@@ -8,7 +8,8 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::net::SocketAddr;
+use std::io::Write as _;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -21,7 +22,11 @@ use coqui_acp_bridge::auth;
 use coqui_acp_bridge::relay::{LinkEnd, relay};
 use coqui_net_acl::{Acl, Action, IpNet, Rule};
 use coqui_peer::PeerId;
-use coqui_peer_tls::{Identity, Pins, Roots, Trust};
+use coqui_peer::TrustStore;
+use coqui_peer_tls::pair::{CodeAlphabet, Pairing, PairingDesk, Pin, PinRole};
+use coqui_peer_tls::{
+    Identity, PairConfig, Pins, ResponderTrust, Roots, Trust, pair_accept, pair_dial, random,
+};
 use coqui_web::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
 use url::Url;
 
@@ -37,6 +42,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Mode {
+    /// Show a PIN and wait for one peer to pair with it. Prints the PIN, then this side's fingerprint. One wrong try ends it.
+    PairAccept(PairAccept),
+    /// Pair with a waiting `pair-accept`, using its PIN. Prints the other side's fingerprint.
+    PairDial(PairDial),
     /// Create an identity file and print its peer id.
     Keygen {
         /// Where to write the key. An existing file is never replaced.
@@ -49,6 +58,35 @@ enum Mode {
 }
 
 #[derive(clap::Args, Debug)]
+struct PairAccept {
+    /// The address to wait on, a TLS connection of its own: pairing does not pass through an agent.
+    #[arg(long)]
+    listen: SocketAddr,
+    /// This side's TLS identity. Created if absent.
+    #[arg(long)]
+    tls_identity: PathBuf,
+    /// The directory of the trust store that records the peer. Use it with `serve --allow-store`.
+    #[arg(long)]
+    store: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct PairDial {
+    /// The `host:port` of the `pair-accept`.
+    address: String,
+    /// This side's TLS identity. Created if absent.
+    #[arg(long)]
+    tls_identity: PathBuf,
+    /// The directory of the trust store that records the peer. Use it with `dial --trust-store`.
+    #[arg(long)]
+    store: PathBuf,
+    /// A file holding the PIN; without it, standard input. A PIN is never an argument, since arguments are visible to
+    /// other users.
+    #[arg(long)]
+    pin_file: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
 struct Serve {
     /// The address to listen on. Plain WebSocket is refused beyond loopback.
     #[arg(long, default_value = "127.0.0.1:8765")]
@@ -58,7 +96,7 @@ struct Serve {
     identity: PathBuf,
     /// A peer id allowed in. Repeat for more. With no peer and no certificate allowed, the bridge refuses to start: nothing
     /// is trusted on first use.
-    #[arg(long = "allow", required_unless_present = "allow_cert")]
+    #[arg(long = "allow", required_unless_present_any = ["allow_cert", "allow_store"])]
     allow: Vec<String>,
     /// A TLS identity (certificate and key, PEM) for wss:// and WebTransport. Without it, plain ws:// on loopback only.
     #[arg(long)]
@@ -73,6 +111,10 @@ struct Serve {
     /// `--tls-identity`. The stream is then plain ACP, for a native client that cannot run the browser method.
     #[arg(long = "allow-cert")]
     allow_cert: Vec<String>,
+    /// A trust store whose accepted peers are allowed in over mutual TLS, read on each connection, so a peer paired or removed
+    /// later takes effect at once. Needs `--tls-identity`.
+    #[arg(long)]
+    allow_store: Option<PathBuf>,
     /// A source network allowed to connect at all, like 10.6.0.0/16. Repeat for more. With any listed, everything else is
     /// dropped before its handshake. Checked first, in the order given, against `--deny`.
     #[arg(long = "permit")]
@@ -96,12 +138,15 @@ struct Dial {
     #[arg(long)]
     tls_identity: PathBuf,
     /// The fingerprint the remote certificate must have. Repeat for more. Needs no certificate authority.
-    #[arg(long = "expect", required_unless_present = "ca_file")]
+    #[arg(long = "expect", required_unless_present_any = ["ca_file", "trust_store"])]
     expect: Vec<String>,
     /// A PEM bundle of certificate authorities the remote certificate may chain to, with its name checked, for a server
     /// behind a normal front door. May be combined with `--expect`.
     #[arg(long)]
     ca_file: Option<PathBuf>,
+    /// A trust store whose accepted peers the remote certificate may be, as `pair-dial` records them.
+    #[arg(long)]
+    trust_store: Option<PathBuf>,
     /// A file holding a token to send as `Authorization: Bearer`, in addition to the client certificate. A token is
     /// never an argument, since arguments are visible to other users.
     #[arg(long)]
@@ -146,19 +191,25 @@ fn server_tls(path: &std::path::Path) -> Result<Arc<rustls::ServerConfig>, Strin
     Ok(Arc::new(config))
 }
 
-fn dial_tls(
-    path: &std::path::Path,
-    expect: BTreeSet<PeerId>,
-    ca_file: Option<&std::path::Path>,
-) -> Result<Arc<rustls::ClientConfig>, String> {
-    let identity = Identity::open_or_create(path).map_err(|error| error.to_string())?;
-    let trust = match ca_file {
-        Some(file) if expect.is_empty() => Trust::Roots(Roots::bundle_file(file)),
-        Some(file) => Trust::PinnedOrRoots {
-            pins: Pins::fixed(expect),
+fn dial_tls(args: &Dial) -> Result<Arc<rustls::ClientConfig>, String> {
+    let identity =
+        Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?;
+    let expect = peers(&args.expect)?;
+    let pins = match &args.trust_store {
+        Some(path) if expect.is_empty() => {
+            Pins::store(TrustStore::open(path).map_err(|error| error.to_string())?)
+        }
+        Some(_) => return Err("give --expect or --trust-store, not both".to_owned()),
+        None => Pins::fixed(expect),
+    };
+    let pinned = !args.expect.is_empty() || args.trust_store.is_some();
+    let trust = match &args.ca_file {
+        Some(file) if pinned => Trust::PinnedOrRoots {
+            pins,
             roots: Roots::bundle_file(file),
         },
-        None => Trust::Pinned(Pins::fixed(expect)),
+        Some(file) => Trust::Roots(Roots::bundle_file(file)),
+        None => Trust::Pinned(pins),
     };
     let verifier = trust
         .server_cert_verifier()
@@ -232,14 +283,11 @@ fn admission(args: &Serve) -> Result<Option<Acl>, String> {
     Ok(Some(acl))
 }
 
-fn mtls_server(
-    path: &std::path::Path,
-    certificates: BTreeSet<PeerId>,
-) -> Result<Arc<rustls::ServerConfig>, String> {
+fn mtls_server(path: &std::path::Path, pins: Pins) -> Result<Arc<rustls::ServerConfig>, String> {
     let identity = Identity::read(path)
         .map_err(|error| error.to_string())?
         .ok_or("the TLS identity file does not exist")?;
-    let verifier = Trust::Pinned(Pins::fixed(certificates))
+    let verifier = Trust::Pinned(pins)
         .client_cert_verifier()
         .map_err(|error| error.to_string())?;
     let config = rustls::ServerConfig::builder_with_provider(provider())
@@ -269,10 +317,13 @@ fn serve_mtls<C: Channel>(channel: &C, agent: &[OsString]) {
 }
 
 fn serve(args: &Serve) -> Result<ExitCode, String> {
-    if args.allow.is_empty() == args.allow_cert.is_empty() {
-        return Err(
-            "give peers with --allow or certificates with --allow-cert, not both".to_owned(),
-        );
+    let modes = [
+        !args.allow.is_empty(),
+        !args.allow_cert.is_empty(),
+        args.allow_store.is_some(),
+    ];
+    if modes.iter().filter(|mode| **mode).count() != 1 {
+        return Err("give exactly one of --allow, --allow-cert and --allow-store".to_owned());
     }
     let allowed = peers(&args.allow)?;
     let acl = admission(args)?;
@@ -282,12 +333,16 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             .as_ref()
             .is_none_or(|acl| acl.decide(source, source).proceeds())
     };
-    if !args.allow_cert.is_empty() {
+    if !args.allow_cert.is_empty() || args.allow_store.is_some() {
         let path = args
             .tls_identity
             .as_deref()
-            .ok_or("--allow-cert needs --tls-identity")?;
-        let tls = mtls_server(path, peers(&args.allow_cert)?)?;
+            .ok_or("mutual TLS needs --tls-identity")?;
+        let pins = match &args.allow_store {
+            Some(store) => Pins::store(TrustStore::open(store).map_err(|error| error.to_string())?),
+            None => Pins::fixed(peers(&args.allow_cert)?),
+        };
+        let tls = mtls_server(path, pins)?;
         let listener = websocket::Listener::bind(args.listen, Some(tls))
             .map_err(|failure| failure.to_string())?
             .with_limits(limits())
@@ -350,8 +405,7 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
     if args.url.scheme() != "wss" {
         return Err("dial needs a wss:// URL".to_owned());
     }
-    let expect = peers(&args.expect)?;
-    let tls = dial_tls(&args.tls_identity, expect, args.ca_file.as_deref())?;
+    let tls = dial_tls(args)?;
     let (program, rest) = split_agent(&args.agent)?;
     let agent = Agent::spawn(program, rest, MAX_LINE)
         .map_err(|error| format!("the agent could not start: {error}"))?;
@@ -390,6 +444,55 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
     }
 }
 
+fn pair_accept_mode(args: &PairAccept) -> Result<ExitCode, String> {
+    let identity =
+        Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?;
+    let store = TrustStore::open(&args.store).map_err(|error| error.to_string())?;
+    let desk = PairingDesk::new(random());
+    let shown = desk.show_pin().map_err(|error| error.to_string())?;
+    let listener = TcpListener::bind(args.listen).map_err(|error| error.to_string())?;
+    println!("{}", shown.pin.as_str());
+    println!("{}", identity.fingerprint());
+    let _ = std::io::stdout().flush();
+    let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
+    let paired = pair_accept(stream, &identity, &store, &desk, &PairConfig::default())
+        .map_err(|error| format!("pairing failed: {error}"))?;
+    eprintln!("paired with {}", paired.peer.id());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn pair_dial_mode(args: &PairDial) -> Result<ExitCode, String> {
+    let text = match &args.pin_file {
+        Some(file) => std::fs::read_to_string(file)
+            .map_err(|error| format!("the PIN file could not be read: {error}"))?,
+        None => {
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?;
+            line
+        }
+    };
+    let pin = Pin::parse(&CodeAlphabet::pin(), text.trim())
+        .map_err(|_| "that is not a PIN".to_owned())?;
+    let identity =
+        Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?;
+    let store = TrustStore::open(&args.store).map_err(|error| error.to_string())?;
+    let stream = TcpStream::connect(&args.address).map_err(|error| error.to_string())?;
+    let config = PairConfig::default();
+    let paired = pair_dial(
+        stream,
+        &identity,
+        Pairing::pin(pin, PinRole::Typed),
+        &ResponderTrust::Unverified,
+        &config,
+    )
+    .and_then(|dialing| dialing.finish(&store))
+    .map_err(|error| format!("pairing failed: {error}"))?;
+    println!("{}", paired.peer.id());
+    Ok(ExitCode::SUCCESS)
+}
+
 fn status_code(status: std::process::ExitStatus) -> ExitCode {
     ExitCode::from(
         status
@@ -408,6 +511,8 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             })
             .map_err(|error| error.to_string()),
+        Mode::PairAccept(args) => pair_accept_mode(args),
+        Mode::PairDial(args) => pair_dial_mode(args),
         Mode::Serve(args) => serve(args),
         Mode::Dial(args) => dial(args),
     };

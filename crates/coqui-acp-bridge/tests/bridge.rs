@@ -581,3 +581,132 @@ fn rcgen_issue(dir: &Path) -> PrivateCa {
         server: std::sync::Arc::new(server),
     }
 }
+
+/// Starts a `pair-accept`; answers its process and the PIN it shows. It prints the PIN only once it is listening.
+fn pair_accept(fixture: &Fixture, identity: &str, store: &str, port: u16) -> (Child, String) {
+    let mut child = Command::new(BRIDGE)
+        .arg("pair-accept")
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--tls-identity")
+        .arg(fixture.dir.join(identity))
+        .arg("--store")
+        .arg(fixture.dir.join(store))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut pin = String::new();
+    reader.read_line(&mut pin).unwrap();
+    let mut fingerprint = String::new();
+    reader.read_line(&mut fingerprint).unwrap();
+    assert!(fingerprint.trim().starts_with("sha256:"), "{fingerprint}");
+    (child, pin.trim().to_owned())
+}
+
+fn pair_dial(
+    fixture: &Fixture,
+    identity: &str,
+    store: &str,
+    port: u16,
+    pin: &str,
+) -> std::process::Output {
+    let file = fixture.dir.join(format!("{identity}.pin"));
+    std::fs::write(&file, format!("{pin}\n")).unwrap();
+    Command::new(BRIDGE)
+        .arg("pair-dial")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--tls-identity")
+        .arg(fixture.dir.join(identity))
+        .arg("--store")
+        .arg(fixture.dir.join(store))
+        .arg("--pin-file")
+        .arg(file)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_pin_pairs_two_sides_and_the_stored_key_gets_the_agent() {
+    use coqui_web::Dialer;
+    let mut fixture = Fixture::new("pin");
+    let port = free_port();
+    let (mut accepting, pin) = pair_accept(&fixture, "server.pem", "server-store", port);
+    assert_eq!(pin.len(), 6, "a six-digit PIN");
+    let joined = pair_dial(&fixture, "client.pem", "client-store", port, &pin);
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    assert!(accepting.wait().unwrap().success());
+
+    let server = native::identity(&fixture.dir.join("server.pem"));
+    let client = native::identity(&fixture.dir.join("client.pem"));
+    assert_eq!(
+        String::from_utf8_lossy(&joined.stdout).trim(),
+        server.fingerprint().to_string()
+    );
+
+    let log = fixture.dir.join("agent.log");
+    let service = free_port();
+    let unused = fixture.keygen("unused.pem").0;
+    let child = Command::new(BRIDGE)
+        .arg("serve")
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{service}"))
+        .arg("--identity")
+        .arg(unused)
+        .arg("--tls-identity")
+        .arg(fixture.dir.join("server.pem"))
+        .arg("--allow-store")
+        .arg(fixture.dir.join("server-store"))
+        .arg("--")
+        .arg(echo_agent())
+        .env("ECHO_AGENT_LOG", &log)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    fixture.bridge = Some(child);
+    wait_for_port(service);
+    let url = url::Url::parse(&format!("wss://127.0.0.1:{service}/agent")).unwrap();
+    let channel = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&client, &server))
+        .dial(coqui_web::Kind::WebSocket, &url, Duration::from_secs(10))
+        .unwrap();
+    initialize(&channel);
+    assert!(log.exists());
+}
+
+#[test]
+fn a_wrong_pin_pairs_nobody_and_ends_the_attempt() {
+    let fixture = Fixture::new("wrongpin");
+    let port = free_port();
+    let (mut accepting, pin) = pair_accept(&fixture, "server.pem", "server-store", port);
+    let wrong = if pin == "000000" { "000001" } else { "000000" };
+    let joined = pair_dial(&fixture, "client.pem", "client-store", port, wrong);
+    assert!(!joined.status.success());
+    assert!(!accepting.wait().unwrap().success());
+    let accepted = fixture
+        .dir
+        .join("server-store")
+        .join("peers")
+        .join("accepted");
+    let empty = std::fs::read_dir(&accepted).map_or(true, |mut entries| entries.next().is_none());
+    assert!(empty, "a wrong PIN must leave no accepted peer");
+}
+
+#[test]
+fn a_pin_is_not_an_argument() {
+    let help = Command::new(BRIDGE)
+        .args(["pair-dial", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        text.contains("--pin-file") && !text.contains("--pin "),
+        "{text}"
+    );
+}

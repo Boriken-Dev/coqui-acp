@@ -23,7 +23,7 @@ clap = { version = "4", features = ["derive"] }
 coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "bccc79a" }
 # Unpublished: the browser-compatible responder lives under coqui-peer's methods/ for now.
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "bccc79a" }
-coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate"] }
+coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate", "pin"] }
 coqui-net-acl = { version = "=0.0.0-alpha.0" }
 coqui-web = { path = "../../../coqui-web", features = ["websocket", "webtransport"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
