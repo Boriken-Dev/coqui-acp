@@ -140,7 +140,11 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | Any other request naming a session of another origin | refused |
 | Any other request or notification (`fs/*`, `terminal/*`, `mcp/message`) | forwarded: it asks the page, and reaches nothing of the person's |
 
-**Sessions are kept with the grant.** A provider MUST remember which sessions an origin opened with an agent for as long as the grant lasts, so a page can resume after a reload, and MUST forget them when the grant ends. A connection, by contrast, ends with its document: **a long turn through a provider ends when the tab does**. Work that must outlive a tab belongs on a connection the page does not hold.
+**Resuming.** A page that reloads, or opens again, may keep going: it remembers the agent's `id` and the ACP session id itself, finds the agent in `agents()`, connects, and sends `session/resume` or `session/load` with that session id, with no new prompt. This works as long as the grant lasts and the session still exists at the agent. An agent that no longer has it answers with its own error, and the page starts a new one.
+
+- A provider MUST remember which sessions an origin opened with an agent for as long as the grant lasts, and MUST forget them when the grant ends. A session id another origin opened is refused, whether or not the page knows it: knowing an id is not permission to read a person's history.
+- A grant of lifetime `once` lasts until the tab closes, across reloads. `always` lasts until revoked.
+- A connection, by contrast, ends with its document, so **a turn in progress through a provider ends when the page does**. Whether its session can be resumed is up to the agent. Work that must outlive a tab belongs on a connection the page does not hold.
 
 `permissions` is a grant the person gives only with the words "this site can approve what the agent does for you". It suits a person's own application, which has its own confirmation screens. It is never the default.
 
@@ -246,7 +250,7 @@ The contract is the page API and the DNS-SD record, so any language can take par
 | `sessions` | keep a page to sessions its origin opened, and refuse `session/list` |
 | `unknown-methods` | refuse `authenticate` and any extension |
 | `modes` | refuse a mode change without `permissions`, and an unknown configuration category, while allowing model and effort |
-| `resume` | let a later connection of the same origin resume its session, and no other |
+| `resume` | let a page that reloaded find its agent and resume its session with no prompt, and refuse a session id it did not open |
 | `verified` | report `identity.verified` false for a key nobody proved |
 | `strict-csp` | define `document.acp` and connect under `script-src 'self'; connect-src 'self'` (a browser check: the driver says how) |
 | `permission-to-person` | answer a permission request in its own window, and keep it from the page |
