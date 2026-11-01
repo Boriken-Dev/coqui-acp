@@ -383,11 +383,13 @@ fn dial_stops_on_the_wrong_certificate_rather_than_knocking_forever() {
     let client = native::identity(&fixture.dir.join("client.pem"));
     let stranger = native::identity(&fixture.dir.join("stranger.pem"));
     let tls = native::server_requiring(&server, &client);
+    // Built first: another test's build can hold the lock for longer than the listener would wait.
+    let agent = echo_agent();
     let listener =
         coqui_web::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), Some(tls)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let accepting = std::thread::spawn(move || {
-        let _ = listener.accept(Some(Duration::from_secs(5)));
+        let _ = listener.accept(Some(Duration::from_secs(25)));
     });
     let log = fixture.dir.join("agent.log");
     let mut child = Command::new(BRIDGE)
@@ -398,7 +400,7 @@ fn dial_stops_on_the_wrong_certificate_rather_than_knocking_forever() {
         .arg("--expect")
         .arg(stranger.fingerprint().to_string())
         .arg("--")
-        .arg(echo_agent())
+        .arg(agent)
         .env("ECHO_AGENT_LOG", &log)
         .stderr(Stdio::null())
         .spawn()
