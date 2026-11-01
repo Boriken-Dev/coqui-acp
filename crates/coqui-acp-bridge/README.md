@@ -12,6 +12,7 @@ bridge passes complete messages and reads none of them, so what the agent may do
 - `dial`: connect out from behind NAT, reconnecting with the agent still running; ends with the agent's exit status.
 - Nothing is trusted on first use. A peer proves a key in-band (`--allow`, or a paired key with `--allow-store`), and everything after that is inside an encrypted session, so a reverse proxy that ends TLS can carry it and can neither read nor inject. Or by a pinned client certificate (`--allow-cert`), which ends where TLS ends.
 - `pair-accept` and `pair-dial`: a PIN makes a full key, inside the same kind of session, so a reverse proxy can carry it. One wrong try ends the attempt.
+- Mutual TLS by pin, store or CA, TLS that checks only the server, or `--no-peer-proof` for a trusted local setup, where that is the choice to make. One proof per endpoint, never negotiated.
 - `--permit` and `--deny` drop a source network before its handshake. `--origin` limits browsers.
 - A key, a PIN or a token is never an argument.
 

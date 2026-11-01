@@ -23,7 +23,7 @@ clap = { version = "4", features = ["derive"] }
 coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "1f00bfe6319f64e7ec038a7003746f4f031d538c" }
 # Unpublished so far.
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "a3776fba131415d006f68ea493120fd7f894244a", features = ["pin"] }
-coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate"] }
+coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate", "ca"] }
 coqui-net-acl = { version = "=0.0.0-alpha.0" }
 coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "4dc609e5c5f23ccbda993e3e126b8d13938648a6", features = ["websocket", "webtransport"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

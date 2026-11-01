@@ -1019,3 +1019,201 @@ fn an_agent_that_stops_reading_ends_the_link_rather_than_wedging_it() {
     );
     agent.stop().unwrap();
 }
+
+fn spawn_serve(fixture: &mut Fixture, port: u16, flags: &[&str], extra: &[&Path], log: &Path) {
+    let mut command = Command::new(BRIDGE);
+    command
+        .arg("serve")
+        .args(["--listen", &format!("127.0.0.1:{port}")])
+        .args(flags);
+    for path in extra {
+        command.arg(path);
+    }
+    let child = command
+        .arg("--")
+        .arg(echo_agent())
+        .env("ECHO_AGENT_LOG", log)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    fixture.bridge = Some(child);
+    wait_for_port(port);
+}
+
+#[test]
+fn no_peer_proof_serves_a_program_on_loopback_and_refuses_a_browser_unless_listed() {
+    use coqui_web::Dialer;
+    let mut fixture = Fixture::new("noproof");
+    let log = fixture.dir.join("agent.log");
+    let port = free_port();
+    spawn_serve(&mut fixture, port, &["--no-peer-proof"], &[], &log);
+    let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap();
+    let wait = Duration::from_secs(10);
+    let page = coqui_web::websocket::Dialer::new()
+        .with_header("origin", "https://any-site.example")
+        .dial(coqui_web::Kind::WebSocket, &url, wait);
+    assert!(page.is_err(), "a page must not reach an unproven agent");
+    assert!(!log.exists());
+    let channel = coqui_web::websocket::Dialer::new()
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
+        .unwrap();
+    initialize(&channel);
+}
+
+#[test]
+fn no_peer_proof_is_refused_where_anyone_could_reach_it() {
+    let fixture = Fixture::new("noproofwide");
+    native::identity(&fixture.dir.join("server.pem"));
+    let output = Command::new(BRIDGE)
+        .args([
+            "serve",
+            "--listen",
+            "0.0.0.0:0",
+            "--no-peer-proof",
+            "--tls-identity",
+        ])
+        .arg(fixture.dir.join("server.pem"))
+        .args(["--", "x"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--permit"));
+    let proofs = Command::new(BRIDGE)
+        .args(["serve", "--no-peer-proof", "--allow"])
+        .arg(format!("sha256:{}", "0".repeat(64)))
+        .args(["--", "x"])
+        .output()
+        .unwrap();
+    assert!(!proofs.status.success(), "one proof, not two");
+}
+
+#[test]
+fn a_client_can_pin_a_server_that_asks_nothing_of_it() {
+    use coqui_web::Dialer;
+    let mut fixture = Fixture::new("serverpin");
+    let server = native::identity(&fixture.dir.join("server.pem"));
+    let other = native::identity(&fixture.dir.join("other.pem"));
+    let client = native::identity(&fixture.dir.join("client.pem"));
+    let log = fixture.dir.join("agent.log");
+    let port = free_port();
+    let path = fixture.dir.join("server.pem");
+    spawn_serve(
+        &mut fixture,
+        port,
+        &["--no-peer-proof", "--tls-identity"],
+        &[&path],
+        &log,
+    );
+    let url = url::Url::parse(&format!("wss://127.0.0.1:{port}/")).unwrap();
+    let wait = Duration::from_secs(10);
+    let wrong = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&client, &other))
+        .dial(coqui_web::Kind::WebSocket, &url, wait);
+    assert!(wrong.is_err(), "the pin decides");
+    let channel = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&client, &server))
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
+        .unwrap();
+    initialize(&channel);
+}
+
+#[test]
+fn dial_can_pin_only_the_server_or_with_a_flag_nothing_on_loopback() {
+    let fixture = Fixture::new("dialmodes");
+    let agent = echo_agent();
+    let server = native::identity(&fixture.dir.join("server.pem"));
+    let tls = coqui_peer_tls::server_config_without_client_auth(&server, &[]).unwrap();
+    let wait = Some(Duration::from_secs(30));
+    let pinned = coqui_web::websocket::Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Some(std::sync::Arc::new(tls)),
+    )
+    .unwrap();
+    let port = pinned.local_addr().unwrap().port();
+    let bridge = Command::new(BRIDGE)
+        .arg("dial")
+        .arg(format!("wss://127.0.0.1:{port}/"))
+        .arg("--expect")
+        .arg(server.fingerprint().to_string())
+        .arg("--")
+        .arg(&agent)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _running = Running(bridge);
+    initialize(&pinned.accept(wait).unwrap());
+
+    let plain = coqui_web::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), None).unwrap();
+    let port = plain.local_addr().unwrap().port();
+    let refused = Command::new(BRIDGE)
+        .arg("dial")
+        .arg(format!("ws://127.0.0.1:{port}/"))
+        .args(["--", "x"])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "nothing checked needs asking for"
+    );
+    let bridge = Command::new(BRIDGE)
+        .arg("dial")
+        .arg(format!("ws://127.0.0.1:{port}/"))
+        .arg("--no-peer-proof")
+        .arg("--")
+        .arg(&agent)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _also = Running(bridge);
+    initialize(&plain.accept(wait).unwrap());
+}
+
+#[test]
+fn a_client_certificate_can_come_from_a_store_or_a_ca() {
+    use coqui_peer_tls::TrustStoreExt as _;
+    use coqui_web::Dialer;
+    let mut fixture = Fixture::new("certsources");
+    let server = native::identity(&fixture.dir.join("server.pem"));
+    let client = native::identity(&fixture.dir.join("client.pem"));
+    let stranger = native::identity(&fixture.dir.join("stranger.pem"));
+    let store_dir = fixture.dir.join("certs");
+    let store = coqui_peer::TrustStore::open(&store_dir).unwrap();
+    let peer = store.accept_certificate(client.certificate_der()).unwrap();
+    let log = fixture.dir.join("agent.log");
+    let port = free_port();
+    let path = fixture.dir.join("server.pem");
+    spawn_serve(
+        &mut fixture,
+        port,
+        &["--tls-identity"],
+        &[&path, Path::new("--allow-cert-store"), &store_dir],
+        &log,
+    );
+    let url = url::Url::parse(&format!("wss://127.0.0.1:{port}/")).unwrap();
+    let wait = Duration::from_secs(10);
+    let channel = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&client, &server))
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
+        .unwrap();
+    initialize(&channel);
+    if let Ok(channel) = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&stranger, &server))
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
+    {
+        assert!(!matches!(
+            coqui_web::Channel::receive(&channel, Some(wait)),
+            Ok(Some(_))
+        ));
+    }
+    store.remove(&peer).unwrap();
+    if let Ok(channel) = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&client, &server))
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
+    {
+        assert!(!matches!(
+            coqui_web::Channel::receive(&channel, Some(wait)),
+            Ok(Some(_))
+        ));
+    }
+}

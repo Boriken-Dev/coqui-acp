@@ -155,6 +155,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 **Discovery is not trust, and neither is a label.** An mDNS answer is an unauthenticated hint that anyone on the link can send, so it can name a server that relays a proof to a real agent. A provider MUST prove the peer, and MUST tie later messages to the proof:
 
 - `identity.verified` is true only when every message after the proof is protected by keys that came out of it, or by TLS the proof is bound to at this endpoint. A proof that only shows who holds a key does not count: whoever relayed it holds the channel. False is reported as false, including for a key nobody proved, and a page may refuse such an agent.
+- A local agent may use no proof at all, or TLS that shows only a host name. A provider may connect to one only if the person added it knowing that, and reports `identity.verified` false, so a page can refuse it.
 - The first use of an agent's key is the person's decision: pairing with a code, or accepting a fingerprint shown beside the label. It is never automatic.
 - A key that changes is a new agent, whose grants do not carry over.
 - Grants are keyed by the verified peer, the page's origin, and the provider's profile. A grant for one agent gives nothing on another.

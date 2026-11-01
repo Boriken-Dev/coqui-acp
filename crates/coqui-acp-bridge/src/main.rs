@@ -127,7 +127,7 @@ struct Serve {
     identity: Option<PathBuf>,
     /// A peer id allowed in, proved in-band. Repeat for more. With nobody allowed, the bridge refuses to start: nothing
     /// is trusted on first use.
-    #[arg(long = "allow", required_unless_present_any = ["allow_cert", "allow_store"])]
+    #[arg(long = "allow", required_unless_present_any = ["allow_cert", "allow_cert_store", "client_ca", "allow_store", "no_peer_proof"])]
     allow: Vec<String>,
     /// A trust store whose accepted peers are allowed in, proved in-band, read on each connection and while it lasts, so a
     /// peer paired or removed later takes effect at once.
@@ -141,6 +141,17 @@ struct Serve {
     /// `--tls-identity`. The stream is then plain ACP protected only by that TLS, so it ends where TLS ends.
     #[arg(long = "allow-cert")]
     allow_cert: Vec<String>,
+    /// A trust store of client certificates allowed in over mutual TLS, read on each connection. Needs `--tls-identity`.
+    #[arg(long)]
+    allow_cert_store: Option<PathBuf>,
+    /// A PEM bundle of certificate authorities a client certificate may chain to, over mutual TLS. Needs `--tls-identity`.
+    #[arg(long)]
+    client_ca: Option<PathBuf>,
+    /// Prove nothing about the peer: whoever can connect gets the agent. Only on loopback, or with `--permit` naming who can
+    /// reach it, and a browser needs its `--origin` listed, or any page it opens could drive the agent. With `--tls-identity` a
+    /// client can still pin this server.
+    #[arg(long)]
+    no_peer_proof: bool,
     /// Serve WebTransport on this UDP port too; needs `--tls-identity`, and the in-band proof.
     #[arg(long)]
     webtransport_port: Option<u16>,
@@ -180,9 +191,13 @@ struct Dial {
     #[arg(long)]
     trust_store: Option<PathBuf>,
     /// A TLS identity (certificate and key, PEM) to present over mutual TLS, in place of the in-band proof. Created if absent.
-    /// A reverse proxy must vouch for the certificate.
+    /// A reverse proxy must vouch for the certificate. With neither this nor `--identity`, TLS checks only the server, by
+    /// `--expect` or `--ca-file`.
     #[arg(long)]
     tls_identity: Option<PathBuf>,
+    /// Check nothing about the remote, for a ws:// on loopback.
+    #[arg(long)]
+    no_peer_proof: bool,
     /// A fingerprint the remote certificate may have, with `--tls-identity`. Repeat for more. Needs no certificate authority.
     /// With `--ca-file`, either a listed fingerprint or a certificate from that authority is enough.
     #[arg(long = "expect")]
@@ -241,17 +256,21 @@ fn in_band_tls(ca_file: Option<&PathBuf>) -> Result<Arc<rustls::ClientConfig>, S
     Ok(Arc::new(config))
 }
 
-fn mtls_client(path: &std::path::Path, args: &Dial) -> Result<Arc<rustls::ClientConfig>, String> {
-    let identity = tls::Identity::open_or_create(path).map_err(|error| error.to_string())?;
+fn remote_trust(args: &Dial) -> Result<tls::Trust, String> {
     let pins = tls::Pins::fixed(peers(&args.expect)?);
-    let trust = match &args.ca_file {
+    Ok(match &args.ca_file {
         Some(file) if !args.expect.is_empty() => tls::Trust::PinnedOrRoots {
             pins,
             roots: tls::Roots::bundle_file(file),
         },
         Some(file) => tls::Trust::Roots(tls::Roots::bundle_file(file)),
         None => tls::Trust::Pinned(pins),
-    };
+    })
+}
+
+fn mtls_client(path: &std::path::Path, args: &Dial) -> Result<Arc<rustls::ClientConfig>, String> {
+    let identity = tls::Identity::open_or_create(path).map_err(|error| error.to_string())?;
+    let trust = remote_trust(args)?;
     // This builder turns resumption off, so a peer that lost trust cannot return on a session.
     let config = tls::client_config(&identity, &trust, &[]).map_err(|error| error.to_string())?;
     Ok(Arc::new(config))
@@ -439,18 +458,25 @@ fn admission(
 }
 
 fn serve(args: &Serve) -> Result<ExitCode, String> {
-    let modes = [
-        !args.allow.is_empty(),
-        !args.allow_cert.is_empty(),
-        args.allow_store.is_some(),
-    ];
-    if modes.iter().filter(|mode| **mode).count() != 1 {
-        return Err("give exactly one of --allow, --allow-cert and --allow-store".to_owned());
+    let in_band = !args.allow.is_empty() || args.allow_store.is_some();
+    let certificates =
+        !args.allow_cert.is_empty() || args.allow_cert_store.is_some() || args.client_ca.is_some();
+    let modes = [in_band, certificates, args.no_peer_proof];
+    if modes.iter().filter(|mode| **mode).count() != 1
+        || (!args.allow.is_empty() && args.allow_store.is_some())
+    {
+        return Err(
+            "give one proof: --allow or --allow-store; client certificates; or --no-peer-proof"
+                .to_owned(),
+        );
     }
     let admit = admission(&args.permit, &args.deny)?;
     let unproven = Gate::new(MAX_UNPROVEN);
     let running = Gate::new(args.max_peers);
-    if !args.allow_cert.is_empty() {
+    if args.no_peer_proof {
+        return serve_unproven(args, admit, unproven, running);
+    }
+    if certificates {
         // Silently dropping these would leave an operator believing they apply.
         if args.identity.is_some() || args.proof_seconds.is_some() {
             return Err("--identity and --proof-seconds belong to the in-band proof".to_owned());
@@ -465,9 +491,26 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             .tls_identity
             .as_deref()
             .ok_or("mutual TLS needs --tls-identity")?;
-        let pins = tls::Pins::fixed(peers(&args.allow_cert)?);
+        let pins = match &args.allow_cert_store {
+            Some(_) if !args.allow_cert.is_empty() => {
+                return Err("give --allow-cert or --allow-cert-store, not both".to_owned());
+            }
+            Some(store) => {
+                tls::Pins::store(TrustStore::open(store).map_err(|error| error.to_string())?)
+            }
+            None => tls::Pins::fixed(peers(&args.allow_cert)?),
+        };
+        let pinned = !args.allow_cert.is_empty() || args.allow_cert_store.is_some();
+        let trust = match &args.client_ca {
+            Some(file) if pinned => tls::Trust::PinnedOrCa {
+                pins,
+                ca: tls::CaPolicy::new(file),
+            },
+            Some(file) => tls::Trust::Ca(tls::CaPolicy::new(file)),
+            None => tls::Trust::Pinned(pins),
+        };
         // This builder turns resumption off, so a peer that lost trust cannot return on a session.
-        let config = tls::server_config(&read_tls_identity(path)?, &tls::Trust::Pinned(pins), &[])
+        let config = tls::server_config(&read_tls_identity(path)?, &trust, &[])
             .map_err(|error| error.to_string())?;
         let listener = websocket::Listener::bind(args.listen, Some(Arc::new(config)))
             .map_err(|failure| failure.to_string())?
@@ -554,10 +597,58 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     accept_loop(|| plain.next(None), websocket::Pending::handshake, &service)
 }
 
-/// How `dial` knows its peer.
+/// `serve --no-peer-proof`: the agent for whoever can connect, so who can connect has to be limited.
+fn serve_unproven(
+    args: &Serve,
+    admit: impl Fn(SocketAddr) -> bool + Clone + Send + Sync + 'static,
+    unproven: Gate,
+    running: Gate,
+) -> Result<ExitCode, String> {
+    if args.identity.is_some() || args.proof_seconds.is_some() || args.webtransport_port.is_some() {
+        return Err("--identity, --proof-seconds and --webtransport-port need a proof".to_owned());
+    }
+    if !args.listen.ip().is_loopback() && args.permit.is_empty() {
+        return Err(
+            "--no-peer-proof beyond loopback needs --permit, to say who can reach it".to_owned(),
+        );
+    }
+    let tls_config = args.tls_identity.as_deref().map(server_tls).transpose()?;
+    // An empty list checks nothing, and a page on any site could then drive an agent on this machine.
+    let origins = if args.origins.is_empty() {
+        vec!["none".to_owned()]
+    } else {
+        args.origins.clone()
+    };
+    let listener = websocket::Listener::bind(args.listen, tls_config)
+        .map_err(|failure| failure.to_string())?
+        .with_limits(limits())
+        .with_origins(origins)
+        .with_admission(admit);
+    eprintln!(
+        "listening on {}, with no proof of the peer: whoever can connect gets the agent",
+        listener
+            .local_addr()
+            .map_err(|failure| failure.to_string())?
+    );
+    let service = Arc::new(Service {
+        method: None,
+        store: None,
+        proof: Duration::ZERO,
+        agent: args.agent.clone(),
+        unproven,
+        peers: running,
+    });
+    accept_loop(
+        || listener.next(None),
+        websocket::Pending::handshake,
+        &service,
+    )
+}
+
+/// How `dial` knows its peer. Without an in-band proof, whatever TLS checked is all there is.
 enum DialProof {
     InBand(WebCrypto, Option<Arc<TrustStore>>),
-    Certificate,
+    Transport,
 }
 
 fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
@@ -609,9 +700,33 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
             let dialer = websocket::Dialer::new()
                 .with_tls(mtls_client(path, args)?)
                 .with_limits(limits());
-            Ok((DialProof::Certificate, dialer))
+            Ok((DialProof::Transport, dialer))
         }
-        _ => Err("give exactly one of --identity and --tls-identity".to_owned()),
+        (None, None) if args.no_peer_proof => {
+            if args.url.scheme() != "ws" || !args.expect.is_empty() || args.ca_file.is_some() {
+                return Err("--no-peer-proof is for a ws:// on loopback".to_owned());
+            }
+            let dialer = websocket::Dialer::new().with_limits(limits());
+            Ok((DialProof::Transport, dialer))
+        }
+        (None, None) => {
+            if args.url.scheme() != "wss" || (args.expect.is_empty() && args.ca_file.is_none()) {
+                return Err(
+                    "give --identity, --tls-identity, or a wss:// URL with --expect or --ca-file"
+                        .to_owned(),
+                );
+            }
+            if !args.peers.is_empty() || args.trust_store.is_some() {
+                return Err("--peer and --trust-store belong to --identity".to_owned());
+            }
+            let config = tls::client_config_without_identity(&remote_trust(args)?, &[])
+                .map_err(|error| error.to_string())?;
+            let dialer = websocket::Dialer::new()
+                .with_tls(Arc::new(config))
+                .with_limits(limits());
+            Ok((DialProof::Transport, dialer))
+        }
+        _ => Err("give --identity or --tls-identity, not both".to_owned()),
     }
 }
 
