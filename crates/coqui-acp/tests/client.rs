@@ -447,7 +447,7 @@ fn a_refused_kind_that_runs_unasked_ends_the_session() {
         .unwrap();
     let events = events_until(&session, 2);
     assert!(
-        matches!(&events[1], Event::Failed(text) if text.contains("without asking")),
+        matches!(&events[1], Event::Failed(text) if text.contains("without leave")),
         "{events:?}"
     );
     let until = Instant::now() + WAIT;

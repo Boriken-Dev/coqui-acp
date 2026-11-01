@@ -1,6 +1,6 @@
 //! The turn state machine: updates in, events out. No I/O, no clock, no thread.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -27,7 +27,6 @@ pub(crate) struct Step {
 pub(crate) struct Turn {
     refused: Vec<String>,
     text: String,
-    asked: BTreeSet<String>,
     kinds: BTreeMap<String, String>,
     finished: bool,
     ending: bool,
@@ -68,8 +67,16 @@ impl Turn {
         self.refused.iter().any(|refused| refused == kind)
     }
 
-    pub(crate) fn asked(&mut self, id: &str) {
-        self.asked.insert(id.to_string());
+    /// Records what the agent says a tool is. A refused kind stays, whatever a later message claims, since the agent
+    /// chooses what it says and only the first claim could have been weighed.
+    pub(crate) fn announce(&mut self, id: &str, kind: &str) {
+        let refused = self
+            .kinds
+            .get(id)
+            .is_some_and(|known| self.is_refused(known));
+        if !refused {
+            self.kinds.insert(id.to_string(), kind.to_string());
+        }
     }
 
     pub(crate) fn kind_of(&self, id: &str) -> Option<String> {
@@ -111,7 +118,8 @@ impl Turn {
             SessionUpdate::ToolCall(call) => {
                 let kind = kind_name(&call.kind);
                 let id = call.tool_call_id.0.to_string();
-                self.kinds.insert(id.clone(), kind.to_string());
+                self.announce(&id, kind);
+                let known = self.kind_of(&id).unwrap_or_else(|| kind.to_string());
                 step.events.extend(self.flush());
                 step.events.push(Event::Tool {
                     id: id.clone(),
@@ -119,18 +127,15 @@ impl Turn {
                     name: call.name,
                     kind: kind.to_string(),
                 });
-                self.check_unasked(&id, kind, call.status, &mut step);
+                self.check_running(&known, call.status, &mut step);
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 let id = update.tool_call_id.0.to_string();
-                let kind = update
-                    .fields
-                    .kind
-                    .as_ref()
-                    .map(|kind| kind_name(kind).to_string())
-                    .or_else(|| self.kind_of(&id));
-                if let (Some(kind), Some(status)) = (kind, update.fields.status) {
-                    self.check_unasked(&id, &kind, status, &mut step);
+                if let Some(kind) = update.fields.kind.as_ref() {
+                    self.announce(&id, kind_name(kind));
+                }
+                if let (Some(kind), Some(status)) = (self.kind_of(&id), update.fields.status) {
+                    self.check_running(&kind, status, &mut step);
                 }
             }
             SessionUpdate::UsageUpdate(usage) => {
@@ -160,21 +165,20 @@ impl Turn {
         }
     }
 
-    /// A tool of a refused kind that runs without having asked ends the session.
-    fn check_unasked(&mut self, id: &str, kind: &str, status: ToolCallStatus, step: &mut Step) {
+    /// A refused kind is never given leave, so one that runs ends the session, whether it asked or not.
+    fn check_running(&mut self, kind: &str, status: ToolCallStatus, step: &mut Step) {
         if !self.is_refused(kind)
             || !matches!(
                 status,
                 ToolCallStatus::InProgress | ToolCallStatus::Completed
             )
-            || self.asked.contains(id)
             || self.ending
         {
             return;
         }
         self.ending = true;
         step.events.push(Event::Failed(format!(
-            "the agent ran a {kind} tool without asking leave; the session was ended"
+            "the agent ran a {kind} tool without leave; the session was ended"
         )));
         step.abort = true;
     }
@@ -223,11 +227,60 @@ mod tests {
         assert!(!turn.update(&tool("3", "execute", "completed")).abort);
     }
 
+    fn update(id: &str, fields: &Value) -> Value {
+        let mut update = json!({"sessionUpdate": "tool_call_update", "toolCallId": id});
+        for (key, value) in fields.as_object().unwrap() {
+            update[key] = value.clone();
+        }
+        json!({"sessionId": "s", "update": update})
+    }
+
     #[test]
-    fn a_refused_tool_that_asked_runs_on() {
+    fn a_refused_kind_that_ran_after_being_refused_ends_the_session() {
         let mut turn = Turn::new(vec!["edit".to_string()]);
-        turn.asked("1");
-        assert!(!turn.update(&tool("1", "edit", "in_progress")).abort);
+        assert!(!turn.update(&tool("1", "edit", "pending")).abort);
+        assert!(
+            turn.update(&update("1", &json!({"status": "in_progress"})))
+                .abort
+        );
+    }
+
+    #[test]
+    fn a_refused_kind_that_failed_after_being_refused_ends_nothing() {
+        let mut turn = Turn::new(vec!["edit".to_string()]);
+        assert!(!turn.update(&tool("1", "edit", "pending")).abort);
+        assert!(
+            !turn
+                .update(&update("1", &json!({"status": "failed"})))
+                .abort
+        );
+    }
+
+    #[test]
+    fn a_refused_kind_stays_refused_whatever_a_later_message_says() {
+        let mut turn = Turn::new(vec!["execute".to_string()]);
+        assert!(!turn.update(&tool("1", "execute", "pending")).abort);
+        let step = turn.update(&update(
+            "1",
+            &json!({"kind": "read", "status": "in_progress"}),
+        ));
+        assert!(step.abort);
+        assert_eq!(turn.kind_of("1").as_deref(), Some("execute"));
+
+        let mut turn = Turn::new(vec!["execute".to_string()]);
+        turn.announce("2", "execute");
+        assert!(turn.update(&tool("2", "read", "in_progress")).abort);
+    }
+
+    #[test]
+    fn a_kind_that_becomes_refused_counts_from_then_on() {
+        let mut turn = Turn::new(vec!["execute".to_string()]);
+        assert!(!turn.update(&tool("1", "read", "in_progress")).abort);
+        let step = turn.update(&update(
+            "1",
+            &json!({"kind": "execute", "status": "in_progress"}),
+        ));
+        assert!(step.abort);
     }
 
     #[test]

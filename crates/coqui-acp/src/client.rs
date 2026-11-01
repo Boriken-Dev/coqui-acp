@@ -36,12 +36,20 @@ use crate::state::{Turn, kind_name};
 const PROTOCOL_VERSION: u64 = 1;
 
 /// An `authenticate` call to make before the first session request.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Authenticate {
     /// The method id the agent advertised.
     pub method: String,
     /// The request's `_meta`, for instance a token. Never logged here.
     pub meta: Map<String, Value>,
+}
+
+impl fmt::Debug for Authenticate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Authenticate")
+            .field("method", &self.method)
+            .finish_non_exhaustive()
+    }
 }
 
 enum Opening {
@@ -183,8 +191,8 @@ impl Builder {
         self
     }
 
-    /// Tool kinds this session refuses without asking the decider. A tool of such a kind that runs
-    /// without asking ends the session.
+    /// Tool kinds this session refuses without asking the decider. A tool of such a kind that runs, whether it asked or
+    /// not, ends the session; a kind once announced as refused stays so, whatever a later message claims.
     pub fn refuse_kinds(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.refuse_kinds = kinds.into_iter().map(Into::into).collect();
         self
@@ -496,14 +504,10 @@ async fn permission(shared: &Arc<Shared>, params: Value) -> Result<Value, RpcErr
     let id = request.tool_call.tool_call_id.0.to_string();
     let (kind, refused) = {
         let mut turn = shared.turn();
-        let kind = request
-            .tool_call
-            .fields
-            .kind
-            .as_ref()
-            .map(|kind| kind_name(kind).to_owned())
-            .or_else(|| turn.kind_of(&id));
-        turn.asked(&id);
+        if let Some(kind) = request.tool_call.fields.kind.as_ref() {
+            turn.announce(&id, kind_name(kind));
+        }
+        let kind = turn.kind_of(&id);
         let refused = kind.as_deref().is_some_and(|kind| turn.is_refused(kind));
         (kind, refused)
     };
