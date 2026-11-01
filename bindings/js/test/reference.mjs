@@ -46,7 +46,7 @@ export function makeReferenceDriver() {
     const win = new FakeWindow();
     let activated = false;
     const open = new Set();
-    const toAgent = (origin_, grant) => ({ id: `${origin_}#${grant.label}`, label: grant.label, provider: 'reference', source: 'manual', identity: { peer: null, verified: true, method: null }, offers: {}, status: 'available', scope: { permissions: grant.permissions === true, lifetime: 'always', mcpOrigins: grant.mcpOrigins ?? [] } });
+    const toAgent = (origin_, grant) => ({ id: `${origin_}#${grant.label}`, label: grant.label, provider: 'reference', source: 'manual', identity: { peer: null, verified: found.get(grant.label).proven, method: null }, offers: {}, status: 'available', scope: { permissions: grant.permissions === true, lifetime: 'always', mcpOrigins: grant.mcpOrigins ?? [] } });
     const held = () => [...grants.entries()].filter(([name]) => name.startsWith(`${origin} `)).map(([, grant]) => grant);
     const find = (agent) => held().find((grant) => toAgent(origin, grant).id === agent?.id);
     const closeAll = (reason, only) => {
@@ -63,9 +63,12 @@ export function makeReferenceDriver() {
         const decision = answer;
         answer = undefined;
         if (decision === undefined || decision.refuse) throw new DOMException('refused', 'NotAllowedError');
-        const grant = { label: decision.allow, cwd: decision.cwd, permissions: decision.permissions, mcpOrigins: decision.mcpOrigins, sessions: new Set() };
-        grants.set(key(origin, decision.allow), grant);
-        return [toAgent(origin, grant)];
+        for (const label of decision.add ?? []) found.set(label, Object.assign(new Agent(), { proven: true }));
+        return [decision.allow].flat().map((label) => {
+          const grant = { label, cwd: decision.cwd, permissions: decision.permissions, mcpOrigins: decision.mcpOrigins, sessions: new Set() };
+          grants.set(key(origin, label), grant);
+          return toAgent(origin, grant);
+        });
       },
       async connect(agent) {
         const grant = find(agent);
@@ -134,8 +137,8 @@ export function makeReferenceDriver() {
   return {
     person,
     page,
-    discover(label) {
-      if (!found.has(label)) found.set(label, new Agent());
+    discover(label, { proven = true } = {}) {
+      if (!found.has(label)) found.set(label, Object.assign(new Agent(), { proven }));
     },
     agent: (label) => found.get(label),
   };

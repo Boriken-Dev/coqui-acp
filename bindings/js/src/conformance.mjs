@@ -1,8 +1,9 @@
 // The checks in docs/browser.md "Conformance", against any provider, through a driver.
 //
 // driver.page(origin) -> a page: { acp, activate(), navigate() }
-// driver.person.answerNext(answer): what the person does at the next prompt: { allow: agentLabel, cwd, permissions?, mcpOrigins? } or
-//   { refuse: true }. driver.person.permissionsAsked(): the permission requests put to the person.
+// driver.person.answerNext(answer): what the person does at the next prompt: { allow: agentLabel or a list of them, add?: labels they
+//   add by hand during it, cwd, permissions?, mcpOrigins? } or { refuse: true }. driver.person.permissionsAsked(): the permission
+//   requests put to the person.
 // driver.discover(label): an agent the provider has found and nobody has granted.
 // driver.agent(label): what the agent received: { received(): objects[], send(object) }
 
@@ -95,6 +96,17 @@ export const CHECKS = {
     await rejectsWith(page.acp.request(), 'NotAllowedError');
     check((await page.acp.agents()).length === 0, 'a refusal was remembered as a grant');
   },
+  async 'person-chooses'(driver) {
+    for (const label of ['first', 'second', 'not-chosen']) driver.discover(label);
+    const page = driver.page('https://a.example');
+    page.activate();
+    driver.person.answerNext({ allow: ['first', 'second', 'added-by-hand'], add: ['added-by-hand'], cwd: '/granted' });
+    const granted = await page.acp.request();
+    const labels = (agents) => agents.map((agent) => agent.label).sort();
+    check(labels(granted).join() === 'added-by-hand,first,second', 'the page did not get what the person chose');
+    check(labels(await page.acp.agents()).join() === 'added-by-hand,first,second', 'the grants were not kept');
+    check(!JSON.stringify(granted).includes('not-chosen'), 'an agent the person did not choose was shown');
+  },
   async 'per-origin'(driver) {
     const first = await grantAndConnect(driver, 'https://a.example');
     const other = driver.page('https://b.example');
@@ -183,6 +195,37 @@ export const CHECKS = {
     await send(RPC(2, 'session/set_mode', { sessionId: opened.result.sessionId, modeId: 'bypass' }));
     check((await next()).error !== undefined, 'a mode change was not refused');
     check(lastOf(seen, 'session/set_mode') === undefined, 'a mode change reached the agent');
+    const session = opened.result.sessionId;
+    await send(RPC(3, 'session/set_config_option', { sessionId: session, category: 'mode', configId: 'm', value: 'x' }));
+    check((await next()).error !== undefined, 'a mode option was not refused');
+    await send(RPC(4, 'session/set_config_option', { sessionId: session, category: 'something-new', configId: 'm', value: 'x' }));
+    check((await next()).error !== undefined, 'an unknown category was not refused');
+    await send(RPC(5, 'session/set_model', { sessionId: session, modelId: 'm' }));
+    check((await next()).error === undefined, 'choosing a model was refused');
+    await send(RPC(6, 'session/set_config_option', { sessionId: session, category: 'thought_level', configId: 'e', value: 'high' }));
+    check((await next()).error === undefined, 'choosing an effort was refused');
+  },
+  async resume(driver) {
+    const first = await grantAndConnect(driver, 'https://a.example');
+    const opened = await first.openSession(1);
+    first.page.navigate();
+    const page = driver.page('https://a.example');
+    const [agent] = await page.acp.agents();
+    const again = await page.acp.connect(agent);
+    const writer = again.writable.getWriter();
+    const reader = again.readable.getReader();
+    await writer.write(RPC(2, 'session/resume', { sessionId: opened.result.sessionId, cwd: '/x', mcpServers: [] }));
+    check(JSON.parse((await reader.read()).value).error === undefined, 'its own session could not be resumed');
+    await writer.write(RPC(3, 'session/resume', { sessionId: 'someone-elses', cwd: '/x', mcpServers: [] }));
+    check(JSON.parse((await reader.read()).value).error !== undefined, 'another session was resumed');
+  },
+  async verified(driver) {
+    driver.discover('unproven', { proven: false });
+    const page = driver.page('https://a.example');
+    page.activate();
+    driver.person.answerNext({ allow: 'unproven', cwd: '/granted' });
+    const [agent] = await page.acp.request();
+    check(agent.identity.verified === false, 'an unproven key was reported as verified');
   },
   async 'permission-to-person'(driver) {
     const { seen, settle, openSession } = await grantAndConnect(driver, 'https://a.example');

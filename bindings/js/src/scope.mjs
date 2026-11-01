@@ -5,7 +5,9 @@ const INVALID_PARAMS = -32602;
 const PARSE_ERROR = -32700;
 
 const OWN_SESSION = new Set(['session/prompt', 'session/cancel', 'session/close']);
-const SETTINGS = new Set(['session/set_mode', 'session/set_model', 'session/set_config_option']);
+// A mode can stop the agent asking. A model or an effort cannot, and an unknown category is taken to be able to.
+const OPEN_CATEGORIES = new Set(['model', 'thought_level']);
+const GATED_SETTINGS = new Set(['session/set_mode', 'session/set_config_option']);
 const REMOTE_SERVERS = new Set(['http', 'sse']);
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -101,9 +103,9 @@ export class Scope {
         ? { forward: JSON.stringify(clean) }
         : refuse(METHOD_NOT_FOUND, 'not a session of this page');
     }
-    if (SETTINGS.has(method) && this.#grant.permissions === true && this.#ownsSession(params)) {
-      return { forward: JSON.stringify(clean) };
-    }
+    const ungated = method === 'session/set_model' || (method === 'session/set_config_option' && OPEN_CATEGORIES.has(params?.category));
+    const allowed = ungated || (GATED_SETTINGS.has(method) && this.#grant.permissions === true);
+    if (allowed && this.#ownsSession(params)) return { forward: JSON.stringify(clean) };
     return refuse(METHOD_NOT_FOUND, 'this page may not call that');
   }
 

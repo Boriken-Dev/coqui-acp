@@ -4,7 +4,7 @@
 export { registerProvider } from './registry.mjs';
 export { Scope } from './scope.mjs';
 
-const USABLE = (acp) => typeof acp?.agents === 'function' && acp.version === 1;
+const USABLE = (acp) => typeof acp?.request === 'function' && acp.version === 1;
 
 /** The registry, or null if no provider answered within `timeoutMs`. By event, so markup cannot shadow it. */
 export function findAcp({ timeoutMs = 100, win = globalThis.window } = {}) {

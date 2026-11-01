@@ -90,7 +90,8 @@ Errors are `DOMException`s: `NotAllowedError` for no grant, a refusal or no user
 
 - `document.acp` exists only in a secure context's top-level document. A cross-origin frame gets nothing in this version.
 - `agents()` returns what this origin was granted and nothing else. **A page learns about an agent only after the person grants it.** Never prompts, and is empty when there are no grants.
-- `request()` needs [transient user activation](https://html.spec.whatwg.org/multipage/interaction.html#transient-activation). The provider asks in its own window, never inside the page, where a page could draw over it. The candidates are shown there and not to the page. The page learns only what was granted.
+- `request()` needs [transient user activation](https://html.spec.whatwg.org/multipage/interaction.html#transient-activation). The provider asks in its own window, never inside the page, where a page could draw over it. That window lists the agents the provider knows and the ones it has discovered, and MUST let the person **grant any number of them, and add one by hand** there and then: by URL and fingerprint, or by pairing with a code. The candidates are shown there and not to the page. The page learns only what was granted, and refusing looks the same as having no agents.
+- A provider MUST also let the person add, remove and revoke agents and grants outside any page's request.
 - `connect()` never prompts. A connection belongs to its document: navigating, closing the tab, or `revoke` closes it at once, with the reason in `closed`.
 - `id` differs per origin, so two sites cannot match their agents by it. `identity.peer` does not differ, and the person is told that the site will see it.
 
@@ -122,7 +123,8 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | `session/new` | forwarded with `cwd` replaced by the grant's, and `mcpServers` checked |
 | `session/prompt`, `session/cancel`, `session/close` | forwarded for a session this origin opened with this agent |
 | `session/load`, `session/resume` | the same, with `cwd` and `mcpServers` handled as for `session/new` |
-| `session/set_mode`, `session/set_model`, `session/set_config_option` | forwarded for its own session only if the grant has `permissions`, since a mode can stop the agent asking |
+| `session/set_model`, and `session/set_config_option` of category `model` or `thought_level` | forwarded for its own session |
+| `session/set_mode`, and `session/set_config_option` of any other category, or none | forwarded for its own session only if the grant has `permissions`, since a mode can stop the agent asking |
 | A response to a request the agent made of the page | forwarded |
 | `authenticate`, `session/list`, anything else, any `_` extension | refused with `-32601`; a notification is dropped |
 
@@ -138,6 +140,8 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | Any other request naming a session of another origin | refused |
 | Any other request or notification (`fs/*`, `terminal/*`, `mcp/message`) | forwarded: it asks the page, and reaches nothing of the person's |
 
+**Sessions are kept with the grant.** A provider MUST remember which sessions an origin opened with an agent for as long as the grant lasts, so a page can resume after a reload, and MUST forget them when the grant ends. A connection, by contrast, ends with its document: **a long turn through a provider ends when the tab does**. Work that must outlive a tab belongs on a connection the page does not hold.
+
 `permissions` is a grant the person gives only with the words "this site can approve what the agent does for you". It suits a person's own application, which has its own confirmation screens. It is never the default.
 
 **Answering for the agent's reach.** A page that wants an agent to act with a person's authority on its service passes an `http` MCP server of its own origin in `mcpServers`, with a short-lived token for that conversation in `headers`. What the agent may do there is what the service allows that person. The token goes to the agent, so it must be worth no more than that conversation.
@@ -146,7 +150,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 
 **Discovery is not trust, and neither is a label.** An mDNS answer is an unauthenticated hint that anyone on the link can send, so it can name a server that relays a proof to a real agent. A provider MUST prove the peer, and MUST tie later messages to the proof:
 
-- `identity.verified` is true only when every message after the proof is protected by keys that came out of it, or by TLS the proof is bound to at this endpoint. A proof that only shows who holds a key does not count: whoever relayed it holds the channel.
+- `identity.verified` is true only when every message after the proof is protected by keys that came out of it, or by TLS the proof is bound to at this endpoint. A proof that only shows who holds a key does not count: whoever relayed it holds the channel. False is reported as false, including for a key nobody proved, and a page may refuse such an agent.
 - The first use of an agent's key is the person's decision: pairing with a code, or accepting a fingerprint shown beside the label. It is never automatic.
 - A key that changes is a new agent, whose grants do not carry over.
 - Grants are keyed by the verified peer, the page's origin, and the provider's profile. A grant for one agent gives nothing on another.
@@ -200,6 +204,7 @@ Advertising tells everyone on the link that an agent exists, so it MUST be off u
 Non-normative: what a Chromium Manifest V3 extension needs, as reference.
 
 - **Getting into pages.** `externally_connectable` cannot serve this, since it [needs each site listed in the manifest](https://developer.chrome.com/docs/extensions/reference/manifest/externally-connectable). Use a small script in the page's main world that defines the registry, and a content script between it and the service worker. Check `sender.origin`, the tab and the document in the service worker: the page's world can forge any message, but not what the browser reports about the sender.
+- **A strict page.** A page may run `script-src 'self'; connect-src 'self'`, and a provider MUST work under it: inject through `chrome.scripting` or a declared main-world content script, never an inline script tag.
 - **Being asked, and asking for little.** Injecting everywhere needs permission for every site and tells every site the extension is there. A provider SHOULD start from the person's click on its button, and offer "let sites ask" as a choice that requests the host permission then.
 - **Connecting.** The service worker holds the connection, so a page's `connect-src` does not limit it.
 
@@ -229,6 +234,7 @@ The contract is the page API and the DNS-SD record, so any language can take par
 | `no-grant-no-connection` | refuse to connect, with the same error as for an unknown agent |
 | `activation` | refuse `request()` without user activation |
 | `person-refuses` | return nothing and remember nothing when the person refuses |
+| `person-chooses` | give a page exactly the agents the person chose, several or one added by hand during the prompt, and nothing about the others |
 | `per-origin` | not let another origin use a grant, and give it a different `id` |
 | `messages` | carry messages both ways, in order, unchanged in meaning |
 | `revoke` | close at once on revocation, and refuse after it |
@@ -239,6 +245,9 @@ The contract is the page API and the DNS-SD record, so any language can take par
 | `meta` | remove `_meta` |
 | `sessions` | keep a page to sessions its origin opened, and refuse `session/list` |
 | `unknown-methods` | refuse `authenticate` and any extension |
-| `modes` | refuse a mode change without `permissions` |
+| `modes` | refuse a mode change without `permissions`, and an unknown configuration category, while allowing model and effort |
+| `resume` | let a later connection of the same origin resume its session, and no other |
+| `verified` | report `identity.verified` false for a key nobody proved |
+| `strict-csp` | define `document.acp` and connect under `script-src 'self'; connect-src 'self'` (a browser check: the driver says how) |
 | `permission-to-person` | answer a permission request in its own window, and keep it from the page |
 | `duplicate-keys` | forward what it parsed, not what it received |
