@@ -20,18 +20,15 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use coqui_acp_bridge::agent::Agent;
+use coqui_acp_bridge::auth::Sealed;
 use coqui_acp_bridge::relay::{LinkEnd, relay};
-use coqui_acp_bridge::{auth, pairing};
+use coqui_acp_bridge::{Error, auth, pairing};
 use coqui_net_acl::{Acl, Action, IpNet, Rule};
-use coqui_peer::PeerId;
-use coqui_peer::TrustStore;
-use coqui_peer_tls::pair::{CodeAlphabet, Pin};
-use coqui_peer_tls::{
-    Identity, Pins, Roots, Trust, client_config, client_config_without_identity, server_config,
-    server_config_without_client_auth,
-};
+use coqui_peer_tls as tls;
+use coqui_peer_webcrypto::pair::{CodeAlphabet, Pin};
+use coqui_peer_webcrypto::{Identity, PeerId, Trust, TrustStore, WebCrypto};
 use coqui_web::websocket::Frames;
-use coqui_web::{Channel, Dialer, Endpoints, Failure, Kind, Limits, websocket, webtransport};
+use coqui_web::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
 use url::Url;
 
 const MAX_LINE: usize = 16 * 1024 * 1024;
@@ -41,8 +38,8 @@ const MAX_UNPROVEN: usize = 64;
 const MAX_PAIRING_RUNS: usize = 16;
 /// How long one connection may take to pair. `pair-dial` asks for the PIN before it connects, so no person is waited for.
 const PAIRING_RUN: Duration = Duration::from_secs(60);
-/// The largest pairing message: certificates and PAKE messages, nothing a peer may grow.
-const PAIR_MESSAGE: usize = 64 * 1024;
+/// How long a remote may take to prove itself to `dial`.
+const DIAL_PROOF: Duration = Duration::from_secs(15);
 /// Messages an unproven peer may have waiting.
 const UNPROVEN_PENDING: usize = 8;
 
@@ -74,12 +71,15 @@ enum Mode {
 #[derive(clap::Args, Debug)]
 struct PairAccept {
     /// The address to wait on, for a WebSocket. On loopback it is plain, for a reverse proxy in front; any other address
-    /// serves wss with `--tls-identity`'s certificate. The PIN authenticates either way.
+    /// needs `--tls-identity`. The PIN authenticates either way.
     #[arg(long)]
     listen: SocketAddr,
-    /// This side's TLS identity, whose key is the one paired. Created if absent.
+    /// This side's identity, whose key is the one paired. Created if absent.
     #[arg(long)]
-    tls_identity: PathBuf,
+    identity: PathBuf,
+    /// A TLS identity for wss://, when this address is not loopback.
+    #[arg(long)]
+    tls_identity: Option<PathBuf>,
     /// The directory of the trust store that records the peer. Use it with `serve --allow-store`.
     #[arg(long)]
     store: PathBuf,
@@ -98,9 +98,9 @@ struct PairAccept {
 struct PairDial {
     /// The URL of the `pair-accept`, any path, such as wss://host/v1/agent/pair. ws:// is for loopback only.
     url: Url,
-    /// This side's TLS identity, whose key is the one paired. Created if absent.
+    /// This side's identity, whose key is the one paired. Created if absent.
     #[arg(long)]
-    tls_identity: PathBuf,
+    identity: PathBuf,
     /// The directory of the trust store that records the peer. Use it with `dial --trust-store`.
     #[arg(long)]
     store: PathBuf,
@@ -122,30 +122,31 @@ struct Serve {
     /// The address to listen on. Plain WebSocket is refused beyond loopback.
     #[arg(long, default_value = "127.0.0.1:8765")]
     listen: SocketAddr,
-    /// This bridge's P-256 identity (see `keygen`), for `--allow`.
+    /// This bridge's identity (see `keygen`), for `--allow` and `--allow-store`.
     #[arg(long)]
     identity: Option<PathBuf>,
-    /// A peer id allowed in. Repeat for more. With no peer and no certificate allowed, the bridge refuses to start: nothing
+    /// A peer id allowed in, proved in-band. Repeat for more. With nobody allowed, the bridge refuses to start: nothing
     /// is trusted on first use.
     #[arg(long = "allow", required_unless_present_any = ["allow_cert", "allow_store"])]
     allow: Vec<String>,
-    /// A TLS identity (certificate and key, PEM) for wss:// and WebTransport. Without it, plain ws:// on loopback only.
+    /// A trust store whose accepted peers are allowed in, proved in-band, read on each connection and while it lasts, so a
+    /// peer paired or removed later takes effect at once.
+    #[arg(long)]
+    allow_store: Option<PathBuf>,
+    /// A TLS identity (certificate and key, PEM) for wss:// and WebTransport. Without it, plain ws:// on loopback only, where
+    /// a reverse proxy may stand in front: the in-band proof and its session do not depend on TLS.
     #[arg(long)]
     tls_identity: Option<PathBuf>,
-    /// Serve WebTransport on this UDP port too; needs `--tls-identity`.
+    /// A client certificate fingerprint allowed in over mutual TLS, in place of the in-band proof. Repeat for more. Needs
+    /// `--tls-identity`. The stream is then plain ACP protected only by that TLS, so it ends where TLS ends.
+    #[arg(long = "allow-cert")]
+    allow_cert: Vec<String>,
+    /// Serve WebTransport on this UDP port too; needs `--tls-identity`, and the in-band proof.
     #[arg(long)]
     webtransport_port: Option<u16>,
     /// A browser origin allowed in. Repeat for more. A non-browser client sends none. With none listed, no origin is checked.
     #[arg(long = "origin")]
     origins: Vec<String>,
-    /// A client certificate fingerprint allowed in over mutual TLS, in place of the in-band proof. Repeat for more. Needs
-    /// `--tls-identity`. The stream is then plain ACP, for a native client that cannot run the browser method.
-    #[arg(long = "allow-cert")]
-    allow_cert: Vec<String>,
-    /// A trust store whose accepted peers are allowed in over mutual TLS, read on each connection, so a peer paired or removed
-    /// later takes effect at once. Needs `--tls-identity`.
-    #[arg(long)]
-    allow_store: Option<PathBuf>,
     /// A source network allowed to connect at all, like 10.6.0.0/16. Repeat for more. With any listed, everything else is
     /// dropped before its handshake. Checked first, in the order given, against `--deny`.
     #[arg(long = "permit")]
@@ -153,7 +154,7 @@ struct Serve {
     /// A source network dropped before its handshake. Repeat for more. Takes precedence over `--permit`.
     #[arg(long = "deny")]
     deny: Vec<String>,
-    /// How long a peer may take to prove itself, in seconds, with `--allow`. Default 15.
+    /// How long a peer may take to prove itself in-band, in seconds. Default 15.
     #[arg(long)]
     proof_seconds: Option<u64>,
     /// Proven peers served at once, each with an agent of its own. Another is turned away while this many run.
@@ -166,24 +167,32 @@ struct Serve {
 
 #[derive(clap::Args, Debug)]
 struct Dial {
-    /// The `wss://` URL to connect to.
+    /// The URL to connect to: wss://, or ws:// on loopback for the in-band proof.
     url: Url,
-    /// A TLS identity (certificate and key, PEM) this bridge presents. Created if absent.
+    /// This side's identity, for the in-band proof, which works through a reverse proxy. Created if absent. Everything after
+    /// the proof is inside its session.
     #[arg(long)]
-    tls_identity: PathBuf,
-    /// A fingerprint the remote certificate may have. Repeat for more. Needs no certificate authority. With `--ca-file`,
-    /// either a listed fingerprint or a certificate from that authority is enough.
-    #[arg(long = "expect", required_unless_present_any = ["ca_file", "trust_store"])]
-    expect: Vec<String>,
-    /// A PEM bundle of certificate authorities the remote certificate may chain to, with its name checked, for a server
-    /// behind a normal front door. May be combined with `--expect`.
-    #[arg(long)]
-    ca_file: Option<PathBuf>,
-    /// A trust store whose accepted peers the remote certificate may be, as `pair-dial` records them.
+    identity: Option<PathBuf>,
+    /// A peer id the remote must prove, with `--identity`. Repeat for more.
+    #[arg(long = "peer")]
+    peers: Vec<String>,
+    /// A trust store whose accepted peers the remote may prove, with `--identity`, as `pair-dial` records them.
     #[arg(long)]
     trust_store: Option<PathBuf>,
-    /// A file holding a token to send as `Authorization: Bearer`, in addition to the client certificate. A token is
-    /// never an argument, since arguments are visible to other users.
+    /// A TLS identity (certificate and key, PEM) to present over mutual TLS, in place of the in-band proof. Created if absent.
+    /// A reverse proxy must vouch for the certificate.
+    #[arg(long)]
+    tls_identity: Option<PathBuf>,
+    /// A fingerprint the remote certificate may have, with `--tls-identity`. Repeat for more. Needs no certificate authority.
+    /// With `--ca-file`, either a listed fingerprint or a certificate from that authority is enough.
+    #[arg(long = "expect")]
+    expect: Vec<String>,
+    /// A PEM bundle of certificate authorities the remote certificate must chain to, with its name checked. With the in-band
+    /// proof TLS authenticates nothing, so without this any certificate is taken.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
+    /// A file holding a token to send as `Authorization: Bearer`. It needs a checked certificate, and it is never an argument,
+    /// since arguments are visible to other users.
     #[arg(long)]
     bearer_file: Option<PathBuf>,
     /// The longest wait between attempts to reconnect, in seconds.
@@ -209,40 +218,42 @@ fn split_agent(agent: &[OsString]) -> Result<(&OsString, &[OsString]), String> {
         .ok_or_else(|| "no agent program".to_owned())
 }
 
-fn read_tls_identity(path: &std::path::Path) -> Result<Identity, String> {
-    Identity::read(path)
+fn read_tls_identity(path: &std::path::Path) -> Result<tls::Identity, String> {
+    tls::Identity::read(path)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "the TLS identity file does not exist".to_owned())
 }
 
 fn server_tls(path: &std::path::Path) -> Result<Arc<rustls::ServerConfig>, String> {
-    let config = server_config_without_client_auth(&read_tls_identity(path)?, &[])
+    let config = tls::server_config_without_client_auth(&read_tls_identity(path)?, &[])
         .map_err(|error| error.to_string())?;
     Ok(Arc::new(config))
 }
 
-fn dial_tls(args: &Dial) -> Result<Arc<rustls::ClientConfig>, String> {
-    let identity =
-        Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?;
-    let expect = peers(&args.expect)?;
-    let pins = match &args.trust_store {
-        Some(path) if expect.is_empty() => {
-            Pins::store(TrustStore::open(path).map_err(|error| error.to_string())?)
-        }
-        Some(_) => return Err("give --expect or --trust-store, not both".to_owned()),
-        None => Pins::fixed(expect),
+/// TLS for a connection whose peer the in-band proof authenticates.
+fn in_band_tls(ca_file: Option<&PathBuf>) -> Result<Arc<rustls::ClientConfig>, String> {
+    let trust = match ca_file {
+        Some(file) => tls::Trust::Roots(tls::Roots::bundle_file(file)),
+        None => tls::Trust::AnyWithKeyProof,
     };
-    let pinned = !args.expect.is_empty() || args.trust_store.is_some();
+    let config =
+        tls::client_config_without_identity(&trust, &[]).map_err(|error| error.to_string())?;
+    Ok(Arc::new(config))
+}
+
+fn mtls_client(path: &std::path::Path, args: &Dial) -> Result<Arc<rustls::ClientConfig>, String> {
+    let identity = tls::Identity::open_or_create(path).map_err(|error| error.to_string())?;
+    let pins = tls::Pins::fixed(peers(&args.expect)?);
     let trust = match &args.ca_file {
-        Some(file) if pinned => Trust::PinnedOrRoots {
+        Some(file) if !args.expect.is_empty() => tls::Trust::PinnedOrRoots {
             pins,
-            roots: Roots::bundle_file(file),
+            roots: tls::Roots::bundle_file(file),
         },
-        Some(file) => Trust::Roots(Roots::bundle_file(file)),
-        None => Trust::Pinned(pins),
+        Some(file) => tls::Trust::Roots(tls::Roots::bundle_file(file)),
+        None => tls::Trust::Pinned(pins),
     };
-    // This builder turns resumption off, so a peer removed from a store cannot return on a session.
-    let config = client_config(&identity, &trust, &[]).map_err(|error| error.to_string())?;
+    // This builder turns resumption off, so a peer that lost trust cannot return on a session.
+    let config = tls::client_config(&identity, &trust, &[]).map_err(|error| error.to_string())?;
     Ok(Arc::new(config))
 }
 
@@ -286,7 +297,8 @@ impl Gate {
 
 /// What every connection of a `serve` shares.
 struct Service {
-    method: Option<coqui_peer_webcrypto::WebCryptoMethod>,
+    method: Option<WebCrypto>,
+    store: Option<Arc<TrustStore>>,
     proof: Duration,
     agent: Vec<OsString>,
     unproven: Gate,
@@ -296,21 +308,40 @@ struct Service {
 impl Service {
     /// Proves the peer unless TLS already did, gives it a fresh agent, and relays until either ends.
     fn run<C: Channel>(&self, channel: &C, unproven: Entered) {
-        let peer = match &self.method {
-            Some(method) => match auth::prove(method, channel, self.proof, MAX_LINE) {
-                Ok(peer) => peer.to_string(),
-                Err(error) => {
-                    eprintln!("a connection was refused: {error}");
-                    return channel.close();
-                }
-            },
-            None => "a certificate peer".to_owned(),
+        let Some(method) = &self.method else {
+            drop(unproven);
+            self.give_agent(channel, "a certificate peer");
+            return channel.close();
         };
-        drop(unproven);
+        match auth::prove(
+            method,
+            channel,
+            self.proof,
+            MAX_LINE + auth::RECORD_OVERHEAD,
+        ) {
+            Ok(established) => {
+                drop(unproven);
+                let peer = established.peer;
+                let label = peer.to_string();
+                let sealed = Sealed::new(channel, established.session);
+                let sealed = match &self.store {
+                    Some(store) => {
+                        let store = Arc::clone(store);
+                        sealed.with_check(move || store.is_accepted(&peer))
+                    }
+                    None => sealed,
+                };
+                self.give_agent(&sealed, &label);
+            }
+            Err(error) => eprintln!("a connection was refused: {error}"),
+        }
+        channel.close();
+    }
+
+    fn give_agent<C: Channel>(&self, channel: &C, peer: &str) {
         eprintln!("{peer} proven");
         let Some(_running) = self.peers.enter() else {
-            eprintln!("{peer} was turned away: --max-peers are running");
-            return channel.close();
+            return eprintln!("{peer} was turned away: --max-peers are running");
         };
         let started = split_agent(&self.agent).and_then(|(program, args)| {
             Agent::spawn(program, args, MAX_LINE)
@@ -324,7 +355,6 @@ impl Service {
             }
             Err(why) => eprintln!("{why}"),
         }
-        channel.close();
     }
 }
 
@@ -412,27 +442,28 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         return Err("give exactly one of --allow, --allow-cert and --allow-store".to_owned());
     }
     let admit = admission(&args.permit, &args.deny)?;
-    let peers_running = Gate::new(args.max_peers);
-    if !args.allow_cert.is_empty() || args.allow_store.is_some() {
+    let unproven = Gate::new(MAX_UNPROVEN);
+    let running = Gate::new(args.max_peers);
+    if !args.allow_cert.is_empty() {
         // Silently dropping these would leave an operator believing they apply.
         if args.identity.is_some() || args.proof_seconds.is_some() {
-            return Err("--identity and --proof-seconds belong to --allow".to_owned());
+            return Err("--identity and --proof-seconds belong to the in-band proof".to_owned());
         }
         if args.webtransport_port.is_some() {
-            return Err("WebTransport has no client certificate here: it needs --allow".to_owned());
+            return Err(
+                "WebTransport has no client certificate here: it needs the in-band proof"
+                    .to_owned(),
+            );
         }
         let path = args
             .tls_identity
             .as_deref()
             .ok_or("mutual TLS needs --tls-identity")?;
-        let pins = match &args.allow_store {
-            Some(store) => Pins::store(TrustStore::open(store).map_err(|error| error.to_string())?),
-            None => Pins::fixed(peers(&args.allow_cert)?),
-        };
-        // This builder turns resumption off, so a peer removed from a store cannot return on a session.
-        let tls = server_config(&read_tls_identity(path)?, &Trust::Pinned(pins), &[])
+        let pins = tls::Pins::fixed(peers(&args.allow_cert)?);
+        // This builder turns resumption off, so a peer that lost trust cannot return on a session.
+        let config = tls::server_config(&read_tls_identity(path)?, &tls::Trust::Pinned(pins), &[])
             .map_err(|error| error.to_string())?;
-        let listener = websocket::Listener::bind(args.listen, Some(Arc::new(tls)))
+        let listener = websocket::Listener::bind(args.listen, Some(Arc::new(config)))
             .map_err(|failure| failure.to_string())?
             .with_limits(limits())
             .with_origins(args.origins.clone())
@@ -445,10 +476,11 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         );
         let service = Arc::new(Service {
             method: None,
+            store: None,
             proof: Duration::ZERO,
             agent: args.agent.clone(),
-            unproven: Gate::new(MAX_UNPROVEN),
-            peers: peers_running,
+            unproven,
+            peers: running,
         });
         accept_loop(
             || listener.next(None),
@@ -459,16 +491,29 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     let identity = args
         .identity
         .as_deref()
-        .ok_or("--allow needs --identity (see keygen)")?;
-    let key = auth::read_identity(identity).map_err(|error| error.to_string())?;
-    let method = auth::method(key, peers(&args.allow)?).map_err(|error| error.to_string())?;
-    println!("{}", method.peer_id());
+        .ok_or("the in-band proof needs --identity (see keygen)")?;
+    let identity = auth::read_identity(identity).map_err(|error| error.to_string())?;
+    let peer_id = identity.peer_id();
+    let store = args
+        .allow_store
+        .as_deref()
+        .map(TrustStore::open)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .map(Arc::new);
+    let trust = match &store {
+        Some(store) => Trust::Store(TrustStore::clone(store)),
+        None => Trust::pinned(peers(&args.allow)?),
+    };
+    let method = WebCrypto::new(identity).with_initiators(trust);
+    println!("{peer_id}");
     let _ = std::io::stdout().flush();
     let proof = Duration::from_secs(args.proof_seconds.unwrap_or(15));
-    let tls = args.tls_identity.as_deref().map(server_tls).transpose()?;
-    let plain = websocket::Listener::bind(args.listen, tls.clone())
+    let tls_config = args.tls_identity.as_deref().map(server_tls).transpose()?;
+    let plain = websocket::Listener::bind(args.listen, tls_config.clone())
         .map_err(|failure| failure.to_string())?
         .with_limits(unproven_limits())
+        .with_frames(Frames::Binary)
         .with_origins(args.origins.clone())
         .with_admission(admit.clone());
     eprintln!(
@@ -477,15 +522,16 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     );
     let service = Arc::new(Service {
         method: Some(method),
+        store,
         proof,
         agent: args.agent.clone(),
-        unproven: Gate::new(MAX_UNPROVEN),
-        peers: peers_running,
+        unproven,
+        peers: running,
     });
     if let Some(port) = args.webtransport_port {
-        let tls = tls.ok_or("WebTransport needs --tls-identity")?;
+        let tls_config = tls_config.ok_or("WebTransport needs --tls-identity")?;
         let address = SocketAddr::new(args.listen.ip(), port);
-        let quic = webtransport::Listener::bind(address, tls)
+        let quic = webtransport::Listener::bind(address, tls_config)
             .map_err(|failure| failure.to_string())?
             .with_limits(unproven_limits())
             .with_origins(args.origins.clone())
@@ -502,15 +548,107 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     accept_loop(|| plain.next(None), websocket::Pending::handshake, &service)
 }
 
-fn dial(args: &Dial) -> Result<ExitCode, String> {
-    if args.url.scheme() != "wss" {
-        return Err("dial needs a wss:// URL".to_owned());
+/// How `dial` knows its peer.
+enum DialProof {
+    InBand(WebCrypto, Option<Arc<TrustStore>>),
+    Certificate,
+}
+
+fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
+    match (&args.identity, &args.tls_identity) {
+        (Some(path), None) => {
+            if !args.expect.is_empty() {
+                return Err("--expect belongs to --tls-identity; use --peer".to_owned());
+            }
+            if args.bearer_file.is_some() && args.ca_file.is_none() {
+                return Err(
+                    "--bearer-file needs --ca-file, so the token goes only to a checked server"
+                        .to_owned(),
+                );
+            }
+            let identity = Identity::open_or_create(path).map_err(|error| error.to_string())?;
+            let store = args
+                .trust_store
+                .as_deref()
+                .map(TrustStore::open)
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .map(Arc::new);
+            let trust = match (&store, args.peers.is_empty()) {
+                (Some(_), false) | (None, true) => {
+                    return Err("give exactly one of --peer and --trust-store".to_owned());
+                }
+                (Some(store), true) => Trust::Store(TrustStore::clone(store)),
+                (None, false) => Trust::pinned(peers(&args.peers)?),
+            };
+            let method = WebCrypto::new(identity).with_responders(trust);
+            let mut dialer = websocket::Dialer::new()
+                .with_limits(unproven_limits())
+                .with_frames(Frames::Binary);
+            if args.url.scheme() == "wss" {
+                dialer = dialer.with_tls(in_band_tls(args.ca_file.as_ref())?);
+            }
+            Ok((DialProof::InBand(method, store), dialer))
+        }
+        (None, Some(path)) => {
+            if !args.peers.is_empty() || args.trust_store.is_some() {
+                return Err("--peer and --trust-store belong to --identity".to_owned());
+            }
+            if args.expect.is_empty() && args.ca_file.is_none() {
+                return Err("--tls-identity needs --expect or --ca-file".to_owned());
+            }
+            if args.url.scheme() != "wss" {
+                return Err("mutual TLS needs a wss:// URL".to_owned());
+            }
+            let dialer = websocket::Dialer::new()
+                .with_tls(mtls_client(path, args)?)
+                .with_limits(limits());
+            Ok((DialProof::Certificate, dialer))
+        }
+        _ => Err("give exactly one of --identity and --tls-identity".to_owned()),
     }
-    let tls = dial_tls(args)?;
+}
+
+/// One link's relay. An error here ends `dial`: a remote that proved the wrong key will not fix itself.
+fn dial_link(
+    proof: &DialProof,
+    channel: &websocket::Channel,
+    agent: &Agent,
+) -> Result<Option<LinkEnd>, String> {
+    let DialProof::InBand(method, store) = proof else {
+        return Ok(Some(relay(channel, agent)));
+    };
+    match auth::prove_out(
+        method,
+        channel,
+        DIAL_PROOF,
+        MAX_LINE + auth::RECORD_OVERHEAD,
+    ) {
+        Ok(established) => {
+            let peer = established.peer;
+            let sealed = Sealed::new(channel, established.session);
+            let end = match store {
+                Some(store) => {
+                    let store = Arc::clone(store);
+                    relay(&sealed.with_check(move || store.is_accepted(&peer)), agent)
+                }
+                None => relay(&sealed, agent),
+            };
+            Ok(Some(end))
+        }
+        Err(Error::Proof(why)) => Err(format!("the remote did not prove itself: {why}")),
+        Err(error) => {
+            eprintln!("the proof did not finish: {error}");
+            Ok(None)
+        }
+    }
+}
+
+fn dial(args: &Dial) -> Result<ExitCode, String> {
+    let (proof, mut dialer) = dial_setup(args)?;
     let (program, rest) = split_agent(&args.agent)?;
     let agent = Agent::spawn(program, rest, MAX_LINE)
         .map_err(|error| format!("the agent could not start: {error}"))?;
-    let mut dialer = websocket::Dialer::new().with_tls(tls).with_limits(limits());
     if let Some(file) = &args.bearer_file {
         let token = std::fs::read_to_string(file)
             .map_err(|error| format!("the bearer file could not be read: {error}"))?;
@@ -525,13 +663,19 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
         match dialer.dial(Kind::WebSocket, &args.url, Duration::from_secs(10)) {
             Ok(channel) => {
                 eprintln!("connected");
-                wait = Duration::from_secs(1);
-                let end = relay(&channel, &agent);
+                let end = dial_link(&proof, &channel, &agent);
                 channel.close();
-                eprintln!("the link ended: {end:?}");
-                if matches!(end, LinkEnd::AgentEnded | LinkEnd::AgentStuck) {
-                    let status = agent.stop().map_err(|error| error.to_string())?;
-                    return Ok(status_code(status));
+                let end = end?;
+                if let Some(end) = end {
+                    wait = Duration::from_secs(1);
+                    eprintln!("the link ended: {end:?}");
+                    if matches!(end, LinkEnd::AgentEnded | LinkEnd::AgentStuck) {
+                        let status = agent.stop().map_err(|error| error.to_string())?;
+                        return Ok(status_code(status));
+                    }
+                    if end == LinkEnd::Failed(Failure::Permission) {
+                        return Err("the remote peer is no longer accepted".to_owned());
+                    }
                 }
             }
             // A rejected certificate will not fix itself: stop rather than knock forever.
@@ -547,26 +691,22 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
 
 fn pair_accept_mode(args: &PairAccept) -> Result<ExitCode, String> {
     let identity =
-        Arc::new(Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?);
+        Arc::new(Identity::open_or_create(&args.identity).map_err(|error| error.to_string())?);
     let store = Arc::new(TrustStore::open(&args.store).map_err(|error| error.to_string())?);
-    let tls = if args.listen.ip().is_loopback() {
-        None
-    } else {
-        Some(server_tls(&args.tls_identity)?)
-    };
-    let listener = websocket::Listener::bind(args.listen, tls)
+    let tls_config = args.tls_identity.as_deref().map(server_tls).transpose()?;
+    let listener = websocket::Listener::bind(args.listen, tls_config)
         .map_err(|failure| failure.to_string())?
         .with_frames(Frames::Binary)
         .with_limits(
             Limits::default()
-                .with_max_message(PAIR_MESSAGE)
-                .with_pending(8),
+                .with_max_message(auth::MAX_PROOF_MESSAGE)
+                .with_pending(UNPROVEN_PENDING),
         )
         .with_admission(admission(&args.permit, &args.deny)?);
     let desk = pairing::desk().map_err(|error| error.to_string())?;
     let shown = desk.show_pin().map_err(|error| error.to_string())?;
     println!("{}", shown.pin.as_str());
-    println!("{}", identity.fingerprint());
+    println!("{}", identity.peer_id());
     let _ = std::io::stdout().flush();
     let until = Instant::now() + Duration::from_secs(args.timeout_seconds);
     let (report, reports) = mpsc::channel();
@@ -636,23 +776,13 @@ fn pair_dial_mode(args: &PairDial) -> Result<ExitCode, String> {
     };
     let pin = Pin::parse(&CodeAlphabet::pin(), text.trim())
         .map_err(|_| "that is not a PIN".to_owned())?;
-    let identity =
-        Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?;
+    let identity = Identity::open_or_create(&args.identity).map_err(|error| error.to_string())?;
     let store = TrustStore::open(&args.store).map_err(|error| error.to_string())?;
-    Endpoints::builder()
-        .websocket(args.url.as_str())
-        .allow_plain_loopback(true)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut dialer = websocket::Dialer::new().with_frames(Frames::Binary);
+    let mut dialer = websocket::Dialer::new()
+        .with_frames(Frames::Binary)
+        .with_limits(unproven_limits());
     if args.url.scheme() == "wss" {
-        let trust = match &args.ca_file {
-            Some(file) => Trust::Roots(Roots::bundle_file(file)),
-            None => Trust::AnyWithKeyProof,
-        };
-        let config =
-            client_config_without_identity(&trust, &[]).map_err(|error| error.to_string())?;
-        dialer = dialer.with_tls(Arc::new(config));
+        dialer = dialer.with_tls(in_band_tls(args.ca_file.as_ref())?);
     }
     let limit = Duration::from_secs(args.timeout_seconds);
     let channel = dialer

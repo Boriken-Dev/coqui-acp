@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["acp", "agent", "bridge", "websocket", "webtransport"]
 categories = ["network-programming", "command-line-utilities"]
 exclude = [".*", "*.local.*"]
-# Nothing is published until the owner chooses a release, and coqui-web has no repository to name yet.
+# Nothing is published until the owner chooses a release.
 publish = false
 
 [[bin]]
@@ -20,14 +20,12 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "bccc79a" }
-# Unpublished: the browser-compatible responder lives under coqui-peer's methods/ for now.
-coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "bccc79a" }
-coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate", "pin"] }
+coqui-peer = "=0.0.0-alpha.1"
+# Unpublished so far.
+coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "293875706f758f11539005ac6bad0473f6d5f254", features = ["pin"] }
+coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate"] }
 coqui-net-acl = { version = "=0.0.0-alpha.0" }
-coqui-web = { path = "../../../coqui-web", features = ["websocket", "webtransport"] }
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
+coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "837e3d06efea0c4858e5a37b4a526f3ab48cf88b", features = ["websocket", "webtransport"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 url = "2.5"
 

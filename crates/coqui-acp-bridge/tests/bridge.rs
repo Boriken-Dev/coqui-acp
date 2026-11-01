@@ -241,7 +241,7 @@ fn a_plain_listener_beyond_loopback_is_refused() {
 fn a_proven_browser_peer_gets_the_agent_and_a_stranger_never_reaches_it() {
     let (Some(node), Some(module)) = (node(), webcrypto_module()) else {
         eprintln!(
-            "SKIPPED: needs Node 22 or later and COQUI_ACP_TEST_WEBCRYPTO naming coqui-peer's methods/webcrypto/src/index.mjs"
+            "SKIPPED: needs Node 22 or later and COQUI_ACP_TEST_WEBCRYPTO naming coqui-peer-webcrypto's bindings/js/coqui-peer-webcrypto/src/index.mjs"
         );
         return;
     };
@@ -580,67 +580,275 @@ fn rcgen_issue(dir: &Path) -> PrivateCa {
     }
 }
 
-fn start_store_bridge(fixture: &mut Fixture, server: &Path, store: &Path, port: u16, log: &Path) {
-    let child = Command::new(BRIDGE)
+/// Serves with a store and returns the bridge's peer id.
+fn start_store_bridge(fixture: &mut Fixture, store: &Path, port: u16, log: &Path) -> String {
+    let (identity, _) = fixture.keygen("bridge.pem");
+    let mut child = Command::new(BRIDGE)
         .arg("serve")
         .arg("--listen")
         .arg(format!("127.0.0.1:{port}"))
-        .arg("--tls-identity")
-        .arg(server)
+        .arg("--identity")
+        .arg(identity)
         .arg("--allow-store")
         .arg(store)
         .arg("--")
         .arg(echo_agent())
         .env("ECHO_AGENT_LOG", log)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
     fixture.bridge = Some(child);
     wait_for_port(port);
+    line.trim().to_owned()
+}
+
+fn binary_dial(url: &url::Url) -> coqui_web::websocket::Channel {
+    use coqui_web::Dialer;
+    coqui_web::websocket::Dialer::new()
+        .with_frames(coqui_web::websocket::Frames::Binary)
+        .dial(coqui_web::Kind::WebSocket, url, Duration::from_secs(10))
+        .unwrap()
 }
 
 #[test]
-fn a_peer_removed_from_the_store_cannot_return_on_a_session_it_holds() {
-    use coqui_peer_tls::TrustStoreExt as _;
-    use coqui_web::Dialer;
+fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
+    use coqui_acp_bridge::auth::{Sealed, prove_out};
+    use coqui_peer_webcrypto::{Identity, Trust, TrustStore, WebCrypto};
     let mut fixture = Fixture::new("removed");
-    let server = native::identity(&fixture.dir.join("server.pem"));
-    let client = native::identity(&fixture.dir.join("client.pem"));
-    let store = coqui_peer::TrustStore::open(&fixture.dir.join("peers")).unwrap();
-    let peer = store.accept_certificate(client.certificate_der()).unwrap();
+    let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
+    let client = Identity::open_or_create(&fixture.dir.join("client.pem")).unwrap();
+    let peer = store.accept_key(&client.key_material()).unwrap();
     let log = fixture.dir.join("agent.log");
     let port = free_port();
-    let (server_path, store_path) = (fixture.dir.join("server.pem"), fixture.dir.join("peers"));
-    start_store_bridge(&mut fixture, &server_path, &store_path, port, &log);
-    let url = url::Url::parse(&format!("wss://127.0.0.1:{port}/agent")).unwrap();
+    let store_path = fixture.dir.join("peers");
+    let server = start_store_bridge(&mut fixture, &store_path, port, &log);
+    let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/agent")).unwrap();
     let wait = Duration::from_secs(10);
-    // One configuration throughout: it keeps the session and tickets a resuming client would use.
-    let tls = native::client_of(&client, &server);
-    let channel = coqui_web::websocket::Dialer::new()
-        .with_tls(std::sync::Arc::clone(&tls))
-        .dial(coqui_web::Kind::WebSocket, &url, wait)
-        .unwrap();
-    initialize(&channel);
-    coqui_web::Channel::close(&channel);
+    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+
+    let channel = binary_dial(&url);
+    let established = prove_out(&method, &channel, wait, 1 << 20).unwrap();
+    let sealed = Sealed::new(&channel, established.session);
+    initialize(&sealed);
+
     store.remove(&peer).unwrap();
-    std::fs::remove_file(&log).unwrap();
-    let dialed = coqui_web::websocket::Dialer::new().with_tls(tls).dial(
-        coqui_web::Kind::WebSocket,
-        &url,
-        wait,
-    );
-    if let Ok(channel) = dialed {
-        let _ = coqui_web::Channel::send(
-            &channel,
-            br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
-        );
-        assert!(!matches!(
-            coqui_web::Channel::receive(&channel, Some(wait)),
-            Ok(Some(_))
-        ));
+    let until = Instant::now() + wait;
+    while coqui_web::Channel::receive(&sealed, Some(Duration::from_millis(100)))
+        == Err(coqui_web::Failure::Timeout)
+    {
+        assert!(Instant::now() < until, "the live link was not closed");
     }
+
+    std::fs::remove_file(&log).unwrap();
+    let again = binary_dial(&url);
+    assert!(prove_out(&method, &again, wait, 1 << 20).is_err());
     assert!(!log.exists(), "a removed peer must not reach an agent");
+}
+
+#[test]
+fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
+    use coqui_acp_bridge::auth::{Sealed, prove_out};
+    use coqui_peer_webcrypto::{Identity, Trust, TrustStore, WebCrypto};
+    let mut fixture = Fixture::new("plainafter");
+    let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
+    let client = Identity::open_or_create(&fixture.dir.join("client.pem")).unwrap();
+    store.accept_key(&client.key_material()).unwrap();
+    let log = fixture.dir.join("agent.log");
+    let port = free_port();
+    let store_path = fixture.dir.join("peers");
+    let server = start_store_bridge(&mut fixture, &store_path, port, &log);
+    let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/agent")).unwrap();
+    let wait = Duration::from_secs(10);
+    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+
+    let channel = binary_dial(&url);
+    prove_out(&method, &channel, wait, 1 << 20).unwrap();
+    coqui_web::Channel::send(
+        &channel,
+        br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+    )
+    .unwrap();
+    assert!(!matches!(
+        coqui_web::Channel::receive(&channel, Some(wait)),
+        Ok(Some(_))
+    ));
+    assert!(!log.exists(), "what is not sealed must not reach an agent");
+
+    // And a real peer on the same bridge is unaffected.
+    let good = binary_dial(&url);
+    let established = prove_out(&method, &good, wait, 1 << 20).unwrap();
+    initialize(&Sealed::new(&good, established.session));
+}
+
+/// A proxy that ends TLS, forwards to `back`, and optionally sends the dialer a plain message once the proof is over.
+fn dial_proxy(tls: std::sync::Arc<rustls::ServerConfig>, back: u16, inject: bool) -> u16 {
+    use coqui_web::Dialer;
+    use coqui_web::websocket::Frames;
+    let front = coqui_web::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), Some(tls))
+        .unwrap()
+        .with_frames(Frames::Binary);
+    let port = front.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        while let Ok(outer) = front.accept(Some(Duration::from_secs(30))) {
+            let url = url::Url::parse(&format!("ws://127.0.0.1:{back}/")).unwrap();
+            let inner = coqui_web::websocket::Dialer::new()
+                .with_frames(Frames::Binary)
+                .dial(coqui_web::Kind::WebSocket, &url, Duration::from_secs(10))
+                .unwrap();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while let Ok(Some(message)) =
+                        coqui_web::Channel::receive(&outer, Some(Duration::from_secs(30)))
+                    {
+                        if coqui_web::Channel::send(&inner, &message).is_err() {
+                            break;
+                        }
+                    }
+                    coqui_web::Channel::close(&inner);
+                });
+                let mut from_back = 0;
+                while let Ok(Some(message)) =
+                    coqui_web::Channel::receive(&inner, Some(Duration::from_secs(30)))
+                {
+                    from_back += 1;
+                    if coqui_web::Channel::send(&outer, &message).is_err() {
+                        break;
+                    }
+                    // The responder's challenge and its acceptance are the proof; this comes right after.
+                    if inject && from_back == 2 {
+                        let _ = coqui_web::Channel::send(
+                            &outer,
+                            br#"{"jsonrpc":"2.0","id":1,"method":"exit"}"#,
+                        );
+                    }
+                }
+                coqui_web::Channel::close(&outer);
+            });
+        }
+    });
+    port
+}
+
+fn start_in_band_dial(fixture: &Fixture, port: u16, peer: &str, ca: &Path, log: &Path) -> Child {
+    Command::new(BRIDGE)
+        .arg("dial")
+        .arg(format!("wss://localhost:{port}/v1/agent"))
+        .arg("--identity")
+        .arg(fixture.dir.join("dialer.pem"))
+        .arg("--peer")
+        .arg(peer)
+        .arg("--ca-file")
+        .arg(ca)
+        .args(["--max-backoff-seconds", "2", "--"])
+        .arg(echo_agent())
+        .env("ECHO_AGENT_LOG", log)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject() {
+    use coqui_acp_bridge::auth::{Sealed, prove};
+    use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
+    let fixture = Fixture::new("dialproxy");
+    let responder = Identity::open_or_create(&fixture.dir.join("responder.pem")).unwrap();
+    let dialer = Identity::open_or_create(&fixture.dir.join("dialer.pem")).unwrap();
+    let peer = responder.peer_id().to_string();
+    let method = WebCrypto::new(responder).with_initiators(Trust::pinned([dialer.peer_id()]));
+    let wait = Duration::from_secs(30);
+    let backend = coqui_web::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), None)
+        .unwrap()
+        .with_frames(coqui_web::websocket::Frames::Binary);
+    let back = backend.local_addr().unwrap().port();
+    let ca = rcgen_issue(&fixture.dir);
+
+    let log = fixture.dir.join("agent.log");
+    let honest = dial_proxy(std::sync::Arc::clone(&ca.server), back, false);
+    let mut bridge = start_in_band_dial(&fixture, honest, &peer, &ca.bundle, &log);
+    let channel = backend.accept(Some(wait)).unwrap();
+    let established = prove(&method, &channel, wait, 1 << 20).unwrap();
+    initialize(&Sealed::new(&channel, established.session));
+    assert!(log.exists());
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+    drop(channel);
+
+    std::fs::remove_file(&log).unwrap();
+    let hostile = dial_proxy(ca.server, back, true);
+    let mut bridge = start_in_band_dial(&fixture, hostile, &peer, &ca.bundle, &log);
+    let channel = backend.accept(Some(wait)).unwrap();
+    prove(&method, &channel, wait, 1 << 20).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        !log.exists(),
+        "the proxy's message must not reach the agent"
+    );
+    assert!(
+        bridge.try_wait().unwrap().is_none(),
+        "a link lost is not the agent ending"
+    );
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+}
+
+#[test]
+fn dial_stops_when_the_remote_proves_the_wrong_key() {
+    use coqui_peer_webcrypto::Identity;
+    let fixture = Fixture::new("dialwrong");
+    let stranger = Identity::open_or_create(&fixture.dir.join("stranger.pem")).unwrap();
+    let mut serving = {
+        let (identity, _) = fixture.keygen("bridge.pem");
+        Command::new(BRIDGE)
+            .args(["serve", "--listen"])
+            .arg("127.0.0.1:0")
+            .arg("--identity")
+            .arg(identity)
+            .arg("--allow")
+            .arg(stranger.peer_id().to_string())
+            .args(["--", "x"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut banner = String::new();
+    BufReader::new(serving.stderr.take().unwrap())
+        .read_line(&mut banner)
+        .unwrap();
+    let address = banner.trim().trim_start_matches("listening on ").to_owned();
+    let mut child = Command::new(BRIDGE)
+        .arg("dial")
+        .arg(format!("ws://{address}/"))
+        .arg("--identity")
+        .arg(fixture.dir.join("dialer.pem"))
+        .arg("--peer")
+        .arg(stranger.peer_id().to_string())
+        .arg("--")
+        .arg(echo_agent())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > until {
+            let _ = child.kill();
+            let _ = serving.kill();
+            panic!("the bridge kept knocking");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let _ = serving.kill();
+    let _ = serving.wait();
+    assert_eq!(status.code(), Some(2));
 }
 
 #[test]
@@ -689,7 +897,11 @@ fn flags_that_cannot_apply_are_refused_rather_than_dropped() {
     let fixture = Fixture::new("flags");
     let server = fixture.dir.join("server.pem");
     native::identity(&server);
-    for extra in [["--webtransport-port", "7000"], ["--proof-seconds", "5"]] {
+    for extra in [
+        ["--webtransport-port", "7000"],
+        ["--proof-seconds", "5"],
+        ["--identity", "unused.pem"],
+    ] {
         let output = Command::new(BRIDGE)
             .args(["serve", "--listen", "127.0.0.1:0", "--tls-identity"])
             .arg(&server)

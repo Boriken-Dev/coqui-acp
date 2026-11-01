@@ -13,6 +13,7 @@ const [port, expected] = (await lines[Symbol.asyncIterator]().next()).value.trim
 lines.close();
 
 const socket = new WebSocket(`ws://127.0.0.1:${port}/`);
+socket.binaryType = 'arraybuffer';
 const inbox = [];
 let waiter = null;
 socket.onmessage = (event) => {
@@ -36,24 +37,28 @@ const next = () => new Promise((resolve) => {
 });
 await new Promise((resolve) => socket.addEventListener('open', resolve));
 
+const text = (data) => (typeof data === 'string' ? data : new TextDecoder().decode(data));
 const proof = await createInitiator(identity, expected);
 socket.send(proof.hello());
-socket.send(await proof.answer(await next()));
-await proof.finish(await next());
+socket.send(await proof.answer(text(await next())));
+const {session} = await proof.finish(text(await next()));
 
-const call = (id, method, params) => socket.send(JSON.stringify({jsonrpc: '2.0', id, method, params}));
+// Every message from here on is one sealed record.
+const send = async (message) => socket.send(await session.seal(JSON.stringify(message)));
+const receive = async () => JSON.parse(text(await session.open(new Uint8Array(await next()))));
+const call = (id, method, params) => send({jsonrpc: '2.0', id, method, params});
 const reply = async (id) => {
   for (;;) {
-    const message = JSON.parse(await next());
+    const message = await receive();
     if (message.method === 'session/update') console.log('echoed:', message.params.update.content.text);
     if (message.id === id) return message.result;
   }
 };
-call(1, 'initialize', {protocolVersion: 1, clientCapabilities: {}, clientInfo: {name: 'test', version: '0'}});
+await call(1, 'initialize', {protocolVersion: 1, clientCapabilities: {}, clientInfo: {name: 'test', version: '0'}});
 await reply(1);
-call(2, 'session/new', {cwd: '/w', mcpServers: []});
+await call(2, 'session/new', {cwd: '/w', mcpServers: []});
 const {sessionId} = await reply(2);
-call(3, 'session/prompt', {sessionId, prompt: [{type: 'text', text: 'hello through the bridge'}]});
+await call(3, 'session/prompt', {sessionId, prompt: [{type: 'text', text: 'hello through the bridge'}]});
 await reply(3);
 socket.onclose = null;
 socket.close();

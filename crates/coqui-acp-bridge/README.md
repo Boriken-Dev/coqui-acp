@@ -10,8 +10,8 @@ bridge passes complete messages and reads none of them, so what the agent may do
 
 - `serve`: wait for peers, each with an agent of its own. WebSocket, and WebTransport beside it.
 - `dial`: connect out from behind NAT, reconnecting with the agent still running; ends with the agent's exit status.
-- Nothing is trusted on first use. A peer is proven by one of: a browser's in-band WebCrypto proof (`--allow`), a pinned client certificate (`--allow-cert`), a paired key in a trust store (`--allow-store`).
-- `pair-accept` and `pair-dial`: a PIN makes a full key, over the bridge's own WebSocket, so a reverse proxy can carry it. One wrong try ends the attempt.
+- Nothing is trusted on first use. A peer proves a key in-band (`--allow`, or a paired key with `--allow-store`), and everything after that is inside an encrypted session, so a reverse proxy that ends TLS can carry it and can neither read nor inject. Or by a pinned client certificate (`--allow-cert`), which ends where TLS ends.
+- `pair-accept` and `pair-dial`: a PIN makes a full key, inside the same kind of session, so a reverse proxy can carry it. One wrong try ends the attempt.
 - `--permit` and `--deny` drop a source network before its handshake. `--origin` limits browsers.
 - A key, a PIN or a token is never an argument.
 
@@ -32,14 +32,14 @@ Two machines, paired by a PIN, with the agent behind NAT:
 
 ```sh
 # On the server: shows a PIN
-coqui-acp-bridge pair-accept --listen 127.0.0.1:7443 --tls-identity server.pem --store peers   # behind a proxy; any other address serves wss
+coqui-acp-bridge pair-accept --listen 127.0.0.1:7443 --identity server.pem --store peers   # behind a proxy
 
 # On the agent's machine: asks for it on standard input
-coqui-acp-bridge pair-dial wss://server.example/v1/agent/pair --tls-identity agent.pem --store peers
+coqui-acp-bridge pair-dial wss://server.example/v1/agent/pair --identity agent.pem --store peers
 
 # Then, on each side
-coqui-acp-bridge serve --listen 0.0.0.0:7444 --tls-identity server.pem --allow-store peers -- my-gateway
-coqui-acp-bridge dial wss://server.example:7444/agent --tls-identity agent.pem --trust-store peers -- gemini --acp
+coqui-acp-bridge serve --listen 127.0.0.1:7444 --identity server.pem --allow-store peers -- my-gateway
+coqui-acp-bridge dial wss://server.example/v1/agent --identity agent.pem --trust-store peers -- gemini --acp
 ```
 
 ## Command line
@@ -51,15 +51,15 @@ coqui-acp-bridge dial wss://server.example:7444/agent --tls-identity agent.pem -
 | `dial URL` | `wss://` only; a wrong remote certificate stops it |
 | `pair-accept`, `pair-dial` | one PIN exchange, recorded in a trust store |
 
-`dial` trusts by `--expect` (a fingerprint), `--trust-store`, `--ca-file` (a private CA, with the name checked), or a pin together with a CA. `--bearer-file` adds `Authorization: Bearer`.
+`dial --identity` proves in-band against `--peer` or `--trust-store`. `dial --tls-identity` is mutual TLS, trusting `--expect` (a fingerprint), `--ca-file` (a private CA, with the name checked), or either. `--bearer-file` adds `Authorization: Bearer`, and needs a checked certificate.
 
 Exit status: the agent's own when it ends the bridge; 2 for a bad configuration or a refused pairing.
 
 ## What it does not protect
 
 - An agent is a program with its own permissions. Allowing a peer gives it whatever that agent will do when asked.
-- A live connection is not closed when a peer is removed from the store: the next connection is refused.
-- `--allow`'s proof shows who holds a key, not who sends what follows: whoever relays the proof holds the channel, including a server a client was lured to and anything ending TLS in front. Use it where that cannot happen, until the method binds later messages. Client certificates end at TLS, so through a proxy they mean what the proxy vouches for.
+- Client certificates end at TLS, so through a proxy they mean what the proxy vouches for.
+- A proxy that also serves a browser client's JavaScript can replace it, so the session protects nothing against that proxy. Ship the client's code with the application or extension.
 - A slow peer is dropped past 64 unproven connections at once; `--permit` is what keeps strangers out of that count.
 - The agent's own children are not stopped with it.
 - Key file permissions are the caller's to keep, on Windows and when reading on any platform.
@@ -68,11 +68,11 @@ Exit status: the agent's own when it ends the bridge; 2 for a bad configuration 
 ## Development
 
 ```sh
-COQUI_ACP_TEST_NODE=/path/to/node COQUI_ACP_TEST_WEBCRYPTO=/path/to/coqui-peer/methods/webcrypto/src/index.mjs \
+COQUI_ACP_TEST_NODE=/path/to/node COQUI_ACP_TEST_WEBCRYPTO=/path/to/coqui-peer-webcrypto/bindings/js/coqui-peer-webcrypto/src/index.mjs \
   cargo test -p coqui-acp-bridge
 ```
 
-The WebCrypto test needs Node 22 or later and coqui-peer's method, and says so when it skips.
+The JavaScript peer's test needs Node 22 or later and coqui-peer-webcrypto's module, and says so when it skips.
 
 ## License
 

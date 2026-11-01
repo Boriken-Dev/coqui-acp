@@ -1,121 +1,230 @@
-//! Proving a peer before any byte reaches the agent.
+//! Proving a peer before any byte reaches the agent, and keeping everything after it inside the session the proof made.
+//! A plain message after the handshake comes from whoever carries the connection, so none is ever taken.
 
-use std::collections::BTreeSet;
-use std::fs;
-use std::io::Write;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use coqui_peer::{Handshake, Method, PeerId};
-use coqui_peer_webcrypto::WebCryptoMethod;
+use coqui_peer::{Handshake, Method};
+use coqui_peer_webcrypto::{
+    Established, Identity, Opener, PeerId, Sealer, Session, WebCrypto, WebCryptoHandshake,
+};
 use coqui_web::{Channel, Failure};
-use p256::SecretKey;
-use p256::ecdsa::SigningKey;
-use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
-use rand_core::OsRng;
 
 use crate::Error;
 
-/// A browser's proof fits in a few short messages; this also bounds what an unproven peer can make us hold.
+/// A proof fits in a few short messages; this also bounds what an unproven peer can make us hold.
 pub const MAX_PROOF_MESSAGE: usize = 3072;
+/// What a session adds to each message.
+pub const RECORD_OVERHEAD: usize = 16;
+/// How often a live session asks whether its peer is still allowed.
+const RECHECK: Duration = Duration::from_secs(1);
 
-/// Reads a P-256 PKCS#8 PEM identity for the browser-compatible method.
+/// Reads an identity.
 ///
 /// # Errors
 ///
-/// [`Error::Identity`] when the file cannot be read or is not such a key. The message never quotes the file.
-pub fn read_identity(path: &Path) -> Result<SigningKey, Error> {
-    let text = fs::read_to_string(path).map_err(|error| Error::Identity(error.to_string()))?;
-    SigningKey::from_pkcs8_pem(&text)
-        .map_err(|_| Error::Identity("not a P-256 PKCS#8 PEM key".to_owned()))
+/// [`Error::Identity`] when the file cannot be read or is not a key. The message never quotes the file.
+pub fn read_identity(path: &Path) -> Result<Identity, Error> {
+    Identity::read(path)
+        .map_err(|error| Error::Identity(error.to_string()))?
+        .ok_or_else(|| Error::Identity("the identity file does not exist".to_owned()))
 }
 
-/// Creates an identity file that only this user can read, and answers its peer id. It never replaces a file.
+/// Creates an identity file and answers its peer id. It never replaces a file. On Unix only this user can read it; elsewhere
+/// it takes its directory's permissions.
 ///
 /// # Errors
 ///
 /// [`Error::Identity`] when the file exists or cannot be written.
 pub fn create_identity(path: &Path) -> Result<PeerId, Error> {
-    let key = SecretKey::random(&mut OsRng);
-    let pem = key
-        .to_pkcs8_pem(LineEnding::LF)
-        .map_err(|_| Error::Identity("could not encode the key".to_owned()))?;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
+    let identity = Identity::generate().map_err(|error| Error::Identity(error.to_string()))?;
+    identity
+        .write_new(path)
         .map_err(|error| Error::Identity(error.to_string()))?;
-    file.write_all(pem.as_bytes())
-        .map_err(|error| Error::Identity(error.to_string()))?;
-    method(SigningKey::from(key), BTreeSet::new()).map(|method| method.peer_id())
-}
-
-/// The responder for the allowed peers. An empty set proves nobody.
-///
-/// # Errors
-///
-/// [`Error::Identity`] when the key is unusable.
-pub fn method(key: SigningKey, allowed: BTreeSet<PeerId>) -> Result<WebCryptoMethod, Error> {
-    WebCryptoMethod::new(key, allowed).map_err(|error| Error::Identity(error.to_string()))
+    Ok(identity.peer_id())
 }
 
 /// Runs the responder's side of the proof on `channel`, within `limit`, and gives a peer that proved itself `max_message`
-/// from before the last message of the proof goes out, so the peer's first message after that meets the new limit. The
-/// peer it proved.
+/// from before the last message of the proof goes out, so the peer's first message after that meets the new limit.
 ///
 /// # Errors
 ///
-/// [`Error::Proof`] for a refused, malformed or too-slow proof, and [`Error::Channel`] when the channel fails.
+/// [`Error::Proof`] for a refused or malformed proof, and [`Error::Channel`] for silence or a failed channel.
 pub fn prove<C: Channel>(
-    method: &WebCryptoMethod,
+    method: &WebCrypto,
     channel: &C,
     limit: Duration,
     max_message: usize,
-) -> Result<PeerId, Error> {
+) -> Result<Established<Session>, Error> {
+    let proof = method.respond(None).map_err(proof_failed)?;
+    drive(proof, channel, limit, max_message)
+}
+
+/// [`prove`], as the side that connected.
+///
+/// # Errors
+///
+/// As [`prove`].
+pub fn prove_out<C: Channel>(
+    method: &WebCrypto,
+    channel: &C,
+    limit: Duration,
+    max_message: usize,
+) -> Result<Established<Session>, Error> {
+    let proof = method.initiate().map_err(proof_failed)?;
+    drive(proof, channel, limit, max_message)
+}
+
+fn proof_failed(error: impl core::fmt::Display) -> Error {
+    Error::Proof(error.to_string())
+}
+
+/// The next message, within `deadline`.
+pub(crate) fn next<C: Channel>(channel: &C, deadline: Instant) -> Result<Vec<u8>, Error> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(Error::Channel(Failure::Timeout));
+    }
+    match channel.receive(Some(left)) {
+        Ok(Some(message)) => Ok(message),
+        Ok(None) => Err(Error::Channel(Failure::PathLost)),
+        Err(failure) => Err(failure.into()),
+    }
+}
+
+fn drive<C: Channel>(
+    mut proof: WebCryptoHandshake,
+    channel: &C,
+    limit: Duration,
+    max_message: usize,
+) -> Result<Established<Session>, Error> {
     let deadline = Instant::now() + limit;
-    let mut proof = method
-        .respond(None)
-        .map_err(|error| Error::Proof(error.to_string()))?;
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(Error::Proof("no proof in time".to_owned()));
-        }
-        let message = match channel.receive(Some(left)) {
-            Ok(Some(message)) => message,
-            Ok(None) => return Err(Error::Proof("the peer left".to_owned())),
-            Err(Failure::Timeout) => return Err(Error::Proof("no proof in time".to_owned())),
-            Err(failure) => return Err(failure.into()),
-        };
-        if message.len() > MAX_PROOF_MESSAGE {
-            return Err(Error::Proof("a proof message is over its limit".to_owned()));
-        }
-        proof
-            .receive(&message)
-            .map_err(|error| Error::Proof(error.to_string()))?;
         let mut outgoing = Vec::new();
-        while let Some(out) = proof
-            .transmit()
-            .map_err(|error| Error::Proof(error.to_string()))?
-        {
+        while let Some(out) = proof.transmit().map_err(proof_failed)? {
             outgoing.push(out);
         }
-        if proof.is_complete() {
+        let complete = proof.is_complete();
+        if complete {
             channel.set_max_message(max_message);
         }
         for out in &outgoing {
             channel.send(out)?;
         }
-        if proof.is_complete() {
-            let established = proof
-                .finish()
-                .map_err(|error| Error::Proof(error.to_string()))?;
-            return Ok(established.peer);
+        if complete {
+            return proof.finish().map_err(proof_failed);
         }
+        let message = next(channel, deadline)?;
+        if message.len() > MAX_PROOF_MESSAGE {
+            return Err(Error::Proof("a proof message is over its limit".to_owned()));
+        }
+        proof.receive(&message).map_err(proof_failed)?;
+    }
+}
+
+struct SealerState {
+    sealer: Sealer,
+    /// A record the channel had no room for. Sealing takes the next sequence number, so it is sent as it is, or the
+    /// peer would meet a gap.
+    waiting: Option<Vec<u8>>,
+}
+
+/// A channel whose every message is inside a session. Anything that does not open ends it.
+pub struct Sealed<'a, C: Channel> {
+    channel: &'a C,
+    sealer: Mutex<SealerState>,
+    opener: Mutex<Opener>,
+    allowed: Option<Box<dyn Fn() -> bool + Send + Sync + 'a>>,
+    checked: Mutex<Instant>,
+}
+
+impl<C: Channel> core::fmt::Debug for Sealed<'_, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Sealed").finish_non_exhaustive()
+    }
+}
+
+impl<'a, C: Channel> Sealed<'a, C> {
+    /// Protects `channel` with `session`.
+    #[must_use]
+    pub fn new(channel: &'a C, session: Session) -> Self {
+        let (sealer, opener) = session.split();
+        Self {
+            channel,
+            sealer: Mutex::new(SealerState {
+                sealer,
+                waiting: None,
+            }),
+            opener: Mutex::new(opener),
+            allowed: None,
+            checked: Mutex::new(Instant::now()),
+        }
+    }
+
+    /// Ends the link within about a second once `allowed` says no, for a peer removed from a store while connected.
+    #[must_use]
+    pub fn with_check(mut self, allowed: impl Fn() -> bool + Send + Sync + 'a) -> Self {
+        self.allowed = Some(Box::new(allowed));
+        self
+    }
+
+    fn still_allowed(&self) -> bool {
+        let Some(allowed) = &self.allowed else {
+            return true;
+        };
+        let mut checked = self.checked.lock().unwrap_or_else(PoisonError::into_inner);
+        if checked.elapsed() < RECHECK {
+            return true;
+        }
+        *checked = Instant::now();
+        allowed()
+    }
+}
+
+impl<C: Channel> Channel for Sealed<'_, C> {
+    /// After [`Failure::NoProgress`], send the same message again: its record is waiting.
+    fn send(&self, message: &[u8]) -> Result<(), Failure> {
+        let mut state = self.sealer.lock().unwrap_or_else(PoisonError::into_inner);
+        let record = match state.waiting.take() {
+            Some(record) => record,
+            None => state.sealer.seal(message).map_err(|_| Failure::Protocol)?,
+        };
+        let sent = self.channel.send(&record);
+        if sent == Err(Failure::NoProgress) {
+            state.waiting = Some(record);
+        }
+        sent
+    }
+
+    fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+        if !self.still_allowed() {
+            self.channel.close();
+            return Err(Failure::Permission);
+        }
+        let Some(record) = self.channel.receive(timeout)? else {
+            return Ok(None);
+        };
+        let opened = self
+            .opener
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .open(&record);
+        match opened {
+            Ok(message) => Ok(Some(message)),
+            Err(_) => {
+                self.channel.close();
+                Err(Failure::Protocol)
+            }
+        }
+    }
+
+    fn close(&self) {
+        self.channel.close();
+    }
+
+    fn set_max_message(&self, bytes: usize) {
+        self.channel
+            .set_max_message(bytes.saturating_add(RECORD_OVERHEAD));
     }
 }
