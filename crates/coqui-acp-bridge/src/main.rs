@@ -9,28 +9,42 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Write as _;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use coqui_acp_bridge::agent::Agent;
-use coqui_acp_bridge::auth;
 use coqui_acp_bridge::relay::{LinkEnd, relay};
+use coqui_acp_bridge::{auth, pairing};
 use coqui_net_acl::{Acl, Action, IpNet, Rule};
 use coqui_peer::PeerId;
 use coqui_peer::TrustStore;
-use coqui_peer_tls::pair::{CodeAlphabet, Pairing, PairingDesk, Pin, PinRole};
+use coqui_peer_tls::pair::{CodeAlphabet, Pin};
 use coqui_peer_tls::{
-    Identity, PairConfig, Pins, ResponderTrust, Roots, Trust, pair_accept, pair_dial, random,
+    Identity, Pins, Roots, Trust, client_config, client_config_without_identity, server_config,
+    server_config_without_client_auth,
 };
-use coqui_web::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
+use coqui_web::websocket::Frames;
+use coqui_web::{Channel, Dialer, Endpoints, Failure, Kind, Limits, websocket, webtransport};
 use url::Url;
 
 const MAX_LINE: usize = 16 * 1024 * 1024;
+/// Connections that have not proved themselves yet, each a thread for at most the handshake and proof limits.
+const MAX_UNPROVEN: usize = 64;
+/// Connections to one `pair-accept` at once.
+const MAX_PAIRING_RUNS: usize = 16;
+/// How long one connection may take to pair. `pair-dial` asks for the PIN before it connects, so no person is waited for.
+const PAIRING_RUN: Duration = Duration::from_secs(60);
+/// The largest pairing message: certificates and PAKE messages, nothing a peer may grow.
+const PAIR_MESSAGE: usize = 64 * 1024;
+/// Messages an unproven peer may have waiting.
+const UNPROVEN_PENDING: usize = 8;
 
 /// Put a stdio Agent Client Protocol agent on the network, under a proven peer identity.
 #[derive(Parser, Debug)]
@@ -51,7 +65,7 @@ enum Mode {
         /// Where to write the key. An existing file is never replaced.
         path: PathBuf,
     },
-    /// Wait for a peer, prove it, and give it the agent. One peer at a time, one agent per connection.
+    /// Wait for peers, prove each, and give it an agent of its own.
     Serve(Serve),
     /// Connect out to a peer, for an agent behind NAT. Reconnects and keeps the agent running.
     Dial(Dial),
@@ -59,22 +73,32 @@ enum Mode {
 
 #[derive(clap::Args, Debug)]
 struct PairAccept {
-    /// The address to wait on, a TLS connection of its own: pairing does not pass through an agent.
+    /// The address to wait on, for a WebSocket. On loopback it is plain, for a reverse proxy in front; any other address
+    /// serves wss with `--tls-identity`'s certificate. The PIN authenticates either way.
     #[arg(long)]
     listen: SocketAddr,
-    /// This side's TLS identity. Created if absent.
+    /// This side's TLS identity, whose key is the one paired. Created if absent.
     #[arg(long)]
     tls_identity: PathBuf,
     /// The directory of the trust store that records the peer. Use it with `serve --allow-store`.
     #[arg(long)]
     store: PathBuf,
+    /// How long the PIN waits for someone to use it, in seconds.
+    #[arg(long, default_value_t = 900)]
+    timeout_seconds: u64,
+    /// A source network allowed to connect at all. Repeat for more. With any listed, everything else is dropped first.
+    #[arg(long = "permit")]
+    permit: Vec<String>,
+    /// A source network dropped before its handshake. Repeat for more. Takes precedence over `--permit`.
+    #[arg(long = "deny")]
+    deny: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
 struct PairDial {
-    /// The `host:port` of the `pair-accept`.
-    address: String,
-    /// This side's TLS identity. Created if absent.
+    /// The URL of the `pair-accept`, any path, such as wss://host/v1/agent/pair. ws:// is for loopback only.
+    url: Url,
+    /// This side's TLS identity, whose key is the one paired. Created if absent.
     #[arg(long)]
     tls_identity: PathBuf,
     /// The directory of the trust store that records the peer. Use it with `dial --trust-store`.
@@ -84,6 +108,13 @@ struct PairDial {
     /// other users.
     #[arg(long)]
     pin_file: Option<PathBuf>,
+    /// A PEM bundle the server's certificate must chain to. Without it any certificate is taken for this exchange, since the
+    /// PIN authenticates the peer, not TLS.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
+    /// How long the exchange may take, in seconds.
+    #[arg(long, default_value_t = 900)]
+    timeout_seconds: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -91,9 +122,9 @@ struct Serve {
     /// The address to listen on. Plain WebSocket is refused beyond loopback.
     #[arg(long, default_value = "127.0.0.1:8765")]
     listen: SocketAddr,
-    /// This bridge's P-256 identity (see `keygen`).
+    /// This bridge's P-256 identity (see `keygen`), for `--allow`.
     #[arg(long)]
-    identity: PathBuf,
+    identity: Option<PathBuf>,
     /// A peer id allowed in. Repeat for more. With no peer and no certificate allowed, the bridge refuses to start: nothing
     /// is trusted on first use.
     #[arg(long = "allow", required_unless_present_any = ["allow_cert", "allow_store"])]
@@ -122,9 +153,12 @@ struct Serve {
     /// A source network dropped before its handshake. Repeat for more. Takes precedence over `--permit`.
     #[arg(long = "deny")]
     deny: Vec<String>,
-    /// How long a peer may take to prove itself, in seconds.
-    #[arg(long, default_value_t = 15)]
-    proof_seconds: u64,
+    /// How long a peer may take to prove itself, in seconds, with `--allow`. Default 15.
+    #[arg(long)]
+    proof_seconds: Option<u64>,
+    /// Proven peers served at once, each with an agent of its own. Another is turned away while this many run.
+    #[arg(long, default_value_t = 4)]
+    max_peers: usize,
     /// The agent program, then its arguments.
     #[arg(last = true, required = true)]
     agent: Vec<OsString>,
@@ -137,7 +171,8 @@ struct Dial {
     /// A TLS identity (certificate and key, PEM) this bridge presents. Created if absent.
     #[arg(long)]
     tls_identity: PathBuf,
-    /// The fingerprint the remote certificate must have. Repeat for more. Needs no certificate authority.
+    /// A fingerprint the remote certificate may have. Repeat for more. Needs no certificate authority. With `--ca-file`,
+    /// either a listed fingerprint or a certificate from that authority is enough.
     #[arg(long = "expect", required_unless_present_any = ["ca_file", "trust_store"])]
     expect: Vec<String>,
     /// A PEM bundle of certificate authorities the remote certificate may chain to, with its name checked, for a server
@@ -174,19 +209,14 @@ fn split_agent(agent: &[OsString]) -> Result<(&OsString, &[OsString]), String> {
         .ok_or_else(|| "no agent program".to_owned())
 }
 
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-    Arc::new(rustls::crypto::ring::default_provider())
+fn read_tls_identity(path: &std::path::Path) -> Result<Identity, String> {
+    Identity::read(path)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the TLS identity file does not exist".to_owned())
 }
 
 fn server_tls(path: &std::path::Path) -> Result<Arc<rustls::ServerConfig>, String> {
-    let identity = Identity::read(path)
-        .map_err(|error| error.to_string())?
-        .ok_or("the TLS identity file does not exist")?;
-    let config = rustls::ServerConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .map_err(|error| error.to_string())?
-        .with_no_client_auth()
-        .with_single_cert(identity.certificate_chain(), identity.private_key_der())
+    let config = server_config_without_client_auth(&read_tls_identity(path)?, &[])
         .map_err(|error| error.to_string())?;
     Ok(Arc::new(config))
 }
@@ -211,16 +241,8 @@ fn dial_tls(args: &Dial) -> Result<Arc<rustls::ClientConfig>, String> {
         Some(file) => Trust::Roots(Roots::bundle_file(file)),
         None => Trust::Pinned(pins),
     };
-    let verifier = trust
-        .server_cert_verifier()
-        .map_err(|error| error.to_string())?;
-    let config = rustls::ClientConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .map_err(|error| error.to_string())?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_client_auth_cert(identity.certificate_chain(), identity.private_key_der())
-        .map_err(|error| error.to_string())?;
+    // This builder turns resumption off, so a peer removed from a store cannot return on a session.
+    let config = client_config(&identity, &trust, &[]).map_err(|error| error.to_string())?;
     Ok(Arc::new(config))
 }
 
@@ -228,92 +250,156 @@ fn limits() -> Limits {
     Limits::default().with_max_message(MAX_LINE)
 }
 
-/// Proves the peer on an accepted channel, gives it a fresh agent, and relays until either ends.
-fn serve_one<C: Channel>(
-    channel: &C,
-    method: &coqui_peer_webcrypto::WebCryptoMethod,
-    proof: Duration,
-    agent: &[OsString],
-) {
-    match auth::prove(method, channel, proof) {
-        Ok(peer) => {
-            eprintln!("peer {peer} proven");
-            let (program, args) = match split_agent(agent) {
-                Ok(split) => split,
-                Err(why) => return eprintln!("{why}"),
-            };
-            match Agent::spawn(program, args, MAX_LINE) {
-                Ok(running) => {
-                    let end = relay(channel, &running);
-                    eprintln!("peer {peer} left: {end:?}");
-                    let _ = running.stop();
-                }
-                Err(error) => eprintln!("the agent could not start: {error}"),
-            }
-        }
-        Err(error) => eprintln!("a connection was refused: {error}"),
+/// What a channel starts with while its peer has proved nothing; the proof raises it.
+fn unproven_limits() -> Limits {
+    Limits::default()
+        .with_max_message(auth::MAX_PROOF_MESSAGE)
+        .with_pending(UNPROVEN_PENDING)
+}
+
+/// A count of what is running, with a ceiling.
+#[derive(Clone)]
+struct Gate(Arc<AtomicUsize>, usize);
+
+struct Entered(Arc<AtomicUsize>);
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
-    channel.close();
+}
+
+impl Gate {
+    fn new(ceiling: usize) -> Self {
+        Self(Arc::new(AtomicUsize::new(0)), ceiling)
+    }
+
+    fn enter(&self) -> Option<Entered> {
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
+                (running < self.1).then_some(running + 1)
+            })
+            .ok()
+            .map(|_| Entered(Arc::clone(&self.0)))
+    }
+}
+
+/// What every connection of a `serve` shares.
+struct Service {
+    method: Option<coqui_peer_webcrypto::WebCryptoMethod>,
+    proof: Duration,
+    agent: Vec<OsString>,
+    unproven: Gate,
+    peers: Gate,
+}
+
+impl Service {
+    /// Proves the peer unless TLS already did, gives it a fresh agent, and relays until either ends.
+    fn run<C: Channel>(&self, channel: &C, unproven: Entered) {
+        let peer = match &self.method {
+            Some(method) => match auth::prove(method, channel, self.proof, MAX_LINE) {
+                Ok(peer) => peer.to_string(),
+                Err(error) => {
+                    eprintln!("a connection was refused: {error}");
+                    return channel.close();
+                }
+            },
+            None => "a certificate peer".to_owned(),
+        };
+        drop(unproven);
+        eprintln!("{peer} proven");
+        let Some(_running) = self.peers.enter() else {
+            eprintln!("{peer} was turned away: --max-peers are running");
+            return channel.close();
+        };
+        let started = split_agent(&self.agent).and_then(|(program, args)| {
+            Agent::spawn(program, args, MAX_LINE)
+                .map_err(|error| format!("the agent could not start: {error}"))
+        });
+        match started {
+            Ok(running) => {
+                let end = relay(channel, &running);
+                eprintln!("{peer} left: {end:?}");
+                let _ = running.stop();
+            }
+            Err(why) => eprintln!("{why}"),
+        }
+        channel.close();
+    }
+}
+
+/// Takes connections for ever, each handshake and proof on a thread of its own, so one slow peer holds up nobody. Past the
+/// ceiling of unproven connections a new one is dropped: that many at once is an attack, or the ceiling needs raising.
+fn accept_loop<P, C>(
+    next: impl Fn() -> Result<P, Failure>,
+    handshake: impl Fn(P) -> Result<C, Failure> + Clone + Send + 'static,
+    service: &Arc<Service>,
+) -> !
+where
+    P: Send + 'static,
+    C: Channel + 'static,
+{
+    loop {
+        let pending = match next() {
+            Ok(pending) => pending,
+            Err(failure) => {
+                eprintln!("a connection failed: {failure}");
+                continue;
+            }
+        };
+        let Some(entered) = service.unproven.enter() else {
+            eprintln!("a connection was dropped: too many are unproven");
+            continue;
+        };
+        let service = Arc::clone(service);
+        let handshake = handshake.clone();
+        let spawned = thread::Builder::new()
+            .name("coqui-acp-bridge-peer".to_owned())
+            .spawn(move || match handshake(pending) {
+                Ok(channel) => service.run(&channel, entered),
+                Err(failure) => eprintln!("a connection failed: {failure}"),
+            });
+        if let Err(error) = spawned {
+            eprintln!("a connection was dropped: {error}");
+        }
+    }
 }
 
 /// What may start a handshake: `--deny` first, then `--permit` if any are listed. A first-match ACL.
-fn admission(args: &Serve) -> Result<Option<Acl>, String> {
-    if args.permit.is_empty() && args.deny.is_empty() {
-        return Ok(None);
-    }
+fn admission(
+    permit: &[String],
+    deny: &[String],
+) -> Result<impl Fn(SocketAddr) -> bool + Clone + Send + Sync + 'static, String> {
     let parse = |text: &String| {
         text.parse::<IpNet>()
             .map_err(|_| "a network is malformed".to_owned())
     };
-    let default = if args.permit.is_empty() {
-        Action::Permit
+    let acl = if permit.is_empty() && deny.is_empty() {
+        None
     } else {
-        Action::Deny
-    };
-    let mut acl = Acl {
-        rules: Vec::new(),
-        default,
-    };
-    for network in &args.deny {
-        acl.push(Rule::new(Action::Deny, parse(network)?));
-    }
-    for network in &args.permit {
-        acl.push(Rule::new(Action::Permit, parse(network)?));
-    }
-    Ok(Some(acl))
-}
-
-fn mtls_server(path: &std::path::Path, pins: Pins) -> Result<Arc<rustls::ServerConfig>, String> {
-    let identity = Identity::read(path)
-        .map_err(|error| error.to_string())?
-        .ok_or("the TLS identity file does not exist")?;
-    let verifier = Trust::Pinned(pins)
-        .client_cert_verifier()
-        .map_err(|error| error.to_string())?;
-    let config = rustls::ServerConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .map_err(|error| error.to_string())?
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(identity.certificate_chain(), identity.private_key_der())
-        .map_err(|error| error.to_string())?;
-    Ok(Arc::new(config))
-}
-
-/// Mutual TLS proved the peer in the handshake: give it a fresh agent directly.
-fn serve_mtls<C: Channel>(channel: &C, agent: &[OsString]) {
-    let (program, args) = match split_agent(agent) {
-        Ok(split) => split,
-        Err(why) => return eprintln!("{why}"),
-    };
-    match Agent::spawn(program, args, MAX_LINE) {
-        Ok(running) => {
-            let end = relay(channel, &running);
-            eprintln!("a certificate peer left: {end:?}");
-            let _ = running.stop();
+        let default = if permit.is_empty() {
+            Action::Permit
+        } else {
+            Action::Deny
+        };
+        let mut acl = Acl {
+            rules: Vec::new(),
+            default,
+        };
+        for network in deny {
+            acl.push(Rule::new(Action::Deny, parse(network)?));
         }
-        Err(error) => eprintln!("the agent could not start: {error}"),
-    }
-    channel.close();
+        for network in permit {
+            acl.push(Rule::new(Action::Permit, parse(network)?));
+        }
+        Some(acl)
+    };
+    let acl = Arc::new(acl);
+    Ok(move |source: SocketAddr| {
+        acl.as_ref()
+            .as_ref()
+            .is_none_or(|acl| acl.decide(source, source).proceeds())
+    })
 }
 
 fn serve(args: &Serve) -> Result<ExitCode, String> {
@@ -325,15 +411,16 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     if modes.iter().filter(|mode| **mode).count() != 1 {
         return Err("give exactly one of --allow, --allow-cert and --allow-store".to_owned());
     }
-    let allowed = peers(&args.allow)?;
-    let acl = admission(args)?;
-    let acl = Arc::new(acl);
-    let admit = move |source: SocketAddr| {
-        acl.as_ref()
-            .as_ref()
-            .is_none_or(|acl| acl.decide(source, source).proceeds())
-    };
+    let admit = admission(&args.permit, &args.deny)?;
+    let peers_running = Gate::new(args.max_peers);
     if !args.allow_cert.is_empty() || args.allow_store.is_some() {
+        // Silently dropping these would leave an operator believing they apply.
+        if args.identity.is_some() || args.proof_seconds.is_some() {
+            return Err("--identity and --proof-seconds belong to --allow".to_owned());
+        }
+        if args.webtransport_port.is_some() {
+            return Err("WebTransport has no client certificate here: it needs --allow".to_owned());
+        }
         let path = args
             .tls_identity
             .as_deref()
@@ -342,63 +429,77 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             Some(store) => Pins::store(TrustStore::open(store).map_err(|error| error.to_string())?),
             None => Pins::fixed(peers(&args.allow_cert)?),
         };
-        let tls = mtls_server(path, pins)?;
-        let listener = websocket::Listener::bind(args.listen, Some(tls))
+        // This builder turns resumption off, so a peer removed from a store cannot return on a session.
+        let tls = server_config(&read_tls_identity(path)?, &Trust::Pinned(pins), &[])
+            .map_err(|error| error.to_string())?;
+        let listener = websocket::Listener::bind(args.listen, Some(Arc::new(tls)))
             .map_err(|failure| failure.to_string())?
             .with_limits(limits())
-            .with_admission(admit.clone());
+            .with_origins(args.origins.clone())
+            .with_admission(admit);
         eprintln!(
             "listening on {}",
             listener
                 .local_addr()
                 .map_err(|failure| failure.to_string())?
         );
-        loop {
-            match listener.accept(None) {
-                Ok(channel) => serve_mtls(&channel, &args.agent),
-                Err(failure) => eprintln!("a connection failed: {failure}"),
-            }
-        }
+        let service = Arc::new(Service {
+            method: None,
+            proof: Duration::ZERO,
+            agent: args.agent.clone(),
+            unproven: Gate::new(MAX_UNPROVEN),
+            peers: peers_running,
+        });
+        accept_loop(
+            || listener.next(None),
+            websocket::Pending::handshake,
+            &service,
+        );
     }
-    let key = auth::read_identity(&args.identity).map_err(|error| error.to_string())?;
-    let method = auth::method(key, allowed).map_err(|error| error.to_string())?;
+    let identity = args
+        .identity
+        .as_deref()
+        .ok_or("--allow needs --identity (see keygen)")?;
+    let key = auth::read_identity(identity).map_err(|error| error.to_string())?;
+    let method = auth::method(key, peers(&args.allow)?).map_err(|error| error.to_string())?;
     println!("{}", method.peer_id());
-    let proof = Duration::from_secs(args.proof_seconds);
+    let _ = std::io::stdout().flush();
+    let proof = Duration::from_secs(args.proof_seconds.unwrap_or(15));
     let tls = args.tls_identity.as_deref().map(server_tls).transpose()?;
     let plain = websocket::Listener::bind(args.listen, tls.clone())
         .map_err(|failure| failure.to_string())?
-        .with_limits(limits())
+        .with_limits(unproven_limits())
         .with_origins(args.origins.clone())
         .with_admission(admit.clone());
     eprintln!(
         "listening on {}",
         plain.local_addr().map_err(|failure| failure.to_string())?
     );
+    let service = Arc::new(Service {
+        method: Some(method),
+        proof,
+        agent: args.agent.clone(),
+        unproven: Gate::new(MAX_UNPROVEN),
+        peers: peers_running,
+    });
     if let Some(port) = args.webtransport_port {
         let tls = tls.ok_or("WebTransport needs --tls-identity")?;
         let address = SocketAddr::new(args.listen.ip(), port);
         let quic = webtransport::Listener::bind(address, tls)
             .map_err(|failure| failure.to_string())?
-            .with_limits(limits())
+            .with_limits(unproven_limits())
             .with_origins(args.origins.clone())
-            .with_admission(admit.clone());
-        let method = method.clone();
-        let agent = args.agent.clone();
+            .with_admission(admit);
+        let service = Arc::clone(&service);
         thread::spawn(move || {
-            loop {
-                match quic.accept(None) {
-                    Ok(channel) => serve_one(&channel, &method, proof, &agent),
-                    Err(failure) => eprintln!("a WebTransport connection failed: {failure}"),
-                }
-            }
+            accept_loop(
+                || quic.next(None),
+                webtransport::Pending::handshake,
+                &service,
+            )
         });
     }
-    loop {
-        match plain.accept(None) {
-            Ok(channel) => serve_one(&channel, &method, proof, &args.agent),
-            Err(failure) => eprintln!("a connection failed: {failure}"),
-        }
-    }
+    accept_loop(|| plain.next(None), websocket::Pending::handshake, &service)
 }
 
 fn dial(args: &Dial) -> Result<ExitCode, String> {
@@ -428,7 +529,7 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
                 let end = relay(&channel, &agent);
                 channel.close();
                 eprintln!("the link ended: {end:?}");
-                if end == LinkEnd::AgentEnded {
+                if matches!(end, LinkEnd::AgentEnded | LinkEnd::AgentStuck) {
                     let status = agent.stop().map_err(|error| error.to_string())?;
                     return Ok(status_code(status));
                 }
@@ -446,19 +547,79 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
 
 fn pair_accept_mode(args: &PairAccept) -> Result<ExitCode, String> {
     let identity =
-        Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?;
-    let store = TrustStore::open(&args.store).map_err(|error| error.to_string())?;
-    let desk = PairingDesk::new(random());
+        Arc::new(Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?);
+    let store = Arc::new(TrustStore::open(&args.store).map_err(|error| error.to_string())?);
+    let tls = if args.listen.ip().is_loopback() {
+        None
+    } else {
+        Some(server_tls(&args.tls_identity)?)
+    };
+    let listener = websocket::Listener::bind(args.listen, tls)
+        .map_err(|failure| failure.to_string())?
+        .with_frames(Frames::Binary)
+        .with_limits(
+            Limits::default()
+                .with_max_message(PAIR_MESSAGE)
+                .with_pending(8),
+        )
+        .with_admission(admission(&args.permit, &args.deny)?);
+    let desk = pairing::desk().map_err(|error| error.to_string())?;
     let shown = desk.show_pin().map_err(|error| error.to_string())?;
-    let listener = TcpListener::bind(args.listen).map_err(|error| error.to_string())?;
     println!("{}", shown.pin.as_str());
     println!("{}", identity.fingerprint());
     let _ = std::io::stdout().flush();
-    let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
-    let paired = pair_accept(stream, &identity, &store, &desk, &PairConfig::default())
-        .map_err(|error| format!("pairing failed: {error}"))?;
-    eprintln!("paired with {}", paired.peer.id());
-    Ok(ExitCode::SUCCESS)
+    let until = Instant::now() + Duration::from_secs(args.timeout_seconds);
+    let (report, reports) = mpsc::channel();
+    let gate = Gate::new(MAX_PAIRING_RUNS);
+    // Each connection runs apart, so a scanner that connects and says nothing costs the person neither the PIN nor the wait.
+    // A proxy's address says nothing about the peer, so the desk is not given one.
+    loop {
+        while let Ok(result) = reports.try_recv() {
+            match result {
+                Ok(peer) => {
+                    eprintln!("paired with {peer}");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                Err(why) => {
+                    eprintln!("a pairing attempt failed: {why}");
+                    if desk.shown_pin().is_none() {
+                        return Err("the PIN is used up or expired: start again".to_owned());
+                    }
+                }
+            }
+        }
+        if Instant::now() >= until {
+            return Err("nobody paired in time".to_owned());
+        }
+        let pending = match listener.next(Some(Duration::from_millis(100))) {
+            Ok(pending) => pending,
+            Err(Failure::Timeout) => continue,
+            Err(failure) => return Err(failure.to_string()),
+        };
+        let Some(entered) = gate.enter() else {
+            continue;
+        };
+        let (identity, store, desk, report) = (
+            Arc::clone(&identity),
+            Arc::clone(&store),
+            desk.clone(),
+            report.clone(),
+        );
+        thread::spawn(move || {
+            let _entered = entered;
+            let result = pending
+                .handshake()
+                .map_err(|failure| failure.to_string())
+                .and_then(|channel| {
+                    let paired =
+                        pairing::respond(&channel, &identity, &store, &desk, None, PAIRING_RUN);
+                    channel.close();
+                    paired.map_err(|error| error.to_string())
+                })
+                .map(|paired| paired.peer.id().to_string());
+            let _ = report.send(result);
+        });
+    }
 }
 
 fn pair_dial_mode(args: &PairDial) -> Result<ExitCode, String> {
@@ -478,17 +639,32 @@ fn pair_dial_mode(args: &PairDial) -> Result<ExitCode, String> {
     let identity =
         Identity::open_or_create(&args.tls_identity).map_err(|error| error.to_string())?;
     let store = TrustStore::open(&args.store).map_err(|error| error.to_string())?;
-    let stream = TcpStream::connect(&args.address).map_err(|error| error.to_string())?;
-    let config = PairConfig::default();
-    let paired = pair_dial(
-        stream,
-        &identity,
-        Pairing::pin(pin, PinRole::Typed),
-        &ResponderTrust::Unverified,
-        &config,
-    )
-    .and_then(|dialing| dialing.finish(&store))
-    .map_err(|error| format!("pairing failed: {error}"))?;
+    Endpoints::builder()
+        .websocket(args.url.as_str())
+        .allow_plain_loopback(true)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut dialer = websocket::Dialer::new().with_frames(Frames::Binary);
+    if args.url.scheme() == "wss" {
+        let trust = match &args.ca_file {
+            Some(file) => Trust::Roots(Roots::bundle_file(file)),
+            None => Trust::AnyWithKeyProof,
+        };
+        let config =
+            client_config_without_identity(&trust, &[]).map_err(|error| error.to_string())?;
+        dialer = dialer.with_tls(Arc::new(config));
+    }
+    let limit = Duration::from_secs(args.timeout_seconds);
+    let channel = dialer
+        .dial(
+            Kind::WebSocket,
+            &args.url,
+            limit.min(Duration::from_secs(10)),
+        )
+        .map_err(|failure| failure.to_string())?;
+    let paired = pairing::join(&channel, &identity, pin, &store, limit)
+        .map_err(|error| error.to_string())?;
+    channel.close();
     println!("{}", paired.peer.id());
     Ok(ExitCode::SUCCESS)
 }

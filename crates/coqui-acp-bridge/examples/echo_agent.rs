@@ -7,6 +7,11 @@ use std::io::{BufRead, Write};
 use serde_json::{Value, json};
 
 fn main() {
+    // An agent that has stopped reading, for the tests of what that costs the bridge.
+    if std::env::args().any(|arg| arg == "--deaf") {
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        return;
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     let log = std::env::var_os("ECHO_AGENT_LOG");

@@ -17,7 +17,7 @@ use rand_core::OsRng;
 use crate::Error;
 
 /// A browser's proof fits in a few short messages; this also bounds what an unproven peer can make us hold.
-const MAX_PROOF_MESSAGE: usize = 3072;
+pub const MAX_PROOF_MESSAGE: usize = 3072;
 
 /// Reads a P-256 PKCS#8 PEM identity for the browser-compatible method.
 ///
@@ -64,7 +64,9 @@ pub fn method(key: SigningKey, allowed: BTreeSet<PeerId>) -> Result<WebCryptoMet
     WebCryptoMethod::new(key, allowed).map_err(|error| Error::Identity(error.to_string()))
 }
 
-/// Runs the responder's side of the proof on `channel`, within `limit`. The peer it proved.
+/// Runs the responder's side of the proof on `channel`, within `limit`, and gives a peer that proved itself `max_message`
+/// from before the last message of the proof goes out, so the peer's first message after that meets the new limit. The
+/// peer it proved.
 ///
 /// # Errors
 ///
@@ -73,6 +75,7 @@ pub fn prove<C: Channel>(
     method: &WebCryptoMethod,
     channel: &C,
     limit: Duration,
+    max_message: usize,
 ) -> Result<PeerId, Error> {
     let deadline = Instant::now() + limit;
     let mut proof = method
@@ -95,11 +98,18 @@ pub fn prove<C: Channel>(
         proof
             .receive(&message)
             .map_err(|error| Error::Proof(error.to_string()))?;
+        let mut outgoing = Vec::new();
         while let Some(out) = proof
             .transmit()
             .map_err(|error| Error::Proof(error.to_string()))?
         {
-            channel.send(&out)?;
+            outgoing.push(out);
+        }
+        if proof.is_complete() {
+            channel.set_max_message(max_message);
+        }
+        for out in &outgoing {
+            channel.send(out)?;
         }
         if proof.is_complete() {
             let established = proof

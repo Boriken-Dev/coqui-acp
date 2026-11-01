@@ -1,0 +1,527 @@
+//! PIN pairing through a proxy that ends TLS, as nginx would, and against one that attacks it: the binary end to end, and the
+//! library for what a dishonest relay does.
+#![allow(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::needless_pass_by_value
+)]
+
+use std::io::{BufRead, BufReader};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use coqui_acp_bridge::pairing;
+use coqui_peer::TrustStore;
+use coqui_peer_tls::pair::{
+    Channel as PairChannel, CodeAlphabet, PairRefusal, Pairing, PairingError, Pin, PinRole,
+};
+use coqui_peer_tls::{Identity, certificate_key, random};
+use coqui_web::websocket::{self, Frames};
+use coqui_web::{Channel, Dialer, Failure, Kind};
+use rustls::pki_types::PrivatePkcs8KeyDer;
+use url::Url;
+
+const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
+const WAIT: Duration = Duration::from_secs(20);
+
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new(name: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("coqui-acp-pairing-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn loopback() -> SocketAddr {
+    "127.0.0.1:0".parse().unwrap()
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn accepted(store: &Path) -> usize {
+    std::fs::read_dir(store.join("peers").join("accepted")).map_or(0, Iterator::count)
+}
+
+/// Forwards every message both ways, as a WebSocket reverse proxy does, optionally changing what the joiner sends first.
+fn forward<A: Channel, B: Channel>(front: &A, back: &B, tamper: bool) {
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut first = tamper;
+            while let Ok(Some(mut message)) = front.receive(Some(WAIT)) {
+                if first {
+                    first = false;
+                    if let Some(last) = message.last_mut() {
+                        *last ^= 0x01;
+                    }
+                }
+                if back.send(&message).is_err() {
+                    break;
+                }
+            }
+            back.close();
+        });
+        while let Ok(Some(message)) = back.receive(Some(WAIT)) {
+            if front.send(&message).is_err() {
+                break;
+            }
+        }
+        front.close();
+    });
+}
+
+fn pair_accept(dir: &Dir, port: u16) -> (Child, String) {
+    let mut child = Command::new(BRIDGE)
+        .arg("pair-accept")
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--tls-identity")
+        .arg(dir.path("server.pem"))
+        .arg("--store")
+        .arg(dir.path("server-store"))
+        .args(["--timeout-seconds", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut pin = String::new();
+    reader.read_line(&mut pin).unwrap();
+    let mut fingerprint = String::new();
+    reader.read_line(&mut fingerprint).unwrap();
+    assert!(fingerprint.trim().starts_with("sha256:"), "{fingerprint}");
+    (child, pin.trim().to_owned())
+}
+
+fn pair_dial(dir: &Dir, url: &str, pin: &str, ca: Option<&Path>) -> std::process::Output {
+    let file = dir.path("pin.txt");
+    std::fs::write(&file, format!("{pin}\n")).unwrap();
+    let mut command = Command::new(BRIDGE);
+    command
+        .arg("pair-dial")
+        .arg(url)
+        .arg("--tls-identity")
+        .arg(dir.path("client.pem"))
+        .arg("--store")
+        .arg(dir.path("client-store"))
+        .arg("--pin-file")
+        .arg(&file)
+        .args(["--timeout-seconds", "20"]);
+    if let Some(ca) = ca {
+        command.arg("--ca-file").arg(ca);
+    }
+    command.output().unwrap()
+}
+
+struct Tls {
+    bundle: PathBuf,
+    server: Arc<rustls::ServerConfig>,
+}
+
+/// A front door's certificate for `localhost`, from a private CA.
+fn front_door(dir: &Dir) -> Tls {
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = ca_params.clone().self_signed(&ca_key).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+    let issuer = rcgen::Issuer::new(ca_params, ca_key);
+    let leaf = params.signed_by(&key, &issuer).unwrap();
+    let bundle = dir.path("ca.pem");
+    std::fs::write(&bundle, ca.pem()).unwrap();
+    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone()],
+        PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+    )
+    .unwrap();
+    Tls {
+        bundle,
+        server: Arc::new(server),
+    }
+}
+
+/// A proxy that ends TLS and passes messages to a plain backend, on a path under `/v1`.
+fn proxy(tls: Arc<rustls::ServerConfig>, backend: u16) -> (u16, thread::JoinHandle<()>) {
+    let front = websocket::Listener::bind(loopback(), Some(tls))
+        .unwrap()
+        .with_frames(Frames::Binary);
+    let port = front.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let Ok(outer) = front.accept(Some(WAIT)) else {
+            return;
+        };
+        let url = Url::parse(&format!("ws://127.0.0.1:{backend}/backend")).unwrap();
+        let inner = websocket::Dialer::new()
+            .with_frames(Frames::Binary)
+            .dial(Kind::WebSocket, &url, WAIT)
+            .unwrap();
+        forward(&outer, &inner, false);
+    });
+    (port, handle)
+}
+
+fn wait_exit(child: &mut Child) -> std::process::ExitStatus {
+    let until = Instant::now() + Duration::from_secs(40);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(Instant::now() < until, "the bridge did not end");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_pin_pairs_through_a_proxy_that_ends_tls_and_the_real_keys_are_stored() {
+    let dir = Dir::new("proxy");
+    let tls = front_door(&dir);
+    let backend = free_port();
+    let (mut accepting, pin) = pair_accept(&dir, backend);
+    let (port, proxy) = proxy(tls.server, backend);
+    let url = format!("wss://localhost:{port}/v1/agent/pair");
+    let joined = pair_dial(&dir, &url, &pin, Some(&tls.bundle));
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    assert!(wait_exit(&mut accepting).success());
+    proxy.join().unwrap();
+
+    let server = Identity::read(&dir.path("server.pem")).unwrap().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&joined.stdout).trim(),
+        server.fingerprint().to_string(),
+        "the backend's key, not the proxy's"
+    );
+    assert_eq!(accepted(&dir.path("server-store")), 1);
+    assert_eq!(accepted(&dir.path("client-store")), 1);
+}
+
+#[test]
+fn a_wrong_pin_through_the_proxy_pairs_nobody() {
+    let dir = Dir::new("wrong");
+    let tls = front_door(&dir);
+    let backend = free_port();
+    let (mut accepting, pin) = pair_accept(&dir, backend);
+    let (port, proxy) = proxy(tls.server, backend);
+    let wrong = if pin == "000000" { "000001" } else { "000000" };
+    let joined = pair_dial(
+        &dir,
+        &format!("wss://localhost:{port}/v1/agent/pair"),
+        wrong,
+        Some(&tls.bundle),
+    );
+    assert!(!joined.status.success());
+    assert!(!wait_exit(&mut accepting).success());
+    proxy.join().unwrap();
+    assert_eq!(accepted(&dir.path("server-store")), 0);
+    assert_eq!(accepted(&dir.path("client-store")), 0);
+}
+
+#[test]
+fn a_certificate_outside_the_given_ca_is_refused_before_any_pin_is_used() {
+    let dir = Dir::new("ca");
+    let tls = front_door(&dir);
+    let other = Dir::new("ca-other");
+    let elsewhere = front_door(&other);
+    let backend = free_port();
+    let (mut accepting, pin) = pair_accept(&dir, backend);
+    let (port, proxy) = proxy(tls.server, backend);
+    let joined = pair_dial(
+        &dir,
+        &format!("wss://localhost:{port}/v1/agent/pair"),
+        &pin,
+        Some(&elsewhere.bundle),
+    );
+    assert!(!joined.status.success());
+    let _ = accepting.kill();
+    let _ = accepting.wait();
+    let _ = proxy.join();
+    assert_eq!(accepted(&dir.path("client-store")), 0);
+}
+
+#[test]
+fn plain_ws_is_refused_beyond_loopback_and_a_pin_is_not_an_argument() {
+    let dir = Dir::new("plain");
+    let joined = pair_dial(&dir, "ws://example.org/pair", "000000", None);
+    assert!(!joined.status.success());
+    let help = Command::new(BRIDGE)
+        .args(["pair-dial", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        text.contains("--pin-file") && !text.contains("--pin "),
+        "{text}"
+    );
+}
+
+/// The library's two sides on a real socket, with something between them.
+struct Sides {
+    server: Identity,
+    client: Identity,
+    server_store: TrustStore,
+    client_store: TrustStore,
+    dir: Dir,
+}
+
+fn sides(name: &str) -> Sides {
+    let dir = Dir::new(name);
+    Sides {
+        server: Identity::open_or_create(&dir.path("s.pem")).unwrap(),
+        client: Identity::open_or_create(&dir.path("c.pem")).unwrap(),
+        server_store: TrustStore::open(&dir.path("server-store")).unwrap(),
+        client_store: TrustStore::open(&dir.path("client-store")).unwrap(),
+        dir,
+    }
+}
+
+fn binary_pair() -> (websocket::Channel, websocket::Channel) {
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_frames(Frames::Binary);
+    let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
+    let accepting = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
+    let near = websocket::Dialer::new()
+        .with_frames(Frames::Binary)
+        .dial(Kind::WebSocket, &url, WAIT)
+        .unwrap();
+    (near, accepting.join().unwrap())
+}
+
+const SHORT: Duration = Duration::from_secs(10);
+
+#[test]
+fn a_relay_that_changes_a_message_fails_both_sides() {
+    let sides = sides("tamper");
+    let (joiner_end, relay_near) = binary_pair();
+    let (relay_far, responder_end) = binary_pair();
+    let desk = pairing::desk().unwrap();
+    let pin = desk.show_pin().unwrap().pin;
+    let relay = thread::spawn(move || forward(&relay_near, &relay_far, true));
+    thread::scope(|scope| {
+        let responding = scope.spawn(|| {
+            pairing::respond(
+                &responder_end,
+                &sides.server,
+                &sides.server_store,
+                &desk,
+                None,
+                SHORT,
+            )
+        });
+        let joined = pairing::join(&joiner_end, &sides.client, pin, &sides.client_store, SHORT);
+        assert!(joined.is_err(), "the joiner must refuse a changed run");
+        assert!(
+            responding.join().unwrap().is_err(),
+            "the responder must refuse a changed run"
+        );
+    });
+    drop(joiner_end);
+    drop(responder_end);
+    relay.join().unwrap();
+    assert_eq!(accepted(&sides.dir.path("server-store")), 0);
+    assert_eq!(accepted(&sides.dir.path("client-store")), 0);
+}
+
+#[test]
+fn a_relay_that_swaps_in_its_own_key_without_the_pin_fails_both_sides() {
+    let sides = sides("swap");
+    let attacker = Identity::open_or_create(&sides.dir.path("a.pem")).unwrap();
+    let attacker_store = TrustStore::open(&sides.dir.path("attacker-store")).unwrap();
+    let attacker_store_two = TrustStore::open(&sides.dir.path("attacker-store-two")).unwrap();
+    let (joiner_end, attacker_near) = binary_pair();
+    let (attacker_far, responder_end) = binary_pair();
+    let real_desk = pairing::desk().unwrap();
+    let pin = real_desk.show_pin().unwrap().pin;
+    // The attacker cannot read the PIN, so it shows its own to the joiner and guesses at the responder.
+    let attacker_desk = pairing::desk().unwrap();
+    let _ = attacker_desk.show_pin().unwrap();
+    let guess = Pin::parse(
+        &CodeAlphabet::pin(),
+        if pin.as_str() == "000000" {
+            "000001"
+        } else {
+            "000000"
+        },
+    )
+    .unwrap();
+    thread::scope(|scope| {
+        let to_joiner = scope.spawn(|| {
+            pairing::respond(
+                &attacker_near,
+                &attacker,
+                &attacker_store,
+                &attacker_desk,
+                None,
+                SHORT,
+            )
+        });
+        let to_responder = scope
+            .spawn(|| pairing::join(&attacker_far, &attacker, guess, &attacker_store_two, SHORT));
+        let responding = scope.spawn(|| {
+            pairing::respond(
+                &responder_end,
+                &sides.server,
+                &sides.server_store,
+                &real_desk,
+                None,
+                SHORT,
+            )
+        });
+        let joined = pairing::join(&joiner_end, &sides.client, pin, &sides.client_store, SHORT);
+        assert!(
+            joined.is_err(),
+            "the joiner must not pair with the attacker"
+        );
+        assert!(
+            responding.join().unwrap().is_err(),
+            "the responder must not pair with the attacker"
+        );
+        assert!(to_joiner.join().unwrap().is_err());
+        assert!(to_responder.join().unwrap().is_err());
+    });
+    assert_eq!(accepted(&sides.dir.path("server-store")), 0);
+    assert_eq!(accepted(&sides.dir.path("client-store")), 0);
+}
+
+#[test]
+fn a_silent_peer_ends_on_the_deadline_and_failure_is_a_channel_error_not_a_hang() {
+    let sides = sides("silent");
+    let (near, far) = binary_pair();
+    let desk = pairing::desk().unwrap();
+    let _ = desk.show_pin().unwrap();
+    let started = Instant::now();
+    let refused = pairing::respond(
+        &far,
+        &sides.server,
+        &sides.server_store,
+        &desk,
+        None,
+        Duration::from_millis(300),
+    );
+    assert!(refused.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        near.receive(Some(Duration::from_secs(1)))
+            .is_ok_and(|first| first.is_some_and(|id| id.len() == 32))
+    );
+    let _: Result<(), Failure> = near.send(b"unused");
+}
+
+/// Runs a joiner by hand against `pairing::respond`, for what `pairing::join` will not ask for.
+fn run_raw_joiner(sides: &Sides, pairing: Pairing, limit: Duration) -> Result<(), PairingError> {
+    let (near, far) = binary_pair();
+    let desk = pairing::desk().unwrap();
+    let _ = desk.show_pin().unwrap();
+    thread::scope(|scope| {
+        let responding = scope.spawn(|| {
+            pairing::respond(&far, &sides.server, &sides.server_store, &desk, None, limit)
+        });
+        let binding = near.receive(Some(limit)).unwrap().unwrap();
+        let side = PairChannel {
+            local: certificate_key(sides.client.certificate_der()).unwrap(),
+            remote: None,
+            verified: false,
+            binding: Some(binding),
+        };
+        let mut joiner = pairing.join(side)?;
+        let ended = loop {
+            while let Some(message) = joiner.transmit() {
+                near.send(&message).unwrap();
+            }
+            if joiner.is_complete() {
+                break Ok(());
+            }
+            match near.receive(Some(limit)) {
+                Ok(Some(message)) => {
+                    if let Err(error) = joiner.receive(&message) {
+                        break Err(error);
+                    }
+                }
+                _ => break Err(PairingError::Protocol),
+            }
+        };
+        assert!(responding.join().unwrap().is_err());
+        ended
+    })
+}
+
+#[test]
+fn a_joiner_asking_for_the_device_flow_is_told_it_is_disabled() {
+    let sides = sides("device");
+    let asked = Pairing::device("a laptop").allow_unverified(true);
+    assert!(
+        matches!(
+            run_raw_joiner(&sides, asked, SHORT),
+            Err(PairingError::Refused(PairRefusal::Disabled))
+        ),
+        "only PIN runs are offered on a channel that proves nothing"
+    );
+    assert_eq!(accepted(&sides.dir.path("server-store")), 0);
+}
+
+#[test]
+fn a_joiner_showing_its_own_pin_pairs_nobody_and_holds_a_run_no_longer_than_its_limit() {
+    let sides = sides("shown");
+    let pin = Pin::generate(&CodeAlphabet::pin(), &random()).unwrap();
+    let started = Instant::now();
+    let limit = Duration::from_millis(500);
+    assert!(run_raw_joiner(&sides, Pairing::pin(pin, PinRole::Shown), limit).is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(accepted(&sides.dir.path("server-store")), 0);
+}
+
+#[test]
+fn a_silent_scanner_costs_neither_the_pin_nor_the_wait() {
+    let dir = Dir::new("scanner");
+    let backend = free_port();
+    let (mut accepting, pin) = pair_accept(&dir, backend);
+    let silent: Vec<_> = (0..4)
+        .map(|_| std::net::TcpStream::connect(("127.0.0.1", backend)).unwrap())
+        .collect();
+    let joined = pair_dial(&dir, &format!("ws://127.0.0.1:{backend}/pair"), &pin, None);
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    assert!(wait_exit(&mut accepting).success());
+    drop(silent);
+    assert_eq!(accepted(&dir.path("server-store")), 1);
+}

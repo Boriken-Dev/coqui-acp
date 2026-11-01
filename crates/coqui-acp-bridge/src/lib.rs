@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod pairing;
 pub mod relay;
 
 use core::fmt;

@@ -3,14 +3,16 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coqui_web::{Channel, Failure};
 
-use crate::agent::{Agent, Output};
+use crate::agent::{Agent, Output, WriteEnd};
 
 /// How often each direction looks up to see whether the other has ended.
 const POLL: Duration = Duration::from_millis(50);
+/// How long a line may wait on a full queue to a peer, after which the peer has stopped taking them.
+const PEER_LIMIT: Duration = Duration::from_secs(30);
 
 /// Why one link ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +20,8 @@ const POLL: Duration = Duration::from_millis(50);
 pub enum LinkEnd {
     /// The agent's output ended, which means it exited or closed it.
     AgentEnded,
+    /// The agent stopped reading its input and a line waited too long for it.
+    AgentStuck,
     /// The peer closed in order.
     PeerClosed,
     /// The channel failed. A dialing bridge may connect again.
@@ -51,8 +55,11 @@ fn from_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Optio
                 if message.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
                     return Some(LinkEnd::Protocol);
                 }
-                if agent.write_line(&message).is_err() {
-                    return Some(LinkEnd::AgentEnded);
+                match agent.write_line(&message, stop) {
+                    Ok(()) => {}
+                    Err(WriteEnd::Ended) => return Some(LinkEnd::AgentEnded),
+                    Err(WriteEnd::Stuck) => return Some(LinkEnd::AgentStuck),
+                    Err(WriteEnd::Stopped) => return None,
                 }
             }
             Ok(None) => return Some(LinkEnd::PeerClosed),
@@ -64,16 +71,11 @@ fn from_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Optio
 }
 
 fn to_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Option<LinkEnd> {
-    let output = agent.output();
     while !stop.load(Ordering::SeqCst) {
-        match output.recv_timeout(POLL) {
+        match agent.next_output(POLL) {
             Ok(Output::Line(line)) => {
-                if let Err(failure) = channel.send(&line) {
-                    return Some(if failure == Failure::Protocol {
-                        LinkEnd::Protocol
-                    } else {
-                        LinkEnd::Failed(failure)
-                    });
+                if let Some(end) = deliver(channel, &line, stop) {
+                    return Some(end);
                 }
             }
             Ok(Output::TooLong) => return Some(LinkEnd::Protocol),
@@ -82,4 +84,19 @@ fn to_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Option<
         }
     }
     None
+}
+
+/// Sends one line, waiting on a full queue, so the agent feels a slow peer as back-pressure rather than losing the link.
+fn deliver<C: Channel>(channel: &C, line: &[u8], stop: &AtomicBool) -> Option<LinkEnd> {
+    let until = Instant::now() + PEER_LIMIT;
+    loop {
+        match channel.send(line) {
+            Ok(()) => return None,
+            Err(Failure::Protocol) => return Some(LinkEnd::Protocol),
+            Err(Failure::NoProgress) if Instant::now() < until && !stop.load(Ordering::SeqCst) => {
+                thread::sleep(POLL);
+            }
+            Err(failure) => return Some(LinkEnd::Failed(failure)),
+        }
+    }
 }

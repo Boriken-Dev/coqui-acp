@@ -433,8 +433,6 @@ fn start_mtls(
         .arg("serve")
         .arg("--listen")
         .arg(format!("127.0.0.1:{port}"))
-        .arg("--identity")
-        .arg(fixture.keygen("unused.pem").0)
         .arg("--tls-identity")
         .arg(server)
         .arg("--allow-cert")
@@ -582,131 +580,162 @@ fn rcgen_issue(dir: &Path) -> PrivateCa {
     }
 }
 
-/// Starts a `pair-accept`; answers its process and the PIN it shows. It prints the PIN only once it is listening.
-fn pair_accept(fixture: &Fixture, identity: &str, store: &str, port: u16) -> (Child, String) {
-    let mut child = Command::new(BRIDGE)
-        .arg("pair-accept")
-        .arg("--listen")
-        .arg(format!("127.0.0.1:{port}"))
-        .arg("--tls-identity")
-        .arg(fixture.dir.join(identity))
-        .arg("--store")
-        .arg(fixture.dir.join(store))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut reader = BufReader::new(child.stdout.take().unwrap());
-    let mut pin = String::new();
-    reader.read_line(&mut pin).unwrap();
-    let mut fingerprint = String::new();
-    reader.read_line(&mut fingerprint).unwrap();
-    assert!(fingerprint.trim().starts_with("sha256:"), "{fingerprint}");
-    (child, pin.trim().to_owned())
-}
-
-fn pair_dial(
-    fixture: &Fixture,
-    identity: &str,
-    store: &str,
-    port: u16,
-    pin: &str,
-) -> std::process::Output {
-    let file = fixture.dir.join(format!("{identity}.pin"));
-    std::fs::write(&file, format!("{pin}\n")).unwrap();
-    Command::new(BRIDGE)
-        .arg("pair-dial")
-        .arg(format!("127.0.0.1:{port}"))
-        .arg("--tls-identity")
-        .arg(fixture.dir.join(identity))
-        .arg("--store")
-        .arg(fixture.dir.join(store))
-        .arg("--pin-file")
-        .arg(file)
-        .output()
-        .unwrap()
-}
-
-#[test]
-fn a_pin_pairs_two_sides_and_the_stored_key_gets_the_agent() {
-    use coqui_web::Dialer;
-    let mut fixture = Fixture::new("pin");
-    let port = free_port();
-    let (mut accepting, pin) = pair_accept(&fixture, "server.pem", "server-store", port);
-    assert_eq!(pin.len(), 6, "a six-digit PIN");
-    let joined = pair_dial(&fixture, "client.pem", "client-store", port, &pin);
-    assert!(
-        joined.status.success(),
-        "{}",
-        String::from_utf8_lossy(&joined.stderr)
-    );
-    assert!(accepting.wait().unwrap().success());
-
-    let server = native::identity(&fixture.dir.join("server.pem"));
-    let client = native::identity(&fixture.dir.join("client.pem"));
-    assert_eq!(
-        String::from_utf8_lossy(&joined.stdout).trim(),
-        server.fingerprint().to_string()
-    );
-
-    let log = fixture.dir.join("agent.log");
-    let service = free_port();
-    let unused = fixture.keygen("unused.pem").0;
+fn start_store_bridge(fixture: &mut Fixture, server: &Path, store: &Path, port: u16, log: &Path) {
     let child = Command::new(BRIDGE)
         .arg("serve")
         .arg("--listen")
-        .arg(format!("127.0.0.1:{service}"))
-        .arg("--identity")
-        .arg(unused)
+        .arg(format!("127.0.0.1:{port}"))
         .arg("--tls-identity")
-        .arg(fixture.dir.join("server.pem"))
+        .arg(server)
         .arg("--allow-store")
-        .arg(fixture.dir.join("server-store"))
+        .arg(store)
         .arg("--")
         .arg(echo_agent())
-        .env("ECHO_AGENT_LOG", &log)
+        .env("ECHO_AGENT_LOG", log)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
     fixture.bridge = Some(child);
-    wait_for_port(service);
-    let url = url::Url::parse(&format!("wss://127.0.0.1:{service}/agent")).unwrap();
+    wait_for_port(port);
+}
+
+#[test]
+fn a_peer_removed_from_the_store_cannot_return_on_a_session_it_holds() {
+    use coqui_peer_tls::TrustStoreExt as _;
+    use coqui_web::Dialer;
+    let mut fixture = Fixture::new("removed");
+    let server = native::identity(&fixture.dir.join("server.pem"));
+    let client = native::identity(&fixture.dir.join("client.pem"));
+    let store = coqui_peer::TrustStore::open(&fixture.dir.join("peers")).unwrap();
+    let peer = store.accept_certificate(client.certificate_der()).unwrap();
+    let log = fixture.dir.join("agent.log");
+    let port = free_port();
+    let (server_path, store_path) = (fixture.dir.join("server.pem"), fixture.dir.join("peers"));
+    start_store_bridge(&mut fixture, &server_path, &store_path, port, &log);
+    let url = url::Url::parse(&format!("wss://127.0.0.1:{port}/agent")).unwrap();
+    let wait = Duration::from_secs(10);
+    // One configuration throughout: it keeps the session and tickets a resuming client would use.
+    let tls = native::client_of(&client, &server);
     let channel = coqui_web::websocket::Dialer::new()
-        .with_tls(native::client_of(&client, &server))
-        .dial(coqui_web::Kind::WebSocket, &url, Duration::from_secs(10))
+        .with_tls(std::sync::Arc::clone(&tls))
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
         .unwrap();
     initialize(&channel);
-    assert!(log.exists());
-}
-
-#[test]
-fn a_wrong_pin_pairs_nobody_and_ends_the_attempt() {
-    let fixture = Fixture::new("wrongpin");
-    let port = free_port();
-    let (mut accepting, pin) = pair_accept(&fixture, "server.pem", "server-store", port);
-    let wrong = if pin == "000000" { "000001" } else { "000000" };
-    let joined = pair_dial(&fixture, "client.pem", "client-store", port, wrong);
-    assert!(!joined.status.success());
-    assert!(!accepting.wait().unwrap().success());
-    let accepted = fixture
-        .dir
-        .join("server-store")
-        .join("peers")
-        .join("accepted");
-    let empty = std::fs::read_dir(&accepted).map_or(true, |mut entries| entries.next().is_none());
-    assert!(empty, "a wrong PIN must leave no accepted peer");
-}
-
-#[test]
-fn a_pin_is_not_an_argument() {
-    let help = Command::new(BRIDGE)
-        .args(["pair-dial", "--help"])
-        .output()
-        .unwrap();
-    let text = String::from_utf8_lossy(&help.stdout);
-    assert!(
-        text.contains("--pin-file") && !text.contains("--pin "),
-        "{text}"
+    coqui_web::Channel::close(&channel);
+    store.remove(&peer).unwrap();
+    std::fs::remove_file(&log).unwrap();
+    let dialed = coqui_web::websocket::Dialer::new().with_tls(tls).dial(
+        coqui_web::Kind::WebSocket,
+        &url,
+        wait,
     );
+    if let Ok(channel) = dialed {
+        let _ = coqui_web::Channel::send(
+            &channel,
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+        );
+        assert!(!matches!(
+            coqui_web::Channel::receive(&channel, Some(wait)),
+            Ok(Some(_))
+        ));
+    }
+    assert!(!log.exists(), "a removed peer must not reach an agent");
+}
+
+#[test]
+fn silent_connections_hold_up_nobody_and_two_peers_each_get_an_agent() {
+    use coqui_web::Dialer;
+    let mut fixture = Fixture::new("slow");
+    let server = native::identity(&fixture.dir.join("server.pem"));
+    let client = native::identity(&fixture.dir.join("client.pem"));
+    let log = fixture.dir.join("agent.log");
+    let port = free_port();
+    let server_path = fixture.dir.join("server.pem");
+    start_mtls(
+        &mut fixture,
+        &server_path,
+        &client.fingerprint().to_string(),
+        port,
+        &[],
+        &log,
+    );
+    let silent: Vec<_> = (0..8)
+        .map(|_| std::net::TcpStream::connect(("127.0.0.1", port)).unwrap())
+        .collect();
+    let url = url::Url::parse(&format!("wss://127.0.0.1:{port}/agent")).unwrap();
+    let wait = Duration::from_secs(5);
+    let started = Instant::now();
+    let first = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&client, &server))
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
+        .unwrap();
+    initialize(&first);
+    let second = coqui_web::websocket::Dialer::new()
+        .with_tls(native::client_of(&client, &server))
+        .dial(coqui_web::Kind::WebSocket, &url, wait)
+        .unwrap();
+    initialize(&second);
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(silent);
+}
+
+#[test]
+fn flags_that_cannot_apply_are_refused_rather_than_dropped() {
+    let fixture = Fixture::new("flags");
+    let server = fixture.dir.join("server.pem");
+    native::identity(&server);
+    for extra in [["--webtransport-port", "7000"], ["--proof-seconds", "5"]] {
+        let output = Command::new(BRIDGE)
+            .args(["serve", "--listen", "127.0.0.1:0", "--tls-identity"])
+            .arg(&server)
+            .args([
+                "--allow-cert",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ])
+            .args(extra)
+            .args(["--", "x"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{extra:?}");
+    }
+}
+
+/// A channel with an endless supply of messages for the agent.
+struct Flood;
+
+impl coqui_web::Channel for Flood {
+    fn send(&self, _: &[u8]) -> Result<(), coqui_web::Failure> {
+        Ok(())
+    }
+
+    fn receive(&self, _: Option<Duration>) -> Result<Option<Vec<u8>>, coqui_web::Failure> {
+        Ok(Some(vec![b'x'; 1024 * 1024]))
+    }
+
+    fn close(&self) {}
+}
+
+#[test]
+fn an_agent_that_stops_reading_ends_the_link_rather_than_wedging_it() {
+    let agent = coqui_acp_bridge::agent::Agent::spawn(
+        &echo_agent().into_os_string(),
+        &["--deaf".into()],
+        1024 * 1024,
+    )
+    .unwrap()
+    .with_write_limit(Duration::from_millis(300));
+    let started = Instant::now();
+    let end = coqui_acp_bridge::relay::relay(&Flood, &agent);
+    assert_eq!(end, coqui_acp_bridge::relay::LinkEnd::AgentStuck);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    agent.stop().unwrap();
 }
