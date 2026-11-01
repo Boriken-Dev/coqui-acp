@@ -3,7 +3,7 @@
 //! Two strangers run the handshake admitting anyone who proves a key, which yields a `PairingSession`: it runs one exchange and
 //! can carry nothing else, so a connection like this can never reach an agent. Inside it the PIN confirms both keys, both PAKE
 //! messages and a secret export of the session, so a relay that swaps a key or changes a message fails on both sides. A peer then
-//! connects again, pinned. Only PIN mode is offered.
+//! connects again, pinned. Only PIN mode is offered, with the PIN this side shows.
 
 use core::cell::Cell;
 use std::io;
@@ -68,6 +68,8 @@ pub fn desk() -> Result<PairingDesk, Error> {
     let options = PairingOptions {
         invitation: false,
         device: false,
+        // Nobody is at a desk here to enter a PIN the joiner shows, so such a run must not wait for one.
+        pin_shown: false,
         ..PairingOptions::default()
     };
     PairingDesk::new(random())

@@ -26,3 +26,7 @@ missing_debug_implementations = "warn"
 std_instead_of_core = "warn"
 std_instead_of_alloc = "warn"
 alloc_instead_of_core = "warn"
+
+# coqui-peer-tls names the released coqui-peer, and one PeerId type across the graph needs one source.
+[patch.crates-io]
+coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "1f00bfe6319f64e7ec038a7003746f4f031d538c" }

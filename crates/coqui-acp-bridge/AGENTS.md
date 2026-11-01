@@ -56,7 +56,7 @@ pub fn respond<C: Channel>(channel: &C, identity: &Identity, store: &TrustStore,
 pub fn join<C: Channel>(channel: &C, identity: &Identity, pin: Pin, store: &TrustStore, limit: Duration) -> Result<Paired, Error>
 ```
 
-PIN pairing over any channel in binary frames, with the PIN shown by the responder: the WebCrypto handshake admitting anyone who proves a key, which yields a `PairingSession` that can carry nothing but this exchange, sealed and bound to a secret export of it. Only PIN mode, and a joiner asking for another is refused. It pairs the WebCrypto key. The connection then ends, and the peer returns pinned.
+PIN pairing over any channel in binary frames, with the PIN shown by the responder: the WebCrypto handshake admitting anyone who proves a key, which yields a `PairingSession` that can carry nothing but this exchange, sealed and bound to a secret export of it. Only PIN mode with the PIN the responder shows, and a joiner asking for anything else is refused at once. It pairs the WebCrypto key. The connection then ends, and the peer returns pinned.
 
 ## `coqui_acp_bridge::auth`
 
@@ -81,7 +81,6 @@ pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -
 ## Gotchas
 
 - A browser cannot do the PIN exchange from this crate; `pair-dial` is native.
-- A joiner that asks to show its own PIN holds a run until the shown PIN expires, since the core's responder waits for an operator. It pairs nobody, and `pair-accept` runs 16 at once, so strangers could hold pairing up for that long: use `--permit`.
 - Behind a reverse proxy every peer has the proxy's address, so `--permit`, `--deny` and the store's per-source limit on waiting entries see the proxy. Bind to loopback and filter at the proxy.
 - `dial` keeps the agent across links, so lines not yet sent go to the next link, which may be another allowed peer.
 - A key file's permissions are set only on Unix; elsewhere it takes its directory's. Nothing checks them on reading. Keep keys in a directory only their owner can read.
