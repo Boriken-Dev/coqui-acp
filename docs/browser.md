@@ -65,7 +65,7 @@ dictionary AcpAgent {
   required AcpScopeInfo scope;
 };
 
-dictionary AcpIdentity { DOMString? peer; required boolean verified; DOMString? method; };
+dictionary AcpIdentity { DOMString? peer; required boolean verified; DOMString? method; };   // method: any proof's name, not a fixed list
 dictionary AcpOffers   { sequence<unsigned short> acpVersions; sequence<DOMString> transports; };
 dictionary AcpScopeInfo { required boolean permissions; required DOMString lifetime; sequence<DOMString> mcpOrigins; }; // "once", "always"
 

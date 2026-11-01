@@ -5,10 +5,8 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use coqui_peer::{Handshake, Method};
-use coqui_peer_webcrypto::{
-    Established, Identity, Opener, PeerId, Sealer, Session, WebCrypto, WebCryptoHandshake,
-};
+use coqui_peer::{Established, Handshake, Method};
+use coqui_peer_webcrypto::{Identity, Opener, PeerId, Sealer, Session};
 use coqui_web::{Channel, Failure};
 
 use crate::Error;
@@ -16,7 +14,7 @@ use crate::Error;
 /// A proof fits in a few short messages; this also bounds what an unproven peer can make us hold.
 pub const MAX_PROOF_MESSAGE: usize = 3072;
 /// What a session adds to each message.
-pub const RECORD_OVERHEAD: usize = 16;
+pub const RECORD_OVERHEAD: usize = 17;
 /// How often a live session asks whether its peer is still allowed.
 const RECHECK: Duration = Duration::from_secs(1);
 
@@ -51,12 +49,12 @@ pub fn create_identity(path: &Path) -> Result<PeerId, Error> {
 /// # Errors
 ///
 /// [`Error::Proof`] for a refused or malformed proof, and [`Error::Channel`] for silence or a failed channel.
-pub fn prove<C: Channel>(
-    method: &WebCrypto,
+pub fn prove<M: Method, C: Channel>(
+    method: &M,
     channel: &C,
     limit: Duration,
     max_message: usize,
-) -> Result<Established<Session>, Error> {
+) -> Result<Established<<M::Handshake as Handshake>::Output>, Error> {
     let proof = method.respond(None).map_err(proof_failed)?;
     drive(proof, channel, limit, max_message)
 }
@@ -66,12 +64,12 @@ pub fn prove<C: Channel>(
 /// # Errors
 ///
 /// As [`prove`].
-pub fn prove_out<C: Channel>(
-    method: &WebCrypto,
+pub fn prove_out<M: Method, C: Channel>(
+    method: &M,
     channel: &C,
     limit: Duration,
     max_message: usize,
-) -> Result<Established<Session>, Error> {
+) -> Result<Established<<M::Handshake as Handshake>::Output>, Error> {
     let proof = method.initiate().map_err(proof_failed)?;
     drive(proof, channel, limit, max_message)
 }
@@ -93,12 +91,12 @@ pub(crate) fn next<C: Channel>(channel: &C, deadline: Instant) -> Result<Vec<u8>
     }
 }
 
-fn drive<C: Channel>(
-    mut proof: WebCryptoHandshake,
+fn drive<H: Handshake, C: Channel>(
+    mut proof: H,
     channel: &C,
     limit: Duration,
     max_message: usize,
-) -> Result<Established<Session>, Error> {
+) -> Result<Established<H::Output>, Error> {
     let deadline = Instant::now() + limit;
     loop {
         let mut outgoing = Vec::new();
@@ -130,7 +128,8 @@ struct SealerState {
     waiting: Option<Vec<u8>>,
 }
 
-/// A channel whose every message is inside a session. Anything that does not open ends it.
+/// A channel whose every message is inside a session. Anything that does not open ends it, and so does a connection cut before
+/// the peer's close record, which is how a relay would hide what it held back.
 pub struct Sealed<'a, C: Channel> {
     channel: &'a C,
     sealer: Mutex<SealerState>,
@@ -202,16 +201,15 @@ impl<C: Channel> Channel for Sealed<'_, C> {
             self.channel.close();
             return Err(Failure::Permission);
         }
+        let mut opener = self.opener.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(record) = self.channel.receive(timeout)? else {
-            return Ok(None);
+            return match opener.verify_end() {
+                Ok(()) => Ok(None),
+                Err(_) => Err(Failure::PathLost),
+            };
         };
-        let opened = self
-            .opener
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .open(&record);
-        match opened {
-            Ok(message) => Ok(Some(message)),
+        match opener.open(&record) {
+            Ok(opened) => Ok(opened),
             Err(_) => {
                 self.channel.close();
                 Err(Failure::Protocol)
@@ -219,7 +217,13 @@ impl<C: Channel> Channel for Sealed<'_, C> {
         }
     }
 
+    /// Sends this side's close record, then ends the channel. Safe to call more than once.
     fn close(&self) {
+        let mut state = self.sealer.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Ok(record) = state.sealer.close() {
+            let _ = self.channel.send(&record);
+        }
+        drop(state);
         self.channel.close();
     }
 

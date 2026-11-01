@@ -337,6 +337,7 @@ impl Service {
                     None => sealed,
                 };
                 self.give_agent(&sealed, &label);
+                sealed.close();
             }
             Err(error) => eprintln!("a connection was refused: {error}"),
         }
@@ -632,13 +633,15 @@ fn dial_link(
         Ok(established) => {
             let peer = established.peer;
             let sealed = Sealed::new(channel, established.session);
-            let end = match store {
+            let sealed = match store {
                 Some(store) => {
                     let store = Arc::clone(store);
-                    relay(&sealed.with_check(move || store.is_accepted(&peer)), agent)
+                    sealed.with_check(move || store.is_accepted(&peer))
                 }
-                None => relay(&sealed, agent),
+                None => sealed,
             };
+            let end = relay(&sealed, agent);
+            sealed.close();
             Ok(Some(end))
         }
         Err(Error::Proof(why)) => Err(format!("the remote did not prove itself: {why}")),

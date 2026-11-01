@@ -39,12 +39,37 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The JavaScript peer of the bridge's test, at the revision crates/coqui-acp-bridge/Cargo.toml pins.
+      - uses: actions/checkout@v4
+        with:
+          repository: Boriken-Dev/coqui-peer-webcrypto
+          ref: 95d415837effd8bfd7fbc32dc03fa9052670ca1e
+          path: peer-webcrypto
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+        env:
+          COQUI_ACP_TEST_WEBCRYPTO: ${{ github.workspace }}/peer-webcrypto/bindings/js/coqui-peer-webcrypto/src/index.mjs
       - run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  js:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bindings/js
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm test
 
   dart:
     runs-on: ubuntu-latest

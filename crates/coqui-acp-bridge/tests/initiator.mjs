@@ -45,7 +45,11 @@ const {session} = await proof.finish(text(await next()));
 
 // Every message from here on is one sealed record.
 const send = async (message) => socket.send(await session.seal(JSON.stringify(message)));
-const receive = async () => JSON.parse(text(await session.open(new Uint8Array(await next()))));
+const receive = async () => {
+  const opened = await session.open(new Uint8Array(await next()));
+  if (opened === null) fail('the bridge closed the session');
+  return JSON.parse(text(opened));
+};
 const call = (id, method, params) => send({jsonrpc: '2.0', id, method, params});
 const reply = async (id) => {
   for (;;) {
@@ -61,5 +65,6 @@ const {sessionId} = await reply(2);
 await call(3, 'session/prompt', {sessionId, prompt: [{type: 'text', text: 'hello through the bridge'}]});
 await reply(3);
 socket.onclose = null;
+socket.send(await session.close());
 socket.close();
 process.exit(0);

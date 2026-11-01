@@ -240,6 +240,10 @@ fn a_plain_listener_beyond_loopback_is_refused() {
 #[test]
 fn a_proven_browser_peer_gets_the_agent_and_a_stranger_never_reaches_it() {
     let (Some(node), Some(module)) = (node(), webcrypto_module()) else {
+        assert!(
+            std::env::var_os("COQUI_ACP_TEST_WEBCRYPTO").is_none(),
+            "a module was named and could not be used"
+        );
         eprintln!(
             "SKIPPED: needs Node 22 or later and COQUI_ACP_TEST_WEBCRYPTO naming coqui-peer-webcrypto's bindings/js/coqui-peer-webcrypto/src/index.mjs"
         );
@@ -683,6 +687,52 @@ fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
     let good = binary_dial(&url);
     let established = prove_out(&method, &good, wait, 1 << 20).unwrap();
     initialize(&Sealed::new(&good, established.session));
+}
+
+#[test]
+fn a_link_cut_before_the_close_record_is_a_failure_and_a_close_record_is_an_orderly_end() {
+    use coqui_acp_bridge::auth::{Sealed, prove, prove_out};
+    use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
+    let fixture = Fixture::new("closerecord");
+    let near = Identity::open_or_create(&fixture.dir.join("near.pem")).unwrap();
+    let far = Identity::open_or_create(&fixture.dir.join("far.pem")).unwrap();
+    let near_method = WebCrypto::new(near.clone()).with_responders(Trust::pinned([far.peer_id()]));
+    let far_method = WebCrypto::new(far).with_initiators(Trust::pinned([near.peer_id()]));
+    let wait = Duration::from_secs(10);
+    for cut in [false, true] {
+        let listener = coqui_web::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), None)
+            .unwrap()
+            .with_frames(coqui_web::websocket::Frames::Binary);
+        let url = url::Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
+        let method = far_method.clone();
+        let serving = std::thread::spawn(move || {
+            let channel = listener.accept(Some(wait)).unwrap();
+            let established = prove(&method, &channel, wait, 1 << 20).unwrap();
+            let sealed = Sealed::new(&channel, established.session);
+            coqui_web::Channel::send(&sealed, b"held back or not").unwrap();
+            if cut {
+                coqui_web::Channel::close(&channel);
+            } else {
+                coqui_web::Channel::close(&sealed);
+            }
+        });
+        let channel = binary_dial(&url);
+        let established = prove_out(&near_method, &channel, wait, 1 << 20).unwrap();
+        let sealed = Sealed::new(&channel, established.session);
+        assert_eq!(
+            coqui_web::Channel::receive(&sealed, Some(wait))
+                .unwrap()
+                .unwrap(),
+            b"held back or not"
+        );
+        let end = coqui_web::Channel::receive(&sealed, Some(wait));
+        if cut {
+            assert_eq!(end, Err(coqui_web::Failure::PathLost));
+        } else {
+            assert_eq!(end, Ok(None));
+        }
+        serving.join().unwrap();
+    }
 }
 
 /// A proxy that ends TLS, forwards to `back`, and optionally sends the dialer a plain message once the proof is over.

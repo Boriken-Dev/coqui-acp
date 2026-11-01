@@ -22,7 +22,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 coqui-peer = "=0.0.0-alpha.1"
 # Unpublished so far.
-coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "293875706f758f11539005ac6bad0473f6d5f254", features = ["pin"] }
+coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "95d415837effd8bfd7fbc32dc03fa9052670ca1e", features = ["pin"] }
 coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate"] }
 coqui-net-acl = { version = "=0.0.0-alpha.0" }
 coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "4dc609e5c5f23ccbda993e3e126b8d13938648a6", features = ["websocket", "webtransport"] }

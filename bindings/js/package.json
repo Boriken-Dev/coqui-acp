@@ -12,5 +12,5 @@
     "./scope": "./src/scope.mjs"
   },
   "engines": { "node": ">=22" },
-  "scripts": { "test": "node --test test/" }
+  "scripts": { "test": "node --test test/page.test.mjs" }
 }

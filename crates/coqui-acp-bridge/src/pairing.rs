@@ -1,37 +1,62 @@
 //! PIN pairing over any channel, so it works through a reverse proxy that ends TLS.
 //!
-//! Two strangers run the WebCrypto handshake trusting anyone who proves a key, then pair inside that session: the PIN confirms
-//! both keys, both PAKE messages and a secret export of the session. A relay that swaps a key or changes a message fails on both
-//! sides. These connections only pair and never serve an agent: a peer connects again, pinned, and only then gets one.
-//! Only PIN mode is offered, and only the PIN the responder shows.
+//! Two strangers run the handshake admitting anyone who proves a key, which yields a `PairingSession`: it runs one exchange and
+//! can carry nothing else, so a connection like this can never reach an agent. Inside it the PIN confirms both keys, both PAKE
+//! messages and a secret export of the session, so a relay that swaps a key or changes a message fails on both sides. A peer then
+//! connects again, pinned. Only PIN mode is offered.
 
+use core::cell::Cell;
+use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use coqui_peer_webcrypto::pair::{
-    Decision, Paired, Pairing, PairingDesk, PairingOptions, PairingResponder, Pin, PinRole,
-};
-use coqui_peer_webcrypto::{Identity, Session, Trust, TrustStore, WebCrypto, random};
-use coqui_web::Channel;
+use coqui_peer::{MessageTransport, ReadTimeout};
+use coqui_peer_webcrypto::pair::{Paired, Pairing, PairingDesk, PairingOptions, Pin, PinRole};
+use coqui_peer_webcrypto::{Identity, PairingMethod, TrustStore, random};
+use coqui_web::{Channel, Failure};
 
 use crate::Error;
-use crate::auth::{MAX_PROOF_MESSAGE, next, prove, prove_out};
+use crate::auth::{MAX_PROOF_MESSAGE, prove, prove_out};
 
 fn failed(error: impl core::fmt::Display) -> Error {
     Error::Proof(error.to_string())
 }
 
-fn send<C: Channel>(channel: &C, session: &mut Session, message: &[u8]) -> Result<(), Error> {
-    let record = session.seal(message).map_err(failed)?;
-    channel.send(&record).map_err(Error::from)
+/// A channel as the messages a pairing exchange expects, never waiting past `deadline`.
+struct OverChannel<'a, C> {
+    channel: &'a C,
+    wait: Cell<Option<Duration>>,
+    deadline: Instant,
 }
 
-fn open<C: Channel>(
-    channel: &C,
-    session: &mut Session,
-    deadline: Instant,
-) -> Result<Vec<u8>, Error> {
-    session.open(&next(channel, deadline)?).map_err(failed)
+impl<C: Channel> MessageTransport for OverChannel<'_, C> {
+    fn send(&mut self, message: &[u8]) -> io::Result<()> {
+        self.channel.send(message).map_err(io_error)
+    }
+
+    fn recv(&mut self) -> io::Result<Vec<u8>> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        let wait = self.wait.get().map_or(left, |wait| wait.min(left));
+        match self.channel.receive(Some(wait)) {
+            Ok(Some(message)) => Ok(message),
+            Ok(None) => Err(io::ErrorKind::UnexpectedEof.into()),
+            Err(failure) => Err(io_error(failure)),
+        }
+    }
+}
+
+impl<C: Channel> ReadTimeout for OverChannel<'_, C> {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.wait.set(timeout);
+        Ok(())
+    }
+}
+
+fn io_error(failure: Failure) -> io::Error {
+    match failure {
+        Failure::Timeout => io::ErrorKind::TimedOut.into(),
+        other => io::Error::other(other.to_string()),
+    }
 }
 
 /// A desk that takes only PIN runs, as [`respond`] needs: a joiner asking for another mode is told it is disabled.
@@ -64,35 +89,17 @@ pub fn respond<C: Channel>(
     limit: Duration,
 ) -> Result<Paired, Error> {
     let deadline = Instant::now() + limit;
-    let method = WebCrypto::new(identity.clone()).with_initiators(Trust::AnyWithKeyProof);
+    let method = PairingMethod::new(identity.clone());
     let established = prove(&method, channel, limit, MAX_PROOF_MESSAGE)?;
-    let remote = established
-        .key
-        .clone()
-        .ok_or_else(|| Error::Proof("the peer proved no key".to_owned()))?;
-    let mut session = established.session;
-    let side = session.pair_channel(identity, remote).map_err(failed)?;
-    let mut responder = PairingResponder::new(side, store, desk, source);
-    loop {
-        while let Some(message) = responder.transmit() {
-            send(channel, &mut session, &message)?;
-        }
-        if responder.is_complete() {
-            return responder.finish().map_err(failed);
-        }
-        let step = match responder.awaiting() {
-            // Nobody is here to enter a PIN the joiner shows, so that run ends now rather than holding this one open.
-            Some(_) => responder.resume(Decision::Denied),
-            None => responder.receive(&open(channel, &mut session, deadline)?),
-        };
-        // A refusal has a message for the joiner, which goes out before the error does.
-        if let Err(error) = step {
-            while let Some(message) = responder.transmit() {
-                let _ = send(channel, &mut session, &message);
-            }
-            return Err(failed(error));
-        }
-    }
+    let mut transport = OverChannel {
+        channel,
+        wait: Cell::new(None),
+        deadline,
+    };
+    established
+        .session
+        .respond(store, desk, source, &mut transport)
+        .map_err(failed)
 }
 
 /// The side that was given the PIN. The responder's key is accepted in `store` once it is confirmed.
@@ -126,26 +133,19 @@ pub fn join_as<C: Channel>(
     limit: Duration,
 ) -> Result<Paired, Error> {
     let deadline = Instant::now() + limit;
-    let method = WebCrypto::new(identity.clone()).with_responders(Trust::AnyWithKeyProof);
+    let method = PairingMethod::new(identity.clone());
     let established = prove_out(&method, channel, limit, MAX_PROOF_MESSAGE)?;
-    let remote = established
-        .key
-        .clone()
-        .ok_or_else(|| Error::Proof("the peer proved no key".to_owned()))?;
-    let mut session = established.session;
-    let side = session.pair_channel(identity, remote).map_err(failed)?;
-    let mut joiner = pairing.join(side).map_err(failed)?;
-    loop {
-        while let Some(message) = joiner.transmit() {
-            send(channel, &mut session, &message)?;
-        }
-        if joiner.is_complete() {
-            break;
-        }
-        let message = open(channel, &mut session, deadline)?;
-        joiner.receive(&message).map_err(failed)?;
-    }
-    let paired = joiner.finish().map_err(failed)?;
+    let mut transport = OverChannel {
+        channel,
+        wait: Cell::new(None),
+        deadline,
+    };
+    let paired = established
+        .session
+        .join(pairing, &mut transport)
+        .map_err(failed)?
+        .finish()
+        .map_err(failed)?;
     match store.accept_key(&paired.peer) {
         Ok(_) | Err(coqui_peer::Error::AlreadyAccepted) => Ok(paired),
         Err(error) => Err(failed(error)),

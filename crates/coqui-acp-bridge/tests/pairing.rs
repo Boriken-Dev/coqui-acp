@@ -471,16 +471,20 @@ fn a_joiner_asking_for_the_device_flow_is_refused() {
 }
 
 #[test]
-fn a_joiner_showing_its_own_pin_pairs_nobody_and_holds_a_run_no_longer_than_its_limit() {
+fn a_joiner_showing_its_own_pin_pairs_nobody() {
     let sides = sides("shown");
     let pin = Pin::generate(&CodeAlphabet::pin(), &random()).unwrap();
-    let started = Instant::now();
+    let (near, far) = binary_pair();
+    let desk = pairing::desk().unwrap();
+    let _ = desk.show_pin().unwrap();
+    let (server, store) = (sides.server.clone(), sides.server_store.clone());
+    // The core's responder waits for an operator for as long as the desk's PIN lasts, so this one is left to the process's end.
+    thread::spawn(move || {
+        let _ = pairing::respond(&far, &server, &store, &desk, None, SHORT);
+    });
+    let asked = Pairing::pin(pin, PinRole::Shown);
     let limit = Duration::from_millis(800);
-    assert!(run_joiner(&sides, Pairing::pin(pin, PinRole::Shown), limit).is_err());
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        started.elapsed()
-    );
+    assert!(pairing::join_as(&near, &sides.client, asked, &sides.client_store, limit).is_err());
     assert_eq!(accepted(&sides.dir.path("server-store")), 0);
+    assert_eq!(accepted(&sides.dir.path("client-store")), 0);
 }

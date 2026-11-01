@@ -56,23 +56,23 @@ pub fn respond<C: Channel>(channel: &C, identity: &Identity, store: &TrustStore,
 pub fn join<C: Channel>(channel: &C, identity: &Identity, pin: Pin, store: &TrustStore, limit: Duration) -> Result<Paired, Error>
 ```
 
-PIN pairing over any channel in binary frames, with the PIN shown by the responder: the WebCrypto handshake trusting anyone who proves a key, then the PIN exchange inside that session, bound to a secret export of it. Only PIN mode, and a joiner asking for another is refused. It pairs the WebCrypto key. The connection then ends, and the peer returns pinned.
+PIN pairing over any channel in binary frames, with the PIN shown by the responder: the WebCrypto handshake admitting anyone who proves a key, which yields a `PairingSession` that can carry nothing but this exchange, sealed and bound to a secret export of it. Only PIN mode, and a joiner asking for another is refused. It pairs the WebCrypto key. The connection then ends, and the peer returns pinned.
 
 ## `coqui_acp_bridge::auth`
 
 ```rust
 pub const MAX_PROOF_MESSAGE: usize = 3072;
-pub const RECORD_OVERHEAD: usize = 16;
+pub const RECORD_OVERHEAD: usize = 17;
 pub fn read_identity(path: &Path) -> Result<Identity, Error>
 pub fn create_identity(path: &Path) -> Result<PeerId, Error>
-pub fn prove<C: Channel>(method: &WebCrypto, channel: &C, limit: Duration, max_message: usize) -> Result<Established<Session>, Error>
-pub fn prove_out<C: Channel>(method: &WebCrypto, channel: &C, limit: Duration, max_message: usize) -> Result<Established<Session>, Error>
+pub fn prove<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
+pub fn prove_out<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
 pub struct Sealed<'a, C>;   // impl Channel
 pub fn Sealed::new(channel: &'a C, session: Session) -> Sealed<'a, C>
 pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -> Sealed<'a, C>
 ```
 
-`create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out. A refused proof is `Error::Proof`; silence or a failed channel is `Error::Channel`. **Run everything after a proof through `Sealed`**: a plain message on the same channel comes from whoever carries it. `Sealed` closes the channel on anything that does not open, and on `with_check` saying no, which is asked about once a second. After `Failure::NoProgress` from its `send`, send the same message again.
+`create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out. A refused proof is `Error::Proof`; silence or a failed channel is `Error::Channel`. **Run everything after a proof through `Sealed`**: a plain message on the same channel comes from whoever carries it. `Sealed` closes the channel on anything that does not open, and on `with_check` saying no, which is asked about once a second. Its `close` sends the session's close record first; `receive` answers `None` only after the peer's, and `Failure::PathLost` for a connection cut before it, which is how a relay would hide what it held back. After `Failure::NoProgress` from its `send`, send the same message again.
 
 ## Errors
 
@@ -81,6 +81,7 @@ pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -
 ## Gotchas
 
 - A browser cannot do the PIN exchange from this crate; `pair-dial` is native.
+- A joiner that asks to show its own PIN holds a run until the shown PIN expires, since the core's responder waits for an operator. It pairs nobody, and `pair-accept` runs 16 at once, so strangers could hold pairing up for that long: use `--permit`.
 - Behind a reverse proxy every peer has the proxy's address, so `--permit`, `--deny` and the store's per-source limit on waiting entries see the proxy. Bind to loopback and filter at the proxy.
 - `dial` keeps the agent across links, so lines not yet sent go to the next link, which may be another allowed peer.
 - A key file's permissions are set only on Unix; elsewhere it takes its directory's. Nothing checks them on reading. Keep keys in a directory only their owner can read.

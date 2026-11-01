@@ -17,7 +17,7 @@ UTF-8 JSON-RPC message, at most 1 MiB. No datagrams.
 
 A connection proves its peer before the first ACP message:
 
-- **In band**: [coqui-peer-webcrypto](https://github.com/Boriken-Dev/coqui-peer-webcrypto), on the channel, with a pinned peer key. It ends in a session: each ACP message after it is one sealed record, in a binary WebSocket frame or one WebTransport frame. A plain message after the handshake is never taken. It does not depend on TLS, so a reverse proxy that ends TLS can carry it. On WebSocket a handshake message may be a text or a binary frame.
+- **In band**: [coqui-peer-webcrypto](https://github.com/Boriken-Dev/coqui-peer-webcrypto), on the channel, with a pinned peer key. It ends in a session: each ACP message after it is one sealed record, in a binary WebSocket frame or one WebTransport frame, and each side ends with a close record, so a connection cut before it is seen as cut. A plain message after the handshake is never taken. It does not depend on TLS, so a reverse proxy that ends TLS can carry it. On WebSocket a handshake message may be a text or a binary frame.
 - **mTLS**, for a native client: through coqui-peer-tls. The stream is then plain ACP from its first byte, and protected only as far as that TLS goes.
 
 A URL, a host name or server TLS alone proves no peer.
