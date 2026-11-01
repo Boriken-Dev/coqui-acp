@@ -1,0 +1,39 @@
+[package]
+name = "coqui-acp-bridge"
+description = "Put a stdio Agent Client Protocol agent on the network, under a proven peer identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["acp", "agent", "bridge", "websocket", "webtransport"]
+categories = ["network-programming", "command-line-utilities"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release, and coqui-web has no repository to name yet.
+publish = false
+
+[[bin]]
+name = "coqui-acp-bridge"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "bccc79a" }
+# Unpublished: the browser-compatible responder lives under coqui-peer's methods/ for now.
+coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "bccc79a" }
+coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate"] }
+coqui-net-acl = { version = "=0.0.0-alpha.0" }
+coqui-web = { path = "../../../coqui-web", features = ["websocket", "webtransport"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+url = "2.5"
+
+[dev-dependencies]
+serde_json.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[lints]
+workspace = true

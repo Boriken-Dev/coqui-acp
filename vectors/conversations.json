@@ -1,0 +1,99 @@
+{
+  "about": "Scripted conversations both clients run against a scripted agent. A step is one of: expect (the next message from the client: method and a subset of params; reply answers it, error fails it), send (a notification from the agent), ask (a request from the agent; answer is a subset its response must hold). `events` is what the client must report, in order. `decider` allows or denies. `version` is the ACP version the agent speaks.",
+  "conversations": [
+    {
+      "name": "a turn becomes text, a tool, a cost and a completion",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello"},
+      "steps": [
+        {"expect": {"method": "initialize", "params": {"protocolVersion": 1}}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new", "params": {"cwd": "/work"}}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt", "params": {"sessionId": "s1"}}, "hold": true},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hel"}}}}},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "lo"}}}}},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read a file", "kind": "read", "status": "pending"}}}},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "usage_update", "used": 10, "size": 100, "cost": {"amount": 0.5, "currency": "USD"}}}}},
+        {"release": {"stopReason": "end_turn"}}
+      ],
+      "events": [
+        {"type": "text", "text": "hello"},
+        {"type": "tool", "title": "Read a file", "kind": "read"},
+        {"type": "cost", "amount": 0.5, "currency": "USD"},
+        {"type": "completed", "stop": "end_turn"}
+      ]
+    },
+    {
+      "name": "a refusal fails the turn",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello"},
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt"}, "reply": {"stopReason": "refusal"}}
+      ],
+      "events": [{"type": "failed"}]
+    },
+    {
+      "name": "a cancelled turn is blocked, not failed",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello"},
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt"}, "reply": {"stopReason": "cancelled"}}
+      ],
+      "events": [{"type": "blocked"}]
+    },
+    {
+      "name": "a failed prompt fails the turn",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello"},
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt"}, "error": {"code": -32603, "message": "boom"}}
+      ],
+      "events": [{"type": "failed"}]
+    },
+    {
+      "name": "an allowed permission selects the allow option",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello", "decider": "allow"},
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt"}, "hold": true},
+        {"ask": {"method": "session/request_permission", "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t1", "title": "Run", "kind": "execute", "status": "pending"}, "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"}, {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}}, "answer": {"outcome": {"outcome": "selected", "optionId": "yes"}}},
+        {"release": {"stopReason": "end_turn"}}
+      ],
+      "events": [{"type": "permission", "allowed": true}, {"type": "completed", "stop": "end_turn"}]
+    },
+    {
+      "name": "a denied permission selects the reject option",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello"},
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt"}, "hold": true},
+        {"ask": {"method": "session/request_permission", "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t1", "title": "Run", "kind": "execute", "status": "pending"}, "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"}, {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}}, "answer": {"outcome": {"outcome": "selected", "optionId": "no"}}},
+        {"release": {"stopReason": "end_turn"}}
+      ],
+      "events": [{"type": "permission", "allowed": false}, {"type": "completed", "stop": "end_turn"}]
+    },
+    {
+      "name": "a v2 turn ends with its idle state update, not the prompt answer",
+      "version": 2,
+      "client": {"cwd": "/work", "prompt": "hello"},
+      "steps": [
+        {"expect": {"method": "initialize", "params": {"protocolVersion": 2}}, "reply": {"protocolVersion": 2, "info": {"name": "agent", "version": "1"}, "capabilities": {"session": {}}}},
+        {"expect": {"method": "session/new", "params": {"cwd": "/work"}}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt", "params": {"sessionId": "s1"}}, "reply": {"messageId": "m1"}},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "state_update", "state": "running"}}}},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "messageId": "a1", "content": {"type": "text", "text": "hi"}}}}},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "state_update", "state": "idle", "stopReason": "end_turn"}}}}
+      ],
+      "events": [{"type": "text", "text": "hi"}, {"type": "completed", "stop": "end_turn"}]
+    }
+  ]
+}
