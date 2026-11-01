@@ -14,4 +14,4 @@ stream over both, since the two end a turn differently: version 1 by the stop re
 
 A client refuses every permission request until the application gives it a decider. The agent's own permissions stay the agent's: neither can override the other's refusal.
 
-[The remote profile](profile.md) describes ACP across a network.
+[The remote profile](profile.md) describes ACP across a network. [ACP in the browser](browser.md) is a draft contract for a web page to find and use a person's agents through any provider.

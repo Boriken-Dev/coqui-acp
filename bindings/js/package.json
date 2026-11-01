@@ -1,0 +1,16 @@
+{
+  "name": "coqui-acp-page",
+  "version": "0.0.0-alpha.0",
+  "description": "Find a person's ACP agents from a web page, and check a provider against the contract.",
+  "license": "MPL-2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./conformance": "./src/conformance.mjs",
+    "./registry": "./src/registry.mjs",
+    "./scope": "./src/scope.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/" }
+}

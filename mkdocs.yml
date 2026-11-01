@@ -16,3 +16,4 @@ theme:
 nav:
   - Home: index.md
   - Remote profile: profile.md
+  - ACP in the browser: browser.md

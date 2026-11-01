@@ -12,6 +12,7 @@ command that puts a stdio agent on the network under a proven identity. It build
 | `crates/coqui-acp` | the Rust library |
 | `crates/coqui-acp-bridge` | the bridge command |
 | `bindings/dart/coqui_acp` | the Dart client, for browsers and Flutter |
+| `bindings/js` | the page side of [ACP in the browser](docs/browser.md), its scope and its conformance checks |
 | `vectors/conversations.json` | scripted conversations both clients must pass |
 | `docs/` | the wire profiles |
 
@@ -22,6 +23,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 (cd bindings/dart/coqui_acp && dart analyze && dart test)
+(cd bindings/js && npm test)
 ```
 
 ## License
