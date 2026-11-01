@@ -286,12 +286,17 @@ impl Gate {
     }
 
     fn enter(&self) -> Option<Entered> {
-        self.0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
-                (running < self.1).then_some(running + 1)
-            })
-            .ok()
-            .map(|_| Entered(Arc::clone(&self.0)))
+        let mut running = self.0.load(Ordering::SeqCst);
+        while running < self.1 {
+            match self
+                .0
+                .compare_exchange(running, running + 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return Some(Entered(Arc::clone(&self.0))),
+                Err(now) => running = now,
+            }
+        }
+        None
     }
 }
 

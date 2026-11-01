@@ -195,7 +195,7 @@ The instance name is the label. The SRV record gives host and port. TXT keys, no
 | `proto` | `acp`, required |
 | `path` | the WebSocket path; default `/acp` |
 | `tls` | `1` for `wss` |
-| `wt` | a UDP port serving WebTransport on the same host |
+| `wt` | a UDP port serving WebTransport on the same host, usually the SRV record's number |
 | `peer` | the peer id, as a hint to match against one already paired |
 | `acpv` | ACP versions, comma separated |
 

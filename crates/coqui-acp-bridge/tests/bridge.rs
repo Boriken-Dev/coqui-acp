@@ -734,8 +734,25 @@ fn dial_proxy(tls: std::sync::Arc<rustls::ServerConfig>, back: u16, inject: bool
     port
 }
 
-fn start_in_band_dial(fixture: &Fixture, port: u16, peer: &str, ca: &Path, log: &Path) -> Child {
-    Command::new(BRIDGE)
+/// A bridge that ends with its test, however the test ends.
+struct Running(Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn start_in_band_dial(
+    fixture: &Fixture,
+    port: u16,
+    peer: &str,
+    ca: &Path,
+    log: &Path,
+    agent: &Path,
+) -> Running {
+    let child = Command::new(BRIDGE)
         .arg("dial")
         .arg(format!("wss://localhost:{port}/v1/agent"))
         .arg("--identity")
@@ -745,11 +762,13 @@ fn start_in_band_dial(fixture: &Fixture, port: u16, peer: &str, ca: &Path, log: 
         .arg("--ca-file")
         .arg(ca)
         .args(["--max-backoff-seconds", "2", "--"])
-        .arg(echo_agent())
+        .arg(agent)
         .env("ECHO_AGENT_LOG", log)
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap()
+        .unwrap();
+    Running(child)
 }
 
 #[test]
@@ -757,6 +776,8 @@ fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject(
     use coqui_acp_bridge::auth::{Sealed, prove};
     use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
     let fixture = Fixture::new("dialproxy");
+    // Built first: another test's build can hold the lock for longer than the listeners would wait.
+    let agent = echo_agent();
     let responder = Identity::open_or_create(&fixture.dir.join("responder.pem")).unwrap();
     let dialer = Identity::open_or_create(&fixture.dir.join("dialer.pem")).unwrap();
     let peer = responder.peer_id().to_string();
@@ -770,18 +791,17 @@ fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject(
 
     let log = fixture.dir.join("agent.log");
     let honest = dial_proxy(std::sync::Arc::clone(&ca.server), back, false);
-    let mut bridge = start_in_band_dial(&fixture, honest, &peer, &ca.bundle, &log);
+    let bridge = start_in_band_dial(&fixture, honest, &peer, &ca.bundle, &log, &agent);
     let channel = backend.accept(Some(wait)).unwrap();
     let established = prove(&method, &channel, wait, 1 << 20).unwrap();
     initialize(&Sealed::new(&channel, established.session));
     assert!(log.exists());
-    let _ = bridge.kill();
-    let _ = bridge.wait();
+    drop(bridge);
     drop(channel);
 
     std::fs::remove_file(&log).unwrap();
     let hostile = dial_proxy(ca.server, back, true);
-    let mut bridge = start_in_band_dial(&fixture, hostile, &peer, &ca.bundle, &log);
+    let mut bridge = start_in_band_dial(&fixture, hostile, &peer, &ca.bundle, &log, &agent);
     let channel = backend.accept(Some(wait)).unwrap();
     prove(&method, &channel, wait, 1 << 20).unwrap();
     std::thread::sleep(Duration::from_secs(2));
@@ -790,11 +810,9 @@ fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject(
         "the proxy's message must not reach the agent"
     );
     assert!(
-        bridge.try_wait().unwrap().is_none(),
+        bridge.0.try_wait().unwrap().is_none(),
         "a link lost is not the agent ending"
     );
-    let _ = bridge.kill();
-    let _ = bridge.wait();
 }
 
 #[test]
