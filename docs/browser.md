@@ -161,7 +161,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 
 **A provider's code must not come from the path it protects.** A proxy that serves a page's JavaScript can replace it, so an end-to-end session in that page protects nothing against that proxy. A provider ships its proof code with the extension or application.
 
-**The person's key.** The provider's own identity proves the connection: the page holds no key and never sees one, and the agent's allow-list names the provider, not each site. A page that connects by itself, with no provider, proves with a key of its own.
+**The person's key.** The provider's own identity proves the connection: the page holds no key and never sees one, and the agent's allow-list names the provider, not each site. A page that connects by itself, with no provider, proves with a key of its own. An agent may instead require a client certificate at TLS, which the browser offers from the person's store or smart card, as for any site. That proves the person to whatever ends the TLS, not to the agent behind a proxy, and whether a provider's background connection gets the browser's prompt is untested.
 
 ## WebMCP
 
