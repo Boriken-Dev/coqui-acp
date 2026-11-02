@@ -340,8 +340,9 @@ final class AcpClient {
   void _receiveUpdate(Object? params) {
     if (params is! Map ||
         params['sessionId'] is! String ||
-        params['update'] is! Map)
+        params['update'] is! Map) {
       return;
+    }
     final update = AcpSessionUpdate(
       params['sessionId'] as String,
       Map<String, dynamic>.from(params['update'] as Map),
@@ -593,8 +594,9 @@ final class AcpClient {
       for (final item in listed.take(maxListedSessions)) {
         if (item is! Map ||
             item['sessionId'] is! String ||
-            (item['sessionId'] as String).isEmpty)
+            (item['sessionId'] as String).isEmpty) {
           continue;
+        }
         String? text(String key) =>
             item[key] is String ? item[key] as String : null;
         sessions.add(
@@ -647,8 +649,9 @@ final class AcpClient {
   }
 
   void _ready() {
-    if (_protocolVersion == null)
+    if (_protocolVersion == null) {
       throw StateError('Initialize ACP before session operations');
+    }
   }
 
   void _checkCwd(String cwd) {
@@ -667,8 +670,9 @@ final class AcpClient {
     return _request('session/new', {'cwd': cwd, 'mcpServers': <Object>[]}).then(
       (reply) {
         final id = reply['sessionId'];
-        if (id is! String || id.isEmpty)
+        if (id is! String || id.isEmpty) {
           throw const AcpFailure('Missing session ID');
+        }
         return AcpOpenedSession(id, reply);
       },
     );
@@ -723,8 +727,9 @@ final class AcpClient {
     List<AcpAttachment> attachments = const [],
   }) async {
     _ready();
-    if (text.trim().isEmpty && attachments.isEmpty)
+    if (text.trim().isEmpty && attachments.isEmpty) {
       throw ArgumentError.value(text, 'text');
+    }
     for (final attachment in attachments) {
       if (attachment.isImage ? !takesImages : !takesFiles) {
         throw AcpFailure(
@@ -754,8 +759,9 @@ final class AcpClient {
     }
     final reply = await _request('session/prompt', params);
     final id = reply['messageId'];
-    if (id is! String || id.isEmpty)
+    if (id is! String || id.isEmpty) {
       throw const AcpFailure('Missing inserted message ID');
+    }
     return id;
   }
 

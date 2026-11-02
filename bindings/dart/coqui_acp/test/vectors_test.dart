@@ -25,8 +25,9 @@ final class Agent {
   var _nextId = 1000;
 
   Future<Map<String, dynamic>> read() async {
-    if (!await _inbox.moveNext().timeout(const Duration(seconds: 10)))
+    if (!await _inbox.moveNext().timeout(const Duration(seconds: 10))) {
       throw StateError('client hung up');
+    }
     return jsonDecode(_inbox.current) as Map<String, dynamic>;
   }
 
@@ -41,8 +42,9 @@ final class Agent {
         final message = await read();
         expect_(message['method'], expect['method']);
         if (expect['params'] case final Object params) {
-          if (!holds(message['params'], params))
+          if (!holds(message['params'], params)) {
             throw StateError('${message['params']} should hold $params');
+          }
         }
         if (step['reply'] case final Object reply) {
           write({'id': message['id'], 'result': reply});
@@ -58,8 +60,9 @@ final class Agent {
         write({'id': id, 'method': ask['method'], 'params': ask['params']});
         final answer = await read();
         expect_(answer['id'], id);
-        if (!holds(answer['result'], step['answer']))
+        if (!holds(answer['result'], step['answer'])) {
           throw StateError('${answer['result']} should hold ${step['answer']}');
+        }
       } else if (step['release'] case final Object result) {
         write({'id': held, 'result': result});
       }
