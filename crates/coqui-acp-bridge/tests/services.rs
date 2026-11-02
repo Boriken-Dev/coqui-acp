@@ -599,7 +599,13 @@ fn a_service_cannot_stand_in_for_a_grant_or_for_what_every_link_has() {
     let fixture = Fixture::new("reserved");
     let (key, identity) = fixture.identity("server");
     let peer = identity.peer_id().to_string();
-    for service in ["tcp/1=x", "tcp/1:db:5432=x", "link/1=x", "acp/1=x"] {
+    for service in [
+        "tcp/1=x",
+        "tcp/1:db:5432=x",
+        "link/1=x",
+        "acp/1=x",
+        "mcp-offer/1=x",
+    ] {
         let output = Command::new(BRIDGE)
             .args([
                 "serve",
@@ -905,4 +911,157 @@ fn stopping_an_agent_ends_what_it_started() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Starts what an `mcp-offer/1` entry names, as an agent would.
+fn start_shim(entry: &serde_json::Value) -> Child {
+    let mut command = Command::new(entry["command"].as_str().unwrap());
+    for argument in entry["args"].as_array().unwrap() {
+        command.arg(argument.as_str().unwrap());
+    }
+    for variable in entry["env"].as_array().unwrap() {
+        command.env(
+            variable["name"].as_str().unwrap(),
+            variable["value"].as_str().unwrap(),
+        );
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn an_agent_reaches_the_tools_of_the_peer_that_offered_them_through_the_real_shim() {
+    let mut fixture = Fixture::new("offer");
+    let (key, _) = fixture.identity("server");
+    let (_, client) = fixture.identity("client");
+    let allowed = client.peer_id().to_string();
+    let port = free_port();
+    let server = fixture.serve(
+        None,
+        &[
+            "--identity",
+            key.to_str().unwrap(),
+            "--allow",
+            &allowed,
+            "--mcp-offers",
+        ],
+        port,
+    );
+    over_link(port, client, &server, |mux| {
+        let offers = capabilities(mux, WAIT).unwrap().offers;
+        assert!(offers.contains(&"mcp-offer/1".to_owned()), "{offers:?}");
+        let agent = mux.open("acp/1").unwrap();
+        initialized(&agent);
+        let stream = mux.open_with("mcp-offer/1", b"canoa-browser").unwrap();
+        let entry: serde_json::Value =
+            serde_json::from_slice(&stream.receive(Some(WAIT)).unwrap().unwrap()).unwrap();
+        assert_eq!(entry["name"], "canoa-browser");
+        assert!(Path::new(entry["command"].as_str().unwrap()).is_absolute());
+        let mut shim = start_shim(&entry);
+        let mut to_shim = shim.stdin.take().unwrap();
+        let mut from_shim = BufReader::new(shim.stdout.take().unwrap());
+        to_shim
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}
+",
+            )
+            .unwrap();
+        to_shim.flush().unwrap();
+        assert_eq!(
+            stream.receive(Some(WAIT)).unwrap().unwrap(),
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"
+        );
+        stream
+            .send(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}")
+            .unwrap();
+        let mut line = String::new();
+        from_shim.read_line(&mut line).unwrap();
+        assert_eq!(
+            line,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}
+"
+        );
+        // The agent's own stream goes on beside it, and the offer's end ends the shim.
+        initialized(&agent);
+        stream.close();
+        line.clear();
+        assert_eq!(from_shim.read_line(&mut line).unwrap(), 0);
+        let until = Instant::now() + WAIT;
+        while shim.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < until, "the shim went on");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(to_shim);
+    });
+}
+
+#[test]
+fn an_offer_needs_a_proof_to_be_for_someone() {
+    let output = Command::new(BRIDGE)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--no-peer-proof",
+            "--mcp-offers",
+            "--",
+            "x",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--mcp-offers"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn an_offer_is_served_only_when_asked_for_and_only_to_a_peer_allowed_it() {
+    let mut fixture = Fixture::new("offer-refused");
+    let (key, _) = fixture.identity("server");
+    let (_, client) = fixture.identity("client");
+    let (_, second) = fixture.identity("second");
+    let allowed = client.peer_id().to_string();
+    let other = second.peer_id().to_string();
+    let plain = free_port();
+    let server = fixture.serve(
+        None,
+        &[
+            "--identity",
+            key.to_str().unwrap(),
+            "--allow",
+            &allowed,
+            "--service",
+            "mcp=x",
+        ],
+        plain,
+    );
+    over_link(plain, client, &server, |mux| {
+        let stream = mux.open("mcp-offer/1").unwrap();
+        assert!(stream.receive(Some(WAIT)).is_err());
+    });
+    let named = free_port();
+    let grant = format!("{other}=acp/1");
+    let server = fixture.serve(
+        None,
+        &[
+            "--identity",
+            key.to_str().unwrap(),
+            "--allow",
+            &other,
+            "--mcp-offers",
+            "--grant",
+            &grant,
+        ],
+        named,
+    );
+    over_link(named, second, &server, |mux| {
+        let stream = mux.open("mcp-offer/1").unwrap();
+        assert!(stream.receive(Some(WAIT)).is_err());
+    });
 }

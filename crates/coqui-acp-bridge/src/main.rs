@@ -25,6 +25,7 @@ use coqui_agentic_peer::auth::Sealed;
 use coqui_agentic_peer::discovery::{Advertised, Advertisement};
 use coqui_agentic_peer::forward::{self, Target};
 use coqui_agentic_peer::link::{self, Accepted, Prefilled, Services};
+use coqui_agentic_peer::mcp_offer;
 use coqui_agentic_peer::mux::{self, LinkStream, Side};
 use coqui_agentic_peer::peers::{FilePeers, NoEvents, PeerRecord, PeerStore};
 use coqui_agentic_peer::{Error, auth, companion, discovery, home, pairing};
@@ -96,6 +97,8 @@ enum Mode {
         #[arg(long, default_value_t = 3)]
         seconds: u64,
     },
+    /// The stdio MCP server `mcp-offer/1` declares to an agent: carries its lines to the peer that offered it. Nothing else starts it.
+    McpShim,
     /// Let a browser extension ask this program who is around, over native messaging.
     Companion {
         #[command(subcommand)]
@@ -243,6 +246,10 @@ struct Serve {
     /// loopback address. Repeat for more. That peer decides from its own grants.
     #[arg(long = "reverse", value_name = "LOCAL=PEER=TARGET")]
     reverses: Vec<String>,
+    /// Serve `mcp-offer/1`, so a peer can give its agent the peer's own MCP tools. A peer allowed `acp/1` can already declare any
+    /// command to its agent, so this adds a way to reach the peer's tools and nothing else.
+    #[arg(long)]
+    mcp_offers: bool,
     /// Say this agent exists, under this name. On loopback a file only this user's programs read; otherwise a DNS-SD record
     /// everyone on the link can see, with no secret in it. Connecting still needs the proof.
     #[arg(long, value_name = "LABEL")]
@@ -626,7 +633,10 @@ struct PairedGrants(FilePeers);
 impl PeerStore for PairedGrants {
     fn get(&self, peer: &str) -> Result<Option<PeerRecord>, Error> {
         let record = self.0.get(peer)?.unwrap_or_else(|| PeerRecord::new(peer));
-        Ok(Some(record.granting(ACP)))
+        // Each comes with pairing: it is served only with `--mcp-offers`, and serving its own tools to its own agent adds nothing to `acp/1`.
+        Ok(Some(
+            record.granting(ACP).granting(mcp_offer::OFFER_PROTOCOL),
+        ))
     }
 
     fn put(&self, record: &PeerRecord) -> Result<(), Error> {
@@ -665,7 +675,11 @@ fn parse_service(text: &str) -> Result<(String, OsString), String> {
             "a protocol token is printable, with no spaces, commas or equals signs".to_owned(),
         );
     }
-    if token.starts_with(forward::TCP_PROTOCOL) || token == link::LINK_PROTOCOL || token == ACP {
+    if token.starts_with(forward::TCP_PROTOCOL)
+        || token == link::LINK_PROTOCOL
+        || token == ACP
+        || token == mcp_offer::OFFER_PROTOCOL
+    {
         return Err(format!(
             "{token} is not for --service: it means something on every link"
         ));
@@ -678,7 +692,7 @@ fn parse_service(text: &str) -> Result<(String, OsString), String> {
 
 /// What `--service` and `--grant` ask for, if anything.
 fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
-    if args.services.is_empty() && !args.forward && args.reverses.is_empty() {
+    if args.services.is_empty() && !args.forward && args.reverses.is_empty() && !args.mcp_offers {
         return Ok(None);
     }
     let mut services =
@@ -691,6 +705,15 @@ fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
     }
     if args.forward {
         services = forward::serving(services);
+    }
+    if args.mcp_offers {
+        let program = std::env::current_exe()
+            .map_err(|error| format!("this program cannot find itself: {error}"))?;
+        services = services.with(
+            mcp_offer::OFFER_PROTOCOL,
+            mcp_offer::handler(program, vec!["mcp-shim".to_owned()]),
+        );
+        every.push(mcp_offer::OFFER_PROTOCOL.to_owned());
     }
     let grants: Box<dyn PeerStore> = if args.paired {
         if !args.grants.is_empty() {
@@ -938,7 +961,7 @@ fn advertise(
             "--advertise-host names a host on the network, and this listens on loopback".to_owned(),
         );
     }
-    let offers: Vec<String> = if args.services.is_empty() && !args.forward {
+    let offers: Vec<String> = if args.services.is_empty() && !args.forward && !args.mcp_offers {
         Vec::new()
     } else {
         core::iter::once(ACP.to_owned())
@@ -948,6 +971,10 @@ fn advertise(
                     .filter_map(|text| parse_service(text).ok().map(|(token, _)| token)),
             )
             .chain(args.forward.then(|| forward::TCP_PROTOCOL.to_owned()))
+            .chain(
+                args.mcp_offers
+                    .then(|| mcp_offer::OFFER_PROTOCOL.to_owned()),
+            )
             .collect()
     };
     let advertisement =
@@ -980,15 +1007,15 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     let admit = admission(&args.permit, &args.deny)?;
     let unproven = Gate::new(MAX_UNPROVEN);
     let running = Gate::new(args.max_peers);
-    if !args.grants.is_empty() && args.services.is_empty() && !args.forward {
+    if !args.grants.is_empty() && args.services.is_empty() && !args.forward && !args.mcp_offers {
         return Err(
-            "--grant needs --service or --forward: otherwise there is nothing to grant".to_owned(),
+            "--grant needs --service, --forward or --mcp-offers: otherwise there is nothing to grant".to_owned(),
         );
     }
-    if (!args.services.is_empty() || args.forward || !args.reverses.is_empty())
+    if (!args.services.is_empty() || args.forward || args.mcp_offers || !args.reverses.is_empty())
         && (args.no_peer_proof || certificates)
     {
-        return Err("--service, --forward and --reverse need the in-band proof: streams are for a link a proof named a peer on".to_owned());
+        return Err("--service, --forward, --mcp-offers and --reverse need the in-band proof: streams are for a link a proof named a peer on".to_owned());
     }
     if args.tls_short_lived && (args.no_peer_proof || certificates) {
         return Err("--tls-short-lived needs the in-band proof: a client cannot pin this certificate for long".to_owned());
@@ -1790,6 +1817,9 @@ fn main() -> ExitCode {
             revoke,
         } => grant_mode(peer, protocol, *revoke),
         Mode::Discover { seconds } => discover_mode(*seconds),
+        Mode::McpShim => mcp_offer::shim(std::io::stdin(), std::io::stdout())
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(|error| error.to_string()),
         Mode::Companion { action } => companion_mode(action),
     };
     match result {
