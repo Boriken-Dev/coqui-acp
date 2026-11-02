@@ -407,24 +407,26 @@ fn one_pairing_serves_every_command() {
     let mut out = BufReader::new(accept.0.stdout.take().unwrap());
     let mut pin = String::new();
     out.read_line(&mut pin).unwrap();
-    let mut dial = Running(
-        Command::new(BRIDGE)
-            .args(["pair-dial", &format!("ws://127.0.0.1:{port}/pair")])
-            .env(home, &client_home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    dial.0
-        .stdin
+    let mut dial = Command::new(BRIDGE)
+        .args(["pair-dial", &format!("ws://127.0.0.1:{port}/pair")])
+        .env(home, &client_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    dial.stdin
         .as_mut()
         .unwrap()
         .write_all(pin.as_bytes())
         .unwrap();
-    drop(dial.0.stdin.take());
-    assert!(dial.0.wait().unwrap().success());
+    drop(dial.stdin.take());
+    let dialed = dial.wait_with_output().unwrap();
+    assert!(
+        dialed.status.success(),
+        "pair-dial, given the PIN line {pin:?}, said: {}",
+        String::from_utf8_lossy(&dialed.stderr)
+    );
     assert!(accept.0.wait().unwrap().success());
 
     let port = free_tcp_port();

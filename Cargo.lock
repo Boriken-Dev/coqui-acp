@@ -455,7 +455,7 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=dd85f68e30ef86428d6db73da3da961be10b5dee#dd85f68e30ef86428d6db73da3da961be10b5dee"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=24dc05d9cc478feebff770f3e7852c32f76748c5#24dc05d9cc478feebff770f3e7852c32f76748c5"
 dependencies = [
  "coqui-peer",
  "coqui-peer-webcrypto",
