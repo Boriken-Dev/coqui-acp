@@ -181,4 +181,60 @@ void main() {
     await opening;
     expect(acp.isClosed, isTrue);
   });
+
+  Future<(Agent, AcpClient)> opened({AcpDecider? decider}) async {
+    final agent = Agent();
+    final acp = AcpClient(incoming: agent.toClient.stream, send: (line) async => agent.fromClient.add(line), decider: decider);
+    final opening = acp.initialize();
+    final init = await agent.read();
+    agent.write({'id': init['id'], 'result': {'protocolVersion': 1, 'agentCapabilities': <String, Object?>{}}});
+    await opening;
+    return (agent, acp);
+  }
+
+  test('what an agent says about a new session reaches the caller', () async {
+    final (agent, acp) = await opened();
+    final opening = acp.openSession(cwd: '/work');
+    final asked = await agent.read();
+    agent.write({'id': asked['id'], 'result': {
+      'sessionId': 's1',
+      'configOptions': [{'id': 'model', 'category': 'model', 'currentValue': 'a'}],
+      'modes': {'currentModeId': 'plan', 'availableModes': <Object>[]},
+    }});
+    final session = await opening;
+    expect(session.id, 's1');
+    expect((session.raw['configOptions'] as List).single, containsPair('id', 'model'));
+    expect((session.raw['modes'] as Map)['currentModeId'], 'plan');
+    await acp.close();
+  });
+
+  test('an option and a mode go to the agent, named as ACP names them', () async {
+    final (agent, acp) = await opened();
+    final setting = acp.setConfigOption('s1', 'model', 'b');
+    final option = await agent.read();
+    expect(option['method'], 'session/set_config_option');
+    expect(option['params'], {'sessionId': 's1', 'configId': 'model', 'value': 'b'});
+    agent.write({'id': option['id'], 'result': {'configOptions': <Object>[]}});
+    expect(await setting, containsPair('configOptions', isEmpty));
+    final moving = acp.setMode('s1', 'plan');
+    final mode = await agent.read();
+    expect(mode['method'], 'session/set_mode');
+    expect(mode['params'], {'sessionId': 's1', 'modeId': 'plan'});
+    agent.write({'id': mode['id'], 'result': <String, Object?>{}});
+    await moving;
+    await acp.close();
+  });
+
+  test('a turn cancelled while a permission waits answers cancelled, not a refusal', () async {
+    final (agent, acp) = await opened(decider: (_) async => const AcpCancel());
+    agent.write({'id': 9, 'method': 'session/request_permission', 'params': {
+      'sessionId': 's1',
+      'toolCall': {'toolCallId': 't1', 'title': 'x'},
+      'options': [{'optionId': 'no', 'kind': 'reject_once'}],
+    }});
+    final answer = await agent.read();
+    expect(answer['id'], 9);
+    expect(answer['result'], {'outcome': {'outcome': 'cancelled'}});
+    await acp.close();
+  });
 }

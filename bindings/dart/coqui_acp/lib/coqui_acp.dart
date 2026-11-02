@@ -90,6 +90,13 @@ final class AcpDeny extends AcpDecision {
   String toString() => 'AcpDeny($reason)';
 }
 
+/// The turn was cancelled while this was waiting. ACP requires this answer, rather than a refusal, for a request still open then.
+final class AcpCancel extends AcpDecision {
+  const AcpCancel();
+  @override
+  String toString() => 'AcpCancel()';
+}
+
 final class AcpPermissionRequest {
   final String sessionId;
   final String toolCallId;
@@ -106,6 +113,13 @@ final class AcpPermissionRequest {
 }
 
 typedef AcpDecider = Future<AcpDecision> Function(AcpPermissionRequest request);
+
+/// A session the agent opened, and what it said about it.
+final class AcpOpenedSession {
+  AcpOpenedSession(this.id, this.raw);
+  final String id;
+  final Map<String, dynamic> raw;
+}
 
 final class AcpSessionUpdate {
   AcpSessionUpdate(this.sessionId, this.raw);
@@ -309,6 +323,12 @@ final class AcpClient {
         decision = AcpDeny('the decider failed: $error');
       }
     }
+    if (decision is AcpCancel) {
+      _flush();
+      _emit(AcpPermission(tool: tool, allowed: false, reason: 'the turn was cancelled'));
+      _reply(id, {'result': {'outcome': {'outcome': 'cancelled'}}});
+      return;
+    }
     final wanted = decision is AcpAllow ? 'allow_once' : 'reject_once';
     _flush();
     _emit(AcpPermission(tool: tool, allowed: decision is AcpAllow, reason: decision is AcpDeny ? decision.reason : null));
@@ -356,14 +376,29 @@ final class AcpClient {
     }
   }
 
-  Future<String> createSession({required String cwd}) {
+  Future<String> createSession({required String cwd}) => openSession(cwd: cwd).then((session) => session.id);
+
+  /// As [createSession], with what the agent said about the session. It is the agent's to say: an agent may send neither.
+  Future<AcpOpenedSession> openSession({required String cwd}) {
     _ready();
     _checkCwd(cwd);
     return _request('session/new', {'cwd': cwd, 'mcpServers': <Object>[]}).then((reply) {
       final id = reply['sessionId'];
       if (id is! String || id.isEmpty) throw const AcpFailure('Missing session ID');
-      return id;
+      return AcpOpenedSession(id, reply);
     });
+  }
+
+  /// Sets one of the agent's `configOptions`, such as the model. The answer can change others, so read `configOptions` from it.
+  Future<Map<String, dynamic>> setConfigOption(String sessionId, String configId, String value) {
+    _ready();
+    return _request('session/set_config_option', {'sessionId': sessionId, 'configId': configId, 'value': value});
+  }
+
+  /// Sets the agent's mode, for an agent that offers `modes` rather than `configOptions`.
+  Future<void> setMode(String sessionId, String modeId) {
+    _ready();
+    return _request('session/set_mode', {'sessionId': sessionId, 'modeId': modeId});
   }
 
   Future<void> resumeSession(String id, {required String cwd, bool replayHistory = false}) {
