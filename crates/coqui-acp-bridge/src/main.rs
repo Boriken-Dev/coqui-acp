@@ -323,10 +323,15 @@ fn short_lived_identity() -> Result<tls::Identity, String> {
         .map_err(|error| error.to_string())
 }
 
-/// New connections could not open after the certificate ends, and that must not look like a bridge still working.
-fn end_with_the_certificate() {
-    thread::spawn(|| {
-        thread::sleep(SHORT_LIVED_RUN);
+/// New connections could not open after the certificate ends, and that must not look like a bridge still working. By the clock
+/// on the wall: a machine that sleeps does not count that towards a sleep. Agents read their end of the pipe closing.
+fn end_with_the_certificate(advertised: Option<Advertised>) {
+    let until = SystemTime::now() + SHORT_LIVED_RUN;
+    thread::spawn(move || {
+        while SystemTime::now() < until {
+            thread::sleep(Duration::from_secs(60));
+        }
+        drop(advertised);
         eprintln!(
             "coqui-acp-bridge: the short-lived certificate is ending: restart to make another"
         );
@@ -527,6 +532,12 @@ fn advertise(
         return Ok(None);
     };
     let text = |error: Error| error.to_string();
+    if !bound.ip().is_loopback() && peer.is_none() {
+        return Err(
+            "--advertise on the network needs the in-band proof: a client has to be able to check the key a record names"
+                .to_owned(),
+        );
+    }
     if bound.ip().is_loopback() && args.advertise_host.is_some() {
         return Err(
             "--advertise-host names a host on the network, and this listens on loopback".to_owned(),
@@ -666,21 +677,41 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         .with_frames(Frames::Binary)
         .with_origins(args.origins.clone())
         .with_admission(admit.clone());
+    // Every listener is bound before anything says this agent exists, so what is announced is there.
+    let quic = args
+        .webtransport_port
+        .map(|port| {
+            let tls_config = tls_config.ok_or("WebTransport needs --tls-identity")?;
+            let address = SocketAddr::new(args.listen.ip(), port);
+            let listener = webtransport::Listener::bind(address, tls_config)
+                .map_err(|failure| failure.to_string())?
+                .with_limits(unproven_limits())
+                .with_origins(args.origins.clone())
+                .with_admission(admit);
+            Ok::<_, String>(listener)
+        })
+        .transpose()?;
     let bound = plain.local_addr().map_err(|failure| failure.to_string())?;
     let hash = short_lived
         .as_ref()
         .map(|identity| identity.fingerprint().to_string());
     if let Some(hash) = &hash {
         eprintln!("certificate {hash}, for 13 days");
-        end_with_the_certificate();
     }
-    let _advertised = advertise(
+    let short_lived_run = hash.is_some();
+    let advertised = advertise(
         args,
         bound,
         Some(peer_id.to_string()),
         args.webtransport_port,
         hash,
     )?;
+    let _advertised = if short_lived_run {
+        end_with_the_certificate(advertised);
+        None
+    } else {
+        advertised
+    };
     eprintln!("listening on {bound}");
     let service = Arc::new(Service {
         method: Some(method),
@@ -690,14 +721,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         unproven,
         peers: running,
     });
-    if let Some(port) = args.webtransport_port {
-        let tls_config = tls_config.ok_or("WebTransport needs --tls-identity")?;
-        let address = SocketAddr::new(args.listen.ip(), port);
-        let quic = webtransport::Listener::bind(address, tls_config)
-            .map_err(|failure| failure.to_string())?
-            .with_limits(unproven_limits())
-            .with_origins(args.origins.clone())
-            .with_admission(admit);
+    if let Some(quic) = quic {
         let service = Arc::clone(&service);
         thread::spawn(move || {
             accept_loop(

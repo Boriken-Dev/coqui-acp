@@ -111,7 +111,7 @@ pub fn descriptors_dir() -> Option<PathBuf>
 pub fn candidate_from(record: &Record<'_>) -> Option<Candidate>
 ```
 
-`candidate_from` reads an answer anyone on the link can send: it refuses a loopback, link-local or multicast address, anything plain, and an unknown `txtvers` or `proto`, cuts the label down, and treats a malformed peer as none. A descriptor may name only loopback.
+`candidate_from` reads an answer anyone on the link can send: it refuses this machine in any spelling, a link-local or multicast address, anything plain, no or a malformed key, and an unknown `txtvers` or `proto`, and cuts the label down, removing control and format characters. A descriptor may name only loopback, and may have no key. `read_descriptors` takes only regular files, spends at most 5 seconds, and believes nothing from a directory others can write to on Unix.
 
 ## `coqui_acp_bridge::companion`
 
@@ -137,7 +137,8 @@ It answers `{ "op": "discover", "seconds": N }`, at most 10 seconds, and nothing
 
 - A browser takes a self-signed certificate only for WebTransport with `serverCertificateHashes`, so a `wss://` address `discover` gives opens in a browser only with a certificate it accepts. `--tls-short-lived` is the way without one.
 - On Windows, the first time this program listens or joins multicast the firewall may ask, and an answer of no leaves an inbound block rule for that path. `discover` then sees agents on this machine and none on others.
-- mDNS stays on the link: it does not cross a router or a site-to-site VPN.
+- mDNS stays on the link: it does not cross a router or a site-to-site VPN. `discover` does not check that an answer came from the link, so anyone who can reach UDP 5353 here can send a record. A record is a claim either way.
+- `serve --advertise` beyond loopback needs the in-band proof, since a client has to be able to check the key a record names; a record naming no key is ignored.
 - A browser cannot do the PIN exchange from this crate; `pair-dial` is native.
 - Behind a reverse proxy every peer has the proxy's address, so `--permit`, `--deny` and the store's per-source limit on waiting entries see the proxy. Bind to loopback and filter at the proxy.
 - `dial` keeps the agent across links, so lines not yet sent go to the next link, which may be another allowed peer.

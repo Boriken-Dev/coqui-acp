@@ -201,7 +201,7 @@ The instance name is the label. The SRV record gives host and port. TXT keys, no
 | `peer` | the peer id, as a hint to match against one already paired |
 | `acpv` | ACP versions, comma separated |
 
-A client MUST treat all of it as hostile input. It MUST NOT offer a record that names a loopback address, which would point a person at a service on their own machine, or one that is plain beyond loopback.
+A client MUST treat all of it as hostile input. It MUST NOT offer a record that names this machine in any spelling, including `localhost`, `*.localhost`, a numeric form of a loopback address or an IPv4 address inside an IPv6 one, which would point a person at a service of their own; one that is link-local; one that is plain; or one that names no `peer`, which nothing could then prove. It SHOULD remove format characters from a label, which can hide part of it or reorder what is shown around it.
 
 Advertising tells everyone on the link that an agent exists, so it MUST be off unless asked for. A record carries nothing secret: a peer id is a public key's hash.
 
@@ -213,7 +213,7 @@ An agent bound to loopback is not reachable through an address mDNS could give o
 { "txtvers": 1, "proto": "acp", "label": "My agent", "url": "ws://127.0.0.1:8765/acp", "peer": "sha256:…", "wt": null, "wth": null }
 ```
 
-A descriptor MUST name loopback. A reader removes one nothing answers at, since a killed program leaves its file behind.
+A descriptor MUST name loopback, with no user name in its URL, and is the only way to offer an agent with no key. A reader removes one nothing answers at, since a killed program leaves its file behind, ignores anything but a regular file, and believes none from a directory others can write to.
 
 ### The companion
 
@@ -221,7 +221,10 @@ A browser extension cannot query any of this itself: `chrome.mdns` is [documente
 
 The companion answers one request, `{ "op": "discover", "seconds": 3 }`, with `{ "candidates": [...] }` of at most 64, each `{ "label", "url", "peer", "source", "webtransport", "webtransportHash", "acpVersions" }`, where `source` is `dns-sd` or `local`. `coqui-acp-bridge` is one: `coqui-acp-bridge companion install --extension-id <id>` registers it, under the name `dev.boriken.coqui_acp_bridge`.
 
-`wth` lets a browser open WebTransport to an agent with no certificate authority: browsers pin a hash only for a certificate valid for 14 days at most, so an agent's hash changes as it renews one. It can be a hint like the rest because TLS authenticates nothing here: a false hash only fails to open, and whichever transport opens has the same proof to pass. For the same reason a provider MAY try a WebSocket when WebTransport does not open. The same key at a new address or hash is the same agent, once the person chooses it, and its grants carry over.
+`wth` lets a browser open WebTransport to an agent with no certificate authority: browsers pin a hash only for a certificate valid for 14 days at most, so an agent's hash changes as it renews one. It can be a hint like the rest because TLS authenticates nothing here: a false hash only fails to open, and whichever transport opens has the same proof to pass. For the same reason a provider MAY try a WebSocket when WebTransport does not open. 
+**A public key proves nothing about who names it.** A record can name the key of an agent the person already has, at the address of whoever sent it. A provider MUST show such a record as that agent, under the name the person knows it by and not the record's, and say that choosing it gives the requesting site that agent. It MUST report the agent as unverified until a proof at the new address, and keep the old address until then, going back to it if the proof fails. A stranger that relays to the real agent passes the proof and still reads nothing, since everything after it is sealed, but it does see when and how much is sent.
+
+**Connecting shows who is asking.** An initiator's first message carries its public key, before the other side has proved anything, so whoever answers at an address learns it, and the same key at several agents can be matched. Keep that in mind when choosing to connect to something discovered.
 
 A provider SHOULD search only when the person asks, since that starts a program and listens on the network, and MUST NOT show a page anything it found. Showing a candidate is not trusting it: it stays unchosen until the person chooses it, with its key beside its label, and choosing it is what accepts that key.
 

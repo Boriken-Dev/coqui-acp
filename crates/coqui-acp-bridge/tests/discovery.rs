@@ -33,7 +33,11 @@ impl Fixture {
     }
 
     fn keygen(&self) -> (PathBuf, String) {
-        let path = self.dir.join("identity");
+        self.keygen_as("identity")
+    }
+
+    fn keygen_as(&self, name: &str) -> (PathBuf, String) {
+        let path = self.dir.join(name);
         let output = Command::new(BRIDGE)
             .arg("keygen")
             .arg(&path)
@@ -253,6 +257,110 @@ fn a_short_lived_certificate_is_advertised_by_its_hash_and_needs_the_in_band_pro
             .unwrap();
         assert!(!output.status.success(), "{flags:?}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_descriptor_directory_others_can_write_to_is_not_believed_and_a_fifo_holds_nothing_up() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut fixture = Fixture::new("private");
+    let (identity, peer) = fixture.keygen();
+    fixture.serve(&identity, &peer, "Mine");
+    assert_eq!(fixture.discover().len(), 1);
+
+    let fifo = fixture.descriptors().join("fifo.json");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let begun = Instant::now();
+    assert_eq!(fixture.discover().len(), 1);
+    assert!(
+        begun.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        begun.elapsed()
+    );
+
+    let dir = fixture.descriptors();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(fixture.discover().is_empty());
+    let (other, other_peer) = fixture.keygen_as("other");
+    let output = Command::new(BRIDGE)
+        .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
+        .arg(&other)
+        .args([
+            "--allow",
+            &other_peer,
+            "--advertise",
+            "Other",
+            "--",
+            "unused-agent",
+        ])
+        .env(ENV, &dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn advertising_on_the_network_needs_a_key_a_client_can_check() {
+    let fixture = Fixture::new("no-key");
+    let output = Command::new(BRIDGE)
+        .args([
+            "serve",
+            "--listen",
+            "0.0.0.0:0",
+            "--no-peer-proof",
+            "--permit",
+            "10.0.0.0/8",
+            "--advertise",
+            "Open",
+            "--",
+            "unused-agent",
+        ])
+        .env(ENV, fixture.descriptors())
+        .output();
+    let output = output.unwrap();
+    // Plain beyond loopback is refused too; either way, nothing with no key goes on the link.
+    assert!(!output.status.success());
+}
+
+#[test]
+fn nothing_is_announced_until_every_listener_is_bound() {
+    let fixture = Fixture::new("bound");
+    let (identity, peer) = fixture.keygen();
+    // Holds the UDP port, while TCP stays free for the same number.
+    let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port().to_string();
+    let output = Command::new(BRIDGE)
+        .args([
+            "serve",
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--identity",
+        ])
+        .arg(&identity)
+        .args([
+            "--allow",
+            &peer,
+            "--tls-short-lived",
+            "--webtransport-port",
+            &port,
+            "--advertise",
+            "Half",
+            "--",
+            "unused-agent",
+        ])
+        .env(ENV, fixture.descriptors())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(!said.contains("listening on"), "{said}");
+    assert_eq!(std::fs::read_dir(fixture.descriptors()).unwrap().count(), 0);
 }
 
 /// A native host as a browser runs it: its origin as the first argument, and framed JSON on its standard streams.

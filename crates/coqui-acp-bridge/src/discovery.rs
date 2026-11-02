@@ -6,8 +6,8 @@
 
 use core::fmt;
 use std::collections::HashMap;
-use std::io::{self, Read as _};
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::io::{self, Read as _, Write as _};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -30,10 +30,14 @@ pub const MAX_CANDIDATES: usize = 64;
 const MAX_LABEL: usize = 63;
 const MAX_PATH: usize = 128;
 const MAX_HOST: usize = 253;
+/// A URL once parsing has percent-encoded it, which can triple a path.
+const MAX_URL: usize = 512;
 const MAX_VERSIONS: usize = 8;
 /// Directory entries looked at in one search, whatever else is in the directory.
 const MAX_DESCRIPTOR_FILES: usize = 256;
 const MAX_DESCRIPTOR_BYTES: u64 = 8 * 1024;
+/// What one search may spend on descriptors, whatever is in the directory: each dead one can cost [`LIVENESS`].
+const DESCRIPTORS_BUDGET: Duration = Duration::from_secs(5);
 /// Longer than Windows takes to report a refused loopback port, about 2 s, so a dead agent is told from a slow answer.
 const LIVENESS: Duration = Duration::from_secs(3);
 
@@ -117,9 +121,9 @@ impl Advertisement {
     /// # Errors
     /// [`Error::Discovery`] when the label cannot be carried, or the host is not a host name.
     pub fn new(label: &str, tls: bool) -> Result<Self, Error> {
-        if label.is_empty() || label.len() > MAX_LABEL || label.chars().any(char::is_control) {
+        if label.is_empty() || label.len() > MAX_LABEL || label.chars().any(hidden) {
             return Err(Error::Discovery(format!(
-                "a label is 1 to {MAX_LABEL} bytes with no control characters"
+                "a label is 1 to {MAX_LABEL} bytes with no control or format characters"
             )));
         }
         Ok(Self {
@@ -197,8 +201,16 @@ fn valid_host(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
 }
 
+/// Control characters, and the format characters that hide part of a name or reorder what is shown around it.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{feff}'
+            | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{fff9}'..='\u{fffb}')
+}
+
 fn clean_label(raw: &str) -> Option<String> {
-    let label: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let label: String = raw.chars().filter(|c| !hidden(*c)).collect();
     let label = label.trim();
     if label.is_empty() {
         return None;
@@ -235,19 +247,49 @@ fn clean_versions(raw: Option<&str>) -> Vec<u32> {
         .collect()
 }
 
-/// An address worth giving a client. A record naming loopback would point a person at a service on their own machine, and a
-/// link-local one needs a scope no URL carries.
+fn usable_v4(ip: Ipv4Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.octets()[0] == 0)
+}
+
+/// An address worth giving a client. A record naming this machine would point a person at a service of their own, a link-local
+/// one needs a scope no URL carries, and an IPv4 address inside an IPv6 one reaches the same place, so it answers the same.
 fn usable(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            !(v4.is_loopback() || v4.is_unspecified() || v4.is_multicast() || v4.is_link_local())
-        }
+        IpAddr::V4(v4) => usable_v4(v4),
         IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            if octets[..12] == [0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0] {
+                return usable_v4(Ipv4Addr::new(
+                    octets[12], octets[13], octets[14], octets[15],
+                ));
+            }
+            if let Some(v4) = v6.to_ipv4() {
+                return usable_v4(v4);
+            }
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || v6.is_unicast_link_local())
         }
+    }
+}
+
+/// Whether a URL's host, as URL parsing normalized it, is one a record may name. A single label is a name on this machine's own
+/// network, not something a certificate for the record's agent would be issued for.
+fn usable_host(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(ip)) => usable(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => usable(IpAddr::V6(ip)),
+        Some(Host::Domain(name)) => {
+            let name = name.to_ascii_lowercase();
+            name.contains('.') && !name.ends_with(".localhost") && name != "localhost"
+        }
+        None => false,
     }
 }
 
@@ -267,7 +309,8 @@ pub struct Record<'a> {
 }
 
 /// Reads an answer, which anyone on the link can send. `None` for one this version does not understand, for one that says it
-/// is plain beyond loopback, which no client may use, and for one naming nothing usable.
+/// is plain beyond loopback, which no client may use, for one naming no key, which nothing could then prove, and for one naming
+/// nothing usable.
 #[must_use]
 pub fn candidate_from(record: &Record<'_>) -> Option<Candidate> {
     let txt = |key: &str| record.txt.get(key).map(String::as_str);
@@ -278,6 +321,7 @@ pub fn candidate_from(record: &Record<'_>) -> Option<Candidate> {
         return None;
     }
     let label = clean_label(record.instance)?;
+    let peer = clean_peer(txt("peer"))?;
     let path = clean_path(txt("path"))?;
     let host = record.host.trim_end_matches('.');
     let authority = if host.to_ascii_lowercase().ends_with(".local") || !valid_host(host) {
@@ -294,10 +338,13 @@ pub fn candidate_from(record: &Record<'_>) -> Option<Candidate> {
         format!("{host}:{}", record.port)
     };
     let url = Url::parse(&format!("wss://{authority}{path}")).ok()?;
+    if !usable_host(&url) || url.as_str().len() > MAX_URL {
+        return None;
+    }
     Some(Candidate {
         label,
         url: url.to_string(),
-        peer: clean_peer(txt("peer")),
+        peer: Some(peer),
         source: Source::Network,
         webtransport: txt("wt")
             .and_then(|port| port.parse().ok())
@@ -335,6 +382,21 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)
 }
 
+/// A descriptor is believed only because nobody else can write one. A directory others can write to, which an override can name,
+/// loses that. Windows gives `%LOCALAPPDATA%` to its owner by default, and this does not read its ACLs.
+fn private_enough(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Ok(metadata) = std::fs::metadata(dir) {
+            return metadata.permissions().mode() & 0o022 == 0;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    true
+}
+
 fn is_loopback_host(url: &Url) -> bool {
     match url.host() {
         Some(Host::Ipv4(ip)) => ip.is_loopback(),
@@ -352,7 +414,13 @@ fn candidate_from_descriptor(text: &str) -> Option<Candidate> {
         return None;
     }
     let url = Url::parse(value.get("url")?.as_str()?).ok()?;
-    if !matches!(url.scheme(), "ws" | "wss") || !is_loopback_host(&url) {
+    // A user name in a URL shows one host and connects to another.
+    if !matches!(url.scheme(), "ws" | "wss")
+        || !is_loopback_host(&url)
+        || url.as_str().len() > MAX_URL
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return None;
     }
     Some(Candidate {
@@ -387,18 +455,30 @@ fn listening(url: &str) -> bool {
 /// and is removed.
 #[must_use]
 pub fn read_descriptors(dir: &Path) -> Vec<Candidate> {
+    if !private_enough(dir) {
+        eprintln!("descriptors ignored: others can write to their directory");
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
+    let until = Instant::now() + DESCRIPTORS_BUDGET;
     let mut found = Vec::new();
-    for entry in entries.flatten().take(MAX_DESCRIPTOR_FILES) {
-        if found.len() >= MAX_CANDIDATES {
+    let named = entries.flatten().filter(|entry| {
+        entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    for entry in named.take(MAX_DESCRIPTOR_FILES) {
+        if found.len() >= MAX_CANDIDATES || Instant::now() >= until {
             break;
         }
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "json") {
+        // A regular file only: opening a FIFO would wait for a writer, and a link could name anything.
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             continue;
         }
+        let path = entry.path();
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
@@ -588,6 +668,11 @@ fn write_descriptor(advertisement: &Advertisement, bound: SocketAddr) -> Result<
     let dir = descriptors_dir()
         .ok_or_else(|| Error::Discovery("no directory for descriptors".to_owned()))?;
     create_private_dir(&dir).map_err(fail)?;
+    if !private_enough(&dir) {
+        return Err(Error::Discovery(
+            "others can write to the descriptor directory".to_owned(),
+        ));
+    }
     let scheme = if advertisement.tls { "wss" } else { "ws" };
     let text = json!({
         "txtvers": 1,
@@ -602,7 +687,18 @@ fn write_descriptor(advertisement: &Advertisement, bound: SocketAddr) -> Result<
     let name = format!("{}-{}", std::process::id(), bound.port());
     let unfinished = dir.join(format!("{name}.tmp"));
     let path = dir.join(format!("{name}.json"));
-    std::fs::write(&unfinished, text).map_err(fail)?;
+    // Never through a link or over something already there, in a directory someone may have named for us.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+        .open(&unfinished)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map_err(fail)?;
     std::fs::rename(&unfinished, &path).map_err(fail)?;
     Ok(Advertised(Published::Descriptor(path)))
 }
@@ -633,7 +729,12 @@ mod tests {
         })
     }
 
-    const GOOD: &[(&str, &str)] = &[("txtvers", "1"), ("proto", "acp"), ("tls", "1")];
+    const GOOD: &[(&str, &str)] = &[
+        ("txtvers", "1"),
+        ("proto", "acp"),
+        ("tls", "1"),
+        ("peer", PEER),
+    ];
 
     #[test]
     fn a_plain_record_gives_a_wss_url_and_the_default_path() {
@@ -641,7 +742,7 @@ mod tests {
         assert_eq!(found.url, "wss://10.0.0.5:8765/acp");
         assert_eq!(found.label, "Mine");
         assert_eq!(found.source, Source::Network);
-        assert_eq!(found.peer, None);
+        assert_eq!(found.peer.as_deref(), Some(PEER));
     }
 
     #[test]
@@ -706,7 +807,7 @@ mod tests {
                 "h.local.",
                 &["10.0.0.5"],
                 1,
-                &[("txtvers", "1"), ("proto", "acp")]
+                &[("txtvers", "1"), ("proto", "acp"), ("peer", PEER)]
             )
             .is_none()
         );
@@ -716,25 +817,18 @@ mod tests {
     }
 
     #[test]
-    fn hostile_text_is_cut_down_and_a_bad_peer_is_no_peer() {
+    fn hostile_text_is_cut_down() {
         let long = "é".repeat(100);
-        let bad_peer = [
-            ("txtvers", "1"),
-            ("proto", "acp"),
-            ("tls", "1"),
-            ("peer", "sha256:zz"),
-        ];
         let found = read(
             &format!("a\u{7}\n{long}"),
             "h.local.",
             &["10.0.0.5"],
             1,
-            &bad_peer,
+            GOOD,
         )
         .unwrap();
         assert!(found.label.len() <= MAX_LABEL);
         assert!(!found.label.chars().any(char::is_control));
-        assert_eq!(found.peer, None);
         assert!(read("\u{7}", "h.local.", &["10.0.0.5"], 1, GOOD).is_none());
         let good_peer = [
             ("txtvers", "1"),
@@ -788,5 +882,85 @@ mod tests {
                 .with_host(Some("a b".to_owned()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_record_cannot_point_a_person_at_their_own_machine_by_any_spelling() {
+        for host in [
+            "localhost.",
+            "LOCALHOST.",
+            "foo.localhost.",
+            "127.1.",
+            "2130706433.",
+            "0x7f.0.0.1.",
+            "0.",
+            "0.0.0.0.",
+            "169.254.169.254.",
+            "intranet.",
+        ] {
+            assert!(read("x", host, &["10.0.0.5"], 1, GOOD).is_none(), "{host}");
+        }
+        for address in [
+            "::ffff:127.0.0.1",
+            "::ffff:0.0.0.0",
+            "::ffff:169.254.169.254",
+            "::127.0.0.1",
+            "64:ff9b::7f00:1",
+            "0.1.2.3",
+            "255.255.255.255",
+        ] {
+            assert!(
+                read("x", "h.local.", &[address], 1, GOOD).is_none(),
+                "{address}"
+            );
+        }
+        assert!(
+            read("x", "h.local.", &["2001:db8::5"], 1, GOOD).is_some(),
+            "a real address still works"
+        );
+        assert!(
+            read("x", "h.local.", &["::ffff:10.0.0.5"], 1, GOOD).is_some(),
+            "and in the form that wraps it"
+        );
+    }
+
+    #[test]
+    fn a_record_naming_no_key_is_not_offered() {
+        let no_peer = [("txtvers", "1"), ("proto", "acp"), ("tls", "1")];
+        assert!(read("x", "h.local.", &["10.0.0.5"], 1, &no_peer).is_none());
+        let bad_peer = [
+            ("txtvers", "1"),
+            ("proto", "acp"),
+            ("tls", "1"),
+            ("peer", "sha256:zz"),
+        ];
+        assert!(read("x", "h.local.", &["10.0.0.5"], 1, &bad_peer).is_none());
+    }
+
+    #[test]
+    fn a_label_cannot_hide_part_of_itself_or_reorder_what_is_around_it() {
+        let found = read(
+            "a\u{202e}b\u{200b}c\u{ad}d",
+            "h.local.",
+            &["10.0.0.5"],
+            1,
+            GOOD,
+        )
+        .unwrap();
+        assert_eq!(found.label, "abcd");
+        assert!(read("\u{202e}\u{200b}", "h.local.", &["10.0.0.5"], 1, GOOD).is_none());
+        assert!(Advertisement::new("a\u{202e}b", false).is_err());
+    }
+
+    #[test]
+    fn a_descriptor_url_is_bounded_and_cannot_show_a_false_host() {
+        let descriptor =
+            |url: &str| format!(r#"{{"txtvers":1,"proto":"acp","label":"x","url":"{url}"}}"#);
+        assert!(
+            candidate_from_descriptor(&descriptor("ws://agent.example.com:443@127.0.0.1:1/acp"))
+                .is_none()
+        );
+        let long = format!("ws://127.0.0.1:1/{}", "\u{e9}".repeat(200));
+        assert!(candidate_from_descriptor(&descriptor(&long)).is_none());
     }
 }
