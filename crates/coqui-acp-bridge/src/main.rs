@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use coqui_acp_bridge::agent::Agent;
 use coqui_acp_bridge::auth::Sealed;
+use coqui_acp_bridge::discovery::{Advertised, Advertisement};
 use coqui_acp_bridge::relay::{LinkEnd, relay};
-use coqui_acp_bridge::{Error, auth, pairing};
+use coqui_acp_bridge::{Error, auth, companion, discovery, pairing};
 use coqui_net_acl::{Acl, Action, IpNet, Rule};
 use coqui_peer_tls as tls;
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pin};
@@ -66,6 +67,29 @@ enum Mode {
     Serve(Serve),
     /// Connect out to a peer, for an agent behind NAT. Reconnects and keeps the agent running.
     Dial(Dial),
+    /// Search this machine and the link for agents, and print each as one line of JSON. What it prints is what they claim.
+    Discover {
+        /// How long to listen on the link, in seconds.
+        #[arg(long, default_value_t = 3)]
+        seconds: u64,
+    },
+    /// Let a browser extension ask this program who is around, over native messaging.
+    Companion {
+        #[command(subcommand)]
+        action: CompanionAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CompanionAction {
+    /// Register this program, where it is now, for this user's Chrome, Chromium and Edge.
+    Install {
+        /// An extension allowed to start it, by its 32-letter id. Repeat for more.
+        #[arg(long = "extension-id", required = true)]
+        extensions: Vec<String>,
+    },
+    /// Remove that registration.
+    Uninstall,
 }
 
 #[derive(clap::Args, Debug)]
@@ -171,6 +195,13 @@ struct Serve {
     /// Proven peers served at once, each with an agent of its own. Another is turned away while this many run.
     #[arg(long, default_value_t = 4)]
     max_peers: usize,
+    /// Say this agent exists, under this name. On loopback a file only this user's programs read; otherwise a DNS-SD record
+    /// everyone on the link can see, with no secret in it. Connecting still needs the proof.
+    #[arg(long, value_name = "LABEL")]
+    advertise: Option<String>,
+    /// A host name to publish in that record, for a certificate a browser accepts. Without it, clients get an address.
+    #[arg(long, requires = "advertise", value_name = "NAME")]
+    advertise_host: Option<String>,
     /// The agent program, then its arguments.
     #[arg(last = true, required = true)]
     agent: Vec<OsString>,
@@ -457,6 +488,33 @@ fn admission(
     })
 }
 
+/// Publishes what `--advertise` asked for. The result has to live as long as the listener.
+fn advertise(
+    args: &Serve,
+    bound: SocketAddr,
+    peer: Option<String>,
+    webtransport: Option<u16>,
+) -> Result<Option<Advertised>, String> {
+    let Some(label) = &args.advertise else {
+        return Ok(None);
+    };
+    let text = |error: Error| error.to_string();
+    if bound.ip().is_loopback() && args.advertise_host.is_some() {
+        return Err(
+            "--advertise-host names a host on the network, and this listens on loopback".to_owned(),
+        );
+    }
+    let advertisement = Advertisement::new(label, args.tls_identity.is_some())
+        .map_err(text)?
+        .with_peer(peer)
+        .with_webtransport(webtransport)
+        .with_host(args.advertise_host.clone())
+        .map_err(text)?;
+    discovery::advertise(&advertisement, bound)
+        .map(Some)
+        .map_err(text)
+}
+
 fn serve(args: &Serve) -> Result<ExitCode, String> {
     let in_band = !args.allow.is_empty() || args.allow_store.is_some();
     let certificates =
@@ -517,12 +575,11 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             .with_limits(limits())
             .with_origins(args.origins.clone())
             .with_admission(admit);
-        eprintln!(
-            "listening on {}",
-            listener
-                .local_addr()
-                .map_err(|failure| failure.to_string())?
-        );
+        let bound = listener
+            .local_addr()
+            .map_err(|failure| failure.to_string())?;
+        eprintln!("listening on {bound}");
+        let _advertised = advertise(args, bound, None, None)?;
         let service = Arc::new(Service {
             method: None,
             store: None,
@@ -565,10 +622,14 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         .with_frames(Frames::Binary)
         .with_origins(args.origins.clone())
         .with_admission(admit.clone());
-    eprintln!(
-        "listening on {}",
-        plain.local_addr().map_err(|failure| failure.to_string())?
-    );
+    let bound = plain.local_addr().map_err(|failure| failure.to_string())?;
+    eprintln!("listening on {bound}");
+    let _advertised = advertise(
+        args,
+        bound,
+        Some(peer_id.to_string()),
+        args.webtransport_port,
+    )?;
     let service = Arc::new(Service {
         method: Some(method),
         store,
@@ -624,12 +685,13 @@ fn serve_unproven(
         .with_limits(limits())
         .with_origins(origins)
         .with_admission(admit);
+    let bound = listener
+        .local_addr()
+        .map_err(|failure| failure.to_string())?;
     eprintln!(
-        "listening on {}, with no proof of the peer: whoever can connect gets the agent",
-        listener
-            .local_addr()
-            .map_err(|failure| failure.to_string())?
+        "listening on {bound}, with no proof of the peer: whoever can connect gets the agent"
     );
+    let _advertised = advertise(args, bound, None, None)?;
     let service = Arc::new(Service {
         method: None,
         store: None,
@@ -931,7 +993,40 @@ fn status_code(status: std::process::ExitStatus) -> ExitCode {
     )
 }
 
+fn discover_mode(seconds: u64) -> Result<ExitCode, String> {
+    for candidate in discovery::discover(Duration::from_secs(seconds)) {
+        println!("{}", candidate.to_json());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn companion_mode(action: &CompanionAction) -> Result<ExitCode, String> {
+    match action {
+        CompanionAction::Install { extensions } => {
+            for written in companion::install(extensions).map_err(|error| error.to_string())? {
+                println!("{written}");
+            }
+        }
+        CompanionAction::Uninstall => companion::uninstall().map_err(|error| error.to_string())?,
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn main() -> ExitCode {
+    // A browser starts a native host with its caller's origin as the first argument, and no way to name a subcommand.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|first| companion::started_by_browser(&first.to_string_lossy()))
+    {
+        let result = companion::run(&mut std::io::stdin().lock(), &mut std::io::stdout().lock());
+        return result.map_or_else(
+            |error| {
+                eprintln!("coqui-acp-bridge: {error}");
+                ExitCode::from(2)
+            },
+            |()| ExitCode::SUCCESS,
+        );
+    }
     let cli = Cli::parse();
     let result = match &cli.command {
         Mode::Keygen { path } => auth::create_identity(path)
@@ -944,6 +1039,8 @@ fn main() -> ExitCode {
         Mode::PairDial(args) => pair_dial_mode(args),
         Mode::Serve(args) => serve(args),
         Mode::Dial(args) => dial(args),
+        Mode::Discover { seconds } => discover_mode(*seconds),
+        Mode::Companion { action } => companion_mode(action),
     };
     match result {
         Ok(code) => code,

@@ -6,6 +6,8 @@
 
 pub mod agent;
 pub mod auth;
+pub mod companion;
+pub mod discovery;
 pub mod pairing;
 pub mod relay;
 
@@ -23,6 +25,8 @@ pub enum Error {
     Agent(std::io::Error),
     /// A key or identity file could not be used.
     Identity(String),
+    /// An agent could not be advertised or searched for, or the companion could not be installed.
+    Discovery(String),
 }
 
 impl fmt::Display for Error {
@@ -32,6 +36,7 @@ impl fmt::Display for Error {
             Self::Proof(why) => write!(f, "the peer was not proven: {why}"),
             Self::Agent(error) => write!(f, "the agent could not start: {error}"),
             Self::Identity(why) => write!(f, "the identity could not be used: {why}"),
+            Self::Discovery(why) => write!(f, "discovery failed: {why}"),
         }
     }
 }

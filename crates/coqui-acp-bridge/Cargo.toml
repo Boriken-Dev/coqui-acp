@@ -26,11 +26,13 @@ coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcry
 coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate", "ca"] }
 coqui-net-acl = { version = "=0.0.0-alpha.0" }
 coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "4dc609e5c5f23ccbda993e3e126b8d13938648a6", features = ["websocket", "webtransport"] }
+# Pure Rust, with no system mDNS service to depend on.
+mdns-sd = "0.21"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde_json.workspace = true
 url = "2.5"
 
 [dev-dependencies]
-serde_json.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 [lints]
