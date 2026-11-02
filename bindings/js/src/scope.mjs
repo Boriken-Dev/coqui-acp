@@ -5,13 +5,16 @@ const INVALID_PARAMS = -32602;
 const PARSE_ERROR = -32700;
 
 const OWN_SESSION = new Set(['session/prompt', 'session/cancel', 'session/close']);
-// A mode can stop the agent asking. A model or an effort cannot, and an unknown category is taken to be able to.
+// A mode can stop the agent asking. A model or an effort cannot, and an unknown category is taken to be able to. A category is
+// what the agent said of the option, in `configOptions`: a page's own claim about one means nothing.
 const OPEN_CATEGORIES = new Set(['model', 'thought_level']);
 const GATED_SETTINGS = new Set(['session/set_mode', 'session/set_config_option']);
 const REMOTE_SERVERS = new Set(['http', 'sse']);
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hasId = (message) => message.id !== undefined && message.id !== null;
+// Above this a number no longer survives being parsed and written again, so a page could not match its answer.
+const validId = (id) => id === undefined || id === null || typeof id === 'string' || Number.isSafeInteger(id);
 
 function refusal(id, code, why) {
   return JSON.stringify({ jsonrpc: '2.0', id: id ?? null, error: { code, message: why } });
@@ -26,14 +29,24 @@ function parse(text) {
   }
 }
 
-function withoutMeta(message) {
-  const { _meta: _dropped, ...rest } = message;
-  if (isObject(rest.params)) {
-    const { _meta: _alsoDropped, ...params } = rest.params;
-    rest.params = params;
+function withoutMetaAtAnyDepth(value) {
+  if (Array.isArray(value)) return value.map(withoutMetaAtAnyDepth);
+  if (!isObject(value)) return value;
+  const kept = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key !== '_meta') kept[key] = withoutMetaAtAnyDepth(item);
   }
+  return kept;
+}
+
+/** Everything toward the agent, except what MCP carries through it, whose `_meta` is MCP's own. */
+function withoutMeta(message, carriesMcp) {
+  if (!carriesMcp) return withoutMetaAtAnyDepth(message);
+  const { _meta: _dropped, ...rest } = message;
   return rest;
 }
+
+const isMcp = (method) => typeof method === 'string' && method.startsWith('mcp/');
 
 function remoteOrigin(server) {
   try {
@@ -50,7 +63,9 @@ export class Scope {
   #origin;
   #sessions;
   #opening = new Map();
-  #fromAgent = new Set();
+  #fromAgent = new Map();
+  /** For each session, what the agent said each configuration option is. */
+  #optionCategories = new Map();
 
   /**
    * @param {{cwd: string|null, permissions?: boolean, mcpOrigins?: string[], sessions?: Set<string>}} grant
@@ -77,12 +92,27 @@ export class Scope {
     return isObject(params) && this.#sessions.has(params.sessionId);
   }
 
+  #learnOptions(session, options) {
+    if (typeof session !== 'string' || !Array.isArray(options)) return;
+    const known = this.#optionCategories.get(session) ?? new Map();
+    for (const option of options) {
+      if (isObject(option) && typeof option.id === 'string') known.set(option.id, option.category);
+    }
+    this.#optionCategories.set(session, known);
+  }
+
+  #optionIsOpen(params) {
+    return OPEN_CATEGORIES.has(this.#optionCategories.get(params?.sessionId)?.get(params?.configId));
+  }
+
   /** A message from the page: `{forward}` for the agent, or `{reply}` for the page, or neither when it is dropped. */
   fromPage(text) {
     const message = parse(text);
-    if (message === undefined) return { reply: refusal(null, PARSE_ERROR, 'not one JSON-RPC object') };
+    if (message === undefined || message.jsonrpc !== '2.0' || !validId(message.id)) {
+      return { reply: refusal(null, PARSE_ERROR, 'not one JSON-RPC object') };
+    }
     if (message.method === undefined) return this.#pageAnswers(message);
-    const clean = withoutMeta(message);
+    const clean = withoutMeta(message, isMcp(message.method));
     const { method, params } = clean;
     const refuse = (code, why) => (hasId(message) ? { reply: refusal(message.id, code, why) } : {});
     if (method === 'initialize') return { forward: JSON.stringify(clean) };
@@ -95,7 +125,7 @@ export class Scope {
       if (!this.#serversAllowed(params.mcpServers)) {
         return refuse(INVALID_PARAMS, 'that MCP server is not allowed for this page');
       }
-      if (hasId(message)) this.#opening.set(message.id, method);
+      if (hasId(message)) this.#opening.set(message.id, { method, session: params.sessionId });
       return { forward: JSON.stringify({ ...clean, params: { ...params, cwd: this.#grant.cwd } }) };
     }
     if (OWN_SESSION.has(method)) {
@@ -103,15 +133,20 @@ export class Scope {
         ? { forward: JSON.stringify(clean) }
         : refuse(METHOD_NOT_FOUND, 'not a session of this page');
     }
-    const ungated = method === 'session/set_model' || (method === 'session/set_config_option' && OPEN_CATEGORIES.has(params?.category));
+    const ungated = method === 'session/set_model' || (method === 'session/set_config_option' && this.#optionIsOpen(params));
     const allowed = ungated || (GATED_SETTINGS.has(method) && this.#grant.permissions === true);
-    if (allowed && this.#ownsSession(params)) return { forward: JSON.stringify(clean) };
+    if (allowed && this.#ownsSession(params)) {
+      if (method === 'session/set_config_option' && hasId(message)) this.#opening.set(message.id, { method, session: params.sessionId });
+      return { forward: JSON.stringify(clean) };
+    }
     return refuse(METHOD_NOT_FOUND, 'this page may not call that');
   }
 
   #pageAnswers(message) {
-    if (!hasId(message) || !this.#fromAgent.delete(message.id)) return {};
-    return { forward: JSON.stringify(withoutMeta(message)) };
+    if (!hasId(message) || !this.#fromAgent.has(message.id)) return {};
+    const method = this.#fromAgent.get(message.id);
+    this.#fromAgent.delete(message.id);
+    return { forward: JSON.stringify(withoutMeta(message, isMcp(method))) };
   }
 
   /**
@@ -125,19 +160,24 @@ export class Scope {
       if (hasId(message) && this.#opening.has(message.id)) {
         const opened = this.#opening.get(message.id);
         this.#opening.delete(message.id);
-        const session = opened === 'session/new' ? message.result?.sessionId : undefined;
-        if (typeof session === 'string') this.#sessions.add(session);
+        const made = opened.method === 'session/new' ? message.result?.sessionId : undefined;
+        if (typeof made === 'string') this.#sessions.add(made);
+        this.#learnOptions(made ?? opened.session, message.result?.configOptions);
       }
       return { forward: JSON.stringify(message) };
     }
     const named = isObject(message.params) ? message.params.sessionId : undefined;
-    if (named !== undefined && !this.#sessions.has(named)) {
+    // A `session/` message about no session at all is not this page's either.
+    const needsOne = named !== undefined || String(message.method).startsWith('session/');
+    if (needsOne && !this.#sessions.has(named)) {
       return hasId(message) ? { reply: refusal(message.id, METHOD_NOT_FOUND, 'not a session of this page') } : {};
     }
+    const update = isObject(message.params) ? message.params.update : undefined;
+    if (isObject(update)) this.#learnOptions(named, update.configOptions);
     if (message.method === 'session/request_permission' && this.#grant.permissions !== true) {
       return { ask: message };
     }
-    if (hasId(message)) this.#fromAgent.add(message.id);
+    if (hasId(message)) this.#fromAgent.set(message.id, message.method);
     return { forward: JSON.stringify(message) };
   }
 

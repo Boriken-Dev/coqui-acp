@@ -5,7 +5,10 @@
 //   add by hand during it, cwd, permissions?, mcpOrigins? } or { refuse: true }. driver.person.permissionsAsked(): the permission
 //   requests put to the person.
 // driver.discover(label): an agent the provider has found and nobody has granted.
-// driver.agent(label): what the agent received: { received(): objects[], send(object) }
+// driver.agent(label): what the agent received: { received(): objects[], send(object) }. The agent answers `session/new` with a
+//   `sessionId`, and any other request with an empty result.
+// driver.page(origin).window, when given: the window the provider's registry is defined on, for `registry`.
+// `strict-csp` needs a real browser, so it is not here: run it as the document says.
 
 const RPC = (id, method, params) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
 
@@ -196,13 +199,28 @@ export const CHECKS = {
     check((await next()).error !== undefined, 'a mode change was not refused');
     check(lastOf(seen, 'session/set_mode') === undefined, 'a mode change reached the agent');
     const session = opened.result.sessionId;
-    await send(RPC(3, 'session/set_config_option', { sessionId: session, category: 'mode', configId: 'm', value: 'x' }));
-    check((await next()).error !== undefined, 'a mode option was not refused');
-    await send(RPC(4, 'session/set_config_option', { sessionId: session, category: 'something-new', configId: 'm', value: 'x' }));
+    // A category is what the agent says of an option, so a page claiming one means nothing.
+    seen.send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: session,
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [{ id: 'm', category: 'mode' }, { id: 'n', category: 'something-new' }, { id: 'e', category: 'thought_level' }],
+        },
+      },
+    });
+    await next();
+    await send(RPC(3, 'session/set_config_option', { sessionId: session, category: 'model', configId: 'm', value: 'x' }));
+    check((await next()).error !== undefined, 'a mode option claimed to be a model was not refused');
+    await send(RPC(4, 'session/set_config_option', { sessionId: session, configId: 'n', value: 'x' }));
     check((await next()).error !== undefined, 'an unknown category was not refused');
+    await send(RPC(7, 'session/set_config_option', { sessionId: session, category: 'model', configId: 'never-described', value: 'x' }));
+    check((await next()).error !== undefined, 'an option the agent never described was not refused');
     await send(RPC(5, 'session/set_model', { sessionId: session, modelId: 'm' }));
     check((await next()).error === undefined, 'choosing a model was refused');
-    await send(RPC(6, 'session/set_config_option', { sessionId: session, category: 'thought_level', configId: 'e', value: 'high' }));
+    await send(RPC(6, 'session/set_config_option', { sessionId: session, configId: 'e', value: 'high' }));
     check((await next()).error === undefined, 'choosing an effort was refused');
   },
   async resume(driver) {
@@ -214,6 +232,8 @@ export const CHECKS = {
     const again = await page.acp.connect(agent);
     const writer = again.writable.getWriter();
     const reader = again.readable.getReader();
+    await writer.write(RPC(10, 'initialize', { protocolVersion: 1 }));
+    await reader.read();
     await writer.write(RPC(2, 'session/resume', { sessionId: opened.result.sessionId, cwd: '/x', mcpServers: [] }));
     check(JSON.parse((await reader.read()).value).error === undefined, 'its own session could not be resumed');
     await writer.write(RPC(3, 'session/resume', { sessionId: 'someone-elses', cwd: '/x', mcpServers: [] }));

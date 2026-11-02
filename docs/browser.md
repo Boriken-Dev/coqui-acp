@@ -84,7 +84,7 @@ dictionary AcpClosed { required DOMString reason; };   // "page", "agent", "navi
 
 Messages are strings, so a WebAssembly module or a Dart program crosses into JavaScript with the type it already has, and ACP's own libraries, which take a pair of streams, need only a parse and a stringify around them.
 
-Errors are `DOMException`s: `NotAllowedError` for no grant, a refusal or no user activation; `NotFoundError` for an agent the provider no longer knows; `NetworkError` when it cannot be reached. An error never says which of "no such agent" and "not granted" applies, so a page cannot probe for agents.
+Errors are `DOMException`s: `NotAllowedError` for no grant, for an agent the provider no longer knows, for a refusal, for choosing nothing, or for no user activation; `NotFoundError` only from the registry, for a `provider` no provider answers to; `NetworkError` when an agent cannot be reached. An error never says which of "no such agent" and "not granted" applies, so a page cannot probe for agents.
 
 ### Rules for the page API
 
@@ -93,6 +93,7 @@ Errors are `DOMException`s: `NotAllowedError` for no grant, a refusal or no user
 - `request()` needs [transient user activation](https://html.spec.whatwg.org/multipage/interaction.html#transient-activation). The provider asks in its own window, never inside the page, where a page could draw over it. That window lists the agents the provider knows and the ones it has discovered, and MUST let the person **grant any number of them, and add one by hand** there and then: by URL and fingerprint, or by pairing with a code. The candidates are shown there and not to the page. The page learns only what was granted, and refusing looks the same as having no agents.
 - A provider MUST also let the person add, remove and revoke agents and grants outside any page's request.
 - `connect()` never prompts. A connection belongs to its document: navigating, closing the tab, or `revoke` closes it at once, with the reason in `closed`.
+- A provider's `uuid` is the same for every page and every install of that build. Different per install, it would be an identifier every site could read.
 - `id` differs per origin, so two sites cannot match their agents by it. `identity.peer` does not differ, and the person is told that the site will see it.
 
 ### Why `document.acp`
@@ -123,8 +124,8 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | `session/new` | forwarded with `cwd` replaced by the grant's, and `mcpServers` checked |
 | `session/prompt`, `session/cancel`, `session/close` | forwarded for a session this origin opened with this agent |
 | `session/load`, `session/resume` | the same, with `cwd` and `mcpServers` handled as for `session/new` |
-| `session/set_model`, and `session/set_config_option` of category `model` or `thought_level` | forwarded for its own session |
-| `session/set_mode`, and `session/set_config_option` of any other category, or none | forwarded for its own session only if the grant has `permissions`, since a mode can stop the agent asking |
+| `session/set_model`, and `session/set_config_option` of an option the agent described as category `model` or `thought_level` | forwarded for its own session |
+| `session/set_mode`, and `session/set_config_option` of any other option, including one the agent never described | forwarded for its own session only if the grant has `permissions`, since a mode can stop the agent asking |
 | A response to a request the agent made of the page | forwarded |
 | `authenticate`, `session/list`, anything else, any `_` extension | refused with `-32601`; a notification is dropped |
 
@@ -140,7 +141,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | Any other request naming a session of another origin | refused |
 | Any other request or notification (`fs/*`, `terminal/*`, `mcp/message`) | forwarded: it asks the page, and reaches nothing of the person's |
 
-**Resuming.** A page that reloads, or opens again, may keep going: it remembers the agent's `id` and the ACP session id itself, finds the agent in `agents()`, connects, and sends `session/resume` or `session/load` with that session id, with no new prompt. This works as long as the grant lasts and the session still exists at the agent. An agent that no longer has it answers with its own error, and the page starts a new one.
+**Resuming.** A page that reloads, or opens again, may keep going: it remembers the agent's `id` and the ACP session id itself, finds the agent in `agents()`, connects, sends `initialize` as on any connection, and then `session/resume` or `session/load` with that session id, with no new prompt. This works as long as the grant lasts and the session still exists at the agent. An agent that no longer has it answers with its own error, and the page starts a new one.
 
 - A provider MUST remember which sessions an origin opened with an agent for as long as the grant lasts, and MUST forget them when the grant ends. A session id another origin opened is refused, whether or not the page knows it: knowing an id is not permission to read a person's history.
 - A grant of lifetime `once` lasts until the tab closes, across reloads. `always` lasts until revoked.
@@ -213,7 +214,7 @@ An agent bound to loopback is not reachable through an address mDNS could give o
 { "txtvers": 1, "proto": "acp", "label": "My agent", "url": "ws://127.0.0.1:8765/acp", "peer": "sha256:…", "wt": null, "wth": null }
 ```
 
-A descriptor MUST name loopback, with no user name in its URL, and is the only way to offer an agent with no key. A reader removes one nothing answers at, since a killed program leaves its file behind, ignores anything but a regular file, and believes none from a directory others can write to.
+A descriptor MUST name loopback, with no user name in its URL, and is the only way discovery offers an agent with no key. A person may still add one by hand. A reader removes one nothing answers at, since a killed program leaves its file behind, ignores anything but a regular file, and believes none from a directory others can write to.
 
 ### The companion
 
@@ -235,7 +236,8 @@ Non-normative: what a Chromium Manifest V3 extension needs, as reference.
 - **Getting into pages.** `externally_connectable` cannot serve this, since it [needs each site listed in the manifest](https://developer.chrome.com/docs/extensions/reference/manifest/externally-connectable). Use a small script in the page's main world that defines the registry, and a content script between it and the service worker. Check `sender.origin`, the tab and the document in the service worker: the page's world can forge any message, but not what the browser reports about the sender.
 - **A strict page.** A page may run `script-src 'self'; connect-src 'self'`, and a provider MUST work under it: inject through `chrome.scripting` or a declared main-world content script, never an inline script tag.
 - **Being asked, and asking for little.** Injecting everywhere needs permission for every site and tells every site the extension is there. A provider SHOULD start from the person's click on its button, and offer "let sites ask" as a choice that requests the host permission then.
-- **Connecting.** The service worker holds the connection, so a page's `connect-src` does not limit it.
+- **Connecting.** The service worker holds the connection, so a page's `connect-src` does not limit it. A worker stops after 30 seconds without an event, which ends its connections, so a provider MUST keep it alive while one is open: an agent can be silent for far longer during a tool call.
+- **Who is protected from whom.** A page running a proof itself is only as trustworthy as whoever served it: a proxy that also serves the page can replace the proof's code. An extension or a packaged app does not have that problem, and a page using `document.acp` holds no proof at all, so it is the provider's code that counts.
 
   | To | How |
   | --- | --- |
@@ -253,6 +255,8 @@ The contract is the page API and the DNS-SD record, so any language can take par
 - **A native program** has no page: it browses DNS-SD itself, connects directly, and needs no scope, since it answers to the person who ran it.
 
 ## Conformance
+
+Passing these shows a provider keeps pages in their place. It does not show it proves agents: one that proves nothing, and reports every agent as `verified: false`, can conform, and a page may refuse every agent it offers.
 
 `bindings/js/src/conformance.mjs` runs these against any provider, given a small driver that plays the person, a page's origin and an agent. A provider conforms when all pass.
 

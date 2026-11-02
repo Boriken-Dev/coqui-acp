@@ -205,3 +205,52 @@ test('a filter hides a tool from listing and calling, and another message is not
 test('a document without WebMCP says so', () => {
   assert.throws(() => exposeWebMcp({ modelContext: undefined }), { name: 'NotSupportedError' });
 });
+
+test('a category is what the agent said of an option, and a page claiming one means nothing', () => {
+  const s = scope({ sessions: new Set(['s1']) });
+  const set = (id, configId, extra = {}) => s.fromPage(JSON.stringify({ jsonrpc: '2.0', id, method: 'session/set_config_option', params: { sessionId: 's1', configId, value: 'x', ...extra } }));
+  assert.ok(set(1, 'm', { category: 'model' }).reply, 'never described, whatever the page says');
+  s.fromAgent(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's1', update: { sessionUpdate: 'config_option_update', configOptions: [{ id: 'm', category: 'mode' }, { id: 'e', category: 'thought_level' }, { id: 'x' }] } } }));
+  assert.ok(set(2, 'm', { category: 'model' }).reply, 'a mode option, whatever the page says');
+  assert.ok(set(3, 'x').reply, 'no category is not an open one');
+  assert.ok(set(4, 'e').forward, 'the agent said this one is an effort');
+  const granted = scope({ sessions: new Set(['s1']), permissions: true });
+  assert.ok(JSON.parse(granted.fromPage(JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'session/set_config_option', params: { sessionId: 's1', configId: 'm', value: 'x' } })).forward), 'a grant with permissions may');
+});
+
+test('what an agent says of an option when a session opens counts too, for that session only', () => {
+  const s = scope();
+  s.fromPage(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session/new', params: { cwd: '/x', mcpServers: [] } }));
+  s.fromAgent(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { sessionId: 's1', configOptions: [{ id: 'e', category: 'model' }] } }));
+  s.fromPage(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/x', mcpServers: [] } }));
+  s.fromAgent(JSON.stringify({ jsonrpc: '2.0', id: 2, result: { sessionId: 's2', configOptions: [{ id: 'e', category: 'mode' }] } }));
+  const set = (id, sessionId) => s.fromPage(JSON.stringify({ jsonrpc: '2.0', id, method: 'session/set_config_option', params: { sessionId, configId: 'e', value: 'x' } }));
+  assert.ok(set(3, 's1').forward);
+  assert.ok(set(4, 's2').reply);
+});
+
+test('_meta goes at every depth toward the agent, except what MCP carries through it', () => {
+  const s = scope({ sessions: new Set(['s1']) });
+  const sent = JSON.parse(s.fromPage(JSON.stringify({ jsonrpc: '2.0', id: 1, _meta: { a: 1 }, method: 'session/prompt', params: { _meta: { b: 1 }, sessionId: 's1', prompt: [{ type: 'text', text: 'hi', _meta: { c: 1 } }] } })).forward);
+  assert.equal(JSON.stringify(sent).includes('_meta'), false);
+  s.fromAgent(JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'mcp/message', params: { connectionId: 'c', message: {} } }));
+  const answer = JSON.parse(s.fromPage(JSON.stringify({ jsonrpc: '2.0', id: 9, _meta: { a: 1 }, result: { content: [{ _meta: { theirs: 1 } }] } })).forward);
+  assert.equal(answer._meta, undefined);
+  assert.deepEqual(answer.result.content[0]._meta, { theirs: 1 });
+});
+
+test('a message about no session of this page never reaches it, or the person', () => {
+  const s = scope({ sessions: new Set(['s1']) });
+  assert.deepEqual(s.fromAgent(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: {} })), {});
+  const refused = s.fromAgent(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session/request_permission', params: { options: [] } }));
+  assert.equal(refused.ask, undefined);
+  assert.ok(JSON.parse(refused.reply).error);
+});
+
+test('a message with no jsonrpc member, or an id a number cannot hold, is refused', () => {
+  const s = scope();
+  assert.equal(JSON.parse(s.fromPage(JSON.stringify({ id: 1, method: 'initialize' })).reply).error.code, -32700);
+  assert.equal(JSON.parse(s.fromPage('{"jsonrpc":"2.0","id":9007199254740993,"method":"initialize"}').reply).error.code, -32700);
+  assert.ok(s.fromPage('{"jsonrpc":"2.0","id":9007199254740991,"method":"initialize"}').forward);
+  assert.ok(s.fromPage('{"jsonrpc":"2.0","id":"a string","method":"initialize"}').forward);
+});
