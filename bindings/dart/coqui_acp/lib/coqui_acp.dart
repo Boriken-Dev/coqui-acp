@@ -103,12 +103,20 @@ final class AcpPermissionRequest {
   final String? title;
   final String? kind;
   final Object? rawInput;
+
+  /// The tool call as the agent sent it, which a client applies to what it shows before asking.
+  final Map<String, dynamic>? toolCall;
+
+  /// Why the agent says it needs this, in v2.
+  final String? description;
   const AcpPermissionRequest({
     required this.sessionId,
     required this.toolCallId,
     this.title,
     this.kind,
     this.rawInput,
+    this.toolCall,
+    this.description,
   });
 }
 
@@ -299,12 +307,16 @@ final class AcpClient {
   }
 
   Future<void> _answerPermission(Object id, Object? params) async {
-    if (params is! Map || params['toolCall'] is! Map || params['options'] is! List) {
+    if (params is! Map || params['options'] is! List) {
       _reply(id, {'error': {'code': -32602, 'message': 'Invalid params'}});
       return;
     }
-    final call = params['toolCall'] as Map;
-    final title = call['title'];
+    // v1 names the tool call directly. v2 has its own title for the prompt, and a subject that is a tool call or a command.
+    final subject = params['subject'] is Map ? params['subject'] as Map : const {};
+    final call = params['toolCall'] is Map
+        ? params['toolCall'] as Map
+        : subject['toolCall'] is Map ? subject['toolCall'] as Map : const {};
+    final title = params['title'] is String ? params['title'] : call['title'];
     final tool = title is String ? title : 'a tool';
     AcpDecision decision;
     final decider = _decider;
@@ -317,7 +329,9 @@ final class AcpClient {
           toolCallId: call['toolCallId'] is String ? call['toolCallId'] as String : '',
           title: title is String ? title : null,
           kind: call['kind'] is String ? call['kind'] as String : null,
-          rawInput: call['rawInput'],
+          rawInput: call['rawInput'] ?? (subject['command'] is String ? {'command': subject['command']} : null),
+          toolCall: call.isEmpty ? null : Map<String, dynamic>.from(call),
+          description: params['description'] is String ? params['description'] as String : null,
         ));
       } catch (error) {
         decision = AcpDeny('the decider failed: $error');

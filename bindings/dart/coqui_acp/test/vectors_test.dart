@@ -237,4 +237,70 @@ void main() {
     expect(answer['result'], {'outcome': {'outcome': 'cancelled'}});
     await acp.close();
   });
+
+  group('a v2 permission request reaches the decider', () {
+    Future<(Map<String, dynamic>, AcpPermissionRequest)> asked(Map<String, Object?> params, AcpDecision decision) async {
+      AcpPermissionRequest? seen;
+      final (agent, acp) = await opened(decider: (request) async {
+        seen = request;
+        return decision;
+      });
+      agent.write({'id': 9, 'method': 'session/request_permission', 'params': params});
+      final answer = await agent.read();
+      await acp.close();
+      return (answer, seen!);
+    }
+
+    const options = [
+      {'optionId': 'yes', 'name': 'Allow', 'kind': 'allow_once'},
+      {'optionId': 'no', 'name': 'Refuse', 'kind': 'reject_once'},
+    ];
+
+    test('about a tool call, which the client can show', () async {
+      final (answer, seen) = await asked({
+        'sessionId': 's1',
+        'title': 'Write to hello.txt',
+        'description': 'To save the answer',
+        'subject': {'type': 'tool_call', 'toolCall': {'toolCallId': 't1', 'kind': 'edit', 'rawInput': {'file_path': 'hello.txt'}}},
+        'options': options,
+      }, const AcpAllow());
+      expect(seen.title, 'Write to hello.txt');
+      expect(seen.description, 'To save the answer');
+      expect(seen.toolCallId, 't1');
+      expect(seen.kind, 'edit');
+      expect(seen.rawInput, {'file_path': 'hello.txt'});
+      expect(seen.toolCall, containsPair('toolCallId', 't1'));
+      expect(answer['result'], {'outcome': {'outcome': 'selected', 'optionId': 'yes'}});
+    });
+
+    test('about a command', () async {
+      final (answer, seen) = await asked({
+        'sessionId': 's1',
+        'title': 'Run it',
+        'subject': {'type': 'command', 'command': 'rm -rf /'},
+        'options': options,
+      }, const AcpDeny('no'));
+      expect(seen.rawInput, {'command': 'rm -rf /'});
+      expect(answer['result'], {'outcome': {'outcome': 'selected', 'optionId': 'no'}});
+    });
+
+    test('about nothing the client understands, which is still the person\'s to answer', () async {
+      final (answer, seen) = await asked({
+        'sessionId': 's1',
+        'title': 'Something new',
+        'subject': {'type': '_future'},
+        'options': options,
+      }, const AcpDeny('no'));
+      expect(seen.title, 'Something new');
+      expect(answer['result'], {'outcome': {'outcome': 'selected', 'optionId': 'no'}});
+    });
+
+    test('with no options is invalid, and the decider is not asked', () async {
+      final (agent, acp) = await opened(decider: (_) async => throw StateError('asked'));
+      agent.write({'id': 9, 'method': 'session/request_permission', 'params': {'sessionId': 's1', 'title': 'x'}});
+      final answer = await agent.read();
+      expect((answer['error'] as Map)['code'], -32602);
+      await acp.close();
+    });
+  });
 }
