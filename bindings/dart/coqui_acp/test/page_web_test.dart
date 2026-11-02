@@ -70,7 +70,7 @@ void main() {
         other.callMethod<JSAny?>('stop'.toJS);
         // The real provider answers too, and only it counts.
         expect(found, isNotNull);
-      final acp = found!;
+        final acp = found!;
         expect((await acp.agents()).single.label, 'Mine');
       },
     );

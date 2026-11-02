@@ -35,7 +35,8 @@ final class AcpPermission extends AcpEvent {
   final String? reason;
   const AcpPermission({required this.tool, required this.allowed, this.reason});
   @override
-  String toString() => 'AcpPermission(tool: $tool, allowed: $allowed, reason: $reason)';
+  String toString() =>
+      'AcpPermission(tool: $tool, allowed: $allowed, reason: $reason)';
 }
 
 final class AcpCompleted extends AcpEvent {
@@ -124,27 +125,86 @@ typedef AcpDecider = Future<AcpDecision> Function(AcpPermissionRequest request);
 
 /// A session the agent opened, and what it said about it.
 final class AcpOpenedSession {
-  AcpOpenedSession(this.id, this.raw);
+  AcpOpenedSession(this.id, this.raw, {this.replayed = false});
   final String id;
   final Map<String, dynamic> raw;
+
+  /// Whether the agent was asked to send the conversation so far, which arrives as updates before this does.
+  final bool replayed;
+}
+
+/// A session an agent says it has. All of it is the agent's to say.
+final class AcpSessionInfo {
+  const AcpSessionInfo({
+    required this.id,
+    this.cwd,
+    this.title,
+    this.updatedAt,
+  });
+  final String id;
+  final String? cwd;
+  final String? title;
+  final String? updatedAt;
+}
+
+/// One page of what an agent lists. Ask again with [nextCursor] for more.
+final class AcpSessionPage {
+  const AcpSessionPage(this.sessions, this.nextCursor);
+  final List<AcpSessionInfo> sessions;
+  final String? nextCursor;
+}
+
+/// Something sent with a prompt. An agent says what it takes: see [AcpClient.takesImages] and [AcpClient.takesFiles].
+final class AcpAttachment {
+  AcpAttachment._(this.name, this.isImage, this._block);
+
+  /// An image, sent whole.
+  factory AcpAttachment.image(String name, String mimeType, List<int> bytes) =>
+      AcpAttachment._(name, true, {
+        'type': 'image',
+        'mimeType': mimeType,
+        'data': base64Encode(bytes),
+      });
+
+  /// A text file's content, sent whole. Its address names no path of this machine, which the agent has no use for.
+  factory AcpAttachment.text(String name, String text, {String? mimeType}) =>
+      AcpAttachment._(name, false, {
+        'type': 'resource',
+        'resource': {
+          'uri': 'attachment:${Uri.encodeComponent(name)}',
+          'text': text,
+          'mimeType': ?mimeType,
+        },
+      });
+
+  final String name;
+  final bool isImage;
+  final Map<String, Object?> _block;
 }
 
 final class AcpSessionUpdate {
   AcpSessionUpdate(this.sessionId, this.raw);
   final String sessionId;
   final Map<String, dynamic> raw;
-  String get kind => raw['sessionUpdate'] is String ? raw['sessionUpdate'] as String : '';
-  String? get messageId => raw['messageId'] is String ? raw['messageId'] as String : null;
+  String get kind =>
+      raw['sessionUpdate'] is String ? raw['sessionUpdate'] as String : '';
+  String? get messageId =>
+      raw['messageId'] is String ? raw['messageId'] as String : null;
   String? get state => raw['state'] is String ? raw['state'] as String : null;
-  String? get reason => raw['stopReason'] is String ? raw['stopReason'] as String : null;
+  String? get reason =>
+      raw['stopReason'] is String ? raw['stopReason'] as String : null;
   String? get text {
     final value = raw['content'];
     if (value is Map && value['type'] == 'text' && value['text'] is String) {
       return value['text'] as String;
     }
     if (value is List) {
-      return value.whereType<Map>().where((entry) => entry['type'] == 'text')
-          .map((entry) => entry['text']).whereType<String>().join();
+      return value
+          .whereType<Map>()
+          .where((entry) => entry['type'] == 'text')
+          .map((entry) => entry['text'])
+          .whereType<String>()
+          .join();
     }
     return null;
   }
@@ -168,9 +228,13 @@ final class AcpClient {
     _subscription = incoming.listen(
       _receive,
       onError: _fail,
-      onDone: () => _fail(const AcpFailure('Connection lost; pending outcomes unknown')),
+      onDone: () =>
+          _fail(const AcpFailure('Connection lost; pending outcomes unknown')),
     );
   }
+
+  /// As many of a page of sessions as this takes: an agent chooses how many it sends.
+  static const maxListedSessions = 500;
 
   final int maxProtocolVersion;
   final String clientName;
@@ -223,7 +287,11 @@ final class AcpClient {
 
   void _reply(Object? id, Map<String, Object?> body) {
     if (_closed) return;
-    unawaited(_send(jsonEncode({'jsonrpc': '2.0', 'id': id, ...body})).catchError((Object _) {}));
+    unawaited(
+      _send(
+        jsonEncode({'jsonrpc': '2.0', 'id': id, ...body}),
+      ).catchError((Object _) {}),
+    );
   }
 
   void _receive(String message) {
@@ -241,7 +309,9 @@ final class AcpClient {
         } else if (method == 'session/request_permission') {
           unawaited(_answerPermission(id, envelope['params']));
         } else {
-          _reply(id, {'error': {'code': -32601, 'message': 'Unsupported method'}});
+          _reply(id, {
+            'error': {'code': -32601, 'message': 'Unsupported method'},
+          });
         }
         return;
       }
@@ -249,9 +319,13 @@ final class AcpClient {
       final completer = _pending.remove(id);
       if (completer == null || completer.isCompleted) return;
       if (envelope['error'] is Map) {
-        completer.completeError(AcpFailure('Agent error: ${envelope['error']}'));
+        completer.completeError(
+          AcpFailure('Agent error: ${envelope['error']}'),
+        );
       } else if (envelope['result'] is Map) {
-        completer.complete(Map<String, dynamic>.from(envelope['result'] as Map));
+        completer.complete(
+          Map<String, dynamic>.from(envelope['result'] as Map),
+        );
       } else {
         completer.completeError(const AcpFailure('Malformed agent response'));
       }
@@ -264,14 +338,22 @@ final class AcpClient {
 
   /// An agent may be newer than this client, so what cannot be read is ignored, never fatal.
   void _receiveUpdate(Object? params) {
-    if (params is! Map || params['sessionId'] is! String || params['update'] is! Map) return;
-    final update = AcpSessionUpdate(params['sessionId'] as String, Map<String, dynamic>.from(params['update'] as Map));
+    if (params is! Map ||
+        params['sessionId'] is! String ||
+        params['update'] is! Map)
+      return;
+    final update = AcpSessionUpdate(
+      params['sessionId'] as String,
+      Map<String, dynamic>.from(params['update'] as Map),
+    );
     if (!_closed) _updates.add(update);
     final raw = update.raw;
     switch (raw['sessionUpdate']) {
       case 'agent_message_chunk':
         final content = raw['content'];
-        if (content is Map && content['type'] == 'text' && content['text'] is String) {
+        if (content is Map &&
+            content['type'] == 'text' &&
+            content['text'] is String) {
           _text.write(content['text'] as String);
         }
       case 'tool_call':
@@ -280,13 +362,26 @@ final class AcpClient {
         if (id is String && title is String) {
           _flush();
           final kind = raw['kind'];
-          _emit(AcpTool(id: id, title: title, kind: kind is String ? kind : 'other'));
+          _emit(
+            AcpTool(
+              id: id,
+              title: title,
+              kind: kind is String ? kind : 'other',
+            ),
+          );
         }
       case 'usage_update':
         final cost = raw['cost'];
-        if (cost is Map && cost['amount'] is num && cost['currency'] is String) {
+        if (cost is Map &&
+            cost['amount'] is num &&
+            cost['currency'] is String) {
           _flush();
-          _emit(AcpCost(amount: (cost['amount'] as num).toDouble(), currency: cost['currency'] as String));
+          _emit(
+            AcpCost(
+              amount: (cost['amount'] as num).toDouble(),
+              currency: cost['currency'] as String,
+            ),
+          );
         }
       case 'state_update':
         if (raw['state'] == 'idle') {
@@ -308,14 +403,20 @@ final class AcpClient {
 
   Future<void> _answerPermission(Object id, Object? params) async {
     if (params is! Map || params['options'] is! List) {
-      _reply(id, {'error': {'code': -32602, 'message': 'Invalid params'}});
+      _reply(id, {
+        'error': {'code': -32602, 'message': 'Invalid params'},
+      });
       return;
     }
     // v1 names the tool call directly. v2 has its own title for the prompt, and a subject that is a tool call or a command.
-    final subject = params['subject'] is Map ? params['subject'] as Map : const {};
+    final subject = params['subject'] is Map
+        ? params['subject'] as Map
+        : const {};
     final call = params['toolCall'] is Map
         ? params['toolCall'] as Map
-        : subject['toolCall'] is Map ? subject['toolCall'] as Map : const {};
+        : subject['toolCall'] is Map
+        ? subject['toolCall'] as Map
+        : const {};
     final title = params['title'] is String ? params['title'] : call['title'];
     final tool = title is String ? title : 'a tool';
     AcpDecision decision;
@@ -324,36 +425,78 @@ final class AcpClient {
       decision = const AcpDeny('no permission decider is configured');
     } else {
       try {
-        decision = await decider(AcpPermissionRequest(
-          sessionId: params['sessionId'] is String ? params['sessionId'] as String : '',
-          toolCallId: call['toolCallId'] is String ? call['toolCallId'] as String : '',
-          title: title is String ? title : null,
-          kind: call['kind'] is String ? call['kind'] as String : null,
-          rawInput: call['rawInput'] ?? (subject['command'] is String ? {'command': subject['command']} : null),
-          toolCall: call.isEmpty ? null : Map<String, dynamic>.from(call),
-          description: params['description'] is String ? params['description'] as String : null,
-        ));
+        decision = await decider(
+          AcpPermissionRequest(
+            sessionId: params['sessionId'] is String
+                ? params['sessionId'] as String
+                : '',
+            toolCallId: call['toolCallId'] is String
+                ? call['toolCallId'] as String
+                : '',
+            title: title is String ? title : null,
+            kind: call['kind'] is String ? call['kind'] as String : null,
+            rawInput:
+                call['rawInput'] ??
+                (subject['command'] is String
+                    ? {'command': subject['command']}
+                    : null),
+            toolCall: call.isEmpty ? null : Map<String, dynamic>.from(call),
+            description: params['description'] is String
+                ? params['description'] as String
+                : null,
+          ),
+        );
       } catch (error) {
         decision = AcpDeny('the decider failed: $error');
       }
     }
     if (decision is AcpCancel) {
       _flush();
-      _emit(AcpPermission(tool: tool, allowed: false, reason: 'the turn was cancelled'));
-      _reply(id, {'result': {'outcome': {'outcome': 'cancelled'}}});
+      _emit(
+        AcpPermission(
+          tool: tool,
+          allowed: false,
+          reason: 'the turn was cancelled',
+        ),
+      );
+      _reply(id, {
+        'result': {
+          'outcome': {'outcome': 'cancelled'},
+        },
+      });
       return;
     }
     final wanted = decision is AcpAllow ? 'allow_once' : 'reject_once';
     _flush();
-    _emit(AcpPermission(tool: tool, allowed: decision is AcpAllow, reason: decision is AcpDeny ? decision.reason : null));
+    _emit(
+      AcpPermission(
+        tool: tool,
+        allowed: decision is AcpAllow,
+        reason: decision is AcpDeny ? decision.reason : null,
+      ),
+    );
     for (final option in params['options'] as List) {
-      if (option is Map && option['kind'] == wanted && option['optionId'] is String) {
-        _reply(id, {'result': {'outcome': {'outcome': 'selected', 'optionId': option['optionId']}}});
+      if (option is Map &&
+          option['kind'] == wanted &&
+          option['optionId'] is String) {
+        _reply(id, {
+          'result': {
+            'outcome': {'outcome': 'selected', 'optionId': option['optionId']},
+          },
+        });
         return;
       }
     }
-    _emit(AcpBlocked('the agent asked leave for $tool and offered no $wanted option'));
-    _reply(id, {'result': {'outcome': {'outcome': 'cancelled'}}});
+    _emit(
+      AcpBlocked(
+        'the agent asked leave for $tool and offered no $wanted option',
+      ),
+    );
+    _reply(id, {
+      'result': {
+        'outcome': {'outcome': 'cancelled'},
+      },
+    });
   }
 
   Future<void> initialize() async {
@@ -362,9 +505,16 @@ final class AcpClient {
       'protocolVersion': maxProtocolVersion,
       if (maxProtocolVersion >= 2) ...{
         'capabilities': <String, Object?>{},
-        'info': {'name': clientName, 'title': clientName, 'version': clientVersion},
+        'info': {
+          'name': clientName,
+          'title': clientName,
+          'version': clientVersion,
+        },
       } else ...{
-        'clientCapabilities': {'fs': {'readTextFile': false, 'writeTextFile': false}, 'terminal': false},
+        'clientCapabilities': {
+          'fs': {'readTextFile': false, 'writeTextFile': false},
+          'terminal': false,
+        },
         'clientInfo': {'name': clientName, 'version': clientVersion},
       },
     });
@@ -375,13 +525,122 @@ final class AcpClient {
         throw const AcpFailure('Agent does not support ACP v2 sessions');
       }
     } else if (version != 1) {
-      throw const AcpFailure('The agent selected a protocol version this client lacks');
+      throw const AcpFailure(
+        'The agent selected a protocol version this client lacks',
+      );
     }
     _protocolVersion = version as int;
+    final capabilities =
+        reply[version == 2 ? 'capabilities' : 'agentCapabilities'];
+    _capabilities = capabilities is Map ? capabilities : const {};
+  }
+
+  Map<dynamic, dynamic> _capabilities = const {};
+
+  /// A capability under [path], which v1 says with `true` or an object and v2 with an object. Absent is no.
+  bool _says(List<String> path) {
+    Object? at = _capabilities;
+    for (final step in path) {
+      if (at is! Map) return false;
+      at = at[step];
+    }
+    return at == true || at is Map;
+  }
+
+  /// Whether this agent takes an image with a prompt.
+  bool get takesImages => _says(
+    _protocolVersion == 2
+        ? const ['session', 'prompt', 'image']
+        : const ['promptCapabilities', 'image'],
+  );
+
+  /// Whether this agent takes a file's content with a prompt.
+  bool get takesFiles => _says(
+    _protocolVersion == 2
+        ? const ['session', 'prompt', 'embeddedContext']
+        : const ['promptCapabilities', 'embeddedContext'],
+  );
+
+  /// Whether an earlier session can be opened again. It is part of v2, and each of its two forms is optional in v1.
+  bool get canReopenSessions =>
+      _protocolVersion == 2 ||
+      _says(const ['loadSession']) ||
+      _says(const ['sessionCapabilities', 'resume']);
+
+  /// The sessions an agent says it has, in [cwd] or everywhere. v1 must offer this to be asked, and a v2 agent can say so only by
+  /// answering: a real one lists without declaring it, and one that does not fails this with [AcpFailure].
+  Future<AcpSessionPage> listSessions({String? cwd, String? cursor}) async {
+    _ready();
+    if (_protocolVersion == 1 &&
+        !_says(const ['sessionCapabilities', 'list'])) {
+      throw const AcpFailure('This agent does not list its sessions');
+    }
+    final reply = await _request('session/list', {
+      'cwd': ?cwd,
+      'cursor': ?cursor,
+    });
+    final listed = reply['sessions'];
+    final sessions = <AcpSessionInfo>[];
+    if (listed is List) {
+      for (final item in listed.take(maxListedSessions)) {
+        if (item is! Map ||
+            item['sessionId'] is! String ||
+            (item['sessionId'] as String).isEmpty)
+          continue;
+        String? text(String key) =>
+            item[key] is String ? item[key] as String : null;
+        sessions.add(
+          AcpSessionInfo(
+            id: item['sessionId'] as String,
+            cwd: text('cwd'),
+            title: text('title'),
+            updatedAt: text('updatedAt'),
+          ),
+        );
+      }
+    }
+    final next = reply['nextCursor'];
+    return AcpSessionPage(
+      sessions,
+      next is String && next.isNotEmpty ? next : null,
+    );
+  }
+
+  /// Opens an earlier session, on this connection, with its conversation replayed as updates where the agent can. Listen to
+  /// [updates] first. Nothing bounds how long a replay takes, so this has no deadline.
+  Future<AcpOpenedSession> reopenSession(
+    String id, {
+    required String cwd,
+  }) async {
+    _ready();
+    _checkCwd(cwd);
+    final params = {'sessionId': id, 'cwd': cwd, 'mcpServers': <Object>[]};
+    if (_protocolVersion == 2) {
+      final reply = await _request('session/resume', {
+        ...params,
+        'replayFrom': {'type': 'start'},
+      }, limited: false);
+      return AcpOpenedSession(id, reply, replayed: true);
+    }
+    if (_says(const ['loadSession'])) {
+      return AcpOpenedSession(
+        id,
+        await _request('session/load', params, limited: false),
+        replayed: true,
+      );
+    }
+    if (_says(const ['sessionCapabilities', 'resume'])) {
+      return AcpOpenedSession(
+        id,
+        await _request('session/resume', params, limited: false),
+      );
+    }
+    throw const AcpFailure('This agent cannot open an earlier session');
   }
 
   void _ready() {
-    if (_protocolVersion == null) throw StateError('Initialize ACP before session operations');
+    if (_protocolVersion == null)
+      throw StateError('Initialize ACP before session operations');
   }
 
   void _checkCwd(String cwd) {
@@ -390,32 +649,51 @@ final class AcpClient {
     }
   }
 
-  Future<String> createSession({required String cwd}) => openSession(cwd: cwd).then((session) => session.id);
+  Future<String> createSession({required String cwd}) =>
+      openSession(cwd: cwd).then((session) => session.id);
 
   /// As [createSession], with what the agent said about the session. It is the agent's to say: an agent may send neither.
   Future<AcpOpenedSession> openSession({required String cwd}) {
     _ready();
     _checkCwd(cwd);
-    return _request('session/new', {'cwd': cwd, 'mcpServers': <Object>[]}).then((reply) {
-      final id = reply['sessionId'];
-      if (id is! String || id.isEmpty) throw const AcpFailure('Missing session ID');
-      return AcpOpenedSession(id, reply);
-    });
+    return _request('session/new', {'cwd': cwd, 'mcpServers': <Object>[]}).then(
+      (reply) {
+        final id = reply['sessionId'];
+        if (id is! String || id.isEmpty)
+          throw const AcpFailure('Missing session ID');
+        return AcpOpenedSession(id, reply);
+      },
+    );
   }
 
   /// Sets one of the agent's `configOptions`, such as the model. The answer can change others, so read `configOptions` from it.
-  Future<Map<String, dynamic>> setConfigOption(String sessionId, String configId, String value) {
+  Future<Map<String, dynamic>> setConfigOption(
+    String sessionId,
+    String configId,
+    String value,
+  ) {
     _ready();
-    return _request('session/set_config_option', {'sessionId': sessionId, 'configId': configId, 'value': value});
+    return _request('session/set_config_option', {
+      'sessionId': sessionId,
+      'configId': configId,
+      'value': value,
+    });
   }
 
   /// Sets the agent's mode, for an agent that offers `modes` rather than `configOptions`.
   Future<void> setMode(String sessionId, String modeId) {
     _ready();
-    return _request('session/set_mode', {'sessionId': sessionId, 'modeId': modeId});
+    return _request('session/set_mode', {
+      'sessionId': sessionId,
+      'modeId': modeId,
+    });
   }
 
-  Future<void> resumeSession(String id, {required String cwd, bool replayHistory = false}) {
+  Future<void> resumeSession(
+    String id, {
+    required String cwd,
+    bool replayHistory = false,
+  }) {
     _ready();
     _checkCwd(cwd);
     return _request('session/resume', {
@@ -428,12 +706,30 @@ final class AcpClient {
 
   /// Sends a turn. In v2 it answers the inserted message's id as soon as the agent acknowledges, and the turn ends by a
   /// later event. In v1 the answer is the end of the turn, so this has no deadline and answers null.
-  Future<String?> prompt(String sessionId, String text) async {
+  ///
+  /// [attachments] go with it, and one this agent does not take is refused before anything is sent, since an agent might otherwise
+  /// answer as though it had read what never reached it.
+  Future<String?> prompt(
+    String sessionId,
+    String text, {
+    List<AcpAttachment> attachments = const [],
+  }) async {
     _ready();
-    if (text.trim().isEmpty) throw ArgumentError.value(text, 'text');
+    if (text.trim().isEmpty && attachments.isEmpty)
+      throw ArgumentError.value(text, 'text');
+    for (final attachment in attachments) {
+      if (attachment.isImage ? !takesImages : !takesFiles) {
+        throw AcpFailure(
+          'This agent does not take ${attachment.isImage ? 'images' : 'files'}',
+        );
+      }
+    }
     final params = {
       'sessionId': sessionId,
-      'prompt': [{'type': 'text', 'text': text}],
+      'prompt': [
+        if (text.trim().isNotEmpty) {'type': 'text', 'text': text},
+        for (final attachment in attachments) attachment._block,
+      ],
     };
     if (_protocolVersion == 1) {
       try {
@@ -450,14 +746,21 @@ final class AcpClient {
     }
     final reply = await _request('session/prompt', params);
     final id = reply['messageId'];
-    if (id is! String || id.isEmpty) throw const AcpFailure('Missing inserted message ID');
+    if (id is! String || id.isEmpty)
+      throw const AcpFailure('Missing inserted message ID');
     return id;
   }
 
   Future<void> cancel(String sessionId) async {
     _ready();
     if (_closed) throw const AcpFailure('Connection closed');
-    await _send(jsonEncode({'jsonrpc': '2.0', 'method': 'session/cancel', 'params': {'sessionId': sessionId}}));
+    await _send(
+      jsonEncode({
+        'jsonrpc': '2.0',
+        'method': 'session/cancel',
+        'params': {'sessionId': sessionId},
+      }),
+    );
   }
 
   Future<void> closeSession(String sessionId) async {
@@ -470,14 +773,27 @@ final class AcpClient {
     await _subscription.cancel();
   }
 
-  Future<Map<String, dynamic>> _request(String method, Map<String, Object?> params, {bool limited = true}) async {
+  Future<Map<String, dynamic>> _request(
+    String method,
+    Map<String, Object?> params, {
+    bool limited = true,
+  }) async {
     if (_closed) throw const AcpFailure('Connection closed');
     final id = ++_counter;
     final pending = Completer<Map<String, dynamic>>();
     _pending[id] = pending;
     try {
-      await _send(jsonEncode({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params})).timeout(requestTimeout);
-      return await (limited ? pending.future.timeout(requestTimeout) : pending.future);
+      await _send(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'id': id,
+          'method': method,
+          'params': params,
+        }),
+      ).timeout(requestTimeout);
+      return await (limited
+          ? pending.future.timeout(requestTimeout)
+          : pending.future);
     } on TimeoutException {
       throw AcpFailure('$method: no answer in time');
     } finally {
