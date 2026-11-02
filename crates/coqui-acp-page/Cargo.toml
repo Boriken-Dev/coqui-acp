@@ -1,0 +1,28 @@
+[package]
+name = "coqui-acp-page"
+description = "A person's Agent Client Protocol agents, from a Rust page compiled to WebAssembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["acp", "agent", "wasm", "browser"]
+categories = ["wasm", "web-programming"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+# Exactly the wasm-bindgen command line's version, which has to match it.
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4"
+
+[[example]]
+name = "page"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true

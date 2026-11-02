@@ -12,4 +12,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `coqui-acp`: drive any Agent Client Protocol version 1 agent from blocking code, with permission deciding, resume, extensions and line transports.
 - `coqui_acp` for Dart: a client that speaks version 1 and version 2, whichever the agent selects.
 - `coqui-acp-bridge`: a stdio ACP agent on the network under coqui-peer identity.
-- `coqui-acp-bridge`: `serve --advertise` publishes a DNS-SD record, or a descriptor on loopback; `discover` finds both; `companion install` lets a browser extension ask, over native messaging.
+- `coqui-acp-bridge`: `serve --advertise` publishes a DNS-SD record, or a descriptor on loopback; `discover` finds both; `companion install` lets a browser extension ask, over native messaging; `serve --tls-short-lived` lets a browser pin WebTransport with no certificate authority.
+- `coqui-acp-page`, and `package:coqui_acp/page.dart` for Dart: a person's agents from a page, over `document.acp`.
