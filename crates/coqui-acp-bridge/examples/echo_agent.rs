@@ -12,6 +12,21 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs(300));
         return;
     }
+    // An agent that starts another, as a launcher does, and says who.
+    if let Some(path) = std::env::args()
+        .skip_while(|arg| arg != "--with-child")
+        .nth(1)
+    {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--deaf")
+            .spawn()
+            .unwrap();
+        std::fs::write(path, child.id().to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     let log = std::env::var_os("ECHO_AGENT_LOG");

@@ -42,6 +42,20 @@ pub struct Agent {
     output: Mutex<Receiver<Output>>,
     queued: Arc<AtomicUsize>,
     write_limit: Duration,
+    stopped: AtomicBool,
+}
+
+/// Ends a process and what it started. A failure here only means less was ended than asked: `stop` still ends the child itself.
+fn end_tree(pid: u32) {
+    #[cfg(windows)]
+    let ended = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .output();
+    #[cfg(not(windows))]
+    let ended = Command::new("kill")
+        .args(["-KILL", &format!("-{pid}")])
+        .output();
+    drop(ended);
 }
 
 impl Agent {
@@ -51,12 +65,16 @@ impl Agent {
     ///
     /// The operating system could not start it.
     pub fn spawn(program: &OsString, args: &[OsString], max_line: usize) -> io::Result<Self> {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+        // Its own group, so `stop` can reach what it starts: an adapter is usually a launcher around the program that does the work.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn()?;
         let mut stdin = child
             .stdin
             .take()
@@ -124,6 +142,7 @@ impl Agent {
             output: Mutex::new(output),
             queued,
             write_limit: Duration::from_secs(30),
+            stopped: AtomicBool::new(false),
         })
     }
 
@@ -186,6 +205,10 @@ impl Agent {
     /// The operating system could not end it.
     pub fn stop(&self) -> io::Result<ExitStatus> {
         let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        // Before looking at the child: once it has been reaped its id is free to be someone else's.
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            end_tree(child.id());
+        }
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }

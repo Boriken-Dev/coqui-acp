@@ -858,3 +858,49 @@ fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
         });
     });
 }
+
+fn alive(pid: &str) -> bool {
+    if cfg!(windows) {
+        let listed = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&listed.stdout).contains(pid)
+    } else {
+        Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+#[test]
+fn stopping_an_agent_ends_what_it_started() {
+    let fixture = Fixture::new("tree");
+    let file = fixture.dir.join("child-pid");
+    let program = echo_agent().into_os_string();
+    let args = ["--with-child".into(), file.clone().into_os_string()];
+    let agent = coqui_acp_bridge::agent::Agent::spawn(&program, &args, 1 << 20).unwrap();
+    let until = Instant::now() + WAIT;
+    let child = loop {
+        if let Ok(text) = std::fs::read_to_string(&file)
+            && !text.is_empty()
+        {
+            break text;
+        }
+        assert!(Instant::now() < until, "the child did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(alive(&child), "the check has to be able to see it");
+    agent.stop().unwrap();
+    let until = Instant::now() + WAIT;
+    while alive(&child) {
+        assert!(
+            Instant::now() < until,
+            "what the agent started is still running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
