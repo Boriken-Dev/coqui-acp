@@ -1,0 +1,13 @@
+{
+  "name": "acp-second-provider",
+  "version": "0.0.0",
+  "description": "A second, independent provider of the ACP page contract in docs/browser.md.",
+  "license": "MPL-2.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.4" },
+  "scripts": {
+    "test": "node --test test/conformance.test.mjs test/provider.test.mjs",
+    "test:browser": "node --test --test-concurrency=1 test/browser.test.mjs"
+  }
+}

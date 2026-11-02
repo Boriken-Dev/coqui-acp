@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ACP agents and grants</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; margin: 16px; max-width: 720px; }
+      li { margin: 6px 0; }
+      input[type='text'] { width: 100%; box-sizing: border-box; }
+      label { display: block; margin: 6px 0; }
+    </style>
+  </head>
+  <body>
+    <h1>Agents</h1>
+    <ul id="agents"></ul>
+    <h2>Add one by hand</h2>
+    <label>Address <input type="text" id="add-url" placeholder="ws://127.0.0.1:8765/acp" /></label>
+    <label>Name <input type="text" id="add-label" /></label>
+    <label>Fingerprint <input type="text" id="add-fingerprint" placeholder="sha256:... (optional)" /></label>
+    <label><input type="checkbox" id="add-understood" /> I know nothing proves who answers at this address.</label>
+    <button type="button" id="add">Add</button>
+    <p id="error"></p>
+    <h1>What sites may use</h1>
+    <ul id="grants"></ul>
+    <script type="module" src="manage.js"></script>
+  </body>
+</html>

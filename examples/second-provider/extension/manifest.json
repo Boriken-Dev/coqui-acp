@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "ACP second provider",
+  "version": "0.0.1",
+  "description": "A minimal provider of document.acp: loopback agents with no proof, reported as unverified.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "ACP agents and grants" },
+  "options_page": "manage.html",
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["page-world.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
