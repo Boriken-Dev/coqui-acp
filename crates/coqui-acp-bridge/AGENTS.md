@@ -2,9 +2,9 @@
 
 Header-file-style reference for the `coqui-acp-bridge` crate: its command line and its small library, so it can be used without reading the source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `coqui-net-acl`, `clap` and `rustls`.
+No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `coqui-net-acl`, `clap`, `rustls`, `mdns-sd`, `serde_json` and `url`.
 
-No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `auth`, `pairing`, `relay`.
+No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `auth`, `companion`, `discovery`, `pairing`, `relay`.
 
 ## Command line
 
@@ -20,7 +20,12 @@ coqui-acp-bridge dial wss://... (--expect FP... | --ca-file FILE) [--bearer-file
 coqui-acp-bridge dial ws://loopback --no-peer-proof [--max-backoff-seconds N] -- PROGRAM ARGS...
 coqui-acp-bridge pair-accept --listen ADDR --identity FILE --store DIR [--tls-identity FILE] [--permit NET...] [--deny NET...]
 coqui-acp-bridge pair-dial URL --identity FILE --store DIR [--pin-file FILE] [--ca-file FILE]
+coqui-acp-bridge discover [--seconds N]
+coqui-acp-bridge companion install --extension-id ID...
+coqui-acp-bridge companion uninstall
 ```
+
+Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`.
 
 - **In-band proof (`--identity`):** the WebCrypto handshake, then every message inside its session. It does not depend on TLS, so it works through a reverse proxy that ends TLS, and the proxy can neither read nor inject. The handshake may be text or binary frames; each record after it is one binary frame.
 - **Mutual TLS:** the client's certificate by pin, trust store or CA. The stream is plain ACP protected by that TLS, so it ends where TLS ends and a proxy must vouch for the certificate.
@@ -31,6 +36,9 @@ coqui-acp-bridge pair-dial URL --identity FILE --store DIR [--pin-file FILE] [--
 - `dial` keeps the agent across reconnects, ends with the agent's status, and stops on a wrong certificate, a remote that proves the wrong key, or a remote removed from `--trust-store`. A remote it cannot reach is tried again.
 - `pair-accept` prints the PIN, then its peer id, and waits until someone uses the PIN or it expires; connections run apart, so one that says nothing costs neither the PIN nor the wait, and one wrong try ends it. `pair-dial` reads the PIN from `--pin-file` or standard input and prints the other side's peer id. Both record the peer in `--store`. A pairing connection never serves an agent: reconnect pinned.
 - An identity file holds a P-256 key, created by `keygen`, and by `dial`, `pair-accept` and `pair-dial` when absent. A TLS identity is a separate PEM certificate and key.
+- `serve --advertise LABEL` is off by default. On loopback it writes a descriptor; otherwise it publishes `_acp-agent._tcp` on every interface the listener is bound to, with no secret in it. `--advertise-host` publishes a host name for a certificate a browser accepts; without it, clients get an address. A killed `serve` leaves a descriptor, which the next search removes. The DNS-SD record is not withdrawn on a kill, and expires.
+- `discover` prints one JSON object per line: `label`, `url`, `peer`, `source` (`mdns` or `local`), `webtransport`, `acpVersions`. It is what they claim.
+- `companion install` registers this program, where it is now, for this user's Chrome, Chromium and Edge: the manifest and, on Windows, the registry keys. A browser starts it with `chrome-extension://…/` as its first argument, which selects native messaging instead of the command line.
 - Exit status: the agent's when it ended the bridge; 2 for a bad configuration, a failed pairing, or a remote that failed its proof.
 
 ## `coqui_acp_bridge::relay`
@@ -79,12 +87,54 @@ pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -
 
 `create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out. A refused proof is `Error::Proof`; silence or a failed channel is `Error::Channel`. **Run everything after a proof through `Sealed`**: a plain message on the same channel comes from whoever carries it. `Sealed` closes the channel on anything that does not open, and on `with_check` saying no, which is asked about once a second. Its `close` sends the session's close record first; `receive` answers `None` only after the peer's, and `Failure::PathLost` for a connection cut before it, which is how a relay would hide what it held back. After `Failure::NoProgress` from its `send`, send the same message again.
 
+## `coqui_acp_bridge::discovery`
+
+```rust
+pub const SERVICE_TYPE: &str = "_acp-agent._tcp.local.";
+pub const DEFAULT_PATH: &str = "/acp";
+pub const DESCRIPTORS_ENV: &str = "COQUI_ACP_DESCRIPTORS";
+pub const MAX_CANDIDATES: usize = 64;
+pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub source: Source, pub webtransport: Option<u16>, pub acp_versions: Vec<u32> }  // non_exhaustive
+pub enum Source { Network, ThisMachine }  // non_exhaustive
+pub fn Candidate::to_json(&self) -> Value
+pub fn Advertisement::new(label: &str, tls: bool) -> Result<Advertisement, Error>
+pub fn Advertisement::with_peer(self, peer: Option<String>) -> Advertisement
+pub const fn Advertisement::with_webtransport(self, port: Option<u16>) -> Advertisement
+pub fn Advertisement::with_host(self, host: Option<String>) -> Result<Advertisement, Error>
+pub fn advertise(advertisement: &Advertisement, bound: SocketAddr) -> Result<Advertised, Error>   // withdrawn on drop
+pub fn discover(wait: Duration) -> Vec<Candidate>                 // descriptors, then the link; a failed mDNS start leaves the descriptors
+pub fn browse(wait: Duration) -> Result<Vec<Candidate>, Error>    // the link only
+pub fn read_descriptors(dir: &Path) -> Vec<Candidate>
+pub fn descriptors_dir() -> Option<PathBuf>
+pub fn candidate_from(record: &Record<'_>) -> Option<Candidate>
+```
+
+`candidate_from` reads an answer anyone on the link can send: it refuses a loopback, link-local or multicast address, anything plain, and an unknown `txtvers` or `proto`, cuts the label down, and treats a malformed peer as none. A descriptor may name only loopback.
+
+## `coqui_acp_bridge::companion`
+
+```rust
+pub const HOST_NAME: &str = "dev.boriken.coqui_acp_bridge";
+pub const MAX_REQUEST: usize = 65_536;
+pub const MAX_REPLY: usize = 1_048_576;
+pub fn started_by_browser(first_argument: &str) -> bool
+pub fn read_message(input: &mut impl Read) -> io::Result<Option<Vec<u8>>>
+pub fn write_message(output: &mut impl Write, message: &[u8]) -> io::Result<()>
+pub fn run(input: &mut impl Read, output: &mut impl Write) -> io::Result<()>
+pub fn install(extensions: &[String]) -> Result<Vec<String>, Error>
+pub fn uninstall() -> Result<(), Error>
+```
+
+It answers `{ "op": "discover", "seconds": N }`, at most 10 seconds, and nothing else; it carries no agent traffic.
+
 ## Errors
 
-`coqui_acp_bridge::Error` (`#[non_exhaustive]`): `Channel(Failure)`, `Proof(String)`, `Agent(io::Error)`, `Identity(String)`. A message never quotes a key file.
+`coqui_acp_bridge::Error` (`#[non_exhaustive]`): `Channel(Failure)`, `Proof(String)`, `Agent(io::Error)`, `Identity(String)`, `Discovery(String)`. A message never quotes a key file.
 
 ## Gotchas
 
+- A browser takes a self-signed certificate only for WebTransport with `serverCertificateHashes`, so a `wss://` address `discover` gives may not open in a browser without a certificate it accepts.
+- mDNS stays on the link: it does not cross a router or a site-to-site VPN.
 - A browser cannot do the PIN exchange from this crate; `pair-dial` is native.
 - Behind a reverse proxy every peer has the proxy's address, so `--permit`, `--deny` and the store's per-source limit on waiting entries see the proxy. Bind to loopback and filter at the proxy.
 - `dial` keeps the agent across links, so lines not yet sent go to the next link, which may be another allowed peer.
