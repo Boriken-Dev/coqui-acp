@@ -709,9 +709,12 @@ fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
     if args.mcp_offers {
         let program = std::env::current_exe()
             .map_err(|error| format!("this program cannot find itself: {error}"))?;
+        let tokens = home::dir()
+            .ok_or("no home directory for this user, which an offer's token needs")?
+            .join("offers");
         services = services.with(
             mcp_offer::OFFER_PROTOCOL,
-            mcp_offer::handler(program, vec!["mcp-shim".to_owned()]),
+            mcp_offer::handler(program, vec!["mcp-shim".to_owned()], tokens),
         );
         every.push(mcp_offer::OFFER_PROTOCOL.to_owned());
     }
@@ -1731,6 +1734,12 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
 }
 
 fn grant_mode(peer: &str, protocol: &str, revoke: bool) -> Result<ExitCode, String> {
+    // `PairedGrants` gives these to whoever is paired, so taking them away here would say it worked and change nothing.
+    if revoke && (protocol == ACP || protocol == mcp_offer::OFFER_PROTOCOL) {
+        return Err(format!(
+            "{protocol} comes with being paired, so this cannot take it away: remove the peer from the trust store instead"
+        ));
+    }
     let target = match protocol.strip_prefix("tcp/1:") {
         Some(target) => Some(
             target

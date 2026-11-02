@@ -958,6 +958,7 @@ fn an_agent_reaches_the_tools_of_the_peer_that_offered_them_through_the_real_shi
         let stream = mux.open_with("mcp-offer/1", b"canoa-browser").unwrap();
         let entry: serde_json::Value =
             serde_json::from_slice(&stream.receive(Some(WAIT)).unwrap().unwrap()).unwrap();
+        assert_eq!(entry["type"], "stdio");
         assert_eq!(entry["name"], "canoa-browser");
         assert!(Path::new(entry["command"].as_str().unwrap()).is_absolute());
         let mut shim = start_shim(&entry);
@@ -996,6 +997,24 @@ fn an_agent_reaches_the_tools_of_the_peer_that_offered_them_through_the_real_shi
         }
         drop(to_shim);
     });
+}
+
+#[test]
+fn what_comes_with_pairing_cannot_be_revoked_by_saying_it_was() {
+    let fixture = Fixture::new("revoke-paired");
+    for protocol in ["acp/1", "mcp-offer/1"] {
+        let output = Command::new(BRIDGE)
+            .args(["grant", "sha256:peer", protocol, "--revoke"])
+            .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{protocol}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("comes with being paired"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
