@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
-const ENV: &str = coqui_acp_bridge::discovery::DESCRIPTORS_ENV;
+const ENV: &str = coqui_agentic_peer::discovery::DESCRIPTORS_ENV;
 
 struct Fixture {
     dir: PathBuf,
@@ -363,6 +363,129 @@ fn nothing_is_announced_until_every_listener_is_bound() {
     assert_eq!(std::fs::read_dir(fixture.descriptors()).unwrap().count(), 0);
 }
 
+/// A child that cannot outlive the test, whatever fails.
+struct Running(Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `dial` starts its agent before it connects, so this has to be a program that runs.
+fn echo_agent() -> PathBuf {
+    let status = Command::new(env!("CARGO"))
+        .args(["build", "-p", "coqui-acp-bridge", "--example", "echo_agent"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut path = PathBuf::from(BRIDGE);
+    path.pop();
+    path.push("examples");
+    path.push(format!("echo_agent{}", std::env::consts::EXE_SUFFIX));
+    path
+}
+
+/// One pairing, and then every command under the same two homes, with nothing else named.
+#[test]
+fn one_pairing_serves_every_command() {
+    let fixture = Fixture::new("paired");
+    let agent = echo_agent();
+    let (server_home, client_home) = (fixture.dir.join("server"), fixture.dir.join("client"));
+    let home = coqui_agentic_peer::home::HOME_ENV;
+    let port = free_tcp_port();
+    let mut accept = Running(
+        Command::new(BRIDGE)
+            .args(["pair-accept", "--listen", &format!("127.0.0.1:{port}")])
+            .env(home, &server_home)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut out = BufReader::new(accept.0.stdout.take().unwrap());
+    let mut pin = String::new();
+    out.read_line(&mut pin).unwrap();
+    let mut dial = Running(
+        Command::new(BRIDGE)
+            .args(["pair-dial", &format!("ws://127.0.0.1:{port}/pair")])
+            .env(home, &client_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    dial.0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(pin.as_bytes())
+        .unwrap();
+    drop(dial.0.stdin.take());
+    assert!(dial.0.wait().unwrap().success());
+    assert!(accept.0.wait().unwrap().success());
+
+    let port = free_tcp_port();
+    let mut serve = Running(
+        Command::new(BRIDGE)
+            .args([
+                "serve",
+                "--paired",
+                "--listen",
+                &format!("127.0.0.1:{port}"),
+                "--",
+            ])
+            .arg(&agent)
+            .env(home, &server_home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let said = serve.0.stderr.take().unwrap();
+    let (lines, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(said).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let next = || {
+        heard
+            .recv_timeout(Duration::from_secs(20))
+            .expect("serve said nothing in time")
+    };
+    assert!(next().starts_with("listening on"));
+    let _client = Running(
+        Command::new(BRIDGE)
+            .args([
+                "dial",
+                &format!("ws://127.0.0.1:{port}/acp"),
+                "--paired",
+                "--",
+            ])
+            .arg(&agent)
+            .env(home, &client_home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    // Proven both ways under what the pairing recorded, with no second pairing and no path named anywhere.
+    assert!(next().ends_with("proven"));
+}
+
+fn free_tcp_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 /// A native host as a browser runs it: its origin as the first argument, and framed JSON on its standard streams.
 struct NativeHost(Child);
 
@@ -440,7 +563,7 @@ fn the_companion_ends_on_a_length_no_browser_would_send() {
 #[test]
 #[ignore = "needs multicast on this machine's interfaces"]
 fn a_record_on_the_link_is_found_with_what_it_claims() {
-    use coqui_acp_bridge::discovery::{Advertisement, Source, advertise, browse};
+    use coqui_agentic_peer::discovery::{Advertisement, Source, advertise, browse};
     let label = format!("coqui-acp-test-{}", std::process::id());
     let peer = "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
     let advertisement = Advertisement::new(&label, true)

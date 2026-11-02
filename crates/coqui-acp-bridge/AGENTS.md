@@ -4,7 +4,7 @@ Header-file-style reference for the `coqui-acp-bridge` crate: its command line a
 
 No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `coqui-net-acl`, `clap`, `rustls`, `mdns-sd`, `serde_json` and `url`.
 
-No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `auth`, `companion`, `discovery`, `pairing`, `relay`.
+No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `relay`. Proof, pairing, discovery and the companion are `coqui-agentic-peer`'s; see its `AGENTS.md`.
 
 ## Command line
 
@@ -18,8 +18,10 @@ coqui-acp-bridge dial URL --identity FILE (--peer ID... | --trust-store DIR) [--
 coqui-acp-bridge dial URL --tls-identity FILE (--expect FP... | --ca-file FILE) [--bearer-file FILE] [--max-backoff-seconds N] -- PROGRAM ARGS...
 coqui-acp-bridge dial wss://... (--expect FP... | --ca-file FILE) [--bearer-file FILE] [--max-backoff-seconds N] -- PROGRAM ARGS...
 coqui-acp-bridge dial ws://loopback --no-peer-proof [--max-backoff-seconds N] -- PROGRAM ARGS...
-coqui-acp-bridge pair-accept --listen ADDR --identity FILE --store DIR [--tls-identity FILE] [--permit NET...] [--deny NET...]
-coqui-acp-bridge pair-dial URL --identity FILE --store DIR [--pin-file FILE] [--ca-file FILE]
+coqui-acp-bridge pair-accept --listen ADDR [--identity FILE] [--store DIR] [--tls-identity FILE] [--permit NET...] [--deny NET...]
+coqui-acp-bridge pair-dial URL [--identity FILE] [--store DIR] [--pin-file FILE] [--ca-file FILE]
+coqui-acp-bridge serve --paired [--listen ADDR] [--tls-identity FILE | --tls-short-lived] ... -- PROGRAM ARGS...
+coqui-acp-bridge dial URL --paired [--ca-file FILE [--bearer-file FILE]] [--max-backoff-seconds N] -- PROGRAM ARGS...
 coqui-acp-bridge discover [--seconds N]
 coqui-acp-bridge companion install --extension-id ID...
 coqui-acp-bridge companion uninstall
@@ -27,6 +29,7 @@ coqui-acp-bridge companion uninstall
 
 Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`. With the in-band proof, `--tls-short-lived` replaces `--tls-identity`.
 
+- **One pairing:** `pair-accept` and `pair-dial` default to this user's own identity and trust store (`coqui_agentic_peer::home`), and `serve --paired` and `dial --paired` read them, so one pairing serves every command, with nothing to name.
 - **In-band proof (`--identity`):** the WebCrypto handshake, then every message inside its session. It does not depend on TLS, so it works through a reverse proxy that ends TLS, and the proxy can neither read nor inject. The handshake may be text or binary frames; each record after it is one binary frame.
 - **Mutual TLS:** the client's certificate by pin, trust store or CA. The stream is plain ACP protected by that TLS, so it ends where TLS ends and a proxy must vouch for the certificate.
 - **TLS checking only the server:** `dial` with `--expect` or `--ca-file` and nothing else. `serve --no-peer-proof --tls-identity` is its other end.
@@ -61,77 +64,6 @@ pub fn Agent::stop(&self) -> io::Result<ExitStatus>
 ```
 
 Standard error stays on this process's. Dropping an `Agent` ends the process, not any process it started.
-
-## `coqui_acp_bridge::pairing`
-
-```rust
-pub fn desk() -> Result<PairingDesk, Error>   // PIN runs only
-pub fn respond<C: Channel>(channel: &C, identity: &Identity, store: &TrustStore, desk: &PairingDesk, source: Option<SocketAddr>, limit: Duration) -> Result<Paired, Error>
-pub fn join<C: Channel>(channel: &C, identity: &Identity, pin: Pin, store: &TrustStore, limit: Duration) -> Result<Paired, Error>
-```
-
-PIN pairing over any channel in binary frames, with the PIN shown by the responder: the WebCrypto handshake admitting anyone who proves a key, which yields a `PairingSession` that can carry nothing but this exchange, sealed and bound to a secret export of it. Only PIN mode with the PIN the responder shows, and a joiner asking for anything else is refused at once. It pairs the WebCrypto key. The connection then ends, and the peer returns pinned.
-
-## `coqui_acp_bridge::auth`
-
-```rust
-pub const MAX_PROOF_MESSAGE: usize = 3072;
-pub const RECORD_OVERHEAD: usize = 17;
-pub fn read_identity(path: &Path) -> Result<Identity, Error>
-pub fn create_identity(path: &Path) -> Result<PeerId, Error>
-pub fn prove<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
-pub fn prove_out<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
-pub struct Sealed<'a, C>;   // impl Channel
-pub fn Sealed::new(channel: &'a C, session: Session) -> Sealed<'a, C>
-pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -> Sealed<'a, C>
-```
-
-`create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out. A refused proof is `Error::Proof`; silence or a failed channel is `Error::Channel`. **Run everything after a proof through `Sealed`**: a plain message on the same channel comes from whoever carries it. `Sealed` closes the channel on anything that does not open, and on `with_check` saying no, which is asked about once a second. Its `close` sends the session's close record first; `receive` answers `None` only after the peer's, and `Failure::PathLost` for a connection cut before it, which is how a relay would hide what it held back. After `Failure::NoProgress` from its `send`, send the same message again.
-
-## `coqui_acp_bridge::discovery`
-
-```rust
-pub const SERVICE_TYPE: &str = "_acp-agent._tcp.local.";
-pub const DEFAULT_PATH: &str = "/acp";
-pub const DESCRIPTORS_ENV: &str = "COQUI_ACP_DESCRIPTORS";
-pub const MAX_CANDIDATES: usize = 64;
-pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub source: Source, pub webtransport: Option<u16>, pub webtransport_hash: Option<String>, pub acp_versions: Vec<u32> }  // non_exhaustive
-pub enum Source { Network, ThisMachine }  // non_exhaustive
-pub fn Candidate::to_json(&self) -> Value
-pub fn Advertisement::new(label: &str, tls: bool) -> Result<Advertisement, Error>
-pub fn Advertisement::with_peer(self, peer: Option<String>) -> Advertisement
-pub const fn Advertisement::with_webtransport(self, port: Option<u16>) -> Advertisement
-pub fn Advertisement::with_webtransport_hash(self, hash: Option<String>) -> Advertisement
-pub fn Advertisement::with_host(self, host: Option<String>) -> Result<Advertisement, Error>
-pub fn advertise(advertisement: &Advertisement, bound: SocketAddr) -> Result<Advertised, Error>   // withdrawn on drop
-pub fn discover(wait: Duration) -> Vec<Candidate>                 // descriptors, then the link; a failed mDNS start leaves the descriptors
-pub fn browse(wait: Duration) -> Result<Vec<Candidate>, Error>    // the link only
-pub fn read_descriptors(dir: &Path) -> Vec<Candidate>
-pub fn descriptors_dir() -> Option<PathBuf>
-pub fn candidate_from(record: &Record<'_>) -> Option<Candidate>
-```
-
-`candidate_from` reads an answer anyone on the link can send: it refuses this machine in any spelling, a link-local or multicast address, anything plain, no or a malformed key, and an unknown `txtvers` or `proto`, and cuts the label down, removing control and format characters. A descriptor may name only loopback, and may have no key. `read_descriptors` takes only regular files, spends at most 5 seconds, and believes nothing from a directory others can write to on Unix.
-
-## `coqui_acp_bridge::companion`
-
-```rust
-pub const HOST_NAME: &str = "dev.boriken.coqui_acp_bridge";
-pub const MAX_REQUEST: usize = 65_536;
-pub const MAX_REPLY: usize = 1_048_576;
-pub fn started_by_browser(first_argument: &str) -> bool
-pub fn read_message(input: &mut impl Read) -> io::Result<Option<Vec<u8>>>
-pub fn write_message(output: &mut impl Write, message: &[u8]) -> io::Result<()>
-pub fn run(input: &mut impl Read, output: &mut impl Write) -> io::Result<()>
-pub fn install(extensions: &[String]) -> Result<Vec<String>, Error>
-pub fn uninstall() -> Result<(), Error>
-```
-
-It answers `{ "op": "discover", "seconds": N }`, at most 10 seconds, and nothing else; it carries no agent traffic.
-
-## Errors
-
-`coqui_acp_bridge::Error` (`#[non_exhaustive]`): `Channel(Failure)`, `Proof(String)`, `Agent(io::Error)`, `Identity(String)`, `Discovery(String)`. A message never quotes a key file.
 
 ## Gotchas
 

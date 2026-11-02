@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_acp_bridge::pairing;
+use coqui_agentic_peer::pairing;
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pairing, Pin, PinRole};
 use coqui_peer_webcrypto::{Identity, TrustStore, random};
 use coqui_web::websocket::{self, Frames};
@@ -445,7 +445,7 @@ fn run_joiner(
     sides: &Sides,
     asked: Pairing,
     limit: Duration,
-) -> Result<(), coqui_acp_bridge::Error> {
+) -> Result<(), coqui_agentic_peer::Error> {
     let (near, far) = binary_pair();
     let desk = pairing::desk().unwrap();
     let _ = desk.show_pin().unwrap();

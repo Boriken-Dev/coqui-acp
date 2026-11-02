@@ -621,7 +621,7 @@ fn binary_dial(url: &url::Url) -> coqui_web::websocket::Channel {
 
 #[test]
 fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
-    use coqui_acp_bridge::auth::{Sealed, prove_out};
+    use coqui_agentic_peer::auth::{Sealed, prove_out};
     use coqui_peer_webcrypto::{Identity, Trust, TrustStore, WebCrypto};
     let mut fixture = Fixture::new("removed");
     let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
@@ -656,7 +656,7 @@ fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
 
 #[test]
 fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
-    use coqui_acp_bridge::auth::{Sealed, prove_out};
+    use coqui_agentic_peer::auth::{Sealed, prove_out};
     use coqui_peer_webcrypto::{Identity, Trust, TrustStore, WebCrypto};
     let mut fixture = Fixture::new("plainafter");
     let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
@@ -691,7 +691,7 @@ fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
 
 #[test]
 fn a_link_cut_before_the_close_record_is_a_failure_and_a_close_record_is_an_orderly_end() {
-    use coqui_acp_bridge::auth::{Sealed, prove, prove_out};
+    use coqui_agentic_peer::auth::{Sealed, prove, prove_out};
     use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
     let fixture = Fixture::new("closerecord");
     let near = Identity::open_or_create(&fixture.dir.join("near.pem")).unwrap();
@@ -823,7 +823,7 @@ fn start_in_band_dial(
 
 #[test]
 fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject() {
-    use coqui_acp_bridge::auth::{Sealed, prove};
+    use coqui_agentic_peer::auth::{Sealed, prove};
     use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
     let fixture = Fixture::new("dialproxy");
     // Built first: another test's build can hold the lock for longer than the listeners would wait.
