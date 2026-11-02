@@ -53,7 +53,7 @@ fn end_tree(pid: u32) {
         .output();
     #[cfg(not(windows))]
     let ended = Command::new("kill")
-        .args(["-KILL", &format!("-{pid}")])
+        .args(["-s", "KILL", "--", &format!("-{pid}")])
         .output();
     drop(ended);
 }

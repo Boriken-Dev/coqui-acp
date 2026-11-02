@@ -859,6 +859,7 @@ fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
     });
 }
 
+/// A killed process stays listed as a zombie until something reaps it, and has ended by then, so that does not count.
 fn alive(pid: &str) -> bool {
     if cfg!(windows) {
         let listed = Command::new("tasklist")
@@ -867,12 +868,13 @@ fn alive(pid: &str) -> bool {
             .unwrap();
         String::from_utf8_lossy(&listed.stdout).contains(pid)
     } else {
-        Command::new("kill")
-            .args(["-0", pid])
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success()
+        let listed = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&listed.stdout);
+        let state = state.trim();
+        !state.is_empty() && !state.starts_with('Z')
     }
 }
 
