@@ -498,9 +498,23 @@ fn option_kind(kind: &PermissionOptionKind) -> &'static str {
 }
 
 /// Answers `session/request_permission` through the decider, on a thread of its own: it may wait for a person.
+/// An agent has been seen to go ahead with the tool on an error answer, so anything that keeps this from being decided is a
+/// cancelled outcome and an event, and never an error.
+fn not_decided(shared: &Shared, why: &str) -> Result<Value, RpcError> {
+    shared.emit(Event::Blocked(why.to_owned()));
+    serde_json::to_value(RequestPermissionResponse::new(
+        RequestPermissionOutcome::Cancelled,
+    ))
+    .map_err(|error| RpcError::internal_error().data(error.to_string()))
+}
+
 async fn permission(shared: &Arc<Shared>, params: Value) -> Result<Value, RpcError> {
-    let request: RequestPermissionRequest =
-        serde_json::from_value(params).map_err(|_| RpcError::invalid_params())?;
+    let Ok(request) = serde_json::from_value::<RequestPermissionRequest>(params) else {
+        return not_decided(
+            shared,
+            "the agent asked leave in a form this client cannot read",
+        );
+    };
     let id = request.tool_call.tool_call_id.0.to_string();
     let (kind, refused) = {
         let mut turn = shared.turn();
@@ -535,12 +549,17 @@ async fn permission(shared: &Arc<Shared>, params: Value) -> Result<Value, RpcErr
         let (answer, decided) = oneshot::channel();
         let decider = shared.decider.clone();
         let for_decider = asked.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("coqui-acp-permission".to_owned())
             .spawn(move || {
                 let _ = answer.send(decider.decide(&for_decider));
-            })
-            .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            });
+        if spawned.is_err() {
+            return not_decided(
+                shared,
+                "nothing could be started to decide what the agent asked",
+            );
+        }
         decided
             .await
             .unwrap_or_else(|_| Decision::Deny("the decision was lost".to_owned()))
@@ -609,7 +628,10 @@ async fn call(
     match within(limit, cx.send_request(message).block_task()).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(Error::Refused(format!("{method}: {}", error_text(&error)))),
-        Err(()) => Err(Error::Timeout(method.to_owned())),
+        Err(()) => Err(Error::Timeout {
+            what: method.to_owned(),
+            limit: limit.unwrap_or_default(),
+        }),
     }
 }
 

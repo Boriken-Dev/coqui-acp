@@ -75,13 +75,18 @@ impl Agent {
 
     /// Asks the client something and returns the response's result.
     fn ask(&mut self, method: &str, params: &Value) -> Value {
+        self.ask_raw(method, params)["result"].clone()
+    }
+
+    /// The whole answer, which may be an error.
+    fn ask_raw(&mut self, method: &str, params: &Value) -> Value {
         self.next_id += 1;
         let id = self.next_id;
         self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         loop {
             let message = self.read().expect("the client answers");
             if message.get("id") == Some(&json!(id)) && message.get("method").is_none() {
-                return message["result"].clone();
+                return message;
             }
         }
     }
@@ -285,8 +290,53 @@ fn a_silent_initialize_times_out_with_its_name() {
         .initialize_timeout(Some(Duration::from_millis(100)))
         .connect(transport)
         .unwrap_err();
-    assert_eq!(error, Error::Timeout("initialize".to_owned()));
+    assert_eq!(
+        error,
+        Error::Timeout {
+            what: "initialize".to_owned(),
+            limit: Duration::from_millis(100),
+        }
+    );
+    assert_eq!(error.to_string(), "initialize: no answer within 100 ms");
     drop(agent);
+}
+
+/// A real adapter goes ahead with the tool on an error answer, so a request this client cannot read has to be refused as an outcome.
+#[test]
+fn a_permission_request_that_cannot_be_read_is_cancelled_never_an_error() {
+    let (agent, transport) = Agent::pair();
+    let answer = Arc::new(Mutex::new(None));
+    let kept = answer.clone();
+    thread::spawn(move || {
+        let mut agent = agent;
+        while let Some(message) = agent.read() {
+            let id = message.get("id").cloned();
+            match message.get("method").and_then(Value::as_str) {
+                Some("session/prompt") => {
+                    let said = agent.ask_raw(
+                        "session/request_permission",
+                        &json!({"sessionId": "s1", "toolCall": "not an object"}),
+                    );
+                    *kept.lock().unwrap() = Some(said);
+                    agent.reply(id.as_ref().unwrap(), &json!({"stopReason": "end_turn"}));
+                }
+                Some(method) if id.is_some() => {
+                    agent.reply(id.as_ref().unwrap(), &plain(method).unwrap());
+                }
+                _ => {}
+            }
+        }
+    });
+    let session = Client::builder("/w")
+        .prompt("go")
+        .decider(Arc::new(Fixed(Decision::Allow)))
+        .connect(transport)
+        .unwrap();
+    let events = events_until(&session, 2);
+    assert!(matches!(&events[0], Event::Blocked(_)), "{events:?}");
+    let said = answer.lock().unwrap().clone().unwrap();
+    assert_eq!(said["result"]["outcome"]["outcome"], "cancelled", "{said}");
+    assert!(said.get("error").is_none(), "{said}");
 }
 
 #[test]

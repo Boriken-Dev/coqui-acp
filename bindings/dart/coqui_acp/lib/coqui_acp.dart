@@ -402,9 +402,17 @@ final class AcpClient {
   }
 
   Future<void> _answerPermission(Object id, Object? params) async {
+    // An agent has been seen to go ahead with the tool on an error answer, so what cannot be asked is cancelled, and said.
     if (params is! Map || params['options'] is! List) {
+      _emit(
+        const AcpBlocked(
+          'the agent asked leave in a form this client cannot read',
+        ),
+      );
       _reply(id, {
-        'error': {'code': -32602, 'message': 'Invalid params'},
+        'result': {
+          'outcome': {'outcome': 'cancelled'},
+        },
       });
       return;
     }

@@ -428,18 +428,22 @@ void main() {
       },
     );
 
-    test('with no options is invalid, and the decider is not asked', () async {
-      final (agent, acp) = await opened(
-        decider: (_) async => throw StateError('asked'),
-      );
-      agent.write({
-        'id': 9,
-        'method': 'session/request_permission',
-        'params': {'sessionId': 's1', 'title': 'x'},
-      });
-      final answer = await agent.read();
-      expect((answer['error'] as Map)['code'], -32602);
-      await acp.close();
-    });
+    test(
+      'with no options is cancelled, never an error, and the decider is not asked',
+      () async {
+        final (agent, acp) = await opened(
+          decider: (_) async => throw StateError('asked'),
+        );
+        agent.write({
+          'id': 9,
+          'method': 'session/request_permission',
+          'params': {'sessionId': 's1', 'title': 'x'},
+        });
+        final answer = await agent.read();
+        expect(answer.containsKey('error'), isFalse);
+        expect((answer['result'] as Map)['outcome'], {'outcome': 'cancelled'});
+        await acp.close();
+      },
+    );
   });
 }

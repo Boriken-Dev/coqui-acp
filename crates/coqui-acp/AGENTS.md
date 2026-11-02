@@ -107,7 +107,7 @@ A transport over blocking I/O, such as a process's pipes, one JSON-RPC message p
 
 ## Errors
 
-`Error` (`#[non_exhaustive]`): `Refused(String)` in the agent's own words, `Unsupported(String)`, `Timeout(String)` naming the operation, `Closed`, `Thread`.
+`Error` (`#[non_exhaustive]`): `Refused(String)` in the agent's own words, `Unsupported(String)`, `Timeout { what, limit }` naming the operation and how long it had, `Closed`, `Thread`.
 
 ## Gotchas
 
