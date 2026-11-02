@@ -12,9 +12,9 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -263,9 +263,9 @@ struct Forward {
     #[arg(long, required_unless_present = "paired")]
     identity: Option<PathBuf>,
     /// Use this user's identity, and prove the remote against whoever this user has paired with.
-    #[arg(long, conflicts_with_all = ["identity", "peers"])]
+    #[arg(long, conflicts_with = "identity")]
     paired: bool,
-    /// A peer id the remote must prove, with `--identity`. Repeat for more.
+    /// A peer id the remote must prove with `--identity`, and who `--allow-target` is for. Repeat for more.
     #[arg(long = "peer", required_unless_present = "paired")]
     peers: Vec<String>,
     /// A PEM bundle of certificate authorities the remote certificate must chain to, with wss://.
@@ -499,11 +499,26 @@ fn parse_local(text: &str) -> Result<(SocketAddr, Target), String> {
     ))
 }
 
-/// One listener for the life of a link. A port that cannot be had is said once: the rest of the link is still good.
+/// One listener for the life of a link. A port someone else holds is said once and tried again: the rest of the link is still good,
+/// and whoever holds it would otherwise be given this forward's clients for good.
 fn listen_for<C: Channel>(mux: &mux::Mux<'_, C>, local: SocketAddr, target: &Target) {
-    let listener = match std::net::TcpListener::bind(local) {
-        Ok(listener) => listener,
-        Err(error) => return eprintln!("could not listen on {local}: {error}"),
+    let mut said = false;
+    let listener = loop {
+        match std::net::TcpListener::bind(local) {
+            Ok(listener) => break listener,
+            Err(error) => {
+                if !said {
+                    eprintln!("could not listen on {local}, trying again: {error}");
+                    said = true;
+                }
+                for _ in 0..50 {
+                    if mux.link_state() != mux::LinkState::Up {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
     };
     eprintln!("{local} forwards to {target}");
     if let Err(error) = forward::listen(mux, &listener, target) {
@@ -526,6 +541,51 @@ struct Service {
 struct Links {
     services: Services,
     grants: Box<dyn PeerStore>,
+    open: LinkCounts,
+}
+
+/// How many links are up. A stream's limits are per link, so without this one key could open as many of everything as it liked.
+#[derive(Default)]
+struct LinkCounts(Mutex<BTreeMap<String, usize>>);
+
+/// Links from one peer. Each can hold its own streams, so this also bounds what forwarding a peer can have open.
+const MAX_LINKS_PER_PEER: usize = 8;
+/// Links from everyone together.
+const MAX_LINKS: usize = 256;
+/// How long a proven peer may take to say whether it is a link or a plain client.
+const FIRST_MESSAGE: Duration = Duration::from_secs(60);
+
+impl LinkCounts {
+    fn enter<'a>(&'a self, peer: &str) -> Option<LinkEntered<'a>> {
+        let mut open = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let total: usize = open.values().sum();
+        let mine = open.entry(peer.to_owned()).or_default();
+        if *mine >= MAX_LINKS_PER_PEER || total >= MAX_LINKS {
+            return None;
+        }
+        *mine += 1;
+        Some(LinkEntered {
+            counts: self,
+            peer: peer.to_owned(),
+        })
+    }
+}
+
+struct LinkEntered<'a> {
+    counts: &'a LinkCounts,
+    peer: String,
+}
+
+impl Drop for LinkEntered<'_> {
+    fn drop(&mut self) {
+        let mut open = self.counts.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(mine) = open.get_mut(&self.peer) {
+            *mine -= 1;
+            if *mine == 0 {
+                open.remove(&self.peer);
+            }
+        }
+    }
 }
 
 /// The token of the agent named after `--`.
@@ -605,6 +665,11 @@ fn parse_service(text: &str) -> Result<(String, OsString), String> {
             "a protocol token is printable, with no spaces, commas or equals signs".to_owned(),
         );
     }
+    if token.starts_with(forward::TCP_PROTOCOL) || token == link::LINK_PROTOCOL || token == ACP {
+        return Err(format!(
+            "{token} is not for --service: it means something on every link"
+        ));
+    }
     if program.is_empty() {
         return Err("a service is TOKEN=PROGRAM".to_owned());
     }
@@ -659,7 +724,11 @@ fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
             named: (!named.is_empty()).then_some(named),
         })
     };
-    Ok(Some(Links { services, grants }))
+    Ok(Some(Links {
+        services,
+        grants,
+        open: LinkCounts::default(),
+    }))
 }
 
 impl Service {
@@ -705,7 +774,10 @@ impl Service {
         eprintln!("{peer} proven");
         let mut options = link::Options::default();
         options.limits.max_message = MAX_LINE;
-        match channel.receive(None) {
+        let Some(_entered) = links.open.enter(peer) else {
+            return eprintln!("{peer} was turned away: it has as many links as it may");
+        };
+        match channel.receive(Some(FIRST_MESSAGE)) {
             Ok(Some(first)) if mux::starts_mux(&first) => {
                 let host = link::Host {
                     store: &*links.grants,
@@ -1488,13 +1560,19 @@ fn discover_mode(seconds: u64) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// What the remote may reach from here, whichever key proves itself: the proof already checked it is one this side wanted.
-struct AllowedTargets(BTreeSet<String>);
+/// What the remote may reach from here, for the peers named: another key this user paired with answering at the same address gets
+/// nothing.
+struct AllowedTargets {
+    peers: BTreeSet<String>,
+    grants: BTreeSet<String>,
+}
 
 impl PeerStore for AllowedTargets {
     fn get(&self, peer: &str) -> Result<Option<PeerRecord>, Error> {
         let mut record = PeerRecord::new(peer);
-        record.grants.clone_from(&self.0);
+        if self.peers.contains(peer) {
+            record.grants.clone_from(&self.grants);
+        }
         Ok(Some(record))
     }
 
@@ -1528,6 +1606,9 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
     if locals.is_empty() && grants.is_empty() {
         return Err("give --local or --allow-target: otherwise this forwards nothing".to_owned());
     }
+    if !grants.is_empty() && args.peers.is_empty() {
+        return Err("--allow-target needs --peer: it says who may reach it".to_owned());
+    }
     let (method, store) = if args.paired {
         let identity = home::identity(None).map_err(|error| error.to_string())?;
         let store = Arc::new(home::store(None).map_err(|error| error.to_string())?);
@@ -1552,7 +1633,10 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
     if args.url.scheme() == "wss" {
         dialer = dialer.with_tls(in_band_tls(args.ca_file.as_ref())?);
     }
-    let allowed = AllowedTargets(grants);
+    let allowed = AllowedTargets {
+        peers: args.peers.iter().cloned().collect(),
+        grants,
+    };
     let services = forward::serving(Services::default());
     let mut options = link::Options::default();
     options.limits.max_message = MAX_LINE;
@@ -1648,6 +1732,12 @@ fn grant_mode(peer: &str, protocol: &str, revoke: bool) -> Result<ExitCode, Stri
         }
         (None, true) => {
             record.grants.remove(protocol);
+            // Otherwise a later grant of one target would bring back all the old ones.
+            if protocol == forward::TCP_PROTOCOL {
+                record
+                    .grants
+                    .retain(|grant| Target::from_grant_token(grant).is_none());
+            }
         }
     }
     store.put(&record).map_err(|error| error.to_string())?;

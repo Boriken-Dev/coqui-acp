@@ -593,3 +593,268 @@ fn a_listener_beyond_loopback_is_refused() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn a_service_cannot_stand_in_for_a_grant_or_for_what_every_link_has() {
+    let fixture = Fixture::new("reserved");
+    let (key, identity) = fixture.identity("server");
+    let peer = identity.peer_id().to_string();
+    for service in ["tcp/1=x", "tcp/1:db:5432=x", "link/1=x", "acp/1=x"] {
+        let output = Command::new(BRIDGE)
+            .args([
+                "serve",
+                "--listen",
+                "127.0.0.1:0",
+                "--identity",
+                key.to_str().unwrap(),
+                "--allow",
+                &peer,
+                "--forward",
+                "--service",
+                service,
+                "--",
+                "x",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{service}");
+    }
+}
+
+#[test]
+fn one_peer_gets_only_so_many_links_and_others_are_not_affected() {
+    let mut fixture = Fixture::new("links");
+    let (key, _) = fixture.identity("server");
+    let (_, greedy) = fixture.identity("greedy");
+    let (_, other) = fixture.identity("other");
+    let (greedy_id, other_id) = (greedy.peer_id().to_string(), other.peer_id().to_string());
+    let port = free_port();
+    let flags = [
+        "--identity",
+        key.to_str().unwrap(),
+        "--allow",
+        &greedy_id,
+        "--allow",
+        &other_id,
+        "--service",
+        "mcp=nothing",
+    ];
+    let server = fixture.serve(None, &flags, port);
+    let method = WebCrypto::new(greedy).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let opening = coqui_agentic_peer::mux::Frame::Open {
+        stream: 1,
+        protocol: "link/1".to_owned(),
+        metadata: Vec::new(),
+    }
+    .encode();
+    let leave = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let (ready, in_place) = std::sync::mpsc::channel();
+        for _ in 0..8 {
+            let (ready, method, opening, leave) = (ready.clone(), &method, &opening, &leave);
+            scope.spawn(move || {
+                let channel = dial(port);
+                let established = prove_out(method, &channel, WAIT, 1 << 25).unwrap();
+                let session = Sealed::new(&channel, established.session);
+                session.send(opening).unwrap();
+                let heard = session.receive(Some(WAIT)).unwrap().is_some();
+                ready.send(heard).unwrap();
+                while !leave.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = session.receive(Some(Duration::from_millis(50)));
+                }
+            });
+        }
+        for _ in 0..8 {
+            assert!(
+                in_place.recv_timeout(WAIT * 2).unwrap(),
+                "within the limit it is served"
+            );
+        }
+        let channel = dial(port);
+        let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
+        let session = Sealed::new(&channel, established.session);
+        let _ = session.send(&opening);
+        assert!(
+            matches!(session.receive(Some(WAIT)), Ok(None) | Err(_)),
+            "past the limit it is turned away"
+        );
+        drop(session);
+        over_link(port, other, &server, |mux| {
+            assert_eq!(
+                capabilities(mux, WAIT).unwrap().offers,
+                ["acp/1", "mcp"],
+                "another peer still gets in"
+            );
+        });
+        leave.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
+#[test]
+fn a_target_a_person_allowed_is_only_for_the_peer_they_named() {
+    let fixture = Fixture::new("allowed");
+    let (key, _) = fixture.identity("client");
+    let output = Command::new(BRIDGE)
+        .args([
+            "forward",
+            "ws://127.0.0.1:1/link",
+            "--paired",
+            "--allow-target",
+            "db:5432",
+        ])
+        .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--peer"));
+    drop(key);
+}
+
+#[test]
+fn revoking_forwarding_leaves_no_targets_to_come_back() {
+    let fixture = Fixture::new("revoke");
+    let grant = |args: &[&str]| {
+        let status = Command::new(BRIDGE)
+            .arg("grant")
+            .args(args)
+            .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    grant(&["peer", "tcp/1:old:1"]);
+    grant(&["peer", "tcp/1:older:2"]);
+    grant(&["peer", "tcp/1", "--revoke"]);
+    grant(&["peer", "tcp/1:new:3"]);
+    let path = fixture.dir.join("grants.json");
+    let kept = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        // Wherever the home keeps it, there is exactly one file naming this peer.
+        std::fs::read_dir(&fixture.dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .find(|text| text.contains("tcp/1:new:3"))
+            .unwrap()
+    });
+    assert!(kept.contains("tcp/1:new:3"));
+    assert!(
+        !kept.contains("tcp/1:old:1") && !kept.contains("tcp/1:older:2"),
+        "{kept}"
+    );
+}
+
+/// Sends each connection a count, so a byte lost or repeated anywhere on the way is seen at the other end.
+fn counting_server(bytes: usize) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut connection) = connection else {
+                return;
+            };
+            std::thread::spawn(move || {
+                let mut count = 0_u64;
+                let mut sent = 0;
+                let mut chunk = Vec::with_capacity(16 * 1024);
+                while sent < bytes {
+                    chunk.clear();
+                    while chunk.len() + 8 <= 16 * 1024 {
+                        chunk.extend_from_slice(&count.to_le_bytes());
+                        count += 1;
+                    }
+                    if connection.write_all(&chunk).is_err() {
+                        return;
+                    }
+                    sent += chunk.len();
+                }
+            });
+        }
+    });
+    address
+}
+
+/// A link read in bursts, as a slow path is. The far side's queue fills while this is not reading, so its sends start to be refused.
+struct Stalling<'a, C> {
+    inner: &'a C,
+    began: Instant,
+}
+
+impl<C: coqui_web::Channel> coqui_web::Channel for Stalling<'_, C> {
+    fn send(&self, message: &[u8]) -> Result<(), coqui_web::Failure> {
+        self.inner.send(message)
+    }
+
+    fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, coqui_web::Failure> {
+        let into_cycle = self.began.elapsed().as_millis() % 2000;
+        if into_cycle < 1500 {
+            std::thread::sleep(Duration::from_millis(
+                u64::try_from(1500 - into_cycle).unwrap(),
+            ));
+        }
+        self.inner.receive(timeout)
+    }
+
+    fn close(&self) {
+        self.inner.close();
+    }
+}
+
+#[test]
+fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
+    const BYTES: usize = 2 * 1024 * 1024;
+    let mut fixture = Fixture::new("integrity");
+    let (server_key, _) = fixture.identity("server");
+    let (_, client) = fixture.identity("client");
+    let client_id = client.peer_id().to_string();
+    let source = counting_server(BYTES);
+    let port = free_port();
+    let grant = format!("{client_id}=tcp/1:{source}");
+    let flags = [
+        "--identity",
+        server_key.to_str().unwrap(),
+        "--allow",
+        &client_id,
+        "--forward",
+        "--grant",
+        &grant,
+    ];
+    let server = fixture.serve(None, &flags, port);
+    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let channel = dial(port);
+    let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
+    let sealed = Sealed::new(&channel, established.session);
+    let stalling = Stalling {
+        inner: &sealed,
+        began: Instant::now(),
+    };
+    let target: coqui_agentic_peer::forward::Target = source.parse().unwrap();
+    Mux::run(&stalling, Side::Dialed, Limits::default(), None, |mux| {
+        let streams: Vec<_> = (0..8)
+            .map(|_| coqui_agentic_peer::forward::connect(mux, &target).unwrap())
+            .collect();
+        std::thread::scope(|scope| {
+            for (reader, stream) in streams.iter().enumerate() {
+                scope.spawn(move || {
+                    let mut expected = 0_u64;
+                    let mut total = 0;
+                    let mut held = Vec::new();
+                    while total < BYTES {
+                        let Ok(Some(message)) = stream.receive(Some(Duration::from_secs(60)))
+                        else {
+                            panic!("stream {reader} ended early at {total}");
+                        };
+                        total += message.len();
+                        held.extend_from_slice(&message);
+                        let whole = held.len() / 8 * 8;
+                        for word in held[..whole].chunks_exact(8) {
+                            let got = u64::from_le_bytes(word.try_into().unwrap());
+                            assert_eq!(got, expected, "stream {reader}, at byte {total}");
+                            expected += 1;
+                        }
+                        held.drain(..whole);
+                    }
+                });
+            }
+        });
+    });
+}
