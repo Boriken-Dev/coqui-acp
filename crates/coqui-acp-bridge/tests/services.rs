@@ -846,8 +846,8 @@ fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
                         total += message.len();
                         held.extend_from_slice(&message);
                         let whole = held.len() / 8 * 8;
-                        for word in held[..whole].chunks_exact(8) {
-                            let got = u64::from_le_bytes(word.try_into().unwrap());
+                        for word in held[..whole].as_chunks::<8>().0 {
+                            let got = u64::from_le_bytes(*word);
                             assert_eq!(got, expected, "stream {reader}, at byte {total}");
                             expected += 1;
                         }
