@@ -197,6 +197,7 @@ The instance name is the label. The SRV record gives host and port. TXT keys, no
 | `path` | the WebSocket path; default `/acp` |
 | `tls` | `1` for `wss` |
 | `wt` | a UDP port serving WebTransport on the same host, usually the SRV record's number |
+| `wth` | `sha256:` and the hex hash of the certificate there, for `serverCertificateHashes`, when no certificate authority vouches for it |
 | `peer` | the peer id, as a hint to match against one already paired |
 | `acpv` | ACP versions, comma separated |
 
@@ -209,7 +210,7 @@ Advertising tells everyone on the link that an agent exists, so it MUST be off u
 An agent bound to loopback is not reachable through an address mDNS could give others. It writes a descriptor instead, one JSON file per listener in a directory only its user can write, which is `$COQUI_ACP_DESCRIPTORS` if set, otherwise `coqui-acp/agents` under `%LOCALAPPDATA%`, `$XDG_RUNTIME_DIR` or `~/.local/state`, the first that is set:
 
 ```json
-{ "txtvers": 1, "proto": "acp", "label": "My agent", "url": "ws://127.0.0.1:8765/acp", "peer": "sha256:…", "wt": null }
+{ "txtvers": 1, "proto": "acp", "label": "My agent", "url": "ws://127.0.0.1:8765/acp", "peer": "sha256:…", "wt": null, "wth": null }
 ```
 
 A descriptor MUST name loopback. A reader removes one nothing answers at, since a killed program leaves its file behind.
@@ -218,7 +219,9 @@ A descriptor MUST name loopback. A reader removes one nothing answers at, since 
 
 A browser extension cannot query any of this itself: `chrome.mdns` is [documented only for Chrome Apps](https://developer.chrome.com/docs/apps/reference/mdns), a platform deprecated in 2020. It asks a native companion over [native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging), whose messages to the extension are limited to 1 MB. Discovery fits; relaying agent traffic through it means splitting larger messages.
 
-The companion answers one request, `{ "op": "discover", "seconds": 3 }`, with `{ "candidates": [...] }` of at most 64, each `{ "label", "url", "peer", "source", "webtransport", "acpVersions" }`, where `source` is `mdns` or `local`. `coqui-acp-bridge` is one: `coqui-acp-bridge companion install --extension-id <id>` registers it, under the name `dev.boriken.coqui_acp_bridge`.
+The companion answers one request, `{ "op": "discover", "seconds": 3 }`, with `{ "candidates": [...] }` of at most 64, each `{ "label", "url", "peer", "source", "webtransport", "webtransportHash", "acpVersions" }`, where `source` is `mdns` or `local`. `coqui-acp-bridge` is one: `coqui-acp-bridge companion install --extension-id <id>` registers it, under the name `dev.boriken.coqui_acp_bridge`.
+
+`wth` lets a browser open WebTransport to an agent with no certificate authority: browsers pin a hash only for a certificate valid for 14 days at most, so an agent's hash changes as it renews one. It can be a hint like the rest because TLS authenticates nothing here: a false hash only fails to open, and whichever transport opens has the same proof to pass. For the same reason a provider MAY try a WebSocket when WebTransport does not open. The same key at a new address or hash is the same agent, once the person chooses it, and its grants carry over.
 
 A provider SHOULD search only when the person asks, since that starts a program and listens on the network, and MUST NOT show a page anything it found. Showing a candidate is not trusting it: it stays unchosen until the person chooses it, with its key beside its label, and choosing it is what accepts that key.
 

@@ -189,6 +189,70 @@ fn what_a_descriptor_cannot_carry_is_refused_at_the_command_line() {
     }
 }
 
+#[test]
+fn a_short_lived_certificate_is_advertised_by_its_hash_and_needs_the_in_band_proof() {
+    let fixture = Fixture::new("short");
+    let (identity, peer) = fixture.keygen();
+    let mut child = Command::new(BRIDGE)
+        .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
+        .arg(&identity)
+        .args([
+            "--allow",
+            &peer,
+            "--tls-short-lived",
+            "--advertise",
+            "Short",
+            "--",
+            "unused-agent",
+        ])
+        .env(ENV, fixture.descriptors())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut listening = String::new();
+    stderr.read_line(&mut listening).unwrap();
+    let mut certificate = String::new();
+    stderr.read_line(&mut certificate).unwrap();
+    let hash = certificate
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(',')
+        .to_owned();
+    let found = fixture.discover();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        found[0]["url"].as_str().unwrap().starts_with("wss://"),
+        "{found:?}"
+    );
+    assert_eq!(found[0]["webtransportHash"], hash.as_str(), "{found:?}");
+
+    for flags in [
+        vec!["--no-peer-proof", "--tls-short-lived"],
+        vec!["--allow-cert", "sha256:0", "--tls-short-lived"],
+        vec![
+            "--identity",
+            "x",
+            "--allow",
+            "sha256:0",
+            "--tls-short-lived",
+            "--tls-identity",
+            "y",
+        ],
+    ] {
+        let output = Command::new(BRIDGE)
+            .args(["serve", "--listen", "127.0.0.1:0"])
+            .args(&flags)
+            .args(["--", "unused-agent"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{flags:?}");
+    }
+}
+
 /// A native host as a browser runs it: its origin as the first argument, and framed JSON on its standard streams.
 struct NativeHost(Child);
 

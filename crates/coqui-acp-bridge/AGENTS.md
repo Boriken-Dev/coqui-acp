@@ -25,7 +25,7 @@ coqui-acp-bridge companion install --extension-id ID...
 coqui-acp-bridge companion uninstall
 ```
 
-Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`.
+Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`. With the in-band proof, `--tls-short-lived` replaces `--tls-identity`.
 
 - **In-band proof (`--identity`):** the WebCrypto handshake, then every message inside its session. It does not depend on TLS, so it works through a reverse proxy that ends TLS, and the proxy can neither read nor inject. The handshake may be text or binary frames; each record after it is one binary frame.
 - **Mutual TLS:** the client's certificate by pin, trust store or CA. The stream is plain ACP protected by that TLS, so it ends where TLS ends and a proxy must vouch for the certificate.
@@ -37,9 +37,10 @@ Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`.
 - `pair-accept` prints the PIN, then its peer id, and waits until someone uses the PIN or it expires; connections run apart, so one that says nothing costs neither the PIN nor the wait, and one wrong try ends it. `pair-dial` reads the PIN from `--pin-file` or standard input and prints the other side's peer id. Both record the peer in `--store`. A pairing connection never serves an agent: reconnect pinned.
 - An identity file holds a P-256 key, created by `keygen`, and by `dial`, `pair-accept` and `pair-dial` when absent. A TLS identity is a separate PEM certificate and key.
 - `serve --advertise LABEL` is off by default. On loopback it writes a descriptor; otherwise it publishes `_acp-agent._tcp` on every interface the listener is bound to, with no secret in it. `--advertise-host` publishes a host name for a certificate a browser accepts; without it, clients get an address. A killed `serve` leaves a descriptor, which the next search removes. The DNS-SD record is not withdrawn on a kill, and expires.
-- `discover` prints one JSON object per line: `label`, `url`, `peer`, `source` (`mdns` or `local`), `webtransport`, `acpVersions`. It is what they claim.
+- `serve --tls-short-lived` makes a certificate for this run, in memory, which a browser can pin over WebTransport with no certificate authority, and advertises its hash as `wth`. Browsers take one valid for 14 days at most, so `serve` ends with status 3 after 13 days: restart it, and a client finds the new hash by searching again. It needs the in-band proof, which is what authenticates.
+- `discover` prints one JSON object per line: `label`, `url`, `peer`, `source` (`mdns` or `local`), `webtransport`, `webtransportHash`, `acpVersions`. It is what they claim.
 - `companion install` registers this program, where it is now, for this user's Chrome, Chromium and Edge: the manifest and, on Windows, the registry keys. A browser starts it with `chrome-extension://…/` as its first argument, which selects native messaging instead of the command line.
-- Exit status: the agent's when it ended the bridge; 2 for a bad configuration, a failed pairing, or a remote that failed its proof.
+- Exit status: 3 when a short-lived certificate is ending; the agent's when it ended the bridge; 2 for a bad configuration, a failed pairing, or a remote that failed its proof.
 
 ## `coqui_acp_bridge::relay`
 
@@ -94,12 +95,13 @@ pub const SERVICE_TYPE: &str = "_acp-agent._tcp.local.";
 pub const DEFAULT_PATH: &str = "/acp";
 pub const DESCRIPTORS_ENV: &str = "COQUI_ACP_DESCRIPTORS";
 pub const MAX_CANDIDATES: usize = 64;
-pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub source: Source, pub webtransport: Option<u16>, pub acp_versions: Vec<u32> }  // non_exhaustive
+pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub source: Source, pub webtransport: Option<u16>, pub webtransport_hash: Option<String>, pub acp_versions: Vec<u32> }  // non_exhaustive
 pub enum Source { Network, ThisMachine }  // non_exhaustive
 pub fn Candidate::to_json(&self) -> Value
 pub fn Advertisement::new(label: &str, tls: bool) -> Result<Advertisement, Error>
 pub fn Advertisement::with_peer(self, peer: Option<String>) -> Advertisement
 pub const fn Advertisement::with_webtransport(self, port: Option<u16>) -> Advertisement
+pub fn Advertisement::with_webtransport_hash(self, hash: Option<String>) -> Advertisement
 pub fn Advertisement::with_host(self, host: Option<String>) -> Result<Advertisement, Error>
 pub fn advertise(advertisement: &Advertisement, bound: SocketAddr) -> Result<Advertised, Error>   // withdrawn on drop
 pub fn discover(wait: Duration) -> Vec<Candidate>                 // descriptors, then the link; a failed mDNS start leaves the descriptors
@@ -133,7 +135,8 @@ It answers `{ "op": "discover", "seconds": N }`, at most 10 seconds, and nothing
 
 ## Gotchas
 
-- A browser takes a self-signed certificate only for WebTransport with `serverCertificateHashes`, so a `wss://` address `discover` gives may not open in a browser without a certificate it accepts.
+- A browser takes a self-signed certificate only for WebTransport with `serverCertificateHashes`, so a `wss://` address `discover` gives opens in a browser only with a certificate it accepts. `--tls-short-lived` is the way without one.
+- On Windows, the first time this program listens or joins multicast the firewall may ask, and an answer of no leaves an inbound block rule for that path. `discover` then sees agents on this machine and none on others.
 - mDNS stays on the link: it does not cross a router or a site-to-site VPN.
 - A browser cannot do the PIN exchange from this crate; `pair-dial` is native.
 - Behind a reverse proxy every peer has the proxy's address, so `--permit`, `--deny` and the store's per-source limit on waiting entries see the proxy. Bind to loopback and filter at the proxy.

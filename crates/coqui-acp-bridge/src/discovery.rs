@@ -70,6 +70,9 @@ pub struct Candidate {
     pub source: Source,
     /// A UDP port claimed to serve WebTransport on the same host.
     pub webtransport: Option<u16>,
+    /// The hash of its short-lived certificate, for a browser to open that WebTransport. A hint like the rest: the proof at
+    /// connect is what authenticates, so a false one only fails to open.
+    pub webtransport_hash: Option<String>,
     /// ACP versions it claims.
     pub acp_versions: Vec<u32>,
 }
@@ -84,6 +87,7 @@ impl Candidate {
             "peer": self.peer,
             "source": self.source.name(),
             "webtransport": self.webtransport,
+            "webtransportHash": self.webtransport_hash,
             "acpVersions": self.acp_versions,
         })
     }
@@ -101,6 +105,8 @@ pub struct Advertisement {
     pub peer: Option<String>,
     /// A UDP port serving WebTransport.
     pub webtransport: Option<u16>,
+    /// The hash of the certificate it serves, when a browser can pin that.
+    pub webtransport_hash: Option<String>,
     /// A host name to publish, for a certificate a browser accepts. Without it, clients get an address.
     pub host: Option<String>,
 }
@@ -121,6 +127,7 @@ impl Advertisement {
             tls,
             peer: None,
             webtransport: None,
+            webtransport_hash: None,
             host: None,
         })
     }
@@ -136,6 +143,13 @@ impl Advertisement {
     #[must_use]
     pub const fn with_webtransport(mut self, port: Option<u16>) -> Self {
         self.webtransport = port;
+        self
+    }
+
+    /// The hash of the certificate it serves.
+    #[must_use]
+    pub fn with_webtransport_hash(mut self, hash: Option<String>) -> Self {
+        self.webtransport_hash = hash;
         self
     }
 
@@ -164,6 +178,9 @@ impl Advertisement {
         }
         if let Some(port) = self.webtransport {
             txt.insert("wt".to_owned(), port.to_string());
+        }
+        if let Some(hash) = &self.webtransport_hash {
+            txt.insert("wth".to_owned(), hash.clone());
         }
         if let Some(peer) = &self.peer {
             txt.insert("peer".to_owned(), peer.clone());
@@ -285,6 +302,7 @@ pub fn candidate_from(record: &Record<'_>) -> Option<Candidate> {
         webtransport: txt("wt")
             .and_then(|port| port.parse().ok())
             .filter(|port| *port != 0),
+        webtransport_hash: clean_peer(txt("wth")),
         acp_versions: clean_versions(txt("acpv")),
     })
 }
@@ -347,6 +365,7 @@ fn candidate_from_descriptor(text: &str) -> Option<Candidate> {
             .and_then(Value::as_u64)
             .and_then(|port| u16::try_from(port).ok())
             .filter(|port| *port != 0),
+        webtransport_hash: clean_peer(value.get("wth").and_then(Value::as_str)),
         acp_versions: clean_versions(value.get("acpv").and_then(Value::as_str)),
     })
 }
@@ -577,6 +596,7 @@ fn write_descriptor(advertisement: &Advertisement, bound: SocketAddr) -> Result<
         "url": format!("{scheme}://{bound}{DEFAULT_PATH}"),
         "peer": advertisement.peer,
         "wt": advertisement.webtransport,
+        "wth": advertisement.webtransport_hash,
     })
     .to_string();
     let name = format!("{}-{}", std::process::id(), bound.port());

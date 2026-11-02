@@ -314,6 +314,7 @@ mod tests {
             peer: Some(format!("sha256:{}", "0".repeat(64))),
             source: discovery::Source::Network,
             webtransport: Some(65535),
+            webtransport_hash: Some(format!("sha256:{}", "0".repeat(64))),
             acp_versions: vec![u32::MAX; 8],
         };
         let reply = reply_with(&vec![big; discovery::MAX_CANDIDATES + 1]);

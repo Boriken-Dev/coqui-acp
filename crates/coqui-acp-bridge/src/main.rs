@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use clap::{Parser, Subcommand};
 use coqui_acp_bridge::agent::Agent;
@@ -41,6 +41,10 @@ const MAX_PAIRING_RUNS: usize = 16;
 const PAIRING_RUN: Duration = Duration::from_secs(60);
 /// How long a remote may take to prove itself to `dial`.
 const DIAL_PROOF: Duration = Duration::from_secs(15);
+/// At most what a browser pins, with a margin.
+const SHORT_LIVED_VALIDITY: Duration = Duration::from_secs(14 * 86_400 - 60);
+const SHORT_LIVED_RUN: Duration = Duration::from_secs(13 * 86_400);
+const EXIT_CERTIFICATE_ENDING: i32 = 3;
 /// Messages an unproven peer may have waiting.
 const UNPROVEN_PENDING: usize = 8;
 
@@ -159,8 +163,13 @@ struct Serve {
     allow_store: Option<PathBuf>,
     /// A TLS identity (certificate and key, PEM) for wss:// and WebTransport. Without it, plain ws:// on loopback only, where
     /// a reverse proxy may stand in front: the in-band proof and its session do not depend on TLS.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "tls_short_lived")]
     tls_identity: Option<PathBuf>,
+    /// Make a certificate for this run and keep it in memory, for a browser to pin over WebTransport with no certificate
+    /// authority. Browsers take only one valid for 14 days at most, so `serve` ends with status 3 after 13: restart it, and a
+    /// client finds the new hash by looking for it again. Needs the in-band proof, which is what authenticates.
+    #[arg(long)]
+    tls_short_lived: bool,
     /// A client certificate fingerprint allowed in over mutual TLS, in place of the in-band proof. Repeat for more. Needs
     /// `--tls-identity`. The stream is then plain ACP protected only by that TLS, so it ends where TLS ends.
     #[arg(long = "allow-cert")]
@@ -305,6 +314,24 @@ fn mtls_client(path: &std::path::Path, args: &Dial) -> Result<Arc<rustls::Client
     // This builder turns resumption off, so a peer that lost trust cannot return on a session.
     let config = tls::client_config(&identity, &trust, &[]).map_err(|error| error.to_string())?;
     Ok(Arc::new(config))
+}
+
+/// A certificate browsers will pin, starting a little early for a client whose clock runs behind.
+fn short_lived_identity() -> Result<tls::Identity, String> {
+    let not_before = SystemTime::now() - Duration::from_secs(3600);
+    tls::Identity::generate_with(not_before, not_before + SHORT_LIVED_VALIDITY)
+        .map_err(|error| error.to_string())
+}
+
+/// New connections could not open after the certificate ends, and that must not look like a bridge still working.
+fn end_with_the_certificate() {
+    thread::spawn(|| {
+        thread::sleep(SHORT_LIVED_RUN);
+        eprintln!(
+            "coqui-acp-bridge: the short-lived certificate is ending: restart to make another"
+        );
+        std::process::exit(EXIT_CERTIFICATE_ENDING);
+    });
 }
 
 fn limits() -> Limits {
@@ -494,6 +521,7 @@ fn advertise(
     bound: SocketAddr,
     peer: Option<String>,
     webtransport: Option<u16>,
+    webtransport_hash: Option<String>,
 ) -> Result<Option<Advertised>, String> {
     let Some(label) = &args.advertise else {
         return Ok(None);
@@ -504,12 +532,14 @@ fn advertise(
             "--advertise-host names a host on the network, and this listens on loopback".to_owned(),
         );
     }
-    let advertisement = Advertisement::new(label, args.tls_identity.is_some())
-        .map_err(text)?
-        .with_peer(peer)
-        .with_webtransport(webtransport)
-        .with_host(args.advertise_host.clone())
-        .map_err(text)?;
+    let advertisement =
+        Advertisement::new(label, args.tls_identity.is_some() || args.tls_short_lived)
+            .map_err(text)?
+            .with_peer(peer)
+            .with_webtransport(webtransport)
+            .with_webtransport_hash(webtransport_hash)
+            .with_host(args.advertise_host.clone())
+            .map_err(text)?;
     discovery::advertise(&advertisement, bound)
         .map(Some)
         .map_err(text)
@@ -531,6 +561,9 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     let admit = admission(&args.permit, &args.deny)?;
     let unproven = Gate::new(MAX_UNPROVEN);
     let running = Gate::new(args.max_peers);
+    if args.tls_short_lived && (args.no_peer_proof || certificates) {
+        return Err("--tls-short-lived needs the in-band proof: a client cannot pin this certificate for long".to_owned());
+    }
     if args.no_peer_proof {
         return serve_unproven(args, admit, unproven, running);
     }
@@ -579,7 +612,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             .local_addr()
             .map_err(|failure| failure.to_string())?;
         eprintln!("listening on {bound}");
-        let _advertised = advertise(args, bound, None, None)?;
+        let _advertised = advertise(args, bound, None, None, None)?;
         let service = Arc::new(Service {
             method: None,
             store: None,
@@ -615,7 +648,18 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     println!("{peer_id}");
     let _ = std::io::stdout().flush();
     let proof = Duration::from_secs(args.proof_seconds.unwrap_or(15));
-    let tls_config = args.tls_identity.as_deref().map(server_tls).transpose()?;
+    let short_lived = args
+        .tls_short_lived
+        .then(short_lived_identity)
+        .transpose()?;
+    let tls_config = match &short_lived {
+        Some(identity) => {
+            let config = tls::server_config_without_client_auth(identity, &[])
+                .map_err(|error| error.to_string())?;
+            Some(Arc::new(config))
+        }
+        None => args.tls_identity.as_deref().map(server_tls).transpose()?,
+    };
     let plain = websocket::Listener::bind(args.listen, tls_config.clone())
         .map_err(|failure| failure.to_string())?
         .with_limits(unproven_limits())
@@ -624,11 +668,19 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         .with_admission(admit.clone());
     let bound = plain.local_addr().map_err(|failure| failure.to_string())?;
     eprintln!("listening on {bound}");
+    let hash = short_lived
+        .as_ref()
+        .map(|identity| identity.fingerprint().to_string());
+    if let Some(hash) = &hash {
+        eprintln!("certificate {hash}, for 13 days");
+        end_with_the_certificate();
+    }
     let _advertised = advertise(
         args,
         bound,
         Some(peer_id.to_string()),
         args.webtransport_port,
+        hash,
     )?;
     let service = Arc::new(Service {
         method: Some(method),
@@ -691,7 +743,7 @@ fn serve_unproven(
     eprintln!(
         "listening on {bound}, with no proof of the peer: whoever can connect gets the agent"
     );
-    let _advertised = advertise(args, bound, None, None)?;
+    let _advertised = advertise(args, bound, None, None, None)?;
     let service = Arc::new(Service {
         method: None,
         store: None,
