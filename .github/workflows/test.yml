@@ -53,6 +53,9 @@ jobs:
       - run: cargo test --workspace --all-features
         env:
           COQUI_ACP_TEST_WEBCRYPTO: ${{ github.workspace }}/peer-webcrypto/bindings/js/coqui-peer-webcrypto/src/index.mjs
+      # Multicast has to work on the machine, which this runner's does.
+      - if: runner.os == 'Linux'
+        run: cargo test -p coqui-acp-bridge --test discovery -- --ignored
       - run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
