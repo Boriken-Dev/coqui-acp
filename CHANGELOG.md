@@ -14,4 +14,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `coqui-acp-bridge`: a stdio ACP agent on the network under coqui-peer identity.
 - `coqui-acp-bridge`: `serve --advertise` publishes a DNS-SD record, or a descriptor on loopback; `discover` finds both; `companion install` lets a browser extension ask, over native messaging; `serve --tls-short-lived` lets a browser pin WebTransport with no certificate authority.
 - `coqui-acp-bridge`: `serve --paired` and `dial --paired`, on this user's own identity and trust store, so one pairing serves every command. Proof, pairing, discovery and the companion moved to `coqui-agentic-peer`.
+- `coqui-acp-bridge`: `serve --service` and `--grant` for several protocols on one link, `grant` for adding one to a paired peer at once, and `dial --fallback` for another endpoint.
 - `coqui-acp-page`, and `package:coqui_acp/page.dart` for Dart: a person's agents from a page, over `document.acp`.

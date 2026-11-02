@@ -32,7 +32,7 @@ pub enum LinkEnd {
 
 /// Relays until the agent or the link ends. A line the peer could not take stays lost: ACP's own session
 /// recovery is the only safe answer to that, so nothing here replays anything.
-pub fn relay<C: Channel>(channel: &C, agent: &Agent) -> LinkEnd {
+pub fn relay<C: Channel + ?Sized>(channel: &C, agent: &Agent) -> LinkEnd {
     let stop = AtomicBool::new(false);
     thread::scope(|scope| {
         let inbound = scope.spawn(|| {
@@ -47,7 +47,11 @@ pub fn relay<C: Channel>(channel: &C, agent: &Agent) -> LinkEnd {
     })
 }
 
-fn from_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Option<LinkEnd> {
+fn from_peer<C: Channel + ?Sized>(
+    channel: &C,
+    agent: &Agent,
+    stop: &AtomicBool,
+) -> Option<LinkEnd> {
     while !stop.load(Ordering::SeqCst) {
         match channel.receive(Some(POLL)) {
             Ok(Some(message)) => {
@@ -70,7 +74,7 @@ fn from_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Optio
     None
 }
 
-fn to_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Option<LinkEnd> {
+fn to_peer<C: Channel + ?Sized>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Option<LinkEnd> {
     while !stop.load(Ordering::SeqCst) {
         match agent.next_output(POLL) {
             Ok(Output::Line(line)) => {
@@ -87,7 +91,7 @@ fn to_peer<C: Channel>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Option<
 }
 
 /// Sends one line, waiting on a full queue, so the agent feels a slow peer as back-pressure rather than losing the link.
-fn deliver<C: Channel>(channel: &C, line: &[u8], stop: &AtomicBool) -> Option<LinkEnd> {
+fn deliver<C: Channel + ?Sized>(channel: &C, line: &[u8], stop: &AtomicBool) -> Option<LinkEnd> {
     let until = Instant::now() + PEER_LIMIT;
     loop {
         match channel.send(line) {

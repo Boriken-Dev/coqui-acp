@@ -6,7 +6,7 @@
     missing_docs
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::net::SocketAddr;
@@ -23,6 +23,9 @@ use coqui_acp_bridge::agent::Agent;
 use coqui_acp_bridge::relay::{LinkEnd, relay};
 use coqui_agentic_peer::auth::Sealed;
 use coqui_agentic_peer::discovery::{Advertised, Advertisement};
+use coqui_agentic_peer::link::{self, Accepted, Prefilled, Services};
+use coqui_agentic_peer::mux::{self, Side};
+use coqui_agentic_peer::peers::{FilePeers, NoEvents, PeerRecord, PeerStore};
 use coqui_agentic_peer::{Error, auth, companion, discovery, home, pairing};
 use coqui_net_acl::{Acl, Action, IpNet, Rule};
 use coqui_peer_tls as tls;
@@ -71,6 +74,17 @@ enum Mode {
     Serve(Serve),
     /// Connect out to a peer, for an agent behind NAT. Reconnects and keeps the agent running.
     Dial(Dial),
+    /// Let a peer this user paired with open a protocol, or with `--revoke` no longer. It counts at once, on a live link too,
+    /// with no second pairing.
+    Grant {
+        /// The peer id.
+        peer: String,
+        /// The protocol token.
+        protocol: String,
+        /// Take it away instead.
+        #[arg(long)]
+        revoke: bool,
+    },
     /// Search this machine and the link for agents, and print each as one line of JSON. What it prints is what they claim.
     Discover {
         /// How long to listen on the link, in seconds.
@@ -208,6 +222,14 @@ struct Serve {
     /// Proven peers served at once, each with an agent of its own. Another is turned away while this many run.
     #[arg(long, default_value_t = 4)]
     max_peers: usize,
+    /// Serve another protocol on the same link, as TOKEN=PROGRAM, such as mcp=my-server. Repeat for more. The agent after `--` is
+    /// `acp/1`. A client opens streams on one proven link, with no second proof and no second pairing.
+    #[arg(long = "service", value_name = "TOKEN=PROGRAM")]
+    services: Vec<String>,
+    /// What a peer may open, as PEER=TOKEN. Repeat for more. With any listed, a peer may open only what names it. With none, every
+    /// peer allowed in may open everything; `--paired` keeps its grants with `grant` instead.
+    #[arg(long = "grant", requires = "services", value_name = "PEER=TOKEN")]
+    grants: Vec<String>,
     /// Say this agent exists, under this name. On loopback a file only this user's programs read; otherwise a DNS-SD record
     /// everyone on the link can see, with no secret in it. Connecting still needs the proof.
     #[arg(long, value_name = "LABEL")]
@@ -224,6 +246,10 @@ struct Serve {
 struct Dial {
     /// The URL to connect to: wss://, or ws:// on loopback for the in-band proof.
     url: Url,
+    /// Another endpoint to try when the one before cannot be reached, such as a second gateway. Repeat for more. Each has to
+    /// prove the same thing, since nothing else about it is checked differently.
+    #[arg(long = "fallback", value_name = "URL")]
+    fallbacks: Vec<Url>,
     /// This side's identity, for the in-band proof, which works through a reverse proxy. Created if absent. Everything after
     /// the proof is inside its session.
     #[arg(long)]
@@ -398,6 +424,136 @@ struct Service {
     agent: Vec<OsString>,
     unproven: Gate,
     peers: Gate,
+    links: Option<Links>,
+}
+
+/// What a link can run beside the one agent, and who may open what.
+struct Links {
+    services: Services,
+    grants: Box<dyn PeerStore>,
+}
+
+/// The token of the agent named after `--`.
+const ACP: &str = "acp/1";
+
+/// `--grant`, or everything for whoever is allowed in: the proof already decided who that is.
+struct FixedGrants {
+    every: Vec<String>,
+    named: Option<BTreeMap<String, BTreeSet<String>>>,
+}
+
+impl PeerStore for FixedGrants {
+    fn get(&self, peer: &str) -> Result<Option<PeerRecord>, Error> {
+        let mut record = PeerRecord::new(peer);
+        match &self.named {
+            Some(named) => record.grants = named.get(peer).cloned().unwrap_or_default(),
+            None => record.grants = self.every.iter().cloned().collect(),
+        }
+        Ok(Some(record))
+    }
+
+    fn put(&self, _record: &PeerRecord) -> Result<(), Error> {
+        Err(Error::Identity(
+            "these grants are fixed by the command line".to_owned(),
+        ))
+    }
+
+    fn remove(&self, _peer: &str) -> Result<(), Error> {
+        Err(Error::Identity(
+            "these grants are fixed by the command line".to_owned(),
+        ))
+    }
+}
+
+/// This user's grants, and the agent a peer was paired for: pairing gave it that, and anything else takes a `grant`.
+struct PairedGrants(FilePeers);
+
+impl PeerStore for PairedGrants {
+    fn get(&self, peer: &str) -> Result<Option<PeerRecord>, Error> {
+        let record = self.0.get(peer)?.unwrap_or_else(|| PeerRecord::new(peer));
+        Ok(Some(record.granting(ACP)))
+    }
+
+    fn put(&self, record: &PeerRecord) -> Result<(), Error> {
+        self.0.put(record)
+    }
+
+    fn remove(&self, peer: &str) -> Result<(), Error> {
+        self.0.remove(peer)
+    }
+}
+
+fn agent_handler(program: Vec<OsString>, gate: Gate) -> link::Handler {
+    Box::new(move |stream: &dyn Channel, accepted: &Accepted| {
+        let Some(_running) = gate.enter() else {
+            return eprintln!("{} was turned away: --max-peers are running", accepted.peer);
+        };
+        let started = split_agent(&program).and_then(|(program, args)| {
+            Agent::spawn(program, args, MAX_LINE)
+                .map_err(|error| format!("the agent could not start: {error}"))
+        });
+        match started {
+            Ok(running) => {
+                let end = relay(stream, &running);
+                eprintln!("{} left {}: {end:?}", accepted.peer, accepted.protocol);
+                let _ = running.stop();
+            }
+            Err(why) => eprintln!("{why}"),
+        }
+    })
+}
+
+fn parse_service(text: &str) -> Result<(String, OsString), String> {
+    let (token, program) = text.split_once('=').ok_or("a service is TOKEN=PROGRAM")?;
+    if !mux::valid_protocol(token) {
+        return Err(
+            "a protocol token is printable, with no spaces, commas or equals signs".to_owned(),
+        );
+    }
+    if program.is_empty() {
+        return Err("a service is TOKEN=PROGRAM".to_owned());
+    }
+    Ok((token.to_owned(), OsString::from(program)))
+}
+
+/// What `--service` and `--grant` ask for, if anything.
+fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
+    if args.services.is_empty() {
+        return Ok(None);
+    }
+    let mut services =
+        Services::default().with(ACP, agent_handler(args.agent.clone(), gate.clone()));
+    let mut every = vec![ACP.to_owned()];
+    for text in &args.services {
+        let (token, program) = parse_service(text)?;
+        services = services.with(&token, agent_handler(vec![program], gate.clone()));
+        every.push(token);
+    }
+    let grants: Box<dyn PeerStore> = if args.paired {
+        if !args.grants.is_empty() {
+            return Err("--paired keeps its grants with the grant command, not --grant".to_owned());
+        }
+        Box::new(PairedGrants(FilePeers::new(
+            home::grants_path().map_err(|error| error.to_string())?,
+        )))
+    } else {
+        let mut named: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for text in &args.grants {
+            let (peer, token) = text.split_once('=').ok_or("a grant is PEER=TOKEN")?;
+            if !every.iter().any(|offered| offered == token) {
+                return Err("a grant names a protocol nothing here serves".to_owned());
+            }
+            named
+                .entry(peer.to_owned())
+                .or_default()
+                .insert(token.to_owned());
+        }
+        Box::new(FixedGrants {
+            every,
+            named: (!named.is_empty()).then_some(named),
+        })
+    };
+    Ok(Some(Links { services, grants }))
 }
 
 impl Service {
@@ -426,12 +582,45 @@ impl Service {
                     }
                     None => sealed,
                 };
-                self.give_agent(&sealed, &label);
+                self.serve_peer(&sealed, &label);
                 sealed.close();
             }
             Err(error) => eprintln!("a connection was refused: {error}"),
         }
         channel.close();
+    }
+
+    /// One protocol, or a link of several: a first message of streams says which, so nothing has to be agreed first. A plain ACP
+    /// client speaks first, and with no services the program may be the one to, so this waits only where there is a choice.
+    fn serve_peer<C: Channel>(&self, channel: &C, peer: &str) {
+        let Some(links) = &self.links else {
+            return self.give_agent(channel, peer);
+        };
+        eprintln!("{peer} proven");
+        let mut options = link::Options::default();
+        options.limits.max_message = MAX_LINE;
+        match channel.receive(None) {
+            Ok(Some(first)) if mux::starts_mux(&first) => {
+                let host = link::Host {
+                    store: &*links.grants,
+                    services: &links.services,
+                    events: &NoEvents,
+                };
+                link::serve(channel, Side::Answered, options, Some(first), peer, &host);
+            }
+            Ok(Some(first)) => {
+                let granted = links
+                    .grants
+                    .get(peer)
+                    .is_ok_and(|record| record.is_some_and(|record| record.grants.contains(ACP)));
+                if granted {
+                    self.give_agent(&Prefilled::new(channel, first), peer);
+                } else {
+                    eprintln!("{peer} may not open {ACP}");
+                }
+            }
+            Ok(None) | Err(_) => {}
+        }
     }
 
     fn give_agent<C: Channel>(&self, channel: &C, peer: &str) {
@@ -551,12 +740,24 @@ fn advertise(
             "--advertise-host names a host on the network, and this listens on loopback".to_owned(),
         );
     }
+    let offers: Vec<String> = if args.services.is_empty() {
+        Vec::new()
+    } else {
+        core::iter::once(ACP.to_owned())
+            .chain(
+                args.services
+                    .iter()
+                    .filter_map(|text| parse_service(text).ok().map(|(token, _)| token)),
+            )
+            .collect()
+    };
     let advertisement =
         Advertisement::new(label, args.tls_identity.is_some() || args.tls_short_lived)
             .map_err(text)?
             .with_peer(peer)
             .with_webtransport(webtransport)
             .with_webtransport_hash(webtransport_hash)
+            .with_offers(&offers)
             .with_host(args.advertise_host.clone())
             .map_err(text)?;
     discovery::advertise(&advertisement, bound)
@@ -580,6 +781,12 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     let admit = admission(&args.permit, &args.deny)?;
     let unproven = Gate::new(MAX_UNPROVEN);
     let running = Gate::new(args.max_peers);
+    if !args.services.is_empty() && (args.no_peer_proof || certificates) {
+        return Err(
+            "--service needs the in-band proof: streams are for a link a proof named a peer on"
+                .to_owned(),
+        );
+    }
     if args.tls_short_lived && (args.no_peer_proof || certificates) {
         return Err("--tls-short-lived needs the in-band proof: a client cannot pin this certificate for long".to_owned());
     }
@@ -639,6 +846,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             agent: args.agent.clone(),
             unproven,
             peers: running,
+            links: None,
         });
         accept_loop(
             || listener.next(None),
@@ -730,6 +938,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         advertised
     };
     eprintln!("listening on {bound}");
+    let links = links(args, &running)?;
     let service = Arc::new(Service {
         method: Some(method),
         store,
@@ -737,6 +946,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         agent: args.agent.clone(),
         unproven,
         peers: running,
+        links,
     });
     if let Some(quic) = quic {
         let service = Arc::clone(&service);
@@ -792,6 +1002,7 @@ fn serve_unproven(
         agent: args.agent.clone(),
         unproven,
         peers: running,
+        links: None,
     });
     accept_loop(
         || listener.next(None),
@@ -957,11 +1168,26 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
     }
     let mut wait = Duration::from_secs(1);
     let longest = Duration::from_secs(args.max_backoff_seconds);
+    if args
+        .fallbacks
+        .iter()
+        .any(|url| url.scheme() != args.url.scheme())
+    {
+        return Err(
+            "a fallback uses the same scheme as the URL: the same checks have to apply".to_owned(),
+        );
+    }
+    let endpoints: Vec<&Url> = core::iter::once(&args.url).chain(&args.fallbacks).collect();
+    let mut endpoint = 0;
     loop {
         if let Some(status) = agent.try_status().map_err(|error| error.to_string())? {
             return Ok(status_code(status));
         }
-        match dialer.dial(Kind::WebSocket, &args.url, Duration::from_secs(10)) {
+        match dialer.dial(
+            Kind::WebSocket,
+            endpoints[endpoint],
+            Duration::from_secs(10),
+        ) {
             Ok(channel) => {
                 eprintln!("connected");
                 let end = dial_link(&proof, &channel, &agent);
@@ -983,7 +1209,14 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
             Err(Failure::Certificate) => {
                 return Err("the remote certificate is not the expected one".to_owned());
             }
-            Err(failure) => eprintln!("could not connect: {failure}"),
+            Err(failure) => {
+                eprintln!("could not connect: {failure}");
+                endpoint = (endpoint + 1) % endpoints.len();
+                // There is another to try, so nothing is gained by waiting first.
+                if endpoint != 0 {
+                    continue;
+                }
+            }
         }
         thread::sleep(wait);
         wait = (wait * 2).min(longest);
@@ -1116,6 +1349,26 @@ fn discover_mode(seconds: u64) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn grant_mode(peer: &str, protocol: &str, revoke: bool) -> Result<ExitCode, String> {
+    if !mux::valid_protocol(protocol) {
+        return Err(
+            "a protocol token is printable, with no spaces, commas or equals signs".to_owned(),
+        );
+    }
+    let store = FilePeers::new(home::grants_path().map_err(|error| error.to_string())?);
+    let mut record = store
+        .get(peer)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| PeerRecord::new(peer));
+    if revoke {
+        record.grants.remove(protocol);
+    } else {
+        record.grants.insert(protocol.to_owned());
+    }
+    store.put(&record).map_err(|error| error.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn companion_mode(action: &CompanionAction) -> Result<ExitCode, String> {
     match action {
         CompanionAction::Install { extensions } => {
@@ -1155,6 +1408,11 @@ fn main() -> ExitCode {
         Mode::PairDial(args) => pair_dial_mode(args),
         Mode::Serve(args) => serve(args),
         Mode::Dial(args) => dial(args),
+        Mode::Grant {
+            peer,
+            protocol,
+            revoke,
+        } => grant_mode(peer, protocol, *revoke),
         Mode::Discover { seconds } => discover_mode(*seconds),
         Mode::Companion { action } => companion_mode(action),
     };

@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "136ea4b0acf93101540b4074317fbb59fcaab4f8" }
+coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "bc4c201da9fe1f7c7f9bd6700f3efdae7ec05087" }
 coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "1f00bfe6319f64e7ec038a7003746f4f031d538c" }
 # Unpublished so far.
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "a3776fba131415d006f68ea493120fd7f894244a", features = ["pin"] }
