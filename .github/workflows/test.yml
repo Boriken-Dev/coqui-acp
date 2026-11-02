@@ -89,6 +89,9 @@ jobs:
         with:
           node-version: "22"
       - run: npm test
+      # A second provider of the page contract, written from the document alone.
+      - run: npm test
+        working-directory: examples/second-provider
 
   dart:
     runs-on: ubuntu-latest
