@@ -51,11 +51,8 @@ impl Fixture {
         if let Some(home) = home {
             command.env(coqui_agentic_peer::home::HOME_ENV, home);
         }
-        let mut child = command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let log = std::fs::File::create(self.dir.join(format!("serve-{port}.log"))).unwrap();
+        let mut child = command.stdout(Stdio::piped()).stderr(log).spawn().unwrap();
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
@@ -63,6 +60,21 @@ impl Fixture {
         self.children.push(child);
         wait_for_port(port);
         line.trim().to_owned()
+    }
+}
+
+impl Fixture {
+    /// What every process here wrote to its log, for a failure to report.
+    fn said(&self) -> String {
+        let mut all = String::new();
+        for entry in std::fs::read_dir(&self.dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "log") {
+                all.push_str(&format!("--- {}\n", path.display()));
+                all.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+        all
     }
 }
 
@@ -427,13 +439,18 @@ fn curl(url: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn curl_until(url: &str) -> String {
+fn curl_until(url: &str, fixture: &Fixture) -> String {
     let until = Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(answer) = curl(url) {
             return answer;
         }
-        assert!(Instant::now() < until, "nothing answered at {url}");
+        assert!(
+            Instant::now() < until,
+            "nothing answered at {url}
+{}",
+            fixture.said()
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -463,6 +480,7 @@ fn curl_reaches_a_server_through_a_link_in_both_directions_and_only_as_granted()
         &reverse,
     ];
     let server = fixture.serve(None, &flags, port);
+    let forward_log = std::fs::File::create(fixture.dir.join("forward.log")).unwrap();
     let forwarding = Command::new(BRIDGE)
         .args([
             "forward",
@@ -482,17 +500,17 @@ fn curl_reaches_a_server_through_a_link_in_both_directions_and_only_as_granted()
         ])
         .args(["--allow-target", &behind_client])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(forward_log)
         .spawn()
         .unwrap();
     fixture.children.push(forwarding);
 
     assert_eq!(
-        curl_until(&format!("http://127.0.0.1:{forward_port}/")),
+        curl_until(&format!("http://127.0.0.1:{forward_port}/"), &fixture),
         "behind the server"
     );
     assert_eq!(
-        curl_until(&format!("http://127.0.0.1:{reverse_port}/")),
+        curl_until(&format!("http://127.0.0.1:{reverse_port}/"), &fixture),
         "behind the client"
     );
     wait_for_port(refused_port);
