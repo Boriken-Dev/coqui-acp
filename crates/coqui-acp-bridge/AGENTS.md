@@ -26,11 +26,13 @@ coqui-acp-bridge discover [--seconds N]
 coqui-acp-bridge companion install --extension-id ID...
 coqui-acp-bridge companion uninstall
 coqui-acp-bridge grant PEER TOKEN [--revoke]
+coqui-acp-bridge forward URL (--paired | --identity KEY --peer ID) [--local LOCAL=TARGET]... [--allow-target HOST:PORT]...
 ```
 
 Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`. With the in-band proof it also takes `--service TOKEN=PROGRAM...` and `--grant PEER=TOKEN...`, and `dial` takes `--fallback URL...`. With the in-band proof, `--tls-short-lived` replaces `--tls-identity`.
 
 - **Several protocols on one link:** `--service mcp=PROGRAM` serves another protocol beside the agent after `--`, which is `acp/1`. A client opens streams on one proven link, and the first message tells a link from a plain ACP client, which keeps working. A proof admits a peer and grants nothing: `--grant PEER=TOKEN` names what it may open, with everything for an allowed peer when none is listed. Under `--paired`, a peer gets `acp/1` for being paired, and `grant PEER TOKEN` adds or takes away anything else, counted at once on a live link, with no second pairing. A store that cannot be read refuses. `--advertise` then says what is offered, as a hint.
+- **Forwarding TCP:** `serve --forward` serves `tcp/1`, and grants nothing: a peer needs `--grant PEER=tcp/1:HOST:PORT` or `grant PEER tcp/1:HOST:PORT`, exact, with no wildcards. `forward --local` listens here and reaches a target from the remote. `serve --reverse LOCAL=PEER=TARGET` and `forward --allow-target` are the other direction, with the dialing side deciding. A listener has to be on loopback, and anyone on this machine who can reach it gets what this peer was granted.
 - **Failover:** `dial --fallback URL` tries the next endpoint when one cannot be reached. Each has to prove what the first would, and they share a scheme.
 - **One pairing:** `pair-accept` and `pair-dial` default to this user's own identity and trust store (`coqui_agentic_peer::home`), and `serve --paired` and `dial --paired` read them, so one pairing serves every command, with nothing to name.
 - **In-band proof (`--identity`):** the WebCrypto handshake, then every message inside its session. It does not depend on TLS, so it works through a reverse proxy that ends TLS, and the proxy can neither read nor inject. The handshake may be text or binary frames; each record after it is one binary frame.

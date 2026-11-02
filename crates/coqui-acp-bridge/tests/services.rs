@@ -388,3 +388,190 @@ fn dial_tries_its_fallback_when_the_first_endpoint_is_not_there() {
     let _ = dialing.wait();
     assert!(connected);
 }
+
+/// A web server that names itself, which only a real HTTP exchange gets an answer from.
+fn web_server(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let serving = std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut connection) = connection else {
+                return;
+            };
+            std::thread::spawn(move || {
+                let mut asked = BufReader::new(connection.try_clone().unwrap());
+                let mut line = String::new();
+                while asked.read_line(&mut line).is_ok_and(|read| read > 0) && line != "\r\n" {
+                    line.clear();
+                }
+                let _ = write!(
+                    connection,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    (address, serving)
+}
+
+/// An unmodified HTTP client, so nothing here knows it went over a link.
+fn curl(url: &str) -> Option<String> {
+    let output = Command::new("curl")
+        .args(["--silent", "--show-error", "--max-time", "5", url])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn curl_until(url: &str) -> String {
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(answer) = curl(url) {
+            return answer;
+        }
+        assert!(Instant::now() < until, "nothing answered at {url}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn curl_reaches_a_server_through_a_link_in_both_directions_and_only_as_granted() {
+    let mut fixture = Fixture::new("forward");
+    let (server_key, _) = fixture.identity("server");
+    let (client_key, client) = fixture.identity("client");
+    let client_id = client.peer_id().to_string();
+    let (behind_server, _server_web) = web_server("behind the server");
+    let (not_granted, _other_web) = web_server("not granted");
+    let (behind_client, _client_web) = web_server("behind the client");
+    let port = free_port();
+    let (forward_port, refused_port, reverse_port) = (free_port(), free_port(), free_port());
+    let grant = format!("{client_id}=tcp/1:{behind_server}");
+    let reverse = format!("127.0.0.1:{reverse_port}={client_id}={behind_client}");
+    let flags = [
+        "--identity",
+        server_key.to_str().unwrap(),
+        "--allow",
+        &client_id,
+        "--forward",
+        "--grant",
+        &grant,
+        "--reverse",
+        &reverse,
+    ];
+    let server = fixture.serve(None, &flags, port);
+    let forwarding = Command::new(BRIDGE)
+        .args([
+            "forward",
+            &format!("ws://127.0.0.1:{port}/link"),
+            "--identity",
+            client_key.to_str().unwrap(),
+            "--peer",
+            &server,
+        ])
+        .args([
+            "--local",
+            &format!("127.0.0.1:{forward_port}={behind_server}"),
+        ])
+        .args([
+            "--local",
+            &format!("127.0.0.1:{refused_port}={not_granted}"),
+        ])
+        .args(["--allow-target", &behind_client])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    fixture.children.push(forwarding);
+
+    assert_eq!(
+        curl_until(&format!("http://127.0.0.1:{forward_port}/")),
+        "behind the server"
+    );
+    assert_eq!(
+        curl_until(&format!("http://127.0.0.1:{reverse_port}/")),
+        "behind the client"
+    );
+    wait_for_port(refused_port);
+    assert_eq!(
+        curl(&format!("http://127.0.0.1:{refused_port}/")),
+        None,
+        "a target with no grant reaches nothing"
+    );
+}
+
+#[test]
+fn forwarding_is_refused_by_default_and_a_target_takes_a_grant_of_its_own() {
+    let mut fixture = Fixture::new("noforward");
+    let (key, _) = fixture.identity("server");
+    let (_, client) = fixture.identity("client");
+    let peer = client.peer_id().to_string();
+    let (web, _serving) = web_server("reached");
+    let port = free_port();
+    let server = fixture.serve(
+        None,
+        &[
+            "--identity",
+            key.to_str().unwrap(),
+            "--allow",
+            &peer,
+            "--forward",
+            "--service",
+            "mcp=nothing",
+        ],
+        port,
+    );
+    over_link(port, client, &server, |mux| {
+        // Allowed in with no --grant gets every protocol that runs a program, and never this.
+        assert_eq!(capabilities(mux, WAIT).unwrap().offers, ["acp/1", "mcp"]);
+        let target: coqui_agentic_peer::forward::Target = web.parse().unwrap();
+        let stream = coqui_agentic_peer::forward::connect(mux, &target).unwrap();
+        assert_eq!(
+            stream.receive(Some(WAIT)),
+            Err(coqui_web::Failure::Permission)
+        );
+    });
+}
+
+#[test]
+fn a_listener_beyond_loopback_is_refused() {
+    let fixture = Fixture::new("beyond");
+    let (key, identity) = fixture.identity("server");
+    let peer = identity.peer_id().to_string();
+    let output = Command::new(BRIDGE)
+        .args([
+            "forward",
+            "ws://127.0.0.1:1/link",
+            "--identity",
+            key.to_str().unwrap(),
+            "--peer",
+            &peer,
+            "--local",
+            "0.0.0.0:9000=db:5432",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("loopback"));
+    let reverse = format!("0.0.0.0:9000={peer}=db:5432");
+    let output = Command::new(BRIDGE)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--identity",
+            key.to_str().unwrap(),
+            "--allow",
+            &peer,
+            "--reverse",
+            &reverse,
+            "--",
+            "x",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}

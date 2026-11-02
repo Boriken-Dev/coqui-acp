@@ -10,6 +10,7 @@ bridge passes complete messages and reads none of them, so what the agent may do
 
 - `serve`: wait for peers, each with an agent of its own. WebSocket, and WebTransport beside it.
 - `serve --service mcp=PROGRAM`: another protocol on the same proven link. `grant PEER TOKEN` adds one to a peer already paired, with no second pairing.
+- `serve --forward`, `forward`: TCP over the link in either direction, each target its own grant.
 - `serve --advertise`, `discover`: find agents on this machine and the link. What is found is a claim, and only the proof at connect tests it. A browser extension asks through `companion install`, and `--tls-short-lived` lets it open WebTransport with no certificate authority.
 - `dial`: connect out from behind NAT, reconnecting with the agent still running; ends with the agent's exit status.
 - Nothing is trusted on first use. A peer proves a key in-band (`--allow`, or a paired key with `--allow-store`), and everything after that is inside an encrypted session, so a reverse proxy that ends TLS can carry it and can neither read nor inject. Or by a pinned client certificate (`--allow-cert`), which ends where TLS ends.

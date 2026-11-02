@@ -23,8 +23,9 @@ use coqui_acp_bridge::agent::Agent;
 use coqui_acp_bridge::relay::{LinkEnd, relay};
 use coqui_agentic_peer::auth::Sealed;
 use coqui_agentic_peer::discovery::{Advertised, Advertisement};
+use coqui_agentic_peer::forward::{self, Target};
 use coqui_agentic_peer::link::{self, Accepted, Prefilled, Services};
-use coqui_agentic_peer::mux::{self, Side};
+use coqui_agentic_peer::mux::{self, LinkStream, Side};
 use coqui_agentic_peer::peers::{FilePeers, NoEvents, PeerRecord, PeerStore};
 use coqui_agentic_peer::{Error, auth, companion, discovery, home, pairing};
 use coqui_net_acl::{Acl, Action, IpNet, Rule};
@@ -74,12 +75,16 @@ enum Mode {
     Serve(Serve),
     /// Connect out to a peer, for an agent behind NAT. Reconnects and keeps the agent running.
     Dial(Dial),
+    /// Forward TCP over a link: listen here for what the far side was asked to reach, and let it reach what is named here. Runs
+    /// until stopped, connecting again when the link goes.
+    Forward(Forward),
     /// Let a peer this user paired with open a protocol, or with `--revoke` no longer. It counts at once, on a live link too,
     /// with no second pairing.
     Grant {
         /// The peer id.
         peer: String,
-        /// The protocol token.
+        /// The protocol token, or `tcp/1:HOST:PORT` for a target a forward may reach, which also grants `tcp/1`. Taking a target away
+        /// keeps `tcp/1`, which reaches nothing without one.
         protocol: String,
         /// Take it away instead.
         #[arg(long)]
@@ -228,8 +233,16 @@ struct Serve {
     services: Vec<String>,
     /// What a peer may open, as PEER=TOKEN. Repeat for more. With any listed, a peer may open only what names it. With none, every
     /// peer allowed in may open everything; `--paired` keeps its grants with `grant` instead.
-    #[arg(long = "grant", requires = "services", value_name = "PEER=TOKEN")]
+    #[arg(long = "grant", value_name = "PEER=TOKEN")]
     grants: Vec<String>,
+    /// Serve `tcp/1`, forwarding to the targets a peer is granted and to no others. Nothing is granted by this. Name each with
+    /// `--grant PEER=tcp/1:HOST:PORT` or, with `--paired`, the `grant` command.
+    #[arg(long)]
+    forward: bool,
+    /// Listen on this machine and reach a target from a peer that forwards for this one, as LOCAL=PEER=TARGET. LOCAL has to be a
+    /// loopback address. Repeat for more. That peer decides from its own grants.
+    #[arg(long = "reverse", value_name = "LOCAL=PEER=TARGET")]
+    reverses: Vec<String>,
     /// Say this agent exists, under this name. On loopback a file only this user's programs read; otherwise a DNS-SD record
     /// everyone on the link can see, with no secret in it. Connecting still needs the proof.
     #[arg(long, value_name = "LABEL")]
@@ -240,6 +253,32 @@ struct Serve {
     /// The agent program, then its arguments.
     #[arg(last = true, required = true)]
     agent: Vec<OsString>,
+}
+
+#[derive(clap::Args, Debug)]
+struct Forward {
+    /// The URL to connect to: wss://, or ws:// on loopback.
+    url: Url,
+    /// This side's identity. See `keygen`.
+    #[arg(long, required_unless_present = "paired")]
+    identity: Option<PathBuf>,
+    /// Use this user's identity, and prove the remote against whoever this user has paired with.
+    #[arg(long, conflicts_with_all = ["identity", "peers"])]
+    paired: bool,
+    /// A peer id the remote must prove, with `--identity`. Repeat for more.
+    #[arg(long = "peer", required_unless_present = "paired")]
+    peers: Vec<String>,
+    /// A PEM bundle of certificate authorities the remote certificate must chain to, with wss://.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
+    /// Listen here and reach a target from the remote, as LOCAL=TARGET. LOCAL has to be a loopback address. Repeat for more. The
+    /// remote decides from its own grants.
+    #[arg(long = "local", value_name = "LOCAL=TARGET")]
+    locals: Vec<String>,
+    /// Let the remote reach this target from here, once it listens for it with `serve --reverse`. Repeat for more. With none, it
+    /// reaches nothing.
+    #[arg(long = "allow-target", value_name = "HOST:PORT")]
+    allow_targets: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -417,6 +456,61 @@ impl Gate {
 }
 
 /// What every connection of a `serve` shares.
+/// `serve --reverse`: a listener here, for as long as this peer's link is up.
+struct Reverse {
+    local: SocketAddr,
+    peer: String,
+    target: Target,
+}
+
+fn local_address(text: &str) -> Result<SocketAddr, String> {
+    let address: SocketAddr = text
+        .parse()
+        .map_err(|_| format!("{text} is not an address and port"))?;
+    if !forward::is_loopback(address.ip()) {
+        return Err(format!(
+            "{text} is not loopback: anyone who can reach it gets what this peer was granted"
+        ));
+    }
+    Ok(address)
+}
+
+fn parse_reverse(text: &str) -> Result<Reverse, String> {
+    let mut parts = text.splitn(3, '=');
+    let (Some(local), Some(peer), Some(target)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err("--reverse is LOCAL=PEER=TARGET".to_owned());
+    };
+    Ok(Reverse {
+        local: local_address(local)?,
+        peer: peer.to_owned(),
+        target: target
+            .parse()
+            .map_err(|error: forward::BadTarget| error.to_string())?,
+    })
+}
+
+fn parse_local(text: &str) -> Result<(SocketAddr, Target), String> {
+    let (local, target) = text.split_once('=').ok_or("--local is LOCAL=TARGET")?;
+    Ok((
+        local_address(local)?,
+        target
+            .parse()
+            .map_err(|error: forward::BadTarget| error.to_string())?,
+    ))
+}
+
+/// One listener for the life of a link. A port that cannot be had is said once: the rest of the link is still good.
+fn listen_for<C: Channel>(mux: &mux::Mux<'_, C>, local: SocketAddr, target: &Target) {
+    let listener = match std::net::TcpListener::bind(local) {
+        Ok(listener) => listener,
+        Err(error) => return eprintln!("could not listen on {local}: {error}"),
+    };
+    eprintln!("{local} forwards to {target}");
+    if let Err(error) = forward::listen(mux, &listener, target) {
+        eprintln!("stopped listening on {local}: {error}");
+    }
+}
+
 struct Service {
     method: Option<WebCrypto>,
     store: Option<Arc<TrustStore>>,
@@ -425,6 +519,7 @@ struct Service {
     unproven: Gate,
     peers: Gate,
     links: Option<Links>,
+    reverses: Vec<Reverse>,
 }
 
 /// What a link can run beside the one agent, and who may open what.
@@ -484,7 +579,7 @@ impl PeerStore for PairedGrants {
 }
 
 fn agent_handler(program: Vec<OsString>, gate: Gate) -> link::Handler {
-    Box::new(move |stream: &dyn Channel, accepted: &Accepted| {
+    Box::new(move |stream: &dyn LinkStream, accepted: &Accepted| {
         let Some(_running) = gate.enter() else {
             return eprintln!("{} was turned away: --max-peers are running", accepted.peer);
         };
@@ -518,7 +613,7 @@ fn parse_service(text: &str) -> Result<(String, OsString), String> {
 
 /// What `--service` and `--grant` ask for, if anything.
 fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
-    if args.services.is_empty() {
+    if args.services.is_empty() && !args.forward && args.reverses.is_empty() {
         return Ok(None);
     }
     let mut services =
@@ -528,6 +623,9 @@ fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
         let (token, program) = parse_service(text)?;
         services = services.with(&token, agent_handler(vec![program], gate.clone()));
         every.push(token);
+    }
+    if args.forward {
+        services = forward::serving(services);
     }
     let grants: Box<dyn PeerStore> = if args.paired {
         if !args.grants.is_empty() {
@@ -540,13 +638,21 @@ fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
         let mut named: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for text in &args.grants {
             let (peer, token) = text.split_once('=').ok_or("a grant is PEER=TOKEN")?;
-            if !every.iter().any(|offered| offered == token) {
+            let entry = named.entry(peer.to_owned()).or_default();
+            if let Some(target) = token.strip_prefix("tcp/1:") {
+                if !args.forward {
+                    return Err("a target needs --forward".to_owned());
+                }
+                let target: Target = target
+                    .parse()
+                    .map_err(|error: forward::BadTarget| error.to_string())?;
+                entry.insert(forward::TCP_PROTOCOL.to_owned());
+                entry.insert(target.grant_token());
+            } else if every.iter().any(|offered| offered == token) {
+                entry.insert(token.to_owned());
+            } else {
                 return Err("a grant names a protocol nothing here serves".to_owned());
             }
-            named
-                .entry(peer.to_owned())
-                .or_default()
-                .insert(token.to_owned());
         }
         Box::new(FixedGrants {
             every,
@@ -606,7 +712,27 @@ impl Service {
                     services: &links.services,
                     events: &NoEvents,
                 };
-                link::serve(channel, Side::Answered, options, Some(first), peer, &host);
+                let reverses: Vec<&Reverse> = self
+                    .reverses
+                    .iter()
+                    .filter(|reverse| reverse.peer == peer)
+                    .collect();
+                link::serve_with(
+                    channel,
+                    Side::Answered,
+                    options,
+                    Some(first),
+                    peer,
+                    &host,
+                    |mux| {
+                        thread::scope(|scope| {
+                            for reverse in reverses {
+                                scope
+                                    .spawn(move || listen_for(mux, reverse.local, &reverse.target));
+                            }
+                        });
+                    },
+                );
             }
             Ok(Some(first)) => {
                 let granted = links
@@ -740,7 +866,7 @@ fn advertise(
             "--advertise-host names a host on the network, and this listens on loopback".to_owned(),
         );
     }
-    let offers: Vec<String> = if args.services.is_empty() {
+    let offers: Vec<String> = if args.services.is_empty() && !args.forward {
         Vec::new()
     } else {
         core::iter::once(ACP.to_owned())
@@ -749,6 +875,7 @@ fn advertise(
                     .iter()
                     .filter_map(|text| parse_service(text).ok().map(|(token, _)| token)),
             )
+            .chain(args.forward.then(|| forward::TCP_PROTOCOL.to_owned()))
             .collect()
     };
     let advertisement =
@@ -781,11 +908,15 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     let admit = admission(&args.permit, &args.deny)?;
     let unproven = Gate::new(MAX_UNPROVEN);
     let running = Gate::new(args.max_peers);
-    if !args.services.is_empty() && (args.no_peer_proof || certificates) {
+    if !args.grants.is_empty() && args.services.is_empty() && !args.forward {
         return Err(
-            "--service needs the in-band proof: streams are for a link a proof named a peer on"
-                .to_owned(),
+            "--grant needs --service or --forward: otherwise there is nothing to grant".to_owned(),
         );
+    }
+    if (!args.services.is_empty() || args.forward || !args.reverses.is_empty())
+        && (args.no_peer_proof || certificates)
+    {
+        return Err("--service, --forward and --reverse need the in-band proof: streams are for a link a proof named a peer on".to_owned());
     }
     if args.tls_short_lived && (args.no_peer_proof || certificates) {
         return Err("--tls-short-lived needs the in-band proof: a client cannot pin this certificate for long".to_owned());
@@ -847,6 +978,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             unproven,
             peers: running,
             links: None,
+            reverses: Vec::new(),
         });
         accept_loop(
             || listener.next(None),
@@ -939,6 +1071,11 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     };
     eprintln!("listening on {bound}");
     let links = links(args, &running)?;
+    let reverses = args
+        .reverses
+        .iter()
+        .map(|text| parse_reverse(text))
+        .collect::<Result<Vec<_>, _>>()?;
     let service = Arc::new(Service {
         method: Some(method),
         store,
@@ -947,6 +1084,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         unproven,
         peers: running,
         links,
+        reverses,
     });
     if let Some(quic) = quic {
         let service = Arc::clone(&service);
@@ -1003,6 +1141,7 @@ fn serve_unproven(
         unproven,
         peers: running,
         links: None,
+        reverses: Vec::new(),
     });
     accept_loop(
         || listener.next(None),
@@ -1349,21 +1488,167 @@ fn discover_mode(seconds: u64) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn grant_mode(peer: &str, protocol: &str, revoke: bool) -> Result<ExitCode, String> {
-    if !mux::valid_protocol(protocol) {
-        return Err(
-            "a protocol token is printable, with no spaces, commas or equals signs".to_owned(),
-        );
+/// What the remote may reach from here, whichever key proves itself: the proof already checked it is one this side wanted.
+struct AllowedTargets(BTreeSet<String>);
+
+impl PeerStore for AllowedTargets {
+    fn get(&self, peer: &str) -> Result<Option<PeerRecord>, Error> {
+        let mut record = PeerRecord::new(peer);
+        record.grants.clone_from(&self.0);
+        Ok(Some(record))
     }
+
+    fn put(&self, _record: &PeerRecord) -> Result<(), Error> {
+        Err(Error::Identity(
+            "these grants are fixed by the command line".to_owned(),
+        ))
+    }
+
+    fn remove(&self, _peer: &str) -> Result<(), Error> {
+        Err(Error::Identity(
+            "these grants are fixed by the command line".to_owned(),
+        ))
+    }
+}
+
+fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
+    let locals = args
+        .locals
+        .iter()
+        .map(|text| parse_local(text))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut grants = BTreeSet::new();
+    for text in &args.allow_targets {
+        let target: Target = text
+            .parse()
+            .map_err(|error: forward::BadTarget| error.to_string())?;
+        grants.insert(forward::TCP_PROTOCOL.to_owned());
+        grants.insert(target.grant_token());
+    }
+    if locals.is_empty() && grants.is_empty() {
+        return Err("give --local or --allow-target: otherwise this forwards nothing".to_owned());
+    }
+    let (method, store) = if args.paired {
+        let identity = home::identity(None).map_err(|error| error.to_string())?;
+        let store = Arc::new(home::store(None).map_err(|error| error.to_string())?);
+        (
+            WebCrypto::new(identity).with_responders(Trust::Store(TrustStore::clone(&store))),
+            Some(store),
+        )
+    } else {
+        let path = args
+            .identity
+            .as_deref()
+            .ok_or("give --identity or --paired")?;
+        let identity = Identity::open_or_create(path).map_err(|error| error.to_string())?;
+        (
+            WebCrypto::new(identity).with_responders(Trust::pinned(peers(&args.peers)?)),
+            None,
+        )
+    };
+    let mut dialer = websocket::Dialer::new()
+        .with_limits(unproven_limits())
+        .with_frames(Frames::Binary);
+    if args.url.scheme() == "wss" {
+        dialer = dialer.with_tls(in_band_tls(args.ca_file.as_ref())?);
+    }
+    let allowed = AllowedTargets(grants);
+    let services = forward::serving(Services::default());
+    let mut options = link::Options::default();
+    options.limits.max_message = MAX_LINE;
+    let longest = Duration::from_secs(60);
+    let mut wait = Duration::from_secs(1);
+    loop {
+        match dialer.dial(Kind::WebSocket, &args.url, Duration::from_secs(10)) {
+            Ok(channel) => match auth::prove_out(
+                &method,
+                &channel,
+                DIAL_PROOF,
+                MAX_LINE + auth::RECORD_OVERHEAD,
+            ) {
+                Ok(established) => {
+                    wait = Duration::from_secs(1);
+                    let peer = established.peer;
+                    eprintln!("connected to {peer}");
+                    let sealed = Sealed::new(&channel, established.session);
+                    let sealed = match &store {
+                        Some(store) => {
+                            let store = Arc::clone(store);
+                            let proven = peer;
+                            sealed.with_check(move || store.is_accepted(&proven))
+                        }
+                        None => sealed,
+                    };
+                    let host = link::Host {
+                        store: &allowed,
+                        services: &services,
+                        events: &NoEvents,
+                    };
+                    link::serve_with(
+                        &sealed,
+                        Side::Dialed,
+                        options,
+                        None,
+                        &peer.to_string(),
+                        &host,
+                        |mux| {
+                            // Says this is a link, which the far side otherwise waits to hear before it opens anything.
+                            if let Err(failure) = link::capabilities(mux, Duration::from_secs(10)) {
+                                eprintln!(
+                                    "the remote said nothing about what it offers: {failure}"
+                                );
+                            }
+                            thread::scope(|scope| {
+                                for (local, target) in &locals {
+                                    scope.spawn(move || listen_for(mux, *local, target));
+                                }
+                            });
+                        },
+                    );
+                    sealed.close();
+                }
+                Err(Error::Proof(why)) => {
+                    return Err(format!("the remote did not prove itself: {why}"));
+                }
+                Err(error) => eprintln!("the proof did not finish: {error}"),
+            },
+            Err(failure) => eprintln!("could not connect: {failure}"),
+        }
+        thread::sleep(wait);
+        wait = (wait * 2).min(longest);
+    }
+}
+
+fn grant_mode(peer: &str, protocol: &str, revoke: bool) -> Result<ExitCode, String> {
+    let target = match protocol.strip_prefix("tcp/1:") {
+        Some(target) => Some(
+            target
+                .parse::<Target>()
+                .map_err(|error| error.to_string())?,
+        ),
+        None if mux::valid_protocol(protocol) => None,
+        None => {
+            return Err(
+                "a protocol token is printable, with no spaces, commas or equals signs".to_owned(),
+            );
+        }
+    };
     let store = FilePeers::new(home::grants_path().map_err(|error| error.to_string())?);
     let mut record = store
         .get(peer)
         .map_err(|error| error.to_string())?
         .unwrap_or_else(|| PeerRecord::new(peer));
-    if revoke {
-        record.grants.remove(protocol);
-    } else {
-        record.grants.insert(protocol.to_owned());
+    match (&target, revoke) {
+        (Some(target), false) => record = forward::grant(record, target),
+        (Some(target), true) => {
+            record.grants.remove(&target.grant_token());
+        }
+        (None, false) => {
+            record.grants.insert(protocol.to_owned());
+        }
+        (None, true) => {
+            record.grants.remove(protocol);
+        }
     }
     store.put(&record).map_err(|error| error.to_string())?;
     Ok(ExitCode::SUCCESS)
@@ -1408,6 +1693,7 @@ fn main() -> ExitCode {
         Mode::PairDial(args) => pair_dial_mode(args),
         Mode::Serve(args) => serve(args),
         Mode::Dial(args) => dial(args),
+        Mode::Forward(args) => forward_mode(args),
         Mode::Grant {
             peer,
             protocol,
