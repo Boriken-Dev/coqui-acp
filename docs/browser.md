@@ -246,7 +246,7 @@ Non-normative: what a Chromium Manifest V3 extension needs, as reference.
 
 The contract is the page API and the DNS-SD record, so any language can take part:
 
-- **WebAssembly** and **Dart** reach `document.acp` through JavaScript and exchange strings.
+- **WebAssembly** and **Dart** reach `document.acp` through JavaScript and exchange strings: `coqui-acp-page` for a Rust page, and `package:coqui_acp/page.dart`, whose connection `AcpClient` takes as it is. The Dart one passes under both dart2js and dart2wasm.
 - **A native program** has no page: it browses DNS-SD itself, connects directly, and needs no scope, since it answers to the person who ran it.
 
 ## Conformance
