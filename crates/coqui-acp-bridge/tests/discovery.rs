@@ -287,5 +287,18 @@ fn a_record_on_the_link_is_found_with_what_it_claims() {
         "{}",
         mine.url
     );
+
+    // The same record through what a browser extension asks.
+    let fixture = Fixture::new("multicast");
+    let mut host = NativeHost::start(&fixture.descriptors());
+    host.send(&json!({ "op": "discover", "seconds": 6 }));
+    let reply = host.receive();
+    let candidates = reply["candidates"].as_array().unwrap();
+    let through = candidates
+        .iter()
+        .find(|candidate| candidate["label"] == label.as_str())
+        .unwrap_or_else(|| panic!("{reply}"));
+    assert_eq!(through["source"], "mdns");
+    assert_eq!(through["peer"], peer.as_str());
     drop(published);
 }
