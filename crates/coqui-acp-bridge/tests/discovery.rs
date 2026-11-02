@@ -211,10 +211,12 @@ fn a_short_lived_certificate_is_advertised_by_its_hash_and_needs_the_in_band_pro
         .spawn()
         .unwrap();
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut listening = String::new();
-    stderr.read_line(&mut listening).unwrap();
     let mut certificate = String::new();
     stderr.read_line(&mut certificate).unwrap();
+    // Said only once it can be found.
+    let mut listening = String::new();
+    stderr.read_line(&mut listening).unwrap();
+    assert!(listening.starts_with("listening on"), "{listening}");
     let hash = certificate
         .split_whitespace()
         .nth(1)
@@ -362,7 +364,7 @@ fn a_record_on_the_link_is_found_with_what_it_claims() {
         .iter()
         .find(|candidate| candidate["label"] == label.as_str())
         .unwrap_or_else(|| panic!("{reply}"));
-    assert_eq!(through["source"], "mdns");
+    assert_eq!(through["source"], "dns-sd");
     assert_eq!(through["peer"], peer.as_str());
     drop(published);
 }

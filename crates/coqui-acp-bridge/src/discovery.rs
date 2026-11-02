@@ -50,7 +50,7 @@ pub enum Source {
 impl Source {
     const fn name(self) -> &'static str {
         match self {
-            Self::Network => "mdns",
+            Self::Network => "dns-sd",
             Self::ThisMachine => "local",
         }
     }

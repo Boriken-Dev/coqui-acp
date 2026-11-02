@@ -611,8 +611,8 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         let bound = listener
             .local_addr()
             .map_err(|failure| failure.to_string())?;
-        eprintln!("listening on {bound}");
         let _advertised = advertise(args, bound, None, None, None)?;
+        eprintln!("listening on {bound}");
         let service = Arc::new(Service {
             method: None,
             store: None,
@@ -667,7 +667,6 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         .with_origins(args.origins.clone())
         .with_admission(admit.clone());
     let bound = plain.local_addr().map_err(|failure| failure.to_string())?;
-    eprintln!("listening on {bound}");
     let hash = short_lived
         .as_ref()
         .map(|identity| identity.fingerprint().to_string());
@@ -682,6 +681,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         args.webtransport_port,
         hash,
     )?;
+    eprintln!("listening on {bound}");
     let service = Arc::new(Service {
         method: Some(method),
         store,
@@ -740,10 +740,10 @@ fn serve_unproven(
     let bound = listener
         .local_addr()
         .map_err(|failure| failure.to_string())?;
+    let _advertised = advertise(args, bound, None, None, None)?;
     eprintln!(
         "listening on {bound}, with no proof of the peer: whoever can connect gets the agent"
     );
-    let _advertised = advertise(args, bound, None, None, None)?;
     let service = Arc::new(Service {
         method: None,
         store: None,
