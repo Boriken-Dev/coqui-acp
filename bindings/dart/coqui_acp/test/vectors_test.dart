@@ -96,6 +96,43 @@ bool matchesEvent(AcpEvent event, Map<String, dynamic> want) => switch (event) {
   _ => false,
 };
 
+/// An outcome as `vectors/describe.json` writes it.
+Object? outcome<T>(AcpAnswer<T> answer, [Object? Function(T)? known]) =>
+    switch (answer) {
+      AcpKnown(:final value) => {'known': known == null ? value : known(value)},
+      AcpUnknown(:final reason) => {'unknown': reason},
+      AcpNotSupported() => 'not_supported',
+    };
+
+List<Object?> sessionJson(List<AcpSessionInfo> sessions) => [
+  for (final session in sessions)
+    {
+      'sessionId': session.id,
+      'cwd': ?session.cwd,
+      'title': ?session.title,
+      'updatedAt': ?session.updatedAt,
+    },
+];
+
+/// JSON with every object's keys in order, so two values compare as text.
+Object? canon(Object? value) => switch (value) {
+  Map() => {
+    for (final key in value.keys.map((key) => '$key').toList()..sort())
+      key: canon(value[key]),
+  },
+  List() => [for (final item in value) canon(item)],
+  _ => value,
+};
+
+/// Whether [got] is the outcome [want] says: the same known value, a reason holding its text, or not supported.
+bool asDescribed(Object? got, Object? want) {
+  if (got is Map && want is Map && want['unknown'] is String) {
+    return got['unknown'] is String &&
+        (got['unknown'] as String).contains(want['unknown'] as String);
+  }
+  return jsonEncode(canon(got)) == jsonEncode(canon(want));
+}
+
 void main() {
   final vectors =
       jsonDecode(File('../../../vectors/conversations.json').readAsStringSync())
@@ -466,5 +503,143 @@ void main() {
         await acp.close();
       },
     );
+  });
+
+  group('describe', () {
+    final described =
+        jsonDecode(File('../../../vectors/describe.json').readAsStringSync())
+            as Map<String, dynamic>;
+
+    for (final raw in described['cases'] as List<dynamic>) {
+      final vector = raw as Map<String, dynamic>;
+      test(vector['name'] as String, () async {
+        final agent = Agent();
+        final acp = AcpClient(
+          incoming: agent.toClient.stream,
+          send: (line) async => agent.fromClient.add(line),
+          maxProtocolVersion: vector['version'] as int,
+        );
+        final script = agent.play(vector['steps'] as List<dynamic>);
+        await acp.initialize();
+        final description = await acp.describe();
+        await script.timeout(const Duration(seconds: 10));
+        await acp.close();
+        unawaited(agent.fromClient.close());
+        expect(
+          await agent._inbox.moveNext(),
+          isFalse,
+          reason: 'the client sent something after the script',
+        );
+        final want = vector['describe'] as Map<String, dynamic>;
+        for (final (part, got) in [
+          ('options', outcome(description.options)),
+          ('modes', outcome(description.modes)),
+          ('sessions', outcome(description.sessions, sessionJson)),
+        ]) {
+          expect(
+            asDescribed(got, want[part]),
+            isTrue,
+            reason:
+                '$part was ${jsonEncode(got)}, wanted ${jsonEncode(want[part])}',
+          );
+        }
+      });
+    }
+
+    test('a description is bounded as the vectors say', () async {
+      final limits = described['limits'] as Map<String, dynamic>;
+      final text = limits['text'] as int;
+      String long(int bytes) => 'é' * (bytes ~/ 2) + (bytes.isOdd ? 'x' : '');
+      final options = [
+        {
+          'id': 'many',
+          'name': long(text + 11),
+          'type': 'select',
+          'currentValue': 'v0',
+          'options': [
+            for (var at = 0; at <= (limits['values'] as int); at++)
+              {'value': 'v$at', 'name': 'v'},
+          ],
+        },
+        {
+          'id': long(text + 1),
+          'name': 'too long to name',
+          'type': 'boolean',
+          'currentValue': true,
+        },
+        for (var at = 0; at < (limits['options'] as int); at++)
+          {'id': 'o$at', 'name': 'o', 'type': 'boolean', 'currentValue': true},
+      ];
+      final agent = Agent();
+      final acp = AcpClient(
+        incoming: agent.toClient.stream,
+        send: (line) async => agent.fromClient.add(line),
+        maxProtocolVersion: 1,
+      );
+      final script = agent.play([
+        {
+          'expect': {'method': 'initialize'},
+          'reply': {
+            'protocolVersion': 1,
+            'agentCapabilities': {
+              'sessionCapabilities': {'list': <String, Object?>{}},
+              '_meta': {acpSessionOptionsCapability: true},
+            },
+          },
+        },
+        {
+          'expect': {'method': acpSessionOptionsMethod},
+          'reply': {
+            'configOptions': options,
+            'modes': {
+              'currentModeId': 'm0',
+              'availableModes': [
+                for (var at = 0; at <= (limits['modes'] as int); at++)
+                  {'id': 'm$at', 'name': 'm'},
+              ],
+            },
+          },
+        },
+        {
+          'expect': {'method': 'session/list'},
+          'reply': {
+            'sessions': [
+              for (var at = 0; at <= (limits['sessions'] as int); at++)
+                {'sessionId': 's$at', 'cwd': '/w'},
+            ],
+          },
+        },
+      ]);
+      await acp.initialize();
+      final description = await acp.describe();
+      await script;
+      final known = (description.options as AcpKnown).value as List;
+      expect(known, hasLength(limits['options']));
+      final first = known.first as Map;
+      expect(first['options'] as List, hasLength(limits['values']));
+      final name = utf8.encode(first['name'] as String).length;
+      expect(name, lessThanOrEqualTo(text));
+      expect(name, greaterThan(text - 2));
+      expect(
+        (known[1] as Map)['id'],
+        'o0',
+        reason: 'an id too long to name is dropped',
+      );
+      final modes = (description.modes as AcpKnown).value as Map;
+      expect(modes['availableModes'] as List, hasLength(limits['modes']));
+      final sessions = (description.sessions as AcpKnown).value as List;
+      expect(sessions, hasLength(limits['sessions']));
+      await acp.close();
+    });
+
+    test('describe before initialize is refused', () async {
+      final agent = Agent();
+      final acp = AcpClient(
+        incoming: agent.toClient.stream,
+        send: (line) async => agent.fromClient.add(line),
+      );
+      expect(acp.describe, throwsStateError);
+      await acp.close();
+    });
   });
 }

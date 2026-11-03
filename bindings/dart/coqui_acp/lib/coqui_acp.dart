@@ -5,6 +5,62 @@ import 'dart:math';
 /// What `coqui-acp-bridge serve --linger` sends when it dropped output while nobody was connected.
 const acpOutputLost = '_dev.boriken.coqui.acp/output_lost';
 
+/// The `_meta` key of an agent's capabilities with which it says it answers [acpSessionOptionsMethod].
+const acpSessionOptionsCapability = 'dev.boriken.coqui.acp/session_options';
+
+/// The request for what a session can be started with, before any session: `{}`, answered
+/// `{"configOptions": [SessionConfigOption], "modes": SessionModeState, "unknown": {part: reason}}`, where a part the agent cannot
+/// tell is left out and may say why under `unknown`.
+const acpSessionOptionsMethod = '_coqui_acp/session_options';
+
+/// One part of what an agent offers: [AcpKnown], [AcpUnknown] or [AcpNotSupported].
+sealed class AcpAnswer<T> {
+  const AcpAnswer();
+}
+
+/// What the agent said.
+final class AcpKnown<T> extends AcpAnswer<T> {
+  const AcpKnown(this.value);
+  final T value;
+  @override
+  String toString() => 'AcpKnown($value)';
+}
+
+/// The agent offers the question and could not tell, for this reason, in its words.
+final class AcpUnknown<T> extends AcpAnswer<T> {
+  const AcpUnknown(this.reason);
+  final String reason;
+  @override
+  String toString() => 'AcpUnknown($reason)';
+}
+
+/// The agent does not offer the question, so it was not asked.
+final class AcpNotSupported<T> extends AcpAnswer<T> {
+  const AcpNotSupported();
+  @override
+  String toString() => 'AcpNotSupported()';
+}
+
+/// What an agent offers before any session; see [AcpClient.describe]. All of it is the agent's to say, read as ACP's own JSON
+/// and bounded.
+final class AcpDescription {
+  const AcpDescription({
+    required this.options,
+    required this.modes,
+    required this.sessions,
+  });
+
+  /// The options a session can start with, each ACP's `SessionConfigOption` of the version spoken (`id` in v1, `configId` in v2),
+  /// at the value a session starts with. A model is the option of category `model`, an effort the one of category `thought_level`.
+  final AcpAnswer<List<Map<String, Object?>>> options;
+
+  /// The modes a session can start in, ACP's v1 `SessionModeState`. v2 has none, so it is not supported there.
+  final AcpAnswer<Map<String, Object?>> modes;
+
+  /// The sessions the agent lists: `session/list`'s first page.
+  final AcpAnswer<List<AcpSessionInfo>> sessions;
+}
+
 sealed class AcpEvent {
   const AcpEvent();
 }
@@ -93,8 +149,11 @@ final class AcpNotice extends AcpEvent {
 }
 
 class AcpFailure implements Exception {
-  const AcpFailure(this.message);
+  const AcpFailure(this.message, {this.code});
   final String message;
+
+  /// The JSON-RPC error code the agent answered with, when this is its error.
+  final int? code;
   @override
   String toString() => 'ACP: $message';
 }
@@ -355,8 +414,12 @@ final class AcpClient {
       final completer = _pending.remove(id);
       if (completer == null || completer.isCompleted) return;
       if (envelope['error'] is Map) {
+        final error = envelope['error'] as Map;
         completer.completeError(
-          AcpFailure('Agent error: ${envelope['error']}'),
+          AcpFailure(
+            'Agent error: $error',
+            code: error['code'] is int ? error['code'] as int : null,
+          ),
         );
       } else if (envelope['result'] is Map) {
         completer.complete(
@@ -731,6 +794,43 @@ final class AcpClient {
     }
   }
 
+  /// What the agent offers before any session, asked without opening one: the options a session can start with and its modes,
+  /// by [acpSessionOptionsMethod] when the agent's capabilities advertise [acpSessionOptionsCapability] in `_meta`, and its
+  /// sessions, by `session/list` when v1's `sessionCapabilities.list` is set, or always in v2, where a method-not-found answer
+  /// means not supported. What it does not advertise is [AcpNotSupported] and nothing is sent for it; a call that fails or
+  /// times out is [AcpUnknown]. Call it after [initialize].
+  Future<AcpDescription> describe() async {
+    _ready();
+    final v2 = _protocolVersion == 2;
+    final meta = _capabilities['_meta'];
+    final extension = meta is Map ? meta[acpSessionOptionsCapability] : null;
+    AcpAnswer<List<Map<String, Object?>>> options = const AcpNotSupported();
+    AcpAnswer<Map<String, Object?>> modes = const AcpNotSupported();
+    if (extension != null && extension != false) {
+      try {
+        final answer = await _request(acpSessionOptionsMethod, {});
+        options = _describedOptions(answer, v2 ? 'configId' : 'id');
+        if (!v2) modes = _describedModes(answer);
+      } on AcpFailure catch (error) {
+        final why = _cut('the agent could not say: ${error.message}');
+        options = AcpUnknown(why);
+        if (!v2) modes = AcpUnknown(why);
+      }
+    }
+    final session = _capabilities['sessionCapabilities'];
+    AcpAnswer<List<AcpSessionInfo>> sessions = const AcpNotSupported();
+    if (v2 || (session is Map && session['list'] is Map)) {
+      try {
+        sessions = _describedSessions(await _request('session/list', {}));
+      } on AcpFailure catch (error) {
+        sessions = v2 && error.code == -32601
+            ? const AcpNotSupported()
+            : AcpUnknown(_cut('the agent could not say: ${error.message}'));
+      }
+    }
+    return AcpDescription(options: options, modes: modes, sessions: sessions);
+  }
+
   Future<String> createSession({required String cwd}) =>
       openSession(cwd: cwd).then((session) => session.id);
 
@@ -891,4 +991,198 @@ final class AcpClient {
       _pending.remove(id);
     }
   }
+}
+
+// What [AcpClient.describe] keeps of an agent's answer, which is untrusted: what cannot be read as ACP's own types is skipped,
+// lists are cut at their limit, an item whose identifier is longer than [_maxText] is dropped, since it could not be named back,
+// and other text is cut there. The Rust client keeps the same, as vectors/describe.json says.
+const _maxOptions = 64;
+const _maxValues = 1024;
+const _maxModes = 64;
+const _maxSessions = 500;
+
+/// The longest text kept, in UTF-8 bytes.
+const _maxText = 4096;
+
+String _cut(String text) {
+  final bytes = utf8.encode(text);
+  if (bytes.length <= _maxText) return text;
+  var end = _maxText;
+  while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+    end--;
+  }
+  return utf8.decode(bytes.sublist(0, end));
+}
+
+bool _fits(Object? id) =>
+    id is String && id.isNotEmpty && utf8.encode(id).length <= _maxText;
+
+/// [into]'s [key] set from [from]'s, cut, when it is text; anything else is left out.
+void _text(Map<String, Object?> into, Map from, String key) {
+  final value = from[key];
+  if (value is String) into[key] = _cut(value);
+}
+
+/// A select's value, or null when it is not one.
+Map<String, Object?>? _value(Object? item) {
+  if (item is! Map || item['value'] is! String || item['name'] is! String) {
+    return null;
+  }
+  return {'value': item['value'], 'name': _cut(item['name'] as String)}
+    ..addAll({
+      if (item['description'] is String)
+        'description': _cut(item['description'] as String),
+    });
+}
+
+/// A select's options, flat or grouped, bounded; null when they are neither.
+List<Map<String, Object?>>? _values(Object? options) {
+  if (options is! List) return null;
+  final flat = options.map(_value).toList();
+  if (!flat.contains(null)) {
+    return flat
+        .cast<Map<String, Object?>>()
+        .where((value) => _fits(value['value']))
+        .take(_maxValues)
+        .toList();
+  }
+  final groups = <Map<String, Object?>>[];
+  var left = _maxValues;
+  for (final group in options) {
+    if (group is! Map ||
+        group['group'] is! String ||
+        group['name'] is! String ||
+        !group.containsKey('options')) {
+      return null;
+    }
+    if (!_fits(group['group'])) continue;
+    final inside = group['options'] is List
+        ? group['options'] as List
+        : const [];
+    final values = inside
+        .map(_value)
+        .whereType<Map<String, Object?>>()
+        .where((value) => _fits(value['value']))
+        .take(left)
+        .toList();
+    left -= values.length;
+    groups.add({
+      'group': group['group'],
+      'name': _cut(group['name'] as String),
+      'options': values,
+    });
+  }
+  return groups;
+}
+
+/// One option, read as ACP's `SessionConfigOption` with its identifier under [idKey], or null.
+Map<String, Object?>? _option(Object? item, String idKey) {
+  if (item is! Map || !_fits(item[idKey]) || item['name'] is! String) {
+    return null;
+  }
+  final option = <String, Object?>{
+    idKey: item[idKey],
+    'name': _cut(item['name'] as String),
+  };
+  _text(option, item, 'description');
+  final category = item['category'];
+  if (category is String && utf8.encode(category).length <= _maxText) {
+    option['category'] = category;
+  }
+  switch (item['type']) {
+    case 'select':
+      final values = _values(item['options']);
+      if (!_fits(item['currentValue']) || values == null) return null;
+      option['type'] = 'select';
+      option['currentValue'] = item['currentValue'];
+      option['options'] = values;
+    case 'boolean':
+      if (item['currentValue'] is! bool) return null;
+      option['type'] = 'boolean';
+      option['currentValue'] = item['currentValue'];
+    default:
+      return null;
+  }
+  return option;
+}
+
+String _unsaid(Map<String, dynamic> answer, String part) {
+  final unknown = answer['unknown'];
+  final reason = unknown is Map ? unknown[part] : null;
+  return reason is String
+      ? _cut(reason)
+      : 'the agent did not say what $part it has';
+}
+
+AcpAnswer<List<Map<String, Object?>>> _describedOptions(
+  Map<String, dynamic> answer,
+  String idKey,
+) {
+  final listed = answer['configOptions'];
+  if (listed is! List) return AcpUnknown(_unsaid(answer, 'configOptions'));
+  return AcpKnown(
+    listed
+        .map((item) => _option(item, idKey))
+        .whereType<Map<String, Object?>>()
+        .take(_maxOptions)
+        .toList(),
+  );
+}
+
+AcpAnswer<Map<String, Object?>> _describedModes(Map<String, dynamic> answer) {
+  final modes = answer['modes'];
+  if (modes is! Map) return AcpUnknown(_unsaid(answer, 'modes'));
+  if (!_fits(modes['currentModeId']) || !modes.containsKey('availableModes')) {
+    return const AcpUnknown("the agent's modes could not be read");
+  }
+  final listed = modes['availableModes'] is List
+      ? modes['availableModes'] as List
+      : const [];
+  final available = <Map<String, Object?>>[];
+  for (final mode in listed) {
+    if (mode is! Map || mode['id'] is! String || mode['name'] is! String) {
+      continue;
+    }
+    if (!_fits(mode['id'])) continue;
+    final kept = <String, Object?>{
+      'id': mode['id'],
+      'name': _cut(mode['name'] as String),
+    };
+    _text(kept, mode, 'description');
+    available.add(kept);
+    if (available.length == _maxModes) break;
+  }
+  return AcpKnown({
+    'currentModeId': modes['currentModeId'],
+    'availableModes': available,
+  });
+}
+
+AcpAnswer<List<AcpSessionInfo>> _describedSessions(
+  Map<String, dynamic> answer,
+) {
+  if (!answer.containsKey('sessions')) {
+    return const AcpUnknown("the agent's sessions could not be read");
+  }
+  final listed = answer['sessions'] is List
+      ? answer['sessions'] as List
+      : const [];
+  final sessions = <AcpSessionInfo>[];
+  for (final item in listed) {
+    if (item is! Map || !_fits(item['sessionId']) || !_fits(item['cwd'])) {
+      continue;
+    }
+    String? text(String key) =>
+        item[key] is String ? _cut(item[key] as String) : null;
+    sessions.add(
+      AcpSessionInfo(
+        id: item['sessionId'] as String,
+        cwd: item['cwd'] as String,
+        title: text('title'),
+        updatedAt: text('updatedAt'),
+      ),
+    );
+    if (sessions.length == _maxSessions) break;
+  }
+  return AcpKnown(sessions);
 }
