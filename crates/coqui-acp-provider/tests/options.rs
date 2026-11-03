@@ -373,7 +373,10 @@ fn describe_knows_the_declared_options_modes_and_sessions_and_starts_nothing() {
             {"id": "code", "name": "Code", "description": "writes files"},
         ]})
     );
-    assert_eq!(description.sessions, Answer::Known(Vec::new()));
+    let Answer::Known(sessions) = &description.sessions else {
+        panic!("{:?}", description.sessions);
+    };
+    assert!(sessions.sessions.is_empty() && sessions.incomplete.is_none());
     assert!(
         probe.starts.lock().unwrap().is_empty(),
         "nothing was started"

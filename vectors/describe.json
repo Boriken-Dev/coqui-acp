@@ -1,5 +1,5 @@
 {
-  "about": "What an agent offers before any session, as both clients' describe calls must report it. `steps` use the grammar of conversations.json, and the client must send nothing after them: no session is opened, and nothing the agent did not advertise is asked. `describe` is each part's outcome: {\"known\": value} must equal what the client reports, as ACP's own JSON; {\"unknown\": text} is a reason that must contain the text; \"not_supported\" was not asked. `limits` are each client's default settings for what it keeps of an answer: options, values per option, modes and sessions, text in UTF-8 bytes, and the pages of `session/list` it asks for, following each page's `nextCursor`. A case's own `limits` replace those it names, set through the client's settings. An identifier longer than the text limit drops its item; other text is cut there.",
+  "about": "What an agent offers before any session, as both clients' describe calls must report it. `steps` use the grammar of conversations.json, and the client must send nothing after them: no session is opened, and nothing the agent did not advertise is asked. `describe` is each part's outcome: {\"known\": value} must equal what the client reports, as ACP's own JSON; {\"unknown\": text} is a reason that must contain the text; \"not_supported\" was not asked. Known sessions are a list the client says is complete, unless the outcome has `incomplete`: then the client must say why the list stopped short, in those words, or, for `<prefix>: <reason>`, in words that start with `<prefix>: ` and contain the reason. `limits` are each client's default settings for what it keeps of an answer: options, values per option, modes and sessions, text in UTF-8 bytes, and the pages of `session/list` it asks for, following each page's `nextCursor`. A case's own `limits` replace those it names, set through the client's settings. An identifier longer than the text limit drops its item; other text is cut there.",
   "limits": {"options": 64, "values": 1024, "modes": 64, "sessions": 500, "text": 4096, "pages": 10},
   "cases": [
     {
@@ -138,7 +138,7 @@
         {"expect": {"method": "session/list"}, "reply": {"sessions": [{"sessionId": "s0", "cwd": "/work"}], "nextCursor": "c1"}},
         {"expect": {"method": "session/list", "params": {"cursor": "c1"}}, "reply": {"sessions": [{"sessionId": "s1", "cwd": "/work"}], "nextCursor": "c2"}}
       ],
-      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}, {"sessionId": "s1", "cwd": "/work"}]}}
+      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}, {"sessionId": "s1", "cwd": "/work"}], "incomplete": "the page limit was reached"}}
     },
     {
       "name": "paging stops once the sessions limit is reached",
@@ -148,6 +148,17 @@
         {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": {}}}}},
         {"expect": {"method": "session/list"}, "reply": {"sessions": [{"sessionId": "s0", "cwd": "/work"}], "nextCursor": "c1"}},
         {"expect": {"method": "session/list", "params": {"cursor": "c1"}}, "reply": {"sessions": [{"sessionId": "s1", "cwd": "/work"}, {"sessionId": "s2", "cwd": "/work"}], "nextCursor": "c2"}}
+      ],
+      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}, {"sessionId": "s1", "cwd": "/work"}], "incomplete": "the sessions limit was reached"}}
+    },
+    {
+      "name": "a list that ends exactly at both limits is complete",
+      "version": 1,
+      "limits": {"sessions": 2, "pages": 2},
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": {}}}}},
+        {"expect": {"method": "session/list"}, "reply": {"sessions": [{"sessionId": "s0", "cwd": "/work"}], "nextCursor": "c1"}},
+        {"expect": {"method": "session/list", "params": {"cursor": "c1"}}, "reply": {"sessions": [{"sessionId": "s1", "cwd": "/work"}]}}
       ],
       "describe": {"options": "not_supported", "modes": "not_supported", "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}, {"sessionId": "s1", "cwd": "/work"}]}}
     },
@@ -159,7 +170,7 @@
         {"expect": {"method": "session/list"}, "reply": {"sessions": [{"sessionId": "s0", "cwd": "/work"}], "nextCursor": "c1"}},
         {"expect": {"method": "session/list", "params": {"cursor": "c1"}}, "error": {"code": -32603, "message": "the session store went away"}}
       ],
-      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}]}}
+      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}], "incomplete": "a later page failed: the session store went away"}}
     },
     {
       "name": "a page limit of 0 asks for no sessions",

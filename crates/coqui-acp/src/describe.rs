@@ -126,7 +126,26 @@ pub struct Description {
     /// The modes a session can start in.
     pub modes: Answer<SessionModeState>,
     /// The sessions the agent lists, from `session/list`'s pages in order.
-    pub sessions: Answer<Vec<SessionInfo>>,
+    pub sessions: Answer<SessionList>,
+}
+
+/// The sessions an agent lists, and whether they are all it listed.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct SessionList {
+    /// The sessions kept, in the agent's order.
+    pub sessions: Vec<SessionInfo>,
+    /// `None` when these are all the agent listed; otherwise why the list stops short: `a later page failed: <why>`,
+    /// `the sessions limit was reached` or `the page limit was reached`.
+    pub incomplete: Option<String>,
+}
+
+/// What one `session/list` page added, as [`sessions_page`] reads it.
+pub(crate) struct Page {
+    /// The next page's cursor; `None` when the agent gave none, or an empty one.
+    pub(crate) next: Option<String>,
+    /// The sessions limit left out a session this page held.
+    pub(crate) cut: bool,
 }
 
 /// `text` cut to `max` bytes, on a character's boundary.
@@ -260,31 +279,27 @@ pub(crate) fn modes(answer: &Value, limits: &DescribeLimits) -> Answer<SessionMo
     Answer::Known(modes)
 }
 
-/// Adds one `session/list` page's sessions to `kept`, up to the sessions limit, and answers the next page's cursor:
-/// `Some(None)` when the agent gave none, or an empty one, and `None` when the page cannot be read.
+/// Adds one `session/list` page's sessions to `kept`, up to the sessions limit; `None` when the page cannot be read.
 pub(crate) fn sessions_page(
     answer: Value,
     limits: &DescribeLimits,
     kept: &mut Vec<SessionInfo>,
-) -> Option<Option<String>> {
+) -> Option<Page> {
     let listed = serde_json::from_value::<ListSessionsResponse>(answer).ok()?;
     let max = limits.text;
     let room = limits.sessions.saturating_sub(kept.len());
-    kept.extend(
-        listed
-            .sessions
-            .into_iter()
-            .filter(|session| {
-                fits(&session.session_id.0, max) && fits(&session.cwd.to_string_lossy(), max)
-            })
-            .take(room)
-            .map(|mut session| {
-                session.additional_directories.clear();
-                cut_optional(&mut session.title, max);
-                cut_optional(&mut session.updated_at, max);
-                session.meta = None;
-                session
-            }),
-    );
-    Some(listed.next_cursor.filter(|cursor| !cursor.is_empty()))
+    let mut readable = listed.sessions.into_iter().filter(|session| {
+        fits(&session.session_id.0, max) && fits(&session.cwd.to_string_lossy(), max)
+    });
+    kept.extend(readable.by_ref().take(room).map(|mut session| {
+        session.additional_directories.clear();
+        cut_optional(&mut session.title, max);
+        cut_optional(&mut session.updated_at, max);
+        session.meta = None;
+        session
+    }));
+    Some(Page {
+        next: listed.next_cursor.filter(|cursor| !cursor.is_empty()),
+        cut: readable.next().is_some(),
+    })
 }

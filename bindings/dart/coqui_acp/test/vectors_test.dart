@@ -124,11 +124,41 @@ Object? canon(Object? value) => switch (value) {
   _ => value,
 };
 
-/// Whether [got] is the outcome [want] says: the same known value, a reason holding its text, or not supported.
+/// The sessions outcome as `vectors/describe.json` writes it: `incomplete` only when the list stops short.
+Object? sessionsOutcome(AcpAnswer<AcpSessionList> answer) => switch (answer) {
+  AcpKnown(:final value) => {
+    'known': sessionJson(value.sessions),
+    'incomplete': ?value.incomplete,
+  },
+  _ => outcome(answer),
+};
+
+/// Whether [got] says why a list stops short as [want] does: the same words, or for `<prefix>: <reason>`, words that start with
+/// `<prefix>: ` and hold the reason.
+bool saidWhy(String got, String want) {
+  if (got == want) return true;
+  final at = want.indexOf(': ');
+  return at >= 0 &&
+      got.startsWith(want.substring(0, at + 2)) &&
+      got.contains(want.substring(at + 2));
+}
+
+/// Whether [got] is the outcome [want] says: the same known value, said complete or incomplete for the same reason, a reason
+/// holding its text, or not supported.
 bool asDescribed(Object? got, Object? want) {
   if (got is Map && want is Map && want['unknown'] is String) {
     return got['unknown'] is String &&
         (got['unknown'] as String).contains(want['unknown'] as String);
+  }
+  if (got is Map && want is Map) {
+    final (said, wanted) = (got['incomplete'], want['incomplete']);
+    if (said is String && wanted is String) {
+      if (!saidWhy(said, wanted)) return false;
+    } else if (said != null || wanted != null) {
+      return false;
+    }
+    Object? rest(Map value) => {...value}..remove('incomplete');
+    return jsonEncode(canon(rest(got))) == jsonEncode(canon(rest(want)));
   }
   return jsonEncode(canon(got)) == jsonEncode(canon(want));
 }
@@ -565,7 +595,7 @@ void main() {
         for (final (part, got) in [
           ('options', outcome(description.options)),
           ('modes', outcome(description.modes)),
-          ('sessions', outcome(description.sessions, sessionJson)),
+          ('sessions', sessionsOutcome(description.sessions)),
         ]) {
           expect(
             asDescribed(got, want[part]),
@@ -657,8 +687,13 @@ void main() {
       );
       final modes = (description.modes as AcpKnown).value as Map;
       expect(modes['availableModes'] as List, hasLength(limits['modes']));
-      final sessions = (description.sessions as AcpKnown).value as List;
-      expect(sessions, hasLength(limits['sessions']));
+      final sessions = (description.sessions as AcpKnown<AcpSessionList>).value;
+      expect(sessions.sessions, hasLength(limits['sessions']));
+      expect(
+        sessions.incomplete,
+        'the sessions limit was reached',
+        reason: 'one session past the limit was left out',
+      );
       await acp.close();
     }
 
@@ -732,7 +767,9 @@ void main() {
         isFalse,
         reason: 'the client asked past the page limit',
       );
-      expect((description.sessions as AcpKnown).value as List, hasLength(10));
+      final sessions = (description.sessions as AcpKnown<AcpSessionList>).value;
+      expect(sessions.sessions, hasLength(10));
+      expect(sessions.incomplete, 'the page limit was reached');
     });
 
     test('describe before initialize is refused', () async {

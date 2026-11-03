@@ -30,8 +30,10 @@ agent offers the question and could not tell, or `AcpNotSupported()` when it doe
 - `modes`: ACP's v1 `SessionModeState`, from the same request. v2 has no modes, so it is not supported there.
 - `sessions`: `session/list`, as `AcpSessionInfo`, when v1's `sessionCapabilities.list` is set; in v2 always asked, and a
   method-not-found answer is not supported. Pages are followed by their `nextCursor` until one gives none or an empty one, the
-  sessions limit is reached, or the page limit is. A first page that fails decides the answer; a later one ends the list with the
-  pages before it. A page limit of 0 asks nothing, and the answer is `AcpUnknown`.
+  sessions limit is reached, or the page limit is. The answer is an `AcpSessionList`: its `sessions`, and `incomplete`, null only
+  when they are all the agent listed, otherwise `a later page failed: <why>`, `the sessions limit was reached` or `the page limit
+  was reached`. A first page that fails decides the answer; a later one ends the list with the pages before it. A page limit of 0
+  asks nothing, and the answer is `AcpUnknown`.
 
 A failed or late answer is `AcpUnknown`. What the agent says is untrusted and only read: items that are not ACP's shape are skipped,
 `_meta` is dropped, and `describeLimits` on the client bounds the rest. Each field of `AcpDescribeLimits` takes any value from 0 up:

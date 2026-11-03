@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use coqui_acp::{
     Answer, Authenticate, Client, Decider, Decision, DescribeLimits, Error, Event, Exchange,
-    PermissionRequest, Session,
+    PermissionRequest, Session, SessionList,
 };
 use futures::SinkExt;
 use futures::channel::mpsc as async_mpsc;
@@ -935,11 +935,48 @@ fn outcome<T>(answer: &Answer<T>, known: impl Fn(&T) -> Value) -> Value {
     }
 }
 
-/// Whether `got` is the outcome `want` says: the same known value, a reason holding its text, or not supported.
+/// The sessions outcome as `vectors/describe.json` writes it: `incomplete` only when the list stops short.
+fn sessions_outcome(answer: &Answer<SessionList>) -> Value {
+    let mut got = outcome(answer, |list| serde_json::to_value(&list.sessions).unwrap());
+    if let Answer::Known(SessionList {
+        incomplete: Some(why),
+        ..
+    }) = answer
+    {
+        got["incomplete"] = json!(why);
+    }
+    got
+}
+
+/// Whether `got` says why a list stops short as `want` does: the same words, or for `<prefix>: <reason>`, words that
+/// start with `<prefix>: ` and hold the reason.
+fn said_why(got: &str, want: &str) -> bool {
+    got == want
+        || want.split_once(": ").is_some_and(|(prefix, reason)| {
+            got.starts_with(&format!("{prefix}: ")) && got.contains(reason)
+        })
+}
+
+/// Whether `got` is the outcome `want` says: the same known value, said complete or incomplete for the same reason, a
+/// reason holding its text, or not supported.
 fn as_described(got: &Value, want: &Value) -> bool {
     match (got.get("unknown"), want.get("unknown")) {
         (Some(Value::String(reason)), Some(Value::String(text))) => reason.contains(text.as_str()),
-        _ => got == want,
+        _ => {
+            let why = match (got.get("incomplete"), want.get("incomplete")) {
+                (None, None) => true,
+                (Some(Value::String(got)), Some(Value::String(want))) => said_why(got, want),
+                _ => false,
+            };
+            let rest = |value: &Value| {
+                let mut value = value.clone();
+                if let Some(fields) = value.as_object_mut() {
+                    fields.remove("incomplete");
+                }
+                value
+            };
+            why && rest(got) == rest(want)
+        }
     }
 }
 
@@ -1025,12 +1062,7 @@ fn every_v1_description_holds() {
                     serde_json::to_value(value).unwrap()
                 }),
             ),
-            (
-                "sessions",
-                outcome(&description.sessions, |value| {
-                    serde_json::to_value(value).unwrap()
-                }),
-            ),
+            ("sessions", sessions_outcome(&description.sessions)),
         ] {
             assert!(
                 as_described(&got, &want[part]),
@@ -1042,7 +1074,7 @@ fn every_v1_description_holds() {
             .join()
             .unwrap_or_else(|_| panic!("{name}: the script failed"));
     }
-    assert!(ran >= 12, "only {ran} v1 descriptions ran");
+    assert!(ran >= 13, "only {ran} v1 descriptions ran");
 }
 
 /// Text of `bytes` UTF-8 bytes, of two-byte characters, so a cut lands inside one.
@@ -1078,7 +1110,11 @@ fn sessions_are_asked_for_ten_pages_at_most_by_default() {
     let Answer::Known(sessions) = &description.sessions else {
         panic!("{:?}", description.sessions);
     };
-    assert_eq!(sessions.len(), 10);
+    assert_eq!(sessions.sessions.len(), 10);
+    assert_eq!(
+        sessions.incomplete.as_deref(),
+        Some("the page limit was reached")
+    );
     let asked = seen
         .try_iter()
         .filter(|message| message["method"] == "session/list")
@@ -1138,5 +1174,10 @@ fn bounded_by(limits: &Value, exchange: Exchange) {
     let Answer::Known(sessions) = &description.sessions else {
         panic!("{:?}", description.sessions);
     };
-    assert_eq!(sessions.len(), limit("sessions"));
+    assert_eq!(sessions.sessions.len(), limit("sessions"));
+    assert_eq!(
+        sessions.incomplete.as_deref(),
+        Some("the sessions limit was reached"),
+        "one session past the limit was left out"
+    );
 }

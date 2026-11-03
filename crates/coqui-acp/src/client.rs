@@ -31,6 +31,7 @@ use serde_json::{Map, Value, json};
 use crate::decider::{Decider, Decision, PermissionOption, PermissionRequest, RefuseAll};
 use crate::describe::{
     self, Answer, DescribeLimits, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD,
+    SessionList,
 };
 use crate::error::Error;
 use crate::event::Event;
@@ -836,17 +837,19 @@ fn not_told<T>(error: &Error, limits: &DescribeLimits) -> Answer<T> {
 }
 
 /// `session/list`, page by page from the cursor each page gives, until one gives none, the sessions limit is reached
-/// or the page limit is. The first page decides the answer; a later one that fails ends the list there.
+/// or the page limit is. The first page decides the answer; a later one that fails ends the list there. A list cut
+/// short by a failure or a limit says why in [`SessionList::incomplete`].
 async fn listing(
     cx: &ConnectionTo<Agent>,
     limits: &DescribeLimits,
     limit: Option<Duration>,
-) -> Answer<Vec<SessionInfo>> {
+) -> Answer<SessionList> {
     if limits.pages == 0 {
         return Answer::Unknown("the sessions were not asked: the page limit is 0".to_owned());
     }
     let mut kept = Vec::new();
     let mut cursor: Option<String> = None;
+    let mut incomplete = None;
     for page in 0..limits.pages {
         let params = cursor
             .take()
@@ -854,18 +857,42 @@ async fn listing(
         let read = match call(cx, "session/list", params, limit).await {
             Ok(answer) => describe::sessions_page(answer, limits, &mut kept),
             Err(error) if page == 0 => return not_told(&error, limits),
-            Err(_) => break,
+            Err(error) => {
+                incomplete = Some(error.to_string());
+                break;
+            }
         };
-        match read {
-            Some(Some(next)) if kept.len() < limits.sessions => cursor = Some(next),
-            Some(_) => break,
-            None if page == 0 => {
+        let Some(read) = read else {
+            if page == 0 {
                 return Answer::Unknown("the agent's sessions could not be read".to_owned());
             }
-            None => break,
+            incomplete = Some("the agent's sessions could not be read".to_owned());
+            break;
+        };
+        // A limit stops the list short only when it leaves out a session or a page the agent offers.
+        if read.cut || (read.next.is_some() && kept.len() >= limits.sessions) {
+            return listed(kept, Some("the sessions limit was reached".to_owned()));
+        }
+        cursor = read.next;
+        if cursor.is_none() {
+            break;
         }
     }
-    Answer::Known(kept)
+    let incomplete = match incomplete {
+        Some(why) => Some(describe::cut(
+            &format!("a later page failed: {why}"),
+            limits.text,
+        )),
+        None => cursor.map(|_| "the page limit was reached".to_owned()),
+    };
+    listed(kept, incomplete)
+}
+
+fn listed(sessions: Vec<SessionInfo>, incomplete: Option<String>) -> Answer<SessionList> {
+    Answer::Known(SessionList {
+        sessions,
+        incomplete,
+    })
 }
 
 /// Asks what `init` says the agent offers, and nothing it does not: no session is opened.

@@ -113,8 +113,10 @@ pub fn Exchange::describe(self, transport: impl ConnectTo<sdk::Client> + 'static
 pub struct Description {
     pub options: Answer<Vec<sdk::schema::v1::SessionConfigOption>>,
     pub modes: Answer<sdk::schema::v1::SessionModeState>,
-    pub sessions: Answer<Vec<sdk::schema::v1::SessionInfo>>,
+    pub sessions: Answer<SessionList>,
 }
+#[non_exhaustive]                                               // Clone, Debug, PartialEq
+pub struct SessionList { pub sessions: Vec<sdk::schema::v1::SessionInfo>, pub incomplete: Option<String> }
 pub enum Answer<T> { Known(T), Unknown(String), NotSupported }   // Clone, Debug, PartialEq, Eq
 
 #[non_exhaustive]                                               // Clone, Copy, Debug, Default, PartialEq, Eq
@@ -129,7 +131,7 @@ pub const SESSION_OPTIONS_METHOD: &str = "_coqui_acp/session_options";
 What an agent offers before any session, on a connection of its own that opens none: initialize, authenticate as `Exchange` does, then ask only what `initialize` advertised.
 
 - `options` and `modes`: `SESSION_OPTIONS_METHOD` with `{}`, sent only when `agentCapabilities._meta[SESSION_OPTIONS_CAPABILITY]` is `true` or an object; otherwise both are `NotSupported`. The answer is `{"configOptions": [SessionConfigOption], "modes": SessionModeState, "unknown": {"configOptions" | "modes": reason}}`: a part present is `Known`, at the values a session starts with; one left out is `Unknown` with the agent's reason, or `the agent did not say what <part> it has`. A model is the option of category `model`, an effort the one of category `thought_level`.
-- `sessions`: `session/list`, sent only when `agentCapabilities.sessionCapabilities.list` is an object; otherwise `NotSupported`. The first request is `{}`, and each next one `{"cursor": <the last page's nextCursor>}`, until a page gives no cursor or an empty one, `sessions` are kept, or `pages` requests were made. A first page that fails or cannot be read decides the answer; a later one ends the list with the pages before it. `pages` 0 asks nothing: `Unknown("the sessions were not asked: the page limit is 0")`.
+- `sessions`: `session/list`, sent only when `agentCapabilities.sessionCapabilities.list` is an object; otherwise `NotSupported`. The first request is `{}`, and each next one `{"cursor": <the last page's nextCursor>}`, until a page gives no cursor or an empty one, `sessions` are kept, or `pages` requests were made. A first page that fails or cannot be read decides the answer; a later one ends the list with the pages before it. A list that stops short says why in `incomplete`, which is `None` only when it holds all the agent listed: `a later page failed: <why>`, `the sessions limit was reached` when that limit left out a session or a page the agent offered, or `the page limit was reached` when a cursor was left. `pages` 0 asks nothing: `Unknown("the sessions were not asked: the page limit is 0")`.
 - A call that fails or gets no answer in time is `Unknown("the agent could not say: <why>")`. `Err` only when the connection, `initialize` or `authenticate` failed.
 
 The answer is the agent's, untrusted, and only read: each item is read as the ACP type or skipped, and `_meta` and `additionalDirectories` are dropped. `DescribeLimits` bounds what is kept, and any value is taken, 0 included: at most `options` options (default 64), `values` values per option across its groups (1024), `modes` modes (64) and `sessions` sessions across pages (500). An item whose identifier (option, value, group, mode or session id, current value, `cwd`) is empty or longer than `text` UTF-8 bytes (4096) is dropped, a category that long is left out, and other text (names, descriptions, titles, reasons) is cut there on a character boundary. `pages` defaults to 10: the 500 sessions at 50 a page, and at most ten request timeouts spent on an agent that always gives a cursor. The Dart client keeps the same, with the same defaults; `vectors/describe.json` holds both to it.

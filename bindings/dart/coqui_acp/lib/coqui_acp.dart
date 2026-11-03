@@ -97,7 +97,22 @@ final class AcpDescription {
   final AcpAnswer<Map<String, Object?>> modes;
 
   /// The sessions the agent lists, from `session/list`'s pages in order.
-  final AcpAnswer<List<AcpSessionInfo>> sessions;
+  final AcpAnswer<AcpSessionList> sessions;
+}
+
+/// The sessions an agent lists, and whether they are all it listed.
+final class AcpSessionList {
+  const AcpSessionList(this.sessions, {this.incomplete});
+
+  /// The sessions kept, in the agent's order.
+  final List<AcpSessionInfo> sessions;
+
+  /// Null when these are all the agent listed; otherwise why the list stops short: `a later page failed: <why>`,
+  /// `the sessions limit was reached` or `the page limit was reached`.
+  final String? incomplete;
+
+  @override
+  String toString() => 'AcpSessionList($sessions, incomplete: $incomplete)';
 }
 
 sealed class AcpEvent {
@@ -866,7 +881,7 @@ final class AcpClient {
       }
     }
     final session = _capabilities['sessionCapabilities'];
-    AcpAnswer<List<AcpSessionInfo>> sessions = const AcpNotSupported();
+    AcpAnswer<AcpSessionList> sessions = const AcpNotSupported();
     if (v2 || (session is Map && session['list'] is Map)) {
       sessions = await _listing(v2, limits);
     }
@@ -874,8 +889,9 @@ final class AcpClient {
   }
 
   /// `session/list`, page by page from the cursor each page gives, until one gives none, the sessions limit is reached or the page
-  /// limit is. The first page decides the answer; a later one that fails ends the list there.
-  Future<AcpAnswer<List<AcpSessionInfo>>> _listing(
+  /// limit is. The first page decides the answer; a later one that fails ends the list there. A list cut short by a failure or a
+  /// limit says why in [AcpSessionList.incomplete].
+  Future<AcpAnswer<AcpSessionList>> _listing(
     bool v2,
     AcpDescribeLimits limits,
   ) async {
@@ -886,29 +902,56 @@ final class AcpClient {
     }
     final kept = <AcpSessionInfo>[];
     String? cursor;
+    String? failed;
     for (var page = 0; page < limits.pages; page++) {
+      final asked = cursor;
+      cursor = null;
       final Map<String, dynamic> answer;
       try {
-        answer = await _request('session/list', {'cursor': ?cursor});
+        answer = await _request('session/list', {'cursor': ?asked});
       } on AcpFailure catch (error) {
-        if (page > 0) break;
-        return v2 && error.code == -32601
-            ? const AcpNotSupported()
-            : AcpUnknown(
-                _cut('the agent could not say: ${error.message}', limits.text),
-              );
-      }
-      if (!_keepSessions(answer, limits, kept)) {
-        if (page > 0) break;
-        return const AcpUnknown("the agent's sessions could not be read");
-      }
-      final next = answer['nextCursor'];
-      if (next is! String || next.isEmpty || kept.length >= limits.sessions) {
+        if (page == 0) {
+          return v2 && error.code == -32601
+              ? const AcpNotSupported()
+              : AcpUnknown(
+                  _cut(
+                    'the agent could not say: ${error.message}',
+                    limits.text,
+                  ),
+                );
+        }
+        failed = error.message;
         break;
       }
+      final cut = _keepSessions(answer, limits, kept);
+      if (cut == null) {
+        if (page == 0) {
+          return const AcpUnknown("the agent's sessions could not be read");
+        }
+        failed = "the agent's sessions could not be read";
+        break;
+      }
+      final next = answer['nextCursor'];
+      final more = next is String && next.isNotEmpty;
+      // A limit stops the list short only when it leaves out a session or a page the agent offers.
+      if (cut || (more && kept.length >= limits.sessions)) {
+        return AcpKnown(
+          AcpSessionList(kept, incomplete: 'the sessions limit was reached'),
+        );
+      }
+      if (!more) break;
       cursor = next;
     }
-    return AcpKnown(kept);
+    return AcpKnown(
+      AcpSessionList(
+        kept,
+        incomplete: failed != null
+            ? _cut('a later page failed: $failed', limits.text)
+            : cursor != null
+            ? 'the page limit was reached'
+            : null,
+      ),
+    );
   }
 
   Future<String> createSession({required String cwd}) =>
@@ -1246,24 +1289,25 @@ AcpAnswer<Map<String, Object?>> _describedModes(
   });
 }
 
-/// Adds one `session/list` page's sessions to [kept], up to the sessions limit, and answers whether the page could be read.
-bool _keepSessions(
+/// Adds one `session/list` page's sessions to [kept], up to the sessions limit. Answers whether that limit left out a session the
+/// page held, or null when the page cannot be read.
+bool? _keepSessions(
   Map<String, dynamic> answer,
   AcpDescribeLimits limits,
   List<AcpSessionInfo> kept,
 ) {
-  if (!answer.containsKey('sessions')) return false;
+  if (!answer.containsKey('sessions')) return null;
   final max = limits.text;
   final listed = answer['sessions'] is List
       ? answer['sessions'] as List
       : const [];
   for (final item in listed) {
-    if (kept.length >= limits.sessions) break;
     if (item is! Map ||
         !_fits(item['sessionId'], max) ||
         !_fits(item['cwd'], max)) {
       continue;
     }
+    if (kept.length >= limits.sessions) return true;
     String? text(String key) =>
         item[key] is String ? _cut(item[key] as String, max) : null;
     kept.add(
@@ -1275,5 +1319,5 @@ bool _keepSessions(
       ),
     );
   }
-  return true;
+  return false;
 }
