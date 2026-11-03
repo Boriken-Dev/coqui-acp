@@ -3,7 +3,7 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use coqui_agentic_peer::auth::{Sealed, prove_out};
@@ -106,9 +106,21 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        // Read on a thread of its own, so a line that never comes fails the test instead of holding it.
+        let (lines, output) = std::sync::mpsc::channel();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        std::thread::spawn(move || {
+            loop {
+                let mut line = String::new();
+                let ended = stdout.read_line(&mut line).map_or(true, |count| count == 0);
+                if lines.send(line).is_err() || ended {
+                    break;
+                }
+            }
+        });
         Client {
             input: child.stdin.take(),
-            output: BufReader::new(child.stdout.take().unwrap()),
+            output,
             child,
         }
     }
@@ -126,7 +138,7 @@ impl Drop for Fixture {
 
 struct Client {
     input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    output: std::sync::mpsc::Receiver<String>,
     child: Child,
 }
 
@@ -139,9 +151,9 @@ impl Client {
     }
 
     fn line(&mut self) -> String {
-        let mut line = String::new();
-        self.output.read_line(&mut line).unwrap();
-        line
+        self.output
+            .recv_timeout(WAIT * 2)
+            .expect("no line from the shim in time")
     }
 
     /// Its status and what it said, once it has ended, however long that takes up to a limit.
@@ -152,8 +164,7 @@ impl Client {
             assert!(Instant::now() < until, "the shim went on");
             std::thread::sleep(Duration::from_millis(20));
         }
-        let mut stdout = String::new();
-        let _ = self.output.read_to_string(&mut stdout);
+        let stdout: String = self.output.try_iter().collect();
         (self.child.wait_with_output().unwrap(), stdout)
     }
 }

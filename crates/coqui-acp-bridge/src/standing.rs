@@ -693,11 +693,29 @@ pub fn shim(peer: &str) -> Result<ExitCode, String> {
     // On its own thread, and left behind: a read of standard input cannot be interrupted, and returning ends the program. The client has
     // gone when it ends, so this ends both ways at once, which also tells the read below.
     thread::spawn(move || {
-        let _ = io::copy(&mut io::stdin().lock(), &mut &*upstream);
+        let mut input = io::stdin().lock();
+        let mut buffer = [0_u8; 16 * 1024];
+        while let Ok(count) = input.read(&mut buffer) {
+            if count == 0 || (&*upstream).write_all(&buffer[..count]).is_err() {
+                break;
+            }
+        }
         left.store(true, Ordering::SeqCst);
         let _ = upstream.shutdown(Shutdown::Both);
     });
-    let _ = io::copy(&mut &*connection, &mut io::stdout().lock());
+    // Reads and writes, not io::copy: on Linux that splices a socket into a piped standard output, and the client got nothing that way.
+    let mut output = io::stdout().lock();
+    let mut buffer = [0_u8; 16 * 1024];
+    while let Ok(count) = (&*connection).read(&mut buffer) {
+        if count == 0
+            || output
+                .write_all(&buffer[..count])
+                .and_then(|()| output.flush())
+                .is_err()
+        {
+            break;
+        }
+    }
     if !client_left.load(Ordering::SeqCst) {
         eprintln!("coqui-acp-bridge: the browser ended this server's connection");
     }
