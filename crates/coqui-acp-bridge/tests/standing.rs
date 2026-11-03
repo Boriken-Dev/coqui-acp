@@ -231,6 +231,25 @@ fn wait_until(what: &str, test: impl Fn() -> bool) {
     }
 }
 
+/// The next connection, or a failure: a test whose shim never comes must not wait for it for ever.
+fn accept_within(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let until = Instant::now() + WAIT;
+    loop {
+        match listener.accept() {
+            Ok((connection, _)) => {
+                connection.set_nonblocking(false).unwrap();
+                return connection;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < until, "nothing connected");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
 fn message<C: coqui_web::Channel>(stream: &C) -> Vec<u8> {
     stream.receive(Some(WAIT)).unwrap().unwrap()
 }
@@ -517,7 +536,7 @@ fn something_else_on_a_dead_bridges_port_hears_only_an_old_token_and_gets_no_mes
     )
     .unwrap();
     let there = std::thread::spawn(move || {
-        let (mut connection, _) = impostor.accept().unwrap();
+        let mut connection = accept_within(&impostor);
         // Whatever it answers it cannot know the answer, and it is told nothing more.
         connection
             .write_all(format!("{} ok", "0".repeat(64)).as_bytes())
@@ -560,7 +579,7 @@ fn an_answer_that_is_not_text_is_no_answer_and_no_panic() {
     )
     .unwrap();
     let there = std::thread::spawn(move || {
-        let (mut connection, _) = impostor.accept().unwrap();
+        let mut connection = accept_within(&impostor);
         // A character of several bytes across where the answer ends.
         let mut answer = vec![b'a'; 63];
         answer.extend_from_slice("\u{20ac}\u{20ac}".as_bytes());
