@@ -42,8 +42,11 @@ const POLL: Duration = Duration::from_millis(50);
 const RELAY_POLL: Duration = Duration::from_millis(5);
 /// How long something that connected has to show the token, in all.
 const TOKEN_WAIT: Duration = Duration::from_secs(2);
-/// As many waiting to show one: past this the longest waiting goes, so nothing local can keep a real shim out by connecting.
+/// As many waiting to show one: past this the longest waiting goes. Each is read as soon as it connects, which is when a shim has shown
+/// it, so connecting in a flood does not keep a real shim out.
 const MAX_KNOCKING: usize = 16;
+/// How many are taken in one turn, so that a flood of them cannot hold up the shims already let in.
+const MAX_ACCEPTS: usize = 64;
 /// How long a shim that showed the token waits for a stream. The peer opens the next one when it hears the last was taken.
 const STREAM_WAIT: Duration = Duration::from_secs(3);
 /// A shim's whole patience with a door: longer than the door's own for a stream, so it hears the answer.
@@ -99,6 +102,32 @@ fn new_token() -> Result<String, &'static str> {
         .fill(&mut bytes)
         .map_err(|_| "this machine has no randomness to offer that with")?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Takes away what `%LOCALAPPDATA%`'s own entries would give others, which on some machines is more than its owner. Run on the empty file,
+/// so nothing secret was ever readable under them. This crate has no unsafe code, so it asks the system's own tool.
+#[cfg(windows)]
+fn owner_only(path: &Path) -> io::Result<()> {
+    let system =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let status = std::process::Command::new(system.join("System32").join("icacls.exe"))
+        .arg(path)
+        // S-1-3-4 is whoever owns the file.
+        .args(["/inheritance:r", "/grant:r", "*S-1-3-4:F"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("icacls refused"))
+    }
+}
+
+#[cfg(not(windows))]
+fn owner_only(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn create_private_dir(dir: &Path) -> io::Result<()> {
@@ -194,7 +223,10 @@ fn publish(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
     let written = options
         .open(&draft)
-        .and_then(|mut file| file.write_all(contents))
+        .and_then(|mut file| {
+            owner_only(&draft)?;
+            file.write_all(contents)
+        })
         .and_then(|()| fs::rename(&draft, path));
     if written.is_err() {
         let _ = fs::remove_file(&draft);
@@ -251,34 +283,49 @@ impl Door {
         let mut knocking: Vec<Knock> = Vec::new();
         let mut admitted: Vec<(TcpStream, Instant)> = Vec::new();
         while !self.stop.load(Ordering::SeqCst) {
-            // All that are waiting, so however many connected first cannot put off the real one by a turn each.
-            while let Ok((connection, _)) = listener.accept() {
+            let mut accepted = 0;
+            while accepted < MAX_ACCEPTS {
+                let Ok((connection, _)) = listener.accept() else {
+                    break;
+                };
+                accepted += 1;
                 if connection.set_nonblocking(true).is_err() {
                     continue;
                 }
-                if knocking.len() >= MAX_KNOCKING {
-                    knocking.remove(0);
-                }
-                knocking.push(Knock {
+                let mut knock = Knock {
                     connection,
                     shown: Vec::with_capacity(self.token.len() + 1),
                     since: Instant::now(),
-                });
-            }
-            knocking.retain_mut(|knock| match knock.read(&self.token) {
-                Knocked::Waiting => true,
-                Knocked::Wrong => false,
-                Knocked::Right => {
-                    if admitted.len() < MAX_KNOCKING
-                        && let Ok(connection) = knock.connection.try_clone()
-                    {
-                        admitted.push((connection, Instant::now()));
+                };
+                if self.heard(&mut knock, &mut admitted) {
+                    if knocking.len() >= MAX_KNOCKING {
+                        knocking.remove(0);
                     }
-                    false
+                    knocking.push(knock);
                 }
-            });
+            }
+            knocking.retain_mut(|knock| self.heard(knock, &mut admitted));
             admitted.retain(|(connection, since)| self.place(connection, *since));
-            thread::sleep(POLL);
+            // Straight back round while they keep coming, since one left waiting can be pushed out.
+            if accepted == 0 {
+                thread::sleep(POLL);
+            }
+        }
+    }
+
+    /// Reads what a connection has shown, and lets it in if that was the token. True while it is still to show it.
+    fn heard(&self, knock: &mut Knock, admitted: &mut Vec<(TcpStream, Instant)>) -> bool {
+        match knock.read(&self.token) {
+            Knocked::Waiting => true,
+            Knocked::Wrong => false,
+            Knocked::Right => {
+                if admitted.len() < MAX_KNOCKING
+                    && let Ok(connection) = knock.connection.try_clone()
+                {
+                    admitted.push((connection, Instant::now()));
+                }
+                false
+            }
         }
     }
 
@@ -502,18 +549,16 @@ pub fn config(peer: &str, name: &str) -> Result<String, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("this program cannot find itself: {error}"))?;
     let program = program.to_str().ok_or("this program's path is not text")?;
-    // A home named for this user is where the shim has to look too.
-    let env = std::env::var(home::HOME_ENV)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| json!({}), |value| json!({ home::HOME_ENV: value }));
+    // A client may start a server with little of its own environment, and what home is depends on that.
+    let home = home::dir().ok_or("no home directory for this user")?;
+    let home = home.to_str().ok_or("this user's home is not text")?;
     let config = json!({
         "mcpServers": {
             name: {
                 "type": "stdio",
                 "command": program,
                 "args": ["mcp-shim", "--peer", peer],
-                "env": env,
+                "env": { home::HOME_ENV: home },
             }
         }
     });
@@ -543,7 +588,7 @@ fn reach(dir: &Path, peer: &str) -> Result<TcpStream, String> {
         .map_err(|_| nobody("no browser is connected"))?;
     // The token would go to whoever is there, so it goes nowhere but this machine.
     if !address.ip().is_loopback() {
-        return Err(nobody("no browser is connected"));
+        return Err(nobody("the address it names is not on this machine"));
     }
     let mut connection = TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .map_err(|_| nobody("no browser is connected"))?;
@@ -551,13 +596,13 @@ fn reach(dir: &Path, peer: &str) -> Result<TcpStream, String> {
         .write_all(format!("{token}\n").as_bytes())
         .map_err(|_| nobody("no browser is connected"))?;
     let heard = read_answer(&connection).ok_or_else(|| nobody("no browser is connected"))?;
-    let told = heard.split_at(TOKEN_BYTES * 2);
+    let (shown, word) = heard.split_at(TOKEN_BYTES * 2);
     // Not a secret worth a comparison in constant time: it is shown to whoever holds the token.
-    if told.0.as_bytes() != answer.as_bytes() {
+    if shown != answer.as_bytes() {
         return Err(nobody("what answered is not that bridge"));
     }
-    match told.1 {
-        " ok" => {
+    match word {
+        b" ok" => {
             connection
                 .set_nonblocking(false)
                 .map_err(|_| nobody("no browser is connected"))?;
@@ -568,7 +613,7 @@ fn reach(dir: &Path, peer: &str) -> Result<TcpStream, String> {
 }
 
 /// Exactly the door's answer and no further, since what follows it is MCP's. Polled, for the reason [`RELAY_POLL`] gives.
-fn read_answer(mut connection: &TcpStream) -> Option<String> {
+fn read_answer(mut connection: &TcpStream) -> Option<Vec<u8>> {
     connection.set_nonblocking(true).ok()?;
     let until = Instant::now() + ANSWER_WAIT;
     let mut heard = vec![0_u8; ANSWER_LENGTH];
@@ -587,7 +632,7 @@ fn read_answer(mut connection: &TcpStream) -> Option<String> {
             Err(_) => return None,
         }
     }
-    String::from_utf8(heard).ok()
+    Some(heard)
 }
 
 #[cfg(unix)]
@@ -603,7 +648,7 @@ fn read_private(path: &Path) -> io::Result<String> {
     fs::read_to_string(path)
 }
 
-/// Windows gives `%LOCALAPPDATA%` to its owner by default, and this does not read its ACLs.
+/// [`owner_only`] made it, and this does not read its ACL back.
 #[cfg(not(unix))]
 fn read_private(path: &Path) -> io::Result<String> {
     fs::read_to_string(path)
@@ -641,18 +686,18 @@ pub fn shim(peer: &str) -> Result<ExitCode, String> {
         Ok(connection) => connection,
         Err(why) => return Ok(tell_client(&why)),
     };
-    let mut upstream = connection
-        .try_clone()
-        .map_err(|error| format!("the connection could not be shared: {error}"))?;
+    let connection = Arc::new(connection);
+    let upstream = Arc::clone(&connection);
     let client_left = Arc::new(AtomicBool::new(false));
     let left = Arc::clone(&client_left);
-    // On its own thread, and left behind: a read of standard input cannot be interrupted, and returning ends the program.
+    // On its own thread, and left behind: a read of standard input cannot be interrupted, and returning ends the program. The client has
+    // gone when it ends, so this ends both ways at once, which also tells the read below.
     thread::spawn(move || {
-        let _ = io::copy(&mut io::stdin().lock(), &mut upstream);
+        let _ = io::copy(&mut io::stdin().lock(), &mut &*upstream);
         left.store(true, Ordering::SeqCst);
-        let _ = upstream.shutdown(Shutdown::Write);
+        let _ = upstream.shutdown(Shutdown::Both);
     });
-    let _ = io::copy(&mut &connection, &mut io::stdout().lock());
+    let _ = io::copy(&mut &*connection, &mut io::stdout().lock());
     if !client_left.load(Ordering::SeqCst) {
         eprintln!("coqui-acp-bridge: the browser ended this server's connection");
     }
