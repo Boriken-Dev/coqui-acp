@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `coqui-acp-bridge`: a new identity, from `keygen`, `pair-accept`, `pair-dial`, `dial` or `serve --paired` on a fresh home, proves by Noise unless `--method webcrypto` is given. An identity made before keeps WebCrypto, and its paired peers keep working; moving them to Noise means pairing them again under a Noise identity, which `pair-accept --method noise` makes and records as the home's method.
 - `coqui-acp-bridge pair-accept` refuses a browser unless `--origin` lists its origin, so a page cannot spend the PIN; `--run-seconds` (120) bounds one connection, and `--timeout-seconds` defaults to the PIN's own 600 seconds, as does `pair-dial`'s.
 - `coqui-acp-bridge`: a home records the method named last, so `serve --paired` naming none keeps working after a home moves to Noise and holds both identities.
 - **Breaking**, `coqui-acp` and `coqui_acp` for Dart: stop reason `cancelled` is `Event::Cancelled` and `AcpCancelled`, and no longer `Event::Blocked` and `AcpBlocked`, which now mean only a permission that could not be answered. It ends the turn, so a connection lost after it is no `Failed`.

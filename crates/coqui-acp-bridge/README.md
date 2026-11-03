@@ -53,7 +53,7 @@ coqui-acp-bridge dial wss://server.example/v1/agent --identity agent.pem --trust
 
 | Command | Does |
 | --- | --- |
-| `keygen PATH [--method noise\|webcrypto]` | creates an identity of the method, WebCrypto unless named, and prints its peer id; never replaces a file |
+| `keygen PATH [--method noise\|webcrypto]` | creates an identity of the method, Noise unless named, and prints its peer id; never replaces a file |
 | `serve` | one agent process per proven connection, up to `--max-peers` (default 4) |
 | `dial URL` | `wss://` only; a wrong remote certificate stops it |
 | `pair-accept`, `pair-dial` | one PIN exchange, recorded in a trust store |
