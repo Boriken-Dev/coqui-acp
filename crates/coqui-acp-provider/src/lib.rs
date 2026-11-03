@@ -1,10 +1,17 @@
-//! A Guatiao provider kind for agents.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 extern crate alloc;
 
+mod facade;
 mod kind;
 
+pub use agent_client_protocol as sdk;
+pub use facade::{
+    AcpFacade, Credential, EVENT_NOTIFICATION, EVENTS_CAPABILITY, Error, FacadeAuth,
+    LAUNCH_META_KEY, Settings,
+};
 pub use guatiao;
 pub use kind::{
     AgentEvent, AgentMessage, AgentProvider, AgentProviderVtable, AgentSession, AgentSessionVtable,

@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use coqui_acp_provider::guatiao::{FromValue, ToValue};
 use coqui_acp_provider::{
     AgentEvent, AgentMessage, AgentProviderVtable, AgentSessionVtable, BLOCKED_EVENT,
-    CANCELLED_EVENT, COMPLETED_EVENT, DENIED_EVENT, FAILED_EVENT, LIMIT_EVENT, QuotaReport, ResumeRequest, StartRequest,
+    CANCELLED_EVENT, COMPLETED_EVENT, DENIED_EVENT, EVENT_NOTIFICATION, EVENTS_CAPABILITY,
+    FAILED_EVENT, LAUNCH_META_KEY, LIMIT_EVENT, QuotaReport, ResumeRequest, StartRequest,
     TEXT_EVENT, TOOL_EVENT, TURN_CANCELLED, TokenUsage, UsageLimit,
 };
 use serde_json::{Value, json};
@@ -57,6 +58,14 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(AgentSessionVtable::FLOOR_HASH, SESSION_HASH);
 }
 
+#[test]
+fn the_api_header_says_those_hashes() {
+    let header = std::fs::read_to_string(file("AGENTS.md")).expect("the header ships");
+    for hash in [PROVIDER_HASH, SESSION_HASH] {
+        assert!(header.contains(&hash.to_string()), "AGENTS.md lacks {hash}");
+    }
+}
+
 const PROVIDER_HASH: u32 = 1182182788;
 const SESSION_HASH: u32 = 1414216972;
 
@@ -86,6 +95,9 @@ fn the_strings_consumers_match_on_stay_what_they_are() {
     assert_eq!(LIMIT_EVENT, "limit");
     assert_eq!(DENIED_EVENT, "denied");
     assert_eq!(TURN_CANCELLED, "the agent cancelled the turn");
+    assert_eq!(LAUNCH_META_KEY, "dev.boriken.coqui.acp/launch");
+    assert_eq!(EVENTS_CAPABILITY, "dev.boriken.coqui.acp/events");
+    assert_eq!(EVENT_NOTIFICATION, "_coqui_acp/event");
 }
 
 fn full_event() -> AgentEvent {
@@ -190,10 +202,15 @@ fn no_debug_shows_an_environment_value() {
     resume
         .environment
         .insert("TOKEN".to_owned(), "sk-secret".to_owned());
+    let mut settings = coqui_acp_provider::Settings::default();
+    settings
+        .environment
+        .insert("TOKEN".to_owned(), "sk-secret".to_owned());
     for shown in [
         format!("{start:?}"),
         format!("{resume:?}"),
-            ] {
+        format!("{settings:?}"),
+    ] {
         assert!(shown.contains("TOKEN"), "{shown}");
         assert!(!shown.contains("sk-secret"), "{shown}");
     }

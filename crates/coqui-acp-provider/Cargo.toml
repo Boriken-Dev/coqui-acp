@@ -31,5 +31,10 @@ uuid.workspace = true
 coqui-acp = { path = "../coqui-acp" }
 guatiao = { workspace = true, features = ["provider", "load"] }
 
+# A real library the tests load: `cargo test` builds it into target/<profile>/examples.
+[[example]]
+name = "echo_provider"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true
