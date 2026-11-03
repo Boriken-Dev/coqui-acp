@@ -471,9 +471,10 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=33be56624cd44f0948468ab2e0c1fb53b5ea5de1#33be56624cd44f0948468ab2e0c1fb53b5ea5de1"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=79a9f393b0cc306a1230ed0e85fa4bd7ec8087c5#79a9f393b0cc306a1230ed0e85fa4bd7ec8087c5"
 dependencies = [
  "coqui-peer",
+ "coqui-peer-noise",
  "coqui-peer-webcrypto",
  "coqui-web",
  "mdns-sd",
@@ -501,6 +502,21 @@ dependencies = [
  "sha2 0.11.1",
  "spake2",
  "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "coqui-peer-noise"
+version = "0.0.0-alpha.0"
+source = "git+https://github.com/Boriken-Dev/coqui-peer-noise?rev=8777403807e3ad6eb6fddc98d9b5b6753bb0e424#8777403807e3ad6eb6fddc98d9b5b6753bb0e424"
+dependencies = [
+ "aes-gcm",
+ "coqui-peer",
+ "data-encoding",
+ "getrandom 0.4.3",
+ "hkdf 0.13.0",
+ "sha2 0.11.1",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -662,6 +678,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -3144,6 +3161,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "zeroize",
+]
+
+[[package]]
 name = "x509-parser"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3220,6 +3248,20 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"

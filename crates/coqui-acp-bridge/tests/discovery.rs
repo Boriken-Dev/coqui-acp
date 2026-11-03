@@ -1,6 +1,8 @@
 //! The real binary as a person and a browser start it: `serve --advertise`, `discover`, and the native host's framing.
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
+mod method;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -41,6 +43,7 @@ impl Fixture {
         let output = Command::new(BRIDGE)
             .arg("keygen")
             .arg(&path)
+            .args(["--method", method::name()])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -120,6 +123,8 @@ fn an_agent_on_loopback_is_found_with_its_key_and_gone_when_it_dies() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0]["label"], "My agent");
     assert_eq!(found[0]["peer"], peer.as_str());
+    // The method its key proves by, which a client connects by.
+    assert_eq!(found[0]["method"], method::name());
     assert_eq!(found[0]["source"], "local");
     assert!(
         found[0]["url"]
@@ -398,6 +403,7 @@ fn one_pairing_serves_every_command() {
     let mut accept = Running(
         Command::new(BRIDGE)
             .args(["pair-accept", "--listen", &format!("127.0.0.1:{port}")])
+            .args(["--method", method::name()])
             .env(home, &server_home)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -409,6 +415,7 @@ fn one_pairing_serves_every_command() {
     out.read_line(&mut pin).unwrap();
     let mut dial = Command::new(BRIDGE)
         .args(["pair-dial", &format!("ws://127.0.0.1:{port}/pair")])
+        .args(["--method", method::name()])
         .env(home, &client_home)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -435,6 +442,8 @@ fn one_pairing_serves_every_command() {
             .args([
                 "serve",
                 "--paired",
+                "--method",
+                method::name(),
                 "--listen",
                 &format!("127.0.0.1:{port}"),
                 "--",
@@ -461,12 +470,15 @@ fn one_pairing_serves_every_command() {
             .expect("serve said nothing in time")
     };
     assert!(next().starts_with("listening on"));
+    assert_eq!(next(), format!("proving by {}", method::name()));
     let _client = Running(
         Command::new(BRIDGE)
             .args([
                 "dial",
                 &format!("ws://127.0.0.1:{port}/acp"),
                 "--paired",
+                "--method",
+                method::name(),
                 "--",
             ])
             .arg(&agent)

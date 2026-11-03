@@ -1,14 +1,16 @@
 //! A program nobody declared anything to, reaching a peer's tools from what `mcp-config` prints, through the real binary.
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
+mod method;
+
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use coqui_agentic_peer::auth::{Identity, Proof, Trust};
 use coqui_agentic_peer::auth::{Sealed, prove_out};
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
-use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
 use coqui_web::Channel as _;
 use serde_json::{Value, json};
 
@@ -42,7 +44,7 @@ impl Fixture {
 
     fn identity(&self, name: &str) -> (PathBuf, Identity) {
         let path = self.dir.join(name);
-        let identity = Identity::open_or_create(&path).unwrap();
+        let identity = method::identity(&path);
         (path, identity)
     }
 
@@ -193,7 +195,7 @@ fn over_link(
     server: &str,
     body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web::websocket::Channel>>),
 ) {
-    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     let sealed = Sealed::new(&channel, established.session);

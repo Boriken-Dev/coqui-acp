@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `coqui-acp-bridge`: the Noise method (`coqui-peer-noise`) beside WebCrypto for the in-band proof and PIN pairing. `--method noise|webcrypto` on `keygen`, `serve`, `dial`, `forward`, `pair-accept` and `pair-dial`: an identity keeps the method of its key, naming another is refused, and nothing negotiates or falls back. `serve`, `dial` and `forward` say on standard error which method they prove by. A record and a descriptor `--advertise` publishes name the method.
+- `coqui-acp-bridge`: `--key-limit` and `--no-rekey` on `serve`, `dial` and `forward`, each method's own setting with its default. A setting looser than the default is said on standard error. WebCrypto has no key change, so it always ends a session at its limit.
+
 - `coqui-acp`: drive any Agent Client Protocol version 1 agent from blocking code, with permission deciding, resume, extensions and line transports.
 - `coqui_acp` for Dart: a client that speaks version 1 and version 2, whichever the agent selects. `openSession`, `setConfigOption`, `setMode` and `AcpCancel` for a client that shows what an agent offers. `listSessions` and `reopenSession` for earlier sessions, and `AcpAttachment` with `takesImages` and `takesFiles` for what goes with a prompt.
 - `coqui-acp-bridge`: a stdio ACP agent on the network under coqui-peer identity.
@@ -33,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - `coqui-acp`: an error's text keeps the agent's reason when `data` is an object with a `message`, as the Grok CLI sends for a spent credit limit, not only when `data` is text.
+- `coqui-acp-bridge`: a new identity, from `keygen`, `pair-accept`, `pair-dial`, `dial` or `serve --paired` on a fresh home, proves by Noise unless `--method webcrypto` is given. An identity made before keeps WebCrypto, and its paired peers keep working; moving them to Noise means pairing them again under a Noise identity, which `pair-accept --method noise` makes and records as the home's method.
+- `coqui-acp-bridge pair-accept` refuses a browser unless `--origin` lists its origin, so a page cannot spend the PIN; `--run-seconds` (120) bounds one connection, and `--timeout-seconds` defaults to the PIN's own 600 seconds, as does `pair-dial`'s.
+- `coqui-acp-bridge`: a home records the method named last, so `serve --paired` naming none keeps working after a home moves to Noise and holds both identities.
 - **Breaking**, `coqui-acp` and `coqui_acp` for Dart: stop reason `cancelled` is `Event::Cancelled` and `AcpCancelled`, and no longer `Event::Blocked` and `AcpBlocked`, which now mean only a permission that could not be answered. It ends the turn, so a connection lost after it is no `Failed`.
 - `coqui-acp` and `coqui_acp` for Dart: a `session/update` of a session other than the client's own is dropped, and a `session/request_permission` of one is answered cancelled without asking the decider, so what an agent kept from an earlier connection says of its session never feeds this one.
 - `coqui_acp` for Dart: request ids start at a random point on each connection, so they do not repeat those of an earlier connection to the same agent.

@@ -1,6 +1,8 @@
 //! `serve --linger`: the real binary, a scripted agent process and a real socket, with a link cut as a page reload cuts it.
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
+mod method;
+
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -10,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use coqui_acp_bridge::linger::OUTPUT_LOST;
+use coqui_agentic_peer::auth::{Identity, Proof, Trust};
 use coqui_agentic_peer::auth::{Sealed, prove_out};
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
-use coqui_peer_webcrypto::{Identity, Trust, TrustStore, WebCrypto};
+use coqui_peer_webcrypto::TrustStore;
 use coqui_web::{Channel, Dialer, Failure, Kind, websocket};
 use serde_json::{Value, json};
 
@@ -45,7 +48,7 @@ impl Fixture {
 
     fn identity(&self, name: &str) -> (PathBuf, Identity) {
         let path = self.dir.join(name);
-        let identity = Identity::open_or_create(&path).unwrap();
+        let identity = method::identity(&path);
         (path, identity)
     }
 
@@ -257,15 +260,14 @@ fn is_answer(message: &Value, id: u64) -> bool {
 
 /// A key that can reach one `serve`.
 struct Peer {
-    method: WebCrypto,
+    method: Proof,
     port: u16,
 }
 
 impl Peer {
     fn new(identity: Identity, port: u16, server: &str) -> Self {
         Self {
-            method: WebCrypto::new(identity)
-                .with_responders(Trust::pinned([server.parse().unwrap()])),
+            method: Proof::new(identity).with_responders(Trust::pinned([server.parse().unwrap()])),
             port,
         }
     }

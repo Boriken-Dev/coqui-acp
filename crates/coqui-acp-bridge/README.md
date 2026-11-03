@@ -16,7 +16,7 @@ bridge passes complete messages and reads none of them, so what the agent may do
 - `mcp-config`: the same tools for an MCP client with no ACP session, such as an IDE, from one stable `mcpServers` entry: a peer keeps a stream standing, and each program gets its own.
 - `serve --advertise`, `discover`: find agents on this machine and the link. What is found is a claim, and only the proof at connect tests it. A browser extension asks through `companion install`, and `--tls-short-lived` lets it open WebTransport with no certificate authority.
 - `dial`: connect out from behind NAT, reconnecting with the agent still running; ends with the agent's exit status.
-- Nothing is trusted on first use. A peer proves a key in-band (`--allow`, or a paired key with `--allow-store`), and everything after that is inside an encrypted session, so a reverse proxy that ends TLS can carry it and can neither read nor inject. Or by a pinned client certificate (`--allow-cert`), which ends where TLS ends.
+- Nothing is trusted on first use. A peer proves a key in-band (`--allow`, or a paired key with `--allow-store`), by Noise or by WebCrypto, chosen per endpoint and never negotiated, and everything after that is inside an encrypted session, so a reverse proxy that ends TLS can carry it and can neither read nor inject. Or by a pinned client certificate (`--allow-cert`), which ends where TLS ends.
 - `pair-accept` and `pair-dial`: a PIN makes a full key, inside the same kind of session, so a reverse proxy can carry it. One wrong try ends the attempt.
 - Mutual TLS by pin, store or CA, TLS that checks only the server, or `--no-peer-proof` for a trusted local setup, where that is the choice to make. One proof per endpoint, never negotiated.
 - `--permit` and `--deny` drop a source network before its handshake. `--origin` limits browsers.
@@ -53,7 +53,7 @@ coqui-acp-bridge dial wss://server.example/v1/agent --identity agent.pem --trust
 
 | Command | Does |
 | --- | --- |
-| `keygen PATH` | creates a P-256 identity and prints its peer id; never replaces a file |
+| `keygen PATH [--method noise\|webcrypto]` | creates an identity of the method, Noise unless named, and prints its peer id; never replaces a file |
 | `serve` | one agent process per proven connection, up to `--max-peers` (default 4) |
 | `dial URL` | `wss://` only; a wrong remote certificate stops it |
 | `pair-accept`, `pair-dial` | one PIN exchange, recorded in a trust store |
@@ -75,11 +75,15 @@ Exit status: the agent's own when it ends the bridge; 2 for a bad configuration 
 ## Development
 
 ```sh
-COQUI_ACP_TEST_NODE=/path/to/node COQUI_ACP_TEST_WEBCRYPTO=/path/to/coqui-peer-webcrypto/bindings/js/coqui-peer-webcrypto/src/index.mjs \
+COQUI_ACP_TEST_METHOD=noise COQUI_ACP_TEST_NODE=/path/to/node \
+COQUI_ACP_TEST_NOISE=/path/to/coqui-peer-noise/bindings/js/coqui-peer-noise/src/index.mjs \
+  cargo test -p coqui-acp-bridge
+COQUI_ACP_TEST_METHOD=webcrypto COQUI_ACP_TEST_NODE=/path/to/node \
+COQUI_ACP_TEST_WEBCRYPTO=/path/to/coqui-peer-webcrypto/bindings/js/coqui-peer-webcrypto/src/index.mjs \
   cargo test -p coqui-acp-bridge
 ```
 
-The JavaScript peer's test needs Node 22 or later and coqui-peer-webcrypto's module, and says so when it skips.
+The suite runs once per method, `COQUI_ACP_TEST_METHOD` naming it (the default method when unset). The JavaScript peer's test needs Node 22 or later and that method's module, and says so when it skips.
 
 ## License
 

@@ -159,6 +159,8 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 - A local agent may use no proof at all, or TLS that shows only a host name. A provider may connect to one only if the person added it knowing that, and reports `identity.verified` false, so a page can refuse it.
 - The first use of an agent's key is the person's decision: pairing with a code, or accepting a fingerprint shown beside the label. It is never automatic.
 - A key that changes is a new agent, whose grants do not carry over.
+- A provider ends each stream with its close record and, when the transport ends, checks the peer's came: a link that ends without it is reported as cut, never as finished.
+- A provider stores the method with the key, and connects by that method only. A failed connection, a refused proof or a record naming another method never selects the other: any of these can come from whoever carries the connection. A peer id is the hash of a key of one type, so only its own method proves it. A browser that cannot run a method, such as one whose WebCrypto has no X25519 for Noise, shows that agent as unreachable from it and says why.
 - Grants are keyed by the verified peer, the page's origin, and the provider's profile. A grant for one agent gives nothing on another.
 
 **A provider's code must not come from the path it protects.** A proxy that serves a page's JavaScript can replace it, so an end-to-end session in that page protects nothing against that proxy. A provider ships its proof code with the extension or application.
@@ -200,6 +202,7 @@ The instance name is the label. The SRV record gives host and port. TXT keys, no
 | `wt` | a UDP port serving WebTransport on the same host, usually the SRV record's number |
 | `wth` | `sha256:` and the hex hash of the certificate there, for `serverCertificateHashes`, when no certificate authority vouches for it |
 | `peer` | the peer id, as a hint to match against one already paired |
+| `method` | the proof's method, `noise` or `webcrypto`. A record naming none is `webcrypto`'s, the only method before records named one; a client skips one naming a method it cannot run |
 | `acpv` | ACP versions, comma separated |
 | `offers` | protocol tokens served over one link, comma separated, such as `acp/1,a2a/1,mcp`. A client ignores one it does not know, and what a peer may open is what the link's own document says. See [the link](https://boriken-dev.github.io/coqui-agentic-peer/link/) |
 
@@ -212,7 +215,7 @@ Advertising tells everyone on the link that an agent exists, so it MUST be off u
 An agent bound to loopback is not reachable through an address mDNS could give others. It writes a descriptor instead, one JSON file per listener in a directory only its user can write, which is `$COQUI_ACP_DESCRIPTORS` if set, otherwise `coqui-acp/agents` under `%LOCALAPPDATA%`, `$XDG_RUNTIME_DIR` or `~/.local/state`, the first that is set:
 
 ```json
-{ "txtvers": 1, "proto": "acp", "label": "My agent", "url": "ws://127.0.0.1:8765/acp", "peer": "sha256:…", "wt": null, "wth": null }
+{ "txtvers": 1, "proto": "acp", "label": "My agent", "url": "ws://127.0.0.1:8765/acp", "peer": "sha256:…", "method": "noise", "wt": null, "wth": null }
 ```
 
 A descriptor MUST name loopback, with no user name in its URL, and is the only way discovery offers an agent with no key. A person may still add one by hand. A reader removes one nothing answers at, since a killed program leaves its file behind, ignores anything but a regular file, and believes none from a directory others can write to.
@@ -221,7 +224,7 @@ A descriptor MUST name loopback, with no user name in its URL, and is the only w
 
 A browser extension cannot query any of this itself: `chrome.mdns` is [documented only for Chrome Apps](https://developer.chrome.com/docs/apps/reference/mdns), a platform deprecated in 2020. It asks a native companion over [native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging), whose messages to the extension are limited to 1 MB. Discovery fits; relaying agent traffic through it means splitting larger messages.
 
-The companion answers one request, `{ "op": "discover", "seconds": 3 }`, with `{ "candidates": [...] }` of at most 64, each `{ "label", "url", "peer", "source", "webtransport", "webtransportHash", "acpVersions", "offers" }`, where `source` is `dns-sd` or `local`. `coqui-acp-bridge` is one: `coqui-acp-bridge companion install --extension-id <id>` registers it, under the name `dev.boriken.coqui_acp_bridge`.
+The companion answers one request, `{ "op": "discover", "seconds": 3 }`, with `{ "candidates": [...] }` of at most 64, each `{ "label", "url", "peer", "method", "source", "webtransport", "webtransportHash", "acpVersions", "offers" }`, where `source` is `dns-sd` or `local`. `coqui-acp-bridge` is one: `coqui-acp-bridge companion install --extension-id <id>` registers it, under the name `dev.boriken.coqui_acp_bridge`.
 
 `wth` lets a browser open WebTransport to an agent with no certificate authority: browsers pin a hash only for a certificate valid for 14 days at most, so an agent's hash changes as it renews one. It can be a hint like the rest because TLS authenticates nothing here: a false hash only fails to open, and whichever transport opens has the same proof to pass. For the same reason a provider MAY try a WebSocket when WebTransport does not open. 
 **A public key proves nothing about who names it.** A record can name the key of an agent the person already has, at the address of whoever sent it. A provider MUST show such a record as that agent, under the name the person knows it by and not the record's, and say that choosing it gives the requesting site that agent. It MUST report the agent as unverified until a proof at the new address, and keep the old address until then, going back to it if the proof fails. A stranger that relays to the real agent passes the proof and still reads nothing, since everything after it is sealed, but it does see when and how much is sent.

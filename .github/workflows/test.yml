@@ -46,16 +46,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      # The JavaScript peer of the bridge's test, at the revision crates/coqui-acp-bridge/Cargo.toml pins.
+      # The JavaScript peers of the bridge's test, at the revisions crates/coqui-acp-bridge/Cargo.toml and coqui-agentic-peer pin.
       - uses: actions/checkout@v4
         with:
           repository: Boriken-Dev/coqui-peer-webcrypto
           ref: a3776fba131415d006f68ea493120fd7f894244a
           path: peer-webcrypto
+      - uses: actions/checkout@v4
+        with:
+          repository: Boriken-Dev/coqui-peer-noise
+          ref: 8777403807e3ad6eb6fddc98d9b5b6753bb0e424
+          path: peer-noise
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
         env:
+          COQUI_ACP_TEST_METHOD: noise
+          COQUI_ACP_TEST_NOISE: ${{ github.workspace }}/peer-noise/bindings/js/coqui-peer-noise/src/index.mjs
+      # The bridge again under the other method: a WebCrypto endpoint keeps serving browsers without X25519.
+      - run: cargo test -p coqui-acp-bridge --all-features
+        env:
+          COQUI_ACP_TEST_METHOD: webcrypto
           COQUI_ACP_TEST_WEBCRYPTO: ${{ github.workspace }}/peer-webcrypto/bindings/js/coqui-peer-webcrypto/src/index.mjs
       # Multicast has to work on the machine, which this runner's does.
       - if: runner.os == 'Linux'
