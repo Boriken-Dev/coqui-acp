@@ -21,9 +21,12 @@ ACP has no field for an environment, a model or an effort, so a client sends the
 The facade is the boundary between a client it may not fully trust and a provider it cannot stop. Each limit is a setting with a safe default.
 
 - **A provider that blocks** costs one session. Every provider call runs on a thread of its own and is timed, so the connection goes on answering. An overdue call fails the turn and ends the session; the thread stays until the call returns, and the session keeps its place among the connection's sessions until then.
+- **A client that never reads** costs at most what the connection may send in all, 256 MiB by default, since the protocol library queues output without limit and cannot say what was read.
 - **A client that vanishes** mid-turn has its sessions closed, and sessions belong to the connection that opened them. Keeping an agent for a client to come back to is the [bridge's](profile.md) to do.
 - **A provider that fails or panics** fails that turn. A panic's words stay out of what the client hears.
-- **A connection** opens eight sessions by default.
+- **A connection** opens eight sessions by default, and tries five credentials: after that it is refused everything.
+- **A provider's session identity** is a bearer secret: one session of the facade holds it at a time, and when none does, the provider decides who may resume it.
+- **A working directory** is any absolute path the client names, unless the host lists the roots it may be under.
 - **A client's environment** reaches a provider only for names the host allows, by default none: a client that can set `PATH` runs what it likes.
 - **A provider's text** is untrusted when it reaches the client. It is only ever data: a stop reason, an error code and a tool's kind never come from it. A tool's kind is always `other`, so what a provider may do is the provider's to enforce.
 
