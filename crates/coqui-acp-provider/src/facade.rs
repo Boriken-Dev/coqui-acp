@@ -40,6 +40,14 @@ pub const EVENTS_CAPABILITY: &str = "dev.boriken.coqui.acp/events";
 /// the [`AgentEvent`](crate::AgentEvent) as JSON. No `event` says the provider's identity is now known.
 pub const EVENT_NOTIFICATION: &str = "_coqui_acp/event";
 
+/// The `agentCapabilities._meta` key with which the facade says it answers [`SESSION_OPTIONS_METHOD`].
+pub const SESSION_OPTIONS_CAPABILITY: &str = "dev.boriken.coqui.acp/session_options";
+
+/// The request for what a session can be started with, before any session: `{}`, answered
+/// `{"configOptions": [SessionConfigOption], "modes": SessionModeState, "unknown": {part: reason}}`, from
+/// [`Settings::options`]; a part the host did not declare is left out, and `unknown` says so.
+pub const SESSION_OPTIONS_METHOD: &str = "_coqui_acp/session_options";
+
 /// Judges the `_meta` of an `authenticate` request.
 pub type Credential = dyn Fn(&Map<String, Value>) -> bool + Send + Sync;
 

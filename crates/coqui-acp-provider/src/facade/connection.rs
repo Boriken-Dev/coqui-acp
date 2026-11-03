@@ -25,7 +25,10 @@ use serde_json::{Map, Value, json};
 
 use super::operation::{Launch, Operation};
 use super::options::{self, OptionTarget};
-use super::{AcpFacade, EVENTS_CAPABILITY, FacadeAuth, LAUNCH_META_KEY, Settings, updates};
+use super::{
+    AcpFacade, EVENTS_CAPABILITY, FacadeAuth, LAUNCH_META_KEY, SESSION_OPTIONS_CAPABILITY,
+    SESSION_OPTIONS_METHOD, Settings, updates,
+};
 use crate::kind::AgentProvider;
 
 /// The longest session identifier a client may name: it reaches the provider.
@@ -222,6 +225,8 @@ impl Connection {
             "session/new" => self.new_session(params, cx),
             "session/set_config_option" => self.set_config_option(params),
             "session/set_mode" => self.set_mode(params),
+            "session/list" => self.list(params),
+            SESSION_OPTIONS_METHOD => Ok(options::description(&self.settings.options)),
             "session/prompt" => {
                 return self.prompt(params, responder);
             }
@@ -260,8 +265,8 @@ impl Connection {
                 "loadSession": false,
                 "promptCapabilities": {},
                 "mcpCapabilities": {"http": false, "sse": false},
-                "sessionCapabilities": {"resume": {}, "close": {}},
-                "_meta": {EVENTS_CAPABILITY: true},
+                "sessionCapabilities": {"resume": {}, "close": {}, "list": {}},
+                "_meta": {EVENTS_CAPABILITY: true, SESSION_OPTIONS_CAPABILITY: true},
             },
             "authMethods": methods,
             "agentInfo": {"name": self.name, "version": self.version},
@@ -392,6 +397,27 @@ impl Connection {
         options::session_fields(&self.settings.options, &launch.choices, &mut answer);
         self.admit(Operation::new(id, launch, self.clone(), cx))?;
         Ok(Value::Object(answer))
+    }
+
+    /// `session/list`: this connection's open sessions, in `cwd` when it names one, in one page. Another
+    /// connection's are not this client's to see: a provider identity works as a bearer secret.
+    fn list(&self, params: &Value) -> Result<Value, RpcError> {
+        if params.get("cursor").is_some_and(|cursor| !cursor.is_null()) {
+            return Err(invalid("this agent lists every session in one page"));
+        }
+        let cwd = params.get("cwd").and_then(Value::as_str);
+        let mut listed: Vec<(String, String)> = self
+            .sessions()
+            .values()
+            .filter_map(|operation| operation.listed())
+            .filter(|(_, directory)| cwd.is_none_or(|cwd| cwd == directory))
+            .collect();
+        listed.sort();
+        let sessions = listed
+            .into_iter()
+            .map(|(id, directory)| json!({"sessionId": id, "cwd": directory}))
+            .collect::<Vec<_>>();
+        Ok(json!({"sessions": sessions}))
     }
 
     /// `session/set_config_option`: a value from the option's own list, before the provider starts.

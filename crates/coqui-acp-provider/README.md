@@ -125,7 +125,7 @@ Everything is at the crate root.
 | `AgentEvent`, `TokenUsage`, `UsageLimit`, `QuotaReport`, the `*_EVENT` constants, `TURN_CANCELLED` | what comes out |
 | `AcpFacade`, `Settings`, `FacadeAuth`, `Credential`, `Error` | a provider as an ACP agent |
 | `StartOption`, `OptionValue`, `OptionTarget` | what a client may choose before a session starts |
-| `LAUNCH_META_KEY`, `EVENT_NOTIFICATION`, `EVENTS_CAPABILITY` | what the facade adds to ACP |
+| `LAUNCH_META_KEY`, `EVENT_NOTIFICATION`, `EVENTS_CAPABILITY`, `SESSION_OPTIONS_METHOD`, `SESSION_OPTIONS_CAPABILITY` | what the facade adds to ACP |
 | `sdk`, `guatiao` | the protocol's own crate and Guatiao, re-exported so a provider names one version of each |
 
 `AGENTS.md` beside this file is the whole contract.

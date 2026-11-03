@@ -25,7 +25,9 @@ The kind cannot be asked what models a provider takes, so the host says, in `Set
  "options": [{"value": "alpha", "name": "Alpha"}, {"value": "beta", "name": "Beta"}]}
 ```
 
-A host that declares nothing offers no options, and a launch's model and effort pass as the client wrote them. ACP has no update for a quota or a usage limit, so those arrive as a `_coqui_acp/event` notification, which a client may ignore.
+A host that declares nothing offers no options, and a launch's model and effort pass as the client wrote them.
+
+A client can also ask before it opens a session: the facade answers [`_coqui_acp/session_options`](profile.md#what-an-agent-offers-before-a-session) from the same declarations, with what the host left out said to be unknown, and `session/list` with the sessions open on that connection. ACP has no update for a quota or a usage limit, so those arrive as a `_coqui_acp/event` notification, which a client may ignore.
 
 ### What a session's limits are for
 

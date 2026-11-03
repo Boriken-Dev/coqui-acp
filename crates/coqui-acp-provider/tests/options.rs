@@ -10,9 +10,10 @@ mod support;
 
 use std::sync::Arc;
 
-use coqui_acp::{Client, Event, Session};
+use coqui_acp::{Answer, Client, Event, Exchange, Session};
 use coqui_acp_provider::{
-    AcpFacade, Error, LAUNCH_META_KEY, OptionTarget, OptionValue, Settings, StartOption,
+    AcpFacade, Error, LAUNCH_META_KEY, OptionTarget, OptionValue, SESSION_OPTIONS_CAPABILITY,
+    SESSION_OPTIONS_METHOD, Settings, StartOption,
 };
 use serde_json::{Value, json};
 use support::{Probe, Raw, WAIT, cwd, detail, facade, quick};
@@ -329,4 +330,128 @@ fn options_that_cannot_be_served_end_run_before_anything_is_served() {
             "{options:?}: {served:?}"
         );
     }
+}
+
+fn described(settings: Settings) -> (Arc<Probe>, coqui_acp::Description) {
+    let probe = Probe::new();
+    let (agent, client) = coqui_acp::duplex();
+    facade(&probe, settings)
+        .serve(agent)
+        .expect("a thread starts");
+    let description = Exchange::new()
+        .describe(client)
+        .expect("the facade is described");
+    (probe, description)
+}
+
+#[test]
+fn describe_knows_the_declared_options_modes_and_sessions_and_starts_nothing() {
+    let (probe, description) = described(declaring(vec![models(), efforts(), modes()]));
+    let Answer::Known(options) = &description.options else {
+        panic!("{:?}", description.options);
+    };
+    let options = serde_json::to_value(options).unwrap();
+    let categories: Vec<&str> = options
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| option["category"].as_str().unwrap())
+        .collect();
+    assert_eq!(categories, ["model", "thought_level", "mode"]);
+    assert_eq!(options[0]["currentValue"], "alpha");
+    assert_eq!(
+        options[0]["options"][1],
+        json!({"value": "beta", "name": "Beta"})
+    );
+    let Answer::Known(modes) = &description.modes else {
+        panic!("{:?}", description.modes);
+    };
+    assert_eq!(
+        serde_json::to_value(modes).unwrap(),
+        json!({"currentModeId": "ask", "availableModes": [
+            {"id": "ask", "name": "Ask"},
+            {"id": "code", "name": "Code", "description": "writes files"},
+        ]})
+    );
+    assert_eq!(description.sessions, Answer::Known(Vec::new()));
+    assert!(
+        probe.starts.lock().unwrap().is_empty(),
+        "nothing was started"
+    );
+}
+
+#[test]
+fn describe_says_what_the_host_did_not_declare_is_unknown() {
+    let (_probe, description) = described(quick());
+    assert!(
+        matches!(&description.options, Answer::Unknown(why) if why.contains("declared no options")),
+        "{:?}",
+        description.options
+    );
+    assert!(
+        matches!(&description.modes, Answer::Unknown(why) if why.contains("declared no modes")),
+        "{:?}",
+        description.modes
+    );
+    let (_probe, description) = described(declaring(vec![models()]));
+    assert!(matches!(&description.options, Answer::Known(options) if options.len() == 1));
+    assert!(
+        matches!(&description.modes, Answer::Unknown(_)),
+        "{:?}",
+        description.modes
+    );
+}
+
+#[test]
+fn a_start_with_a_value_outside_the_described_list_is_refused() {
+    let probe = Probe::new();
+    let (agent, client) = coqui_acp::duplex();
+    facade(&probe, declaring(vec![models()]))
+        .serve(agent)
+        .expect("a thread starts");
+    let refused = Client::builder(cwd())
+        .meta(LAUNCH_META_KEY, json!({"model": "gamma"}))
+        .prompt("hi")
+        .connect(client)
+        .expect_err("gamma is not on the host's list");
+    assert!(refused.to_string().contains("no value gamma"), "{refused}");
+    assert!(probe.starts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_facade_lists_the_sessions_of_this_connection_only() {
+    let probe = Probe::new();
+    let facade = facade(&probe, quick());
+    let (mut raw, _served) = Raw::serve(&facade);
+    let init = raw.initialize();
+    assert_eq!(
+        init["agentCapabilities"]["sessionCapabilities"]["list"],
+        json!({})
+    );
+    assert_eq!(
+        init["agentCapabilities"]["_meta"][SESSION_OPTIONS_CAPABILITY],
+        json!(true)
+    );
+    let session = raw.new_session();
+    let answer = raw.call("session/list", &json!({}));
+    assert_eq!(
+        answer["result"],
+        json!({"sessions": [{"sessionId": session, "cwd": cwd()}]}),
+        "{answer}"
+    );
+    let elsewhere = raw.call("session/list", &json!({"cwd": "/elsewhere"}));
+    assert_eq!(elsewhere["result"], json!({"sessions": []}), "{elsewhere}");
+    let (mut other, _served) = Raw::serve(&facade);
+    other.initialize();
+    let answer = other.call("session/list", &json!({}));
+    assert_eq!(answer["result"], json!({"sessions": []}), "{answer}");
+}
+
+#[test]
+fn the_extension_names_match_the_clients() {
+    assert_eq!(
+        SESSION_OPTIONS_CAPABILITY,
+        coqui_acp::SESSION_OPTIONS_CAPABILITY
+    );
+    assert_eq!(SESSION_OPTIONS_METHOD, coqui_acp::SESSION_OPTIONS_METHOD);
 }

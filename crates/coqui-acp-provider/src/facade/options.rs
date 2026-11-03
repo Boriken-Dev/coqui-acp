@@ -308,3 +308,37 @@ pub(super) fn session_fields(
         answer.insert("modes".to_string(), modes);
     }
 }
+
+/// The answer to [`SESSION_OPTIONS_METHOD`](super::SESSION_OPTIONS_METHOD): every option at its default, and
+/// what the host did not declare as unknown, since the kind cannot be asked.
+pub(super) fn description(options: &[StartOption]) -> Value {
+    let choices = defaults(options);
+    let mut answer = Map::new();
+    let mut unknown = Map::new();
+    if options.is_empty() {
+        unknown.insert(
+            "configOptions".to_string(),
+            json!("the host declared no options for this agent"),
+        );
+    } else {
+        answer.insert(
+            "configOptions".to_string(),
+            config_options(options, &choices),
+        );
+    }
+    match modes(options, &choices) {
+        Some(modes) => {
+            answer.insert("modes".to_string(), modes);
+        }
+        None => {
+            unknown.insert(
+                "modes".to_string(),
+                json!("the host declared no modes for this agent"),
+            );
+        }
+    }
+    if !unknown.is_empty() {
+        answer.insert("unknown".to_string(), Value::Object(unknown));
+    }
+    Value::Object(answer)
+}

@@ -450,6 +450,14 @@ impl Operation {
         }
     }
 
+    /// Its identity and working directory, while it is open.
+    pub(super) fn listed(&self) -> Option<(String, String)> {
+        if self.closing.load(Ordering::SeqCst) || self.state().dead.is_some() {
+            return None;
+        }
+        Some((self.id.clone(), self.launch.working_directory.clone()))
+    }
+
     /// What the provider is given now: the options as they stand.
     fn given(&self) -> Given {
         let choices = self.state().choices.clone();
