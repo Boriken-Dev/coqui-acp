@@ -63,6 +63,11 @@ impl Turn {
         self.finished
     }
 
+    /// Something other than the prompt's answer ended this turn.
+    pub(crate) const fn finish(&mut self) {
+        self.finished = true;
+    }
+
     pub(crate) fn is_refused(&self, kind: &str) -> bool {
         self.refused.iter().any(|refused| refused == kind)
     }

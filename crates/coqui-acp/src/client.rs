@@ -58,6 +58,9 @@ enum Opening {
     Load(String),
 }
 
+type EndsTurn = Box<dyn Fn(&str, &Value) -> bool + Send + Sync>;
+type DisconnectDetail = Box<dyn FnOnce() -> Option<String> + Send>;
+
 /// How to open a session; see [`Client::builder`].
 #[must_use]
 pub struct Builder {
@@ -75,6 +78,8 @@ pub struct Builder {
     refuse_kinds: Vec<String>,
     authenticate: Option<Authenticate>,
     turn_end_by: Option<String>,
+    ends_turn: Option<EndsTurn>,
+    disconnect_detail: Option<DisconnectDetail>,
     initialize_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
     close_grace: Option<Duration>,
@@ -117,6 +122,8 @@ impl Client {
             refuse_kinds: Vec::new(),
             authenticate: None,
             turn_end_by: None,
+            ends_turn: None,
+            disconnect_detail: None,
             initialize_timeout: Some(Duration::from_secs(20)),
             request_timeout: Some(Duration::from_secs(30)),
             close_grace: Some(Duration::from_secs(2)),
@@ -212,6 +219,27 @@ impl Builder {
         self
     }
 
+    /// Says which of the extension's notifications end a turn, given their method and parameters, while [`Builder::turn_end_by`]
+    /// is active: a connection that ends after one is no [`Event::Failed`]. It is asked on the connection's thread as each one
+    /// arrives, ahead of the connection's end, so it cannot race what a caller reads. It must not block.
+    pub fn ends_turn(
+        mut self,
+        ends: impl Fn(&str, &Value) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.ends_turn = Some(Box::new(ends));
+        self
+    }
+
+    /// Says what became of the agent, for the [`Event::Failed`] a lost connection reports: `<why>: <detail>`. It is asked at most
+    /// once, on the connection's thread, only when that event is due, and may wait a while for the agent's exit.
+    pub fn disconnect_detail(
+        mut self,
+        detail: impl FnOnce() -> Option<String> + Send + 'static,
+    ) -> Self {
+        self.disconnect_detail = Some(Box::new(detail));
+        self
+    }
+
     /// How long `initialize` may take; `None` waits without limit. Default 20 s.
     pub const fn initialize_timeout(mut self, limit: Option<Duration>) -> Self {
         self.initialize_timeout = limit;
@@ -278,6 +306,8 @@ impl Builder {
             max_pending: self.max_pending_events,
             commands: commands_tx.clone(),
             decider: self.decider.clone(),
+            ends_turn: self.ends_turn.take(),
+            disconnect_detail: Mutex::new(self.disconnect_detail.take()),
             fail_on_disconnect: self.fail_on_disconnect,
             close_on_drop: self.close_on_drop,
             lost: AtomicBool::new(false),
@@ -372,6 +402,8 @@ struct Shared {
     max_pending: usize,
     commands: async_mpsc::UnboundedSender<Command>,
     decider: Arc<dyn Decider>,
+    ends_turn: Option<EndsTurn>,
+    disconnect_detail: Mutex<Option<DisconnectDetail>>,
     fail_on_disconnect: bool,
     close_on_drop: bool,
     lost: AtomicBool,
@@ -434,6 +466,14 @@ impl Shared {
                 let _ = self.commands.unbounded_send(Command::Abort);
             }
         } else if method.starts_with('_') {
+            if self.extension.load(Ordering::SeqCst)
+                && self
+                    .ends_turn
+                    .as_ref()
+                    .is_some_and(|ends| ends(method, message.params()))
+            {
+                self.turn().finish();
+            }
             self.push(Event::Extension {
                 method: method.to_owned(),
                 params: message.params().clone(),
@@ -474,9 +514,19 @@ impl Shared {
         self.lost.store(true, Ordering::SeqCst);
         self.flush();
         let finished = self.turn().finished();
-        if self.fail_on_disconnect && !finished {
-            self.emit(Event::Failed(why.to_owned()));
+        if !self.fail_on_disconnect || finished {
+            return;
         }
+        let detail = self
+            .disconnect_detail
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .and_then(|detail| detail());
+        self.emit(Event::Failed(match detail {
+            Some(detail) => format!("{why}: {detail}"),
+            None => why.to_owned(),
+        }));
     }
 }
 

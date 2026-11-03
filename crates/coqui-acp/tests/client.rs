@@ -654,6 +654,146 @@ fn a_lost_connection_after_a_cancelled_turn_is_no_failure() {
     assert!(session.connection_lost());
 }
 
+const EXTENSION: &str = "example/events";
+
+/// Whether a notification of this test's extension ends a turn.
+fn completed(method: &str, params: &Value) -> bool {
+    method == "_example/event" && params["kind"] == "completed"
+}
+
+#[test]
+fn a_notification_that_ends_a_turn_keeps_the_agent_leaving_from_being_a_failure() {
+    let transport = agent_leaving_at_prompt(json!({"_meta": {EXTENSION: true}}), |agent, _| {
+        agent.notify("_example/event", &json!({"kind": "completed"}));
+    });
+    let asked = Arc::new(Mutex::new(false));
+    let told = asked.clone();
+    let session = Client::builder("/w")
+        .turn_end_by(EXTENSION)
+        .ends_turn(completed)
+        .disconnect_detail(move || {
+            *told.lock().unwrap() = true;
+            None
+        })
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    assert!(matches!(
+        session.next_event(WAIT),
+        Some(Event::Extension { .. })
+    ));
+    assert_eq!(session.next_event(Duration::from_millis(300)), None);
+    assert!(session.connection_lost());
+    assert!(
+        !*asked.lock().unwrap(),
+        "nothing is due, so nothing is asked"
+    );
+}
+
+#[test]
+fn a_notification_that_ends_nothing_leaves_the_agent_leaving_a_failure() {
+    let transport = agent_leaving_at_prompt(json!({"_meta": {EXTENSION: true}}), |agent, _| {
+        agent.notify("_example/event", &json!({"kind": "text"}));
+    });
+    let session = Client::builder("/w")
+        .turn_end_by(EXTENSION)
+        .ends_turn(completed)
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    assert!(matches!(
+        session.next_event(WAIT),
+        Some(Event::Extension { .. })
+    ));
+    assert!(matches!(session.next_event(WAIT), Some(Event::Failed(_))));
+}
+
+#[test]
+fn a_turn_after_one_an_extension_ended_can_still_fail() {
+    let (mut agent, transport) = Agent::pair();
+    let actor = thread::spawn(move || {
+        let mut prompts = 0;
+        while let Some(message) = agent.read() {
+            let method = message["method"].as_str().unwrap_or_default().to_owned();
+            match method.as_str() {
+                "initialize" => agent.reply(
+                    &message["id"],
+                    &json!({"protocolVersion": 1, "agentCapabilities": {"_meta": {EXTENSION: true}}}),
+                ),
+                "session/prompt" => {
+                    prompts += 1;
+                    if prompts == 2 {
+                        return;
+                    }
+                    agent.notify("_example/event", &json!({"kind": "completed"}));
+                }
+                _ => agent.reply(&message["id"], &plain(&method).unwrap()),
+            }
+        }
+    });
+    let session = Client::builder("/w")
+        .turn_end_by(EXTENSION)
+        .ends_turn(completed)
+        .prompt("one")
+        .connect(transport)
+        .unwrap();
+    assert!(matches!(
+        session.next_event(WAIT),
+        Some(Event::Extension { .. })
+    ));
+    session.send("two").unwrap();
+    actor.join().unwrap();
+    assert!(matches!(session.next_event(WAIT), Some(Event::Failed(_))));
+}
+
+#[test]
+fn an_agent_with_no_such_extension_is_not_asked_what_ends_a_turn() {
+    let transport = agent_leaving_at_prompt(json!({}), |agent, _| {
+        agent.notify("_example/event", &json!({"kind": "completed"}));
+    });
+    let session = Client::builder("/w")
+        .turn_end_by(EXTENSION)
+        .ends_turn(completed)
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    assert!(matches!(
+        session.next_event(WAIT),
+        Some(Event::Extension { .. })
+    ));
+    assert!(matches!(session.next_event(WAIT), Some(Event::Failed(_))));
+}
+
+#[test]
+fn a_lost_agents_failure_says_what_became_of_it() {
+    let transport = agent_leaving_at_prompt(json!({}), |_, _| {});
+    let session = Client::builder("/w")
+        .disconnect_detail(|| Some("it exited with status 3".to_owned()))
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    assert_eq!(
+        session.next_event(WAIT),
+        Some(Event::Failed(
+            "the agent closed its connection: it exited with status 3".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn a_lost_agent_with_nothing_to_say_fails_in_the_librarys_words() {
+    let transport = agent_leaving_at_prompt(json!({}), |_, _| {});
+    let session = Client::builder("/w")
+        .disconnect_detail(|| None)
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    assert_eq!(
+        session.next_event(WAIT),
+        Some(Event::Failed("the agent closed its connection".to_owned()))
+    );
+}
+
 #[test]
 fn a_reader_past_the_event_limit_ends_the_session() {
     let (transport, _) = agent_with(|method, _, agent| match method {
