@@ -71,14 +71,26 @@ impl Launch {
 
 enum Turn {
     Idle,
-    /// A prompt waits for its answer. `cancelled` is when `session/cancel` came.
+    /// A prompt waits for its answer. `cancelled` is when `session/cancel` came; `number` counts the
+    /// session's turns.
     Active {
         responder: Box<Responder<Value>>,
         cancelled: Option<Instant>,
+        number: u64,
     },
     /// The prompt was answered `cancelled` and the provider has not ended the turn. What it sends is the
     /// old turn's, so a new prompt has to wait, or the old ending would answer it.
-    Draining,
+    Draining(u64),
+}
+
+impl Turn {
+    /// The turn the provider is working on, if any.
+    const fn number(&self) -> Option<u64> {
+        match self {
+            Self::Idle => None,
+            Self::Active { number, .. } | Self::Draining(number) => Some(*number),
+        }
+    }
 }
 
 struct State {
@@ -90,7 +102,9 @@ struct State {
     /// Why the session cannot go on.
     dead: Option<String>,
     open_tools: Vec<String>,
+    /// The provider's identity once known, whether or not it could be shown to the client.
     provider_id: Option<String>,
+    turns: u64,
     /// The `session/resume` waiting for the provider's.
     resuming: Option<Responder<Value>>,
     /// `session/close` calls waiting for the provider's.
@@ -136,13 +150,16 @@ pub(super) struct Operation {
     connection: Arc<Connection>,
     cx: ConnectionTo<Client>,
     session: Mutex<Option<Arc<Object<dyn AgentSession>>>>,
+    /// The provider identity this session holds across the facade, freed with it.
+    pub(super) held: Mutex<Option<String>>,
     state: Mutex<State>,
     calls: Mutex<Vec<Call>>,
     next_call: AtomicU64,
     threads: AtomicUsize,
     closing: AtomicBool,
     close_called: AtomicBool,
-    interrupting: AtomicBool,
+    /// The turn an `interrupt` is in flight for.
+    interrupting: Mutex<Option<u64>>,
     starting: AtomicBool,
 }
 
@@ -174,12 +191,14 @@ impl Operation {
             connection,
             cx,
             session: Mutex::new(None),
+            held: Mutex::new(None),
             state: Mutex::new(State {
                 turn: Turn::Idle,
                 bytes: 0,
                 dead: None,
                 open_tools: Vec::new(),
                 provider_id: None,
+                turns: 0,
                 resuming: None,
                 closing: Vec::new(),
                 closed: false,
@@ -189,7 +208,7 @@ impl Operation {
             threads: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             close_called: AtomicBool::new(false),
-            interrupting: AtomicBool::new(false),
+            interrupting: Mutex::new(None),
             starting: AtomicBool::new(false),
         })
     }
@@ -246,14 +265,17 @@ impl Operation {
         }
     }
 
+    /// Sends what the facade itself says. It counts toward the connection's total, but a few short lines as a
+    /// session ends are not refused for it.
     fn notify(&self, method: &str, params: Value) {
+        self.connection.charge(updates::cost(method, &params));
+        self.send(method, params);
+    }
+
+    fn send(&self, method: &str, params: Value) {
         if let Ok(message) = UntypedMessage::new(method, params) {
             let _ = self.cx.send_notification(message);
         }
-    }
-
-    fn update(&self, params: Value) {
-        self.notify("session/update", params);
     }
 
     /// Answers the prompt, ending the turn's tool calls first so none is left running.
@@ -264,7 +286,10 @@ impl Operation {
             "failed"
         };
         for tool in open_tools {
-            self.update(updates::tool_finished(&self.id, &tool, status));
+            self.notify(
+                "session/update",
+                updates::tool_finished(&self.id, &tool, status),
+            );
         }
         let _ = match ending {
             Ending::Stop(stop) => responder.respond(json!({"stopReason": stop})),
@@ -281,6 +306,7 @@ impl Operation {
                 Turn::Active {
                     responder,
                     cancelled,
+                    ..
                 } => (responder, cancelled, core::mem::take(&mut state.open_tools)),
                 other => {
                     state.turn = other;
@@ -326,13 +352,15 @@ impl Operation {
             let mut state = self.state();
             let why = if let Some(reason) = &state.dead {
                 Some(format!("this session has ended: {reason}"))
+            } else if state.resuming.is_some() {
+                Some("this session is still being resumed".to_string())
             } else if self.closing.load(Ordering::SeqCst) {
                 Some("this session is closing".to_string())
             } else {
                 match state.turn {
                     Turn::Idle => None,
                     Turn::Active { .. } => Some("a turn is in progress".to_string()),
-                    Turn::Draining => {
+                    Turn::Draining(_) => {
                         Some("the provider has not ended the cancelled turn".to_string())
                     }
                 }
@@ -341,9 +369,11 @@ impl Operation {
                 Some(why) => Some((why, responder)),
                 None => {
                     state.bytes = 0;
+                    state.turns += 1;
                     state.turn = Turn::Active {
                         responder: Box::new(responder),
                         cancelled: None,
+                        number: state.turns,
                     };
                     None
                 }
@@ -375,7 +405,7 @@ impl Operation {
             self.end_turn(Ending::Failure(label), Turn::Idle);
             // The provider never took it, so no ending will come for a turn already answered.
             let mut state = self.state();
-            if matches!(state.turn, Turn::Draining) {
+            if matches!(state.turn, Turn::Draining(_)) {
                 state.turn = Turn::Idle;
             }
         }
@@ -410,9 +440,15 @@ impl Operation {
                         let _ = responder.respond(json!({}));
                     }
                 }
-                // Nothing is held, so the identity is free again before the client hears.
+                // The session ends before it leaves the books, so nothing that came meanwhile can start
+                // one, and the identity is free again before the client hears.
                 Err(why) => {
-                    this.state().closed = true;
+                    this.closing.store(true, Ordering::SeqCst);
+                    {
+                        let mut state = this.state();
+                        state.dead = Some(why.clone());
+                        state.closed = true;
+                    }
                     this.connection.remove(this);
                     if let Some(responder) = responder {
                         let label = updates::label(&why, this.connection.settings.max_label_bytes);
@@ -422,6 +458,7 @@ impl Operation {
             }
         });
         if !spawned {
+            self.closing.store(true, Ordering::SeqCst);
             self.state().closed = true;
             self.connection.remove(self);
             if let Some(responder) = self.state().resuming.take() {
@@ -435,7 +472,16 @@ impl Operation {
     /// session ended is closed here, so no harness outlives what asked for it.
     fn adopt(self: &Arc<Self>, session: Object<dyn AgentSession>) {
         let session = Arc::new(session);
-        *self.session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session.clone());
+        let replaced = self
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(session.clone());
+        // Two harnesses for one session would leave one running with nothing to close it.
+        if let Some(replaced) = replaced {
+            let limit = self.connection.settings.close_timeout;
+            let _ = self.call(What::Close, limit, || replaced.close());
+        }
         if self.closing.load(Ordering::SeqCst) {
             let _ = self.close_provider(&session);
             return;
@@ -445,18 +491,22 @@ impl Operation {
             move |this| this.pump(&session)
         }) {
             self.abandon("no thread could be started to read the provider".to_string());
+            let _ = self.close_provider(&session);
+            self.finish_if_done();
             return;
         }
         // A cancel that came while the provider was starting had nothing to reach.
-        let cancelled = matches!(
-            self.state().turn,
+        let cancelled = match self.state().turn {
             Turn::Active {
                 cancelled: Some(_),
+                number,
                 ..
-            } | Turn::Draining
-        );
-        if cancelled {
-            self.interrupt();
+            }
+            | Turn::Draining(number) => Some(number),
+            _ => None,
+        };
+        if let Some(number) = cancelled {
+            self.interrupt(number);
         }
     }
 
@@ -496,114 +546,120 @@ impl Operation {
         let Ok(Some(id)) = self.call(What::SessionId, limit, || session.session_id()) else {
             return;
         };
-        let id = updates::label(&id, self.connection.settings.max_label_bytes);
         self.state().provider_id = Some(id.clone());
-        self.notify(
-            EVENT_NOTIFICATION,
-            json!({"sessionId": self.id, "providerSessionId": id}),
-        );
+        {
+            let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+            if held.is_none() && self.connection.hold(&id) {
+                *held = Some(id.clone());
+            }
+        }
+        // An identity that would not show as it is cannot be named back, so it is not told.
+        if updates::title(&id, self.connection.settings.max_label_bytes) == id {
+            self.notify(
+                EVENT_NOTIFICATION,
+                json!({"sessionId": self.id, "providerSessionId": id}),
+            );
+        }
     }
 
     /// Passes one event on, and ends the turn if it does.
+    /// Every notification is costed as the line it becomes before any of it is sent.
     fn deliver(self: &Arc<Self>, event: &AgentEvent) {
         let settings = &self.connection.settings;
         let ending = updates::ending(event, settings.max_label_bytes);
-        let (overflowed, drained) = {
+        let (overflowed, outgoing) = {
             let mut state = self.state();
-            if matches!(state.turn, Turn::Draining) {
+            if matches!(state.turn, Turn::Draining(_)) {
                 if ending.is_some() {
                     state.turn = Turn::Idle;
                 }
-                (false, true)
-            } else {
-                state.bytes = state.bytes.saturating_add(updates::weight(event));
-                (state.bytes > settings.max_turn_bytes, false)
+                return;
             }
+            let limits = updates::Limits {
+                update: settings.max_update_bytes,
+                label: settings.max_label_bytes,
+            };
+            let shown = state
+                .provider_id
+                .as_deref()
+                .filter(|id| updates::title(id, settings.max_label_bytes) == *id);
+            let outgoing = updates::outgoing(&self.id, shown, event, limits);
+            let cost: usize = outgoing
+                .messages
+                .iter()
+                .map(|(method, params)| updates::cost(method, params))
+                .sum();
+            state.bytes = state.bytes.saturating_add(cost);
+            let overflowed = state.bytes > settings.max_turn_bytes;
+            (overflowed || !self.connection.charge(cost), outgoing)
         };
-        if drained {
-            return;
-        }
         if overflowed {
             self.abandon("the provider sent more than this agent passes on".to_string());
             return;
         }
-        self.forward(event);
+        for (method, params) in outgoing.messages {
+            self.send(method, params);
+        }
+        self.state().open_tools.extend(outgoing.opened);
         if let Some(ending) = ending {
             self.end_turn(ending, Turn::Idle);
         }
     }
 
-    fn forward(&self, event: &AgentEvent) {
-        let settings = &self.connection.settings;
-        if event.kind == crate::kind::TEXT_EVENT
-            && let Some(text) = &event.text
-        {
-            for chunk in updates::message_chunks(&self.id, text, settings.max_update_bytes) {
-                self.update(chunk);
-            }
-        }
-        for (title, name) in updates::tools(event, settings.max_label_bytes) {
-            let id = uuid::Uuid::new_v4().to_string();
-            self.update(updates::tool_call(
-                &self.id,
-                &id,
-                &title,
-                &name,
-                "in_progress",
-            ));
-            self.state().open_tools.push(id);
-        }
-        for name in updates::denied_tools(event) {
-            let id = uuid::Uuid::new_v4().to_string();
-            let name = updates::label(name, settings.max_label_bytes);
-            self.update(updates::tool_call(&self.id, &id, &name, &name, "failed"));
-        }
-        if let Some(usage) = updates::usage(&self.id, event) {
-            self.update(usage);
-        }
-        if updates::needs_extension(event) {
-            let provider = self.state().provider_id.clone();
-            self.notify(
-                EVENT_NOTIFICATION,
-                json!({
-                    "sessionId": self.id,
-                    "providerSessionId": provider,
-                    "event": updates::bounded(event, settings.max_update_bytes),
-                }),
-            );
-        }
-    }
-
     /// `session/cancel`: remembers it, whichever call it arrives during, and asks the provider.
     pub(super) fn cancel(self: &Arc<Self>) {
-        {
+        let number = {
             let mut state = self.state();
-            let Turn::Active { cancelled, .. } = &mut state.turn else {
+            let Turn::Active {
+                cancelled, number, ..
+            } = &mut state.turn
+            else {
                 return;
             };
             if cancelled.is_some() {
                 return;
             }
             *cancelled = Some(Instant::now());
-        }
-        self.interrupt();
+            *number
+        };
+        self.interrupt(number);
     }
 
-    /// One `interrupt` at a time, however many `session/cancel` a client sends.
-    fn interrupt(self: &Arc<Self>) {
+    /// One `interrupt` at a time for turn `number`, however many `session/cancel` a client sends, and none
+    /// once that turn is over: it would stop the next one.
+    fn interrupt(self: &Arc<Self>, number: u64) {
         let Some(session) = self.provider_session() else {
             return;
         };
-        if self.interrupting.swap(true, Ordering::SeqCst) {
-            return;
+        {
+            let mut interrupting = self
+                .interrupting
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *interrupting == Some(number) {
+                return;
+            }
+            *interrupting = Some(number);
         }
         let spawned = self.spawn("interrupt", move |this| {
-            let limit = this.connection.settings.call_timeout;
-            let _ = this.call(What::Interrupt, limit, || session.interrupt());
-            this.interrupting.store(false, Ordering::SeqCst);
+            if this.state().turn.number() == Some(number) {
+                let limit = this.connection.settings.call_timeout;
+                let _ = this.call(What::Interrupt, limit, || session.interrupt());
+            }
+            this.interrupted(number);
         });
         if !spawned {
-            self.interrupting.store(false, Ordering::SeqCst);
+            self.interrupted(number);
+        }
+    }
+
+    fn interrupted(&self, number: u64) {
+        let mut interrupting = self
+            .interrupting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *interrupting == Some(number) {
+            *interrupting = None;
         }
     }
 
@@ -649,8 +705,13 @@ impl Operation {
             };
             this.closed(outcome);
         });
+        // With no thread to spare the provider is asked here: nothing it holds may outlive the session.
         if !spawned {
-            self.closed(Err("no thread could be started to close it".to_string()));
+            let outcome = self
+                .provider_session()
+                .map_or(Ok(()), |session| self.close_provider(&session));
+            self.closed(outcome);
+            self.finish_if_done();
         }
     }
 
@@ -709,12 +770,16 @@ impl Operation {
             None => {}
         }
         let grace = self.connection.settings.cancel_grace;
-        let late = matches!(
-            self.state().turn,
-            Turn::Active { cancelled: Some(at), .. } if now.duration_since(at) > grace
-        );
-        if late {
-            self.end_turn(Ending::Stop("cancelled"), Turn::Draining);
+        let late = match self.state().turn {
+            Turn::Active {
+                cancelled: Some(at),
+                number,
+                ..
+            } if now.duration_since(at) > grace => Some(number),
+            _ => None,
+        };
+        if let Some(number) = late {
+            self.end_turn(Ending::Stop("cancelled"), Turn::Draining(number));
         }
     }
 }

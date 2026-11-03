@@ -3,15 +3,15 @@
 //! Handlers run on the connection's executor and never call a provider: every provider call has a thread of
 //! its own, so a provider that blocks cannot stop the connection answering.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -54,6 +54,10 @@ pub(super) struct Connection {
     auth_failures: AtomicU32,
     stop: Mutex<Option<oneshot::Sender<()>>>,
     sessions: Mutex<HashMap<String, Arc<Operation>>>,
+    /// The provider identities every connection of the facade holds.
+    held: Arc<Mutex<BTreeSet<String>>>,
+    /// What this connection has sent, against [`Settings::max_connection_bytes`].
+    sent: AtomicUsize,
     wake: Mutex<Option<Sender<()>>>,
 }
 
@@ -80,6 +84,8 @@ impl Connection {
             auth_failures: AtomicU32::new(0),
             stop: Mutex::new(Some(stop)),
             sessions: Mutex::new(HashMap::new()),
+            held: facade.held.clone(),
+            sent: AtomicUsize::new(0),
             wake: Mutex::new(None),
         })
     }
@@ -113,8 +119,11 @@ impl Connection {
         for session in sessions {
             session.begin_close();
         }
-        let deadline = Instant::now() + self.settings.close_timeout + TICK;
-        while !self.sessions().is_empty() && Instant::now() < deadline {
+        // A limit too large for the clock waits for as long as it takes.
+        let deadline = Instant::now().checked_add(self.settings.close_timeout.saturating_add(TICK));
+        while !self.sessions().is_empty()
+            && deadline.is_none_or(|deadline| Instant::now() < deadline)
+        {
             thread::sleep(TICK);
         }
         *self.wake.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -129,7 +138,57 @@ impl Connection {
             .is_some_and(|held| core::ptr::eq(&**held, operation))
         {
             sessions.remove(&operation.id);
+            let held = operation
+                .held
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(id) = held {
+                self.held
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
+            }
         }
+    }
+
+    /// Holds a provider identity for one session of the facade; `false` when one already holds it.
+    pub(super) fn hold(&self, id: &str) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.to_string())
+    }
+
+    /// Counts what goes out. Past the connection's limit the connection ends, and the answer is `false`.
+    pub(super) fn charge(&self, cost: usize) -> bool {
+        let sent = self
+            .sent
+            .fetch_add(cost, Ordering::SeqCst)
+            .saturating_add(cost);
+        if sent <= self.settings.max_connection_bytes {
+            return true;
+        }
+        self.end();
+        false
+    }
+
+    /// Ends the connection, as its client closing it would.
+    fn end(&self) {
+        if let Some(stop) = self
+            .stop
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let _ = stop.send(());
+        }
+    }
+
+    /// Whether this connection has run out of credentials to try: then it answers nothing more.
+    fn locked(&self) -> bool {
+        self.auth.is_some()
+            && self.auth_failures.load(Ordering::SeqCst) >= self.settings.max_auth_failures
     }
 
     fn operation(&self, params: &Value) -> Result<Arc<Operation>, RpcError> {
@@ -147,6 +206,14 @@ impl Connection {
         cx: ConnectionTo<Client>,
     ) {
         let params = message.params();
+        // Requests already sent keep arriving after the connection is told to end, so each is refused.
+        if self.locked() {
+            let _ = responder.respond_with_error(
+                RpcError::auth_required()
+                    .data("this connection tried too many credentials".to_string()),
+            );
+            return;
+        }
         let outcome = match message.method() {
             "initialize" => Ok(self.initialize()),
             "authenticate" => self.authenticate(params),
@@ -170,7 +237,7 @@ impl Connection {
     }
 
     pub(super) fn notification(&self, message: &UntypedMessage) {
-        if message.method() != "session/cancel" {
+        if message.method() != "session/cancel" || self.locked() {
             return;
         }
         if let Ok(operation) = self.operation(message.params()) {
@@ -209,13 +276,8 @@ impl Connection {
             return Ok(json!({}));
         }
         if self.auth_failures.fetch_add(1, Ordering::SeqCst) + 1 >= self.settings.max_auth_failures
-            && let Some(stop) = self
-                .stop
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take()
         {
-            let _ = stop.send(());
+            self.end();
         }
         Err(RpcError::auth_required().data("the credential was not accepted".to_string()))
     }
@@ -226,11 +288,27 @@ impl Connection {
             .get("cwd")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("the request names no cwd"))?;
-        if !Path::new(cwd).is_absolute() {
+        let path = Path::new(cwd);
+        if !path.is_absolute() {
             return Err(invalid("cwd is not an absolute path"));
         }
-        if params
-            .get("mcpServers")
+        // Compared as written: `..` would climb out of a root, and links are the provider's to judge.
+        let roots = &self.settings.working_roots;
+        if !roots.is_empty()
+            && (path
+                .components()
+                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+                || !roots.iter().any(|root| path.starts_with(root)))
+        {
+            return Err(invalid(
+                "cwd is outside the directories this agent works in",
+            ));
+        }
+        let servers = params.get("mcpServers");
+        if servers.is_some_and(|servers| !servers.is_array()) {
+            return Err(invalid("mcpServers is not a list"));
+        }
+        if servers
             .and_then(Value::as_array)
             .is_some_and(|servers| !servers.is_empty())
         {
@@ -333,8 +411,26 @@ impl Connection {
                 return Err(invalid("that session identifier is too long"));
             }
             let launch = self.launch(params)?;
+            // The identity works as a bearer token: one session of the facade at a time may hold it.
+            if !self.hold(id) {
+                return Err(invalid("that session is already open"));
+            }
             let operation = Operation::new(id.to_string(), launch, self.clone(), cx);
-            self.admit(operation.clone())?;
+            *operation
+                .held
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(id.to_string());
+            if let Err(error) = self.admit(operation.clone()) {
+                *operation
+                    .held
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                self.held
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(id);
+                return Err(error);
+            }
             Ok(operation)
         });
         match opened {

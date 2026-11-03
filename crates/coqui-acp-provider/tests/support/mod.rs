@@ -41,7 +41,14 @@ pub enum Fault {
     Hang,
     Panic,
     Fail,
+    /// Takes [`SLOW`], then goes on.
+    Slow,
+    /// Takes [`SLOW`], then refuses.
+    SlowFail,
 }
+
+/// How long a slow call takes.
+pub const SLOW: Duration = Duration::from_millis(150);
 
 /// A secret a panic or an environment holds, which no client may hear.
 pub const SECRET: &str = "sk-do-not-show";
@@ -151,6 +158,17 @@ impl Probe {
                 Status::GUATIAO_ERR_BAD_VALUE,
                 "the provider refused",
             )),
+            Some(Fault::Slow) => {
+                thread::sleep(SLOW);
+                Ok(())
+            }
+            Some(Fault::SlowFail) => {
+                thread::sleep(SLOW);
+                Err(ProviderError::new(
+                    Status::GUATIAO_ERR_BAD_VALUE,
+                    "the provider refused",
+                ))
+            }
         }
     }
 }
@@ -213,14 +231,15 @@ impl AgentSession for TestSession {
         Ok(pending.pop_front())
     }
 
+    /// Reports what the test set up, then misbehaves if told to: an interrupt that ended its turn and has
+    /// not returned yet.
     fn interrupt(&self) -> Result<(), ProviderError> {
         self.0.interrupted.fetch_add(1, Ordering::SeqCst);
-        self.0.enter(Call::Interrupt)?;
         let event = self.0.on_interrupt.lock().unwrap().clone();
         if let Some(event) = event {
             self.0.report(event);
         }
-        Ok(())
+        self.0.enter(Call::Interrupt)
     }
 
     fn close(&self) -> Result<(), ProviderError> {
@@ -276,10 +295,14 @@ type AgentLines = sdk::Lines<
 /// never would.
 pub struct Raw {
     to_agent: Option<async_mpsc::UnboundedSender<io::Result<String>>>,
-    from_agent: mpsc::Receiver<Value>,
+    from_agent: mpsc::Receiver<(usize, Value)>,
     next_id: u64,
     /// Every notification seen so far.
     pub notifications: Vec<Value>,
+    /// What those notifications took on the wire, in bytes.
+    pub notification_bytes: usize,
+    /// The longest line the facade wrote so far, in bytes.
+    pub longest_line: usize,
     answers: Vec<Value>,
 }
 
@@ -292,7 +315,7 @@ impl Raw {
             while let Some(line) = futures::executor::block_on(futures::StreamExt::next(&mut lines))
             {
                 let message: Value = serde_json::from_str(&line).expect("the facade writes JSON");
-                if forward.send(message).is_err() {
+                if forward.send((line.len(), message)).is_err() {
                     return;
                 }
             }
@@ -304,6 +327,8 @@ impl Raw {
                 from_agent,
                 next_id: 0,
                 notifications: Vec::new(),
+                notification_bytes: 0,
+                longest_line: 0,
                 answers: Vec::new(),
             },
             sdk::Lines::new(outgoing, agent_reads),
@@ -342,7 +367,11 @@ impl Raw {
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match self.from_agent.recv_timeout(left) {
-                Ok(message) => {
+                Ok((length, message)) => {
+                    self.longest_line = self.longest_line.max(length);
+                    if message.get("id").is_none() {
+                        self.notification_bytes += length;
+                    }
                     if done(&message) {
                         return Some(message);
                     }
@@ -369,6 +398,18 @@ impl Raw {
         }
         self.read_until(|message| message.get("id") == Some(&json!(id)))
             .expect("the facade answers before it goes")
+    }
+
+    /// The answer to request `id`, or `None` when the facade ended the connection first.
+    pub fn answer_or_gone(&mut self, id: u64) -> Option<Value> {
+        if let Some(at) = self
+            .answers
+            .iter()
+            .position(|answer| answer["id"] == json!(id))
+        {
+            return Some(self.answers.remove(at));
+        }
+        self.read_until(|message| message.get("id") == Some(&json!(id)))
     }
 
     pub fn call(&mut self, method: &str, params: &Value) -> Value {

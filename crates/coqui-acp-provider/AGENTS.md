@@ -20,7 +20,7 @@ pub trait AgentProvider: Send + Sync {
 }
 ```
 
-A provider owns whatever process it runs; no terminal crosses. `start` may block until the harness runs. `resume` reattaches to an identity this provider issued, as long as it still exists; the identity may come from outside, so a provider checks it.
+A provider owns whatever process it runs; no terminal crosses. `start` may block until the harness runs. `resume` reattaches to an identity this provider issued, as long as it still exists. **An identity works as a bearer secret**: the request carries no owner, so whoever names it resumes it. The facade lets one of its sessions hold an identity at a time; when none holds it, who may resume it is the provider's to decide.
 
 ```rust
 #[guatiao::kind(object, name = "agent_session")]
@@ -70,7 +70,7 @@ pub struct ResumeRequest {
 pub fn ResumeRequest::new(session_id: impl Into<String>, working_directory: impl Into<String>) -> ResumeRequest
 ```
 
-`environment` may hold credentials: a provider logs and reports none of it, its schema marks it sensitive, and no `Debug` here shows its values. `meta` is the provider's alone: nothing between the client and the provider reads it, so it is untrusted input.
+`environment` may hold credentials: a provider logs and reports none of it, its schema marks it sensitive, and no `Debug` here shows its values. Through the facade everything else is the client's choice and untrusted input: `working_directory` is any absolute path the host's `working_roots` allows (by default any, a network share's included), and `prompt`, `context`, `model`, `effort` and `meta` are what the client wrote. `meta` is the provider's alone: nothing between the client and the provider reads it.
 
 ## Events
 
@@ -91,7 +91,7 @@ pub struct TokenUsage { pub input: u64, pub output: u64, pub cache_read: u64, pu
 pub struct QuotaReport { pub window: String, pub used_permille: Option<u16>, pub resets_at: Option<i64>, pub status: Option<String> }
 ```
 
-All derive `ToValue`, `FromValue`, `Schema`, `Serialize`, `Deserialize`. In JSON every key but `quota` is required, `null` where empty. As a Guatiao value only `kind` is required. Their fields are public and the structs are not `non_exhaustive`, so a literal names every field.
+All derive `ToValue`, `FromValue`, `Schema`, `Serialize`, `Deserialize`. In JSON `kind` and `tools` are required; the others read as absent when left out, and are written as `null` (`quota` is left out when empty). As a Guatiao value only `kind` is required. Their fields are public and the structs are not `non_exhaustive`, so a literal names every field.
 
 Consumers match `kind` as text, so these strings are the contract:
 
@@ -122,7 +122,7 @@ pub fn serve(&self, transport: impl ConnectTo<sdk::Agent> + 'static) -> Result<J
 
 `run` serves one connection on the calling thread until its transport closes, then closes its sessions and waits for them, up to `close_timeout`. `serve` is that on a thread. Sessions belong to the connection that opened them: another connection cannot name one, and a client that vanishes mid-turn has its sessions closed.
 
-What ACP sees: `initialize` answers version 1, whatever the client asked. `authenticate` as below. `session/new` checks what it is given and makes no provider call; the first `session/prompt` calls `start` and later ones `send_message`, one turn at a time. `session/cancel` calls `interrupt`, and the prompt is answered `cancelled`, however the provider ended the turn. `session/resume` calls `resume` and its answer waits for the provider's, so a session that no longer exists fails there in the provider's words; its `sessionId` is the provider's identity, and it stays the ACP session's. `session/close` answers when the provider's `close` returned. `session/load` and everything else is method not found. A prompt is text and resource links, a link passing as its address; any other block is refused. A client's `mcpServers` other than empty is refused: no field of the kind carries them.
+What ACP sees: `initialize` answers version 1, whatever the client asked. `authenticate` as below. `session/new` checks what it is given and makes no provider call; the first `session/prompt` calls `start` and later ones `send_message`, one turn at a time. `session/cancel` calls `interrupt` for that turn alone, and the prompt is answered `cancelled`, however the provider ended the turn; an `interrupt` still running when its turn is over is not called again for it, and one not yet called is dropped. `session/resume` calls `resume` and its answer waits for the provider's, so a session that no longer exists fails there in the provider's words; a prompt before that answer is refused. Its `sessionId` is the provider's identity, it stays the ACP session's, and it is refused while another session of the facade, on any connection, holds that identity. `session/close` answers when the provider's `close` returned. `session/load` and everything else is method not found. A prompt is text and resource links, a link passing as its address; any other block is refused. A client's `mcpServers` other than an empty list is refused: no field of the kind carries them.
 
 ### What ACP has no field for
 
@@ -134,7 +134,7 @@ pub const EVENT_NOTIFICATION: &str = "_coqui_acp/event";
 
 `_meta[LAUNCH_META_KEY]` on `session/new` and `session/resume`: `{"context": [text], "environment": {name: text}, "model": text, "effort": text, "meta": any}`, each optional. An unknown key is refused. An environment name not in `Settings::client_environment` is refused.
 
-`EVENT_NOTIFICATION`, advertised under `agentCapabilities._meta[EVENTS_CAPABILITY]`, is `{"sessionId", "providerSessionId", "event"}`: the event as JSON, for what ACP has no update for. With no `event` it says the provider's identity is now known, once; that identity is what a later `session/resume` names.
+`EVENT_NOTIFICATION`, advertised under `agentCapabilities._meta[EVENTS_CAPABILITY]`, is `{"sessionId", "providerSessionId", "event"}`: the event as JSON, for what ACP has no update for. With no `event` it says the provider's identity is now known, once; that identity is what a later `session/resume` names. An identity with a character a terminal acts on, or longer than `max_label_bytes`, is never told, since it could not be named back as it is. In an event the kind, tool names and quota strings are cut as titles, the text and bytes as below; an event that still does not fit a line is replaced by its kind and a note that it was larger.
 
 | Event | On the wire |
 | --- | --- |
@@ -163,12 +163,18 @@ A failure with no prompt waiting goes as `EVENT_NOTIFICATION`, with kind `failed
 | `cancel_grace: Duration` | 10 s | A cancelled turn is answered `cancelled`. Its later events are dropped, and a prompt is refused until its ending comes, or the old ending would answer the new prompt. |
 | `close_timeout: Duration` | 10 s | `session/close` fails, or `run` answers `Error::Stuck`. |
 | `max_prompt_bytes: usize` | 8 MiB | The prompt is refused. |
-| `max_turn_bytes: usize` | 64 MiB | What a provider sends in a turn or between turns: the session ends. It bounds what queues for a client that stops reading. |
-| `max_update_bytes: usize` | 1 MiB | `text` is split; an event in `EVENT_NOTIFICATION` has its text cut and bytes that do not fit left out. |
-| `max_label_bytes: usize` | 4 KiB | A tool's title or a failure text is cut. |
-| `max_auth_failures: u32` | 5 | The connection ends. |
+| `max_turn_bytes: usize` | 64 MiB | What a provider sends in a turn or between turns, counted as the lines it becomes: the session ends. |
+| `max_connection_bytes: usize` | 256 MiB | What the connection sends in all, as lines: the connection ends. |
+| `max_update_bytes: usize` | 1 MiB | A text, as JSON, is split; an event in `EVENT_NOTIFICATION` is cut. |
+| `max_label_bytes: usize` | 4 KiB | A tool's title or name, a failure text or an identity, as JSON, is cut. |
+| `max_auth_failures: u32` | 5 | Every later request on the connection is refused unread, and the connection ends. |
+| `working_roots: Vec<PathBuf>` | empty | A `cwd` must be under one, compared as written, with no `..` or `.`; empty takes any absolute path. |
 | `environment: BTreeMap<String, String>` | empty | Given to every `start` and `resume`. |
 | `client_environment: Vec<String>` | empty | The names a client may set, over `environment`. A client that can set `PATH` runs what it likes. |
+
+`max_sessions` is per connection, and so is everything above: a host serving many connections caps how many it accepts. When `run` returns, a session whose provider has not returned from a call counts against nothing but holds its identity until it does.
+
+**What a client that never reads can cost.** The protocol library queues what goes out without limit and does not say what the client has read, so the bound is on what is sent: at most `max_connection_bytes` per connection, plus the answers to the client's own requests and a short update per tool call as its turn ends. No line is longer than `max_update_bytes`, twice `max_label_bytes` and 5 KiB, as long as `max_label_bytes` is set below `max_update_bytes`.
 
 `Debug` shows the environment's names, never its values.
 
@@ -179,7 +185,7 @@ pub type Credential = dyn Fn(&Map<String, Value>) -> bool + Send + Sync;
 pub struct FacadeAuth { pub method: String, pub name: String, pub check: Arc<Credential> }
 ```
 
-Every request but `initialize` and `authenticate` answers auth required until an `authenticate` naming `method` has `check` accept its `_meta`. A refusal quotes nothing. `check` is the host's, so comparing in constant time is too.
+Every request but `initialize` and `authenticate` answers auth required until an `authenticate` naming `method` has `check` accept its `_meta`. A refusal quotes nothing. After `max_auth_failures` refusals `check` is not called again: every request already sent, and any after, is refused, and the connection ends. `check` is the host's, so comparing in constant time is too.
 
 ## Errors
 
@@ -187,9 +193,9 @@ Every request but `initialize` and `authenticate` answers auth required until an
 
 ## Gotchas
 
-- **A provider's text is untrusted when it reaches the client.** The facade carries it as data: a stop reason, an error code, a tool's kind and identifier never come from it, and titles and failures lose control characters. `text` itself passes unchanged, so a client treats it as it treats any agent's output.
+- **A provider's text is untrusted when it reaches the client.** The facade carries it as data: a stop reason, an error code, a tool's kind and identifier never come from it, and titles, names, identities and failures lose control and format characters (bidirectional overrides, zero-width characters). `text` itself passes unchanged, so a client treats it as it treats any agent's output.
 - **A tool's kind is always `other`.** A name says nothing a client could rely on, so a client's refused kinds (`coqui_acp`'s `refuse_kinds`) cannot hold a provider to anything: what a provider may do is the provider's to enforce.
-- **A thread stuck in a provider cannot be stopped.** The session ends, its thread stays until the call returns, and it keeps its place in `max_sessions`. A provider in the host's process that holds a lock forever, as Python code holding the interpreter does, stops every call that needs it: run one that may do that in a process of its own.
+- **A thread stuck in a provider cannot be stopped.** The session ends, its thread stays until the call returns, and it keeps its place in `max_sessions` and its identity. An `interrupt` stuck in the provider may still reach a later turn there when it returns: a provider applies `interrupt` to the turn running when it is called. A provider in the host's process that holds a lock forever, as Python code holding the interpreter does, stops every call that needs it: run one that may do that in a process of its own.
 - **A panic stops at the call**, and its words are not told: they can hold anything the provider held. Through a Guatiao table it is a status; in a trait object called directly, `the provider panicked in <call>`.
 - **Nothing reaches a provider's environment from a client by default**, and a provider's `meta` is whatever a client wrote.
 - **Standard output is the transport** for a facade served on standard input and output, so a provider in that process must not print to it.

@@ -162,6 +162,11 @@ fn an_events_json_shape_is_exact() {
         "tools is required in JSON"
     );
     assert_eq!(
+        serde_json::from_str::<AgentEvent>(r#"{"kind":"text","tools":[]}"#).unwrap(),
+        AgentEvent::new("text", None),
+        "and only kind and tools are"
+    );
+    assert_eq!(
         serde_json::to_string(&AgentMessage {
             text: "a".to_owned()
         })

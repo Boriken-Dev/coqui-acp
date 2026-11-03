@@ -1,11 +1,13 @@
 //! Any [`AgentProvider`] as an ACP agent.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 
 use agent_client_protocol::{
@@ -82,16 +84,26 @@ pub struct Settings {
     pub close_timeout: Duration,
     /// The largest prompt taken. Default 8 MiB.
     pub max_prompt_bytes: usize,
-    /// What a provider may send in one turn, or between turns, before the session is ended. Notifications
-    /// queue without limit for a client that stops reading, so this bounds them. Default 64 MiB.
+    /// What a provider may send in one turn, or between turns, as the lines it becomes, before the session is
+    /// ended. Default 64 MiB.
     pub max_turn_bytes: usize,
-    /// The largest text in one `session/update`: a longer one is split, since a line transport ends at
-    /// its line limit. Default 1 MiB.
+    /// What one connection may send in all, as lines, before it is ended. The protocol library queues what
+    /// goes out without limit and says nothing of what the client has read, so this is what bounds the
+    /// memory a client that never reads can cost. Default 256 MiB.
+    pub max_connection_bytes: usize,
+    /// The most a text or an event takes in one line, as JSON: a longer text is split, and an event cut, since
+    /// a line transport ends at its line limit. A line is at most this, twice `max_label_bytes`, and 5 KiB.
+    /// Default 1 MiB.
     pub max_update_bytes: usize,
-    /// The largest tool title or failure text: past it the text is cut. Default 4 KiB.
+    /// The most a tool's title or name, a failure text or an identity takes, as JSON: past it the text is
+    /// cut. Default 4 KiB.
     pub max_label_bytes: usize,
-    /// Failed `authenticate` requests before the connection is ended. Default 5.
+    /// Failed `authenticate` requests before the connection is ended: from then on every request on it is
+    /// refused unread. Default 5.
     pub max_auth_failures: u32,
+    /// The directories a session may work in, compared as written; a `cwd` with `..` or `.` in it is
+    /// refused. Empty, the default, takes any absolute path, a network share's included.
+    pub working_roots: Vec<PathBuf>,
     /// Environment values given to every `start` and `resume`.
     pub environment: BTreeMap<String, String>,
     /// The environment names a client may set through [`LAUNCH_META_KEY`], over `environment`; any other is
@@ -111,9 +123,11 @@ impl fmt::Debug for Settings {
             .field("close_timeout", &self.close_timeout)
             .field("max_prompt_bytes", &self.max_prompt_bytes)
             .field("max_turn_bytes", &self.max_turn_bytes)
+            .field("max_connection_bytes", &self.max_connection_bytes)
             .field("max_update_bytes", &self.max_update_bytes)
             .field("max_label_bytes", &self.max_label_bytes)
             .field("max_auth_failures", &self.max_auth_failures)
+            .field("working_roots", &self.working_roots)
             .field("environment", &self.environment.keys())
             .field("client_environment", &self.client_environment)
             .finish()
@@ -131,9 +145,11 @@ impl Default for Settings {
             close_timeout: Duration::from_secs(10),
             max_prompt_bytes: 8 * 1024 * 1024,
             max_turn_bytes: 64 * 1024 * 1024,
+            max_connection_bytes: 256 * 1024 * 1024,
             max_update_bytes: 1024 * 1024,
             max_label_bytes: 4 * 1024,
             max_auth_failures: 5,
+            working_roots: Vec::new(),
             environment: BTreeMap::new(),
             client_environment: Vec::new(),
         }
@@ -177,6 +193,8 @@ impl core::error::Error for Error {
 #[derive(Clone)]
 pub struct AcpFacade {
     provider: Arc<dyn AgentProvider>,
+    /// Shared by every clone and connection, so no identity is held twice.
+    held: Arc<Mutex<BTreeSet<String>>>,
     auth: Option<FacadeAuth>,
     settings: Settings,
     name: String,
@@ -199,6 +217,7 @@ impl AcpFacade {
     pub fn new(provider: Arc<dyn AgentProvider>) -> Self {
         Self {
             provider,
+            held: Arc::new(Mutex::new(BTreeSet::new())),
             auth: None,
             settings: Settings::default(),
             name: env!("CARGO_PKG_NAME").to_string(),
