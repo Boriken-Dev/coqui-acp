@@ -20,5 +20,5 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 (cd bindings/dart/coqui_acp && dart analyze && dart test)
 ```
 
-A change in how a client behaves on the wire changes `vectors/conversations.json`, which both suites run. Each crate's
+A change in how a client behaves on the wire changes `vectors/conversations.json` or `vectors/describe.json`, which both suites run. Each crate's
 `AGENTS.md` is its API header and ships in the package; keep it current in the same commit. Files are LF.

@@ -62,3 +62,20 @@ Past the limit the oldest lines are dropped, since the newest hold the answer th
 ```
 
 ACP has no message for this. A notification whose method starts with `_` is the extension point it offers, and a client that does not know this one ignores it, as ACP requires, and sees only the gap it would have had anyway. It is the one message the bridge writes itself, and it travels inside the proven session like any other. A client that reads it reconciles by `session/load`, or tells the person. These clients report it as `Event::OutputLost` (Rust) and `AcpOutputLost` (Dart).
+
+## What an agent offers before a session
+
+ACP says what a session can be set to only once one exists, in `session/new`'s answer. A client that wants to show a person the models, efforts and modes before starting anything asks with an extension request, and only an agent that advertises it, as `agentCapabilities._meta["dev.boriken.coqui.acp/session_options"]` (`capabilities._meta` in version 2) set to `true` or an object:
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"_coqui_acp/session_options","params":{}}
+{"jsonrpc":"2.0","id":3,"result":{
+  "configOptions":[
+    {"id":"model","name":"Model","category":"model","type":"select","currentValue":"alpha",
+     "options":[{"value":"alpha","name":"Alpha"},{"value":"beta","name":"Beta"}]},
+    {"id":"effort","name":"Effort","category":"thought_level","type":"select","currentValue":"low",
+     "options":[{"value":"low","name":"Low"},{"value":"high","name":"High"}]}],
+  "unknown":{"modes":"the host declared no modes for this agent"}}}
+```
+
+`configOptions` is ACP's own `SessionConfigOption` list of the version spoken (`id` in version 1, `configId` in version 2), at the values a session would start with, and `modes` version 1's `SessionModeState`. A part the agent cannot tell is left out, and `unknown` may say why. Nothing in it opens a session. With `session/list`, when the agent offers it, this gives each part one of three answers: known; unknown, with the agent's reason; or not supported, when the agent does not advertise the question and so is not asked. `Exchange::describe` (Rust) and `AcpClient.describe` (Dart) report them, bounded, as `vectors/describe.json` says. A client still sets what a person chose through `session/set_config_option` or `session/set_mode` once the session exists, and an agent refuses a value it did not offer.
