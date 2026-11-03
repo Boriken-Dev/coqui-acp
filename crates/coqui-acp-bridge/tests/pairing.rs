@@ -488,3 +488,104 @@ fn a_joiner_showing_its_own_pin_is_refused_at_once() {
     );
     assert_eq!(accepted(&sides.dir.path("server-store")), 0);
 }
+
+/// The status line `pair-accept` answers a WebSocket upgrade with, sent with `origin` if any.
+fn upgrade_status(port: u16, origin: Option<&str>) -> String {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let origin = origin.map_or(String::new(), |origin| format!("Origin: {origin}\r\n"));
+    write!(
+        stream,
+        "GET /pair HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin}\r\n"
+    )
+    .unwrap();
+    let mut answer = [0; 64];
+    let read = stream.read(&mut answer).unwrap_or(0);
+    String::from_utf8_lossy(&answer[..read])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// `pair-accept` with `origins` allowed, and its PIN.
+fn pair_accept_allowing(dir: &Dir, port: u16, origins: &[&str]) -> (Child, String) {
+    let mut command = Command::new(BRIDGE);
+    command
+        .arg("pair-accept")
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--identity")
+        .arg(dir.path("server.pem"))
+        .args(["--method", method::name()])
+        .arg("--store")
+        .arg(dir.path("server-store"))
+        .args(["--timeout-seconds", "20"]);
+    for origin in origins {
+        command.args(["--origin", origin]);
+    }
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut pin = String::new();
+    reader.read_line(&mut pin).unwrap();
+    let mut peer = String::new();
+    reader.read_line(&mut peer).unwrap();
+    (child, pin.trim().to_owned())
+}
+
+#[test]
+fn a_page_cannot_spend_the_pin_and_only_a_listed_origin_reaches_the_exchange() {
+    let dir = Dir::new("origins");
+    let port = free_port();
+    let (mut accepting, pin) = pair_accept(&dir, port);
+    // Any browser sends an Origin; with none listed, every one is refused before the handshake.
+    assert!(upgrade_status(port, Some("https://evil.example")).contains(" 403"));
+    assert!(
+        upgrade_status(
+            port,
+            Some("chrome-extension://abcdefghijklmnopabcdefghijklmnop")
+        )
+        .contains(" 403")
+    );
+    // A native client sends none, and the PIN still pairs it.
+    assert!(upgrade_status(port, None).contains(" 101"));
+    let joined = pair_dial(&dir, &format!("ws://127.0.0.1:{port}/pair"), &pin, None);
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    assert!(wait_exit(&mut accepting).success());
+
+    let dir = Dir::new("origins-listed");
+    let port = free_port();
+    let extension = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+    let (mut accepting, _) = pair_accept_allowing(&dir, port, &[extension]);
+    assert!(upgrade_status(port, Some(extension)).contains(" 101"));
+    assert!(upgrade_status(port, Some("https://evil.example")).contains(" 403"));
+    let _ = accepting.kill();
+    let _ = accepting.wait();
+}
+
+#[test]
+fn a_pin_waits_as_long_as_the_desk_keeps_it_and_a_run_is_a_setting() {
+    let help = Command::new(BRIDGE)
+        .args(["pair-accept", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&help.stdout);
+    // The desk's PIN lives ten minutes: waiting longer would only wait for a dead PIN.
+    assert!(text.contains("[default: 600]"), "{text}");
+    assert!(
+        text.contains("--run-seconds") && text.contains("[default: 120]"),
+        "{text}"
+    );
+    assert!(text.contains("--origin"), "{text}");
+}

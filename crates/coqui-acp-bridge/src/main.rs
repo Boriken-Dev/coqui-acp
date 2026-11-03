@@ -46,8 +46,8 @@ const MAX_LINE: usize = 16 * 1024 * 1024;
 const MAX_UNPROVEN: usize = 64;
 /// Connections to one `pair-accept` at once.
 const MAX_PAIRING_RUNS: usize = 16;
-/// How long one connection may take to pair. `pair-dial` asks for the PIN before it connects, so no person is waited for.
-const PAIRING_RUN: Duration = Duration::from_secs(60);
+/// No browser sends this as its `Origin`, so a listener allowing only it takes only clients that send none: native programs.
+const NO_BROWSER: &str = "-";
 /// How long a remote may take to prove itself to `dial`.
 const DIAL_PROOF: Duration = Duration::from_secs(15);
 /// At most what a browser pins, with a margin.
@@ -181,9 +181,17 @@ struct PairAccept {
     /// The directory of the trust store that records the peer. Without it, this user's own, which `serve --paired` reads.
     #[arg(long)]
     store: Option<PathBuf>,
-    /// How long the PIN waits for someone to use it, in seconds.
-    #[arg(long, default_value_t = 900)]
+    /// How long the PIN waits for someone to use it, in seconds: at most the ten minutes the PIN lives.
+    #[arg(long, default_value_t = 600)]
     timeout_seconds: u64,
+    /// How long one connection may take to pair, in seconds, from its handshake to the end of the exchange. A browser's
+    /// extension waits as long by default.
+    #[arg(long, default_value_t = 120)]
+    run_seconds: u64,
+    /// A browser origin allowed to pair, such as chrome-extension://ID for the extension. Repeat for more. With none listed, a
+    /// browser is refused before its handshake, so a page cannot spend the PIN; a native client sends no origin.
+    #[arg(long = "origin")]
+    origins: Vec<String>,
     #[command(flatten)]
     method: MethodArgs,
     /// A source network allowed to connect at all. Repeat for more. With any listed, everything else is dropped first.
@@ -212,8 +220,8 @@ struct PairDial {
     /// PIN authenticates the peer, not TLS.
     #[arg(long)]
     ca_file: Option<PathBuf>,
-    /// How long the exchange may take, in seconds.
-    #[arg(long, default_value_t = 900)]
+    /// How long the exchange may take, in seconds: at most the ten minutes a PIN lives.
+    #[arg(long, default_value_t = 600)]
     timeout_seconds: u64,
     #[command(flatten)]
     method: MethodArgs,
@@ -1690,7 +1698,13 @@ fn pair_accept_mode(args: &PairAccept) -> Result<ExitCode, String> {
                 .with_max_message(auth::MAX_PROOF_MESSAGE)
                 .with_pending(UNPROVEN_PENDING),
         )
+        .with_origins(if args.origins.is_empty() {
+            vec![NO_BROWSER.to_owned()]
+        } else {
+            args.origins.clone()
+        })
         .with_admission(admission(&args.permit, &args.deny)?);
+    let run = Duration::from_secs(args.run_seconds);
     let desk = pairing::desk().map_err(|error| error.to_string())?;
     let shown = desk.show_pin().map_err(|error| error.to_string())?;
     println!("{}", shown.pin.as_str());
@@ -1739,8 +1753,7 @@ fn pair_accept_mode(args: &PairAccept) -> Result<ExitCode, String> {
                 .handshake()
                 .map_err(|failure| failure.to_string())
                 .and_then(|channel| {
-                    let paired =
-                        pairing::respond(&channel, &identity, &store, &desk, None, PAIRING_RUN);
+                    let paired = pairing::respond(&channel, &identity, &store, &desk, None, run);
                     channel.close();
                     paired.map_err(|error| error.to_string())
                 })

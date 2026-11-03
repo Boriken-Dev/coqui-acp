@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `coqui-acp-bridge pair-accept` refuses a browser unless `--origin` lists its origin, so a page cannot spend the PIN; `--run-seconds` (120) bounds one connection, and `--timeout-seconds` defaults to the PIN's own 600 seconds, as does `pair-dial`'s.
+- `coqui-acp-bridge`: a home records the method named last, so `serve --paired` naming none keeps working after a home moves to Noise and holds both identities.
 - **Breaking**, `coqui-acp` and `coqui_acp` for Dart: stop reason `cancelled` is `Event::Cancelled` and `AcpCancelled`, and no longer `Event::Blocked` and `AcpBlocked`, which now mean only a permission that could not be answered. It ends the turn, so a connection lost after it is no `Failed`.
 - `coqui-acp` and `coqui_acp` for Dart: a `session/update` of a session other than the client's own is dropped, and a `session/request_permission` of one is answered cancelled without asking the decider, so what an agent kept from an earlier connection says of its session never feeds this one.
 - `coqui_acp` for Dart: request ids start at a random point on each connection, so they do not repeat those of an earlier connection to the same agent.

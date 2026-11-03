@@ -1442,3 +1442,29 @@ fn a_fresh_home_proves_by_the_default_and_a_webcrypto_home_keeps_serving_its_pee
     let _ = serving.kill();
     let _ = serving.wait();
 }
+
+#[test]
+fn after_moving_to_noise_a_paired_serve_naming_no_method_keeps_working() {
+    use coqui_agentic_peer::auth::{Identity, Method};
+    use coqui_agentic_peer::home;
+    let fixture = Fixture::new("moved");
+    let moved = fixture.dir.join("home");
+    // A home paired before Noise.
+    Identity::open_or_create(
+        &moved.join(home::identity_file(Method::WebCrypto)),
+        Method::WebCrypto,
+    )
+    .unwrap();
+    // The move: Noise named once, as the migration says.
+    let (mut serving, noise_peer, heard) =
+        serve_saying(&["--paired", "--method", "noise"], Some(&moved));
+    assert_eq!(heard_line(&heard, "proving by"), "proving by noise");
+    let _ = serving.kill();
+    let _ = serving.wait();
+    // Then a program naming no method, as Canoa's app runs its host, gets the method named last.
+    let (mut serving, peer, heard) = serve_saying(&["--paired"], Some(&moved));
+    assert_eq!(heard_line(&heard, "proving by"), "proving by noise");
+    assert_eq!(peer, noise_peer);
+    let _ = serving.kill();
+    let _ = serving.wait();
+}

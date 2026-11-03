@@ -159,6 +159,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 - A local agent may use no proof at all, or TLS that shows only a host name. A provider may connect to one only if the person added it knowing that, and reports `identity.verified` false, so a page can refuse it.
 - The first use of an agent's key is the person's decision: pairing with a code, or accepting a fingerprint shown beside the label. It is never automatic.
 - A key that changes is a new agent, whose grants do not carry over.
+- A provider ends each stream with its close record and, when the transport ends, checks the peer's came: a link that ends without it is reported as cut, never as finished.
 - A provider stores the method with the key, and connects by that method only. A failed connection, a refused proof or a record naming another method never selects the other: any of these can come from whoever carries the connection. A peer id is the hash of a key of one type, so only its own method proves it. A browser that cannot run a method, such as one whose WebCrypto has no X25519 for Noise, shows that agent as unreachable from it and says why.
 - Grants are keyed by the verified peer, the page's origin, and the provider's profile. A grant for one agent gives nothing on another.
 
