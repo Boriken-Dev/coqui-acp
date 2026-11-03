@@ -231,6 +231,19 @@ fn wait_until(what: &str, test: impl Fn() -> bool) {
     }
 }
 
+/// A door file as a bridge would leave it: only its owner may read it, or the shim will not.
+fn write_door(path: &Path, contents: String) {
+    let parent = path.parent().unwrap();
+    std::fs::create_dir_all(parent).unwrap();
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
 /// The next connection, or a failure: a test whose shim never comes must not wait for it for ever.
 fn accept_within(listener: &std::net::TcpListener) -> std::net::TcpStream {
     listener.set_nonblocking(true).unwrap();
@@ -528,13 +541,11 @@ fn something_else_on_a_dead_bridges_port_hears_only_an_old_token_and_gets_no_mes
     let peer = format!("sha256:{}", "c".repeat(64));
     let impostor = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = impostor.local_addr().unwrap().to_string();
-    std::fs::create_dir_all(fixture.door(&peer).parent().unwrap()).unwrap();
-    std::fs::write(
-        fixture.door(&peer),
+    write_door(
+        &fixture.door(&peer),
         json!({ "address": address, "token": "t".repeat(64), "answer": "a".repeat(64) })
             .to_string(),
-    )
-    .unwrap();
+    );
     let there = std::thread::spawn(move || {
         let mut connection = accept_within(&impostor);
         // Whatever it answers it cannot know the answer, and it is told nothing more.
@@ -571,13 +582,11 @@ fn an_answer_that_is_not_text_is_no_answer_and_no_panic() {
     let peer = format!("sha256:{}", "e".repeat(64));
     let impostor = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = impostor.local_addr().unwrap().to_string();
-    std::fs::create_dir_all(fixture.door(&peer).parent().unwrap()).unwrap();
-    std::fs::write(
-        fixture.door(&peer),
+    write_door(
+        &fixture.door(&peer),
         json!({ "address": address, "token": "t".repeat(64), "answer": "a".repeat(64) })
             .to_string(),
-    )
-    .unwrap();
+    );
     let there = std::thread::spawn(move || {
         let mut connection = accept_within(&impostor);
         // A character of several bytes across where the answer ends.
@@ -631,16 +640,40 @@ fn on_windows_the_door_answers_only_its_owner() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn a_door_file_others_can_read_is_not_believed() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("shared-file");
+    let peer = format!("sha256:{}", "f".repeat(64));
+    let impostor = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = impostor.local_addr().unwrap().to_string();
+    write_door(
+        &fixture.door(&peer),
+        json!({ "address": address, "token": "t".repeat(64), "answer": "a".repeat(64) })
+            .to_string(),
+    );
+    std::fs::set_permissions(fixture.door(&peer), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut client = fixture.start_client(&peer);
+    client.say(INITIALIZE);
+    let answer: Value = serde_json::from_str(&client.line()).unwrap();
+    assert_eq!(answer["error"]["code"], -32000, "{answer}");
+    assert_eq!(client.ended().0.status.code(), Some(1));
+    impostor.set_nonblocking(true).unwrap();
+    assert!(
+        impostor.accept().is_err(),
+        "the token went to whoever wrote that file"
+    );
+}
+
 #[test]
 fn a_shim_will_not_show_its_token_beyond_this_machine() {
     let fixture = Fixture::new("beyond");
     let peer = format!("sha256:{}", "d".repeat(64));
-    std::fs::create_dir_all(fixture.door(&peer).parent().unwrap()).unwrap();
-    std::fs::write(
-        fixture.door(&peer),
+    write_door(
+        &fixture.door(&peer),
         json!({ "address": "10.0.0.1:80", "token": "t", "answer": "a" }).to_string(),
-    )
-    .unwrap();
+    );
     let mut client = fixture.start_client(&peer);
     client.say(INITIALIZE);
     let answer: Value = serde_json::from_str(&client.line()).unwrap();
