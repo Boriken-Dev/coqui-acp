@@ -36,6 +36,7 @@ pub const fn request_timeout(self, limit: Option<Duration>) -> Self
 pub const fn close_grace(self, limit: Option<Duration>) -> Self
 pub const fn max_pending_events(self, events: usize) -> Self
 pub const fn text_flush(self, bytes: usize) -> Self
+pub const fn max_tool_kinds(self, calls: usize) -> Self
 pub fn decider(self, decider: Arc<dyn Decider>) -> Self
 pub const fn close_on_drop(self, close: bool) -> Self
 pub const fn fail_on_disconnect(self, fail: bool) -> Self
@@ -46,10 +47,11 @@ pub fn connect(self, transport: impl ConnectTo<sdk::Client> + 'static) -> Result
 - `resume`: `session/resume`, else `session/load` with its replayed history dropped. `load`: `session/load` whatever else the agent offers, delivering what it replays.
 - `meta` sets a key of the session request's `_meta`. `model` and `effort` go through the agent's config options: by the id given with `model_option`/`effort_option`, else the option of category `model`/`thought_level`, else the id `model`/`effort`. What cannot be applied is an `Event::Notice`.
 - `refuse_kinds`: refused without asking the decider. A tool of such a kind that runs, whether it asked or not, ends the session with `Event::Failed`; a tool that reports `failed` ends nothing. A kind once announced as refused stays so, whatever a later message claims.
+- `max_tool_kinds(calls)`: the tool calls whose kind is kept, which a later message about one without its kind (an update, a permission request) is judged by. At the limit the oldest of a kind not refused is forgotten, which changes no refusal: such a message is then of unknown kind, so `PermissionRequest::kind` is `None`, and the first one forgotten is an `Event::Notice`. One of a refused kind is never forgotten: when every one kept is refused, a further tool of a refused kind ends the session with `Event::Failed`. Any value is taken; 0 keeps none.
 - `turn_end_by(key)`: when the agent advertises `key` in `agentCapabilities._meta`, its notifications carry turn endings: standard updates and config options are left alone, and a failed prompt is `Event::PromptFailed`.
 - `ends_turn(ends)`: while `turn_end_by` is active, says which of the extension's notifications end a turn, given their method and parameters, so a connection that ends after one is no `Event::Failed`. It runs on the connection's thread, in order and ahead of the connection's end, so it cannot race a reader; it must not block. Turns are counted: no turn runs only once as many endings have arrived as turns were sent, so a turn sent before the last one's ending arrived still counts as running. `PromptFailed` is still delivered after such a turn: the caller judges it.
 - `disconnect_detail(detail)`: appended to the `Event::Failed` of a lost connection as `<why>: <detail>`. Asked at most once, on the connection's thread, only when that event is due; it may wait a while for the agent's exit.
-- Defaults: 20 s `initialize`, 30 s other requests, 2 s close grace; `None` waits without limit. 100000 pending events, then the session ends with `Event::Failed`. Agent text is delivered as an `Event::Text` once 64 KiB of UTF-8 has gathered (`text_flush`; any value is taken). `RefuseAll`. `close_on_drop` and `fail_on_disconnect` on.
+- Defaults: 20 s `initialize`, 30 s other requests, 2 s close grace; `None` waits without limit. 100000 pending events, then the session ends with `Event::Failed`. Agent text is delivered as an `Event::Text` once 64 KiB of UTF-8 has gathered (`text_flush`; any value is taken). The kinds of 4096 tool calls. `RefuseAll`. `close_on_drop` and `fail_on_disconnect` on.
 - `connect` initializes, authenticates, opens the session and sends the first prompt. It errors on the agent's refusal or silence, a protocol version other than 1, or a capability the session needs, such as HTTP MCP servers.
 
 ## `Session` (crate root)

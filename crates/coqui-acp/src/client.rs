@@ -35,7 +35,7 @@ use crate::describe::{
 };
 use crate::error::Error;
 use crate::event::Event;
-use crate::state::{TEXT_FLUSH, Turn, kind_name};
+use crate::state::{Step, TEXT_FLUSH, TOOL_KINDS, Turn, kind_name};
 
 const PROTOCOL_VERSION: u64 = 1;
 /// What `coqui-acp-bridge serve --linger` sends when it dropped output while nobody was connected.
@@ -91,6 +91,7 @@ pub struct Builder {
     close_grace: Option<Duration>,
     max_pending_events: usize,
     text_flush: usize,
+    max_tool_kinds: usize,
     decider: Arc<dyn Decider>,
     close_on_drop: bool,
     fail_on_disconnect: bool,
@@ -136,6 +137,7 @@ impl Client {
             close_grace: Some(Duration::from_secs(2)),
             max_pending_events: 100_000,
             text_flush: TEXT_FLUSH,
+            max_tool_kinds: TOOL_KINDS,
             decider: Arc::new(RefuseAll),
             close_on_drop: true,
             fail_on_disconnect: true,
@@ -279,6 +281,14 @@ impl Builder {
         self
     }
 
+    /// The tool calls whose kind is kept, for what [`Builder::refuse_kinds`] decides of later messages about them. One of a
+    /// refused kind is never forgotten: one that cannot be kept ends the session. Forgetting another is said once, as an
+    /// [`Event::Notice`]. Default 4096.
+    pub const fn max_tool_kinds(mut self, calls: usize) -> Self {
+        self.max_tool_kinds = calls;
+        self
+    }
+
     /// Answers permission requests. Default: [`RefuseAll`].
     pub fn decider(mut self, decider: Arc<dyn Decider>) -> Self {
         self.decider = decider;
@@ -330,7 +340,11 @@ impl Builder {
             extension: AtomicBool::new(false),
             suppress: AtomicBool::new(false),
             session: Mutex::new(None),
-            turn: Mutex::new(Turn::new(self.refuse_kinds.clone()).text_flush(self.text_flush)),
+            turn: Mutex::new(
+                Turn::new(self.refuse_kinds.clone())
+                    .text_flush(self.text_flush)
+                    .max_kinds(self.max_tool_kinds),
+            ),
         });
         let close_grace = self.close_grace;
         let worker = shared.clone();
@@ -459,6 +473,16 @@ impl Shared {
         self.push(event);
     }
 
+    fn apply(&self, step: Step) {
+        for event in step.events {
+            self.emit(event);
+        }
+        if step.abort {
+            self.closing.store(true, Ordering::SeqCst);
+            let _ = self.commands.unbounded_send(Command::Abort);
+        }
+    }
+
     fn flush(&self) {
         let flushed = self.turn().flush();
         if let Some(text) = flushed {
@@ -484,13 +508,7 @@ impl Shared {
                 return;
             }
             let step = self.turn().update(message.params());
-            for event in step.events {
-                self.emit(event);
-            }
-            if step.abort {
-                self.closing.store(true, Ordering::SeqCst);
-                let _ = self.commands.unbounded_send(Command::Abort);
-            }
+            self.apply(step);
         } else if method == OUTPUT_LOST {
             let count = |key: &str| {
                 message
@@ -611,15 +629,18 @@ async fn permission(shared: &Arc<Shared>, params: Value) -> Result<Value, RpcErr
         );
     };
     let id = request.tool_call.tool_call_id.0.to_string();
+    let mut step = Step::default();
     let (kind, refused) = {
         let mut turn = shared.turn();
-        if let Some(kind) = request.tool_call.fields.kind.as_ref() {
-            turn.announce(&id, kind_name(kind));
+        let claimed = request.tool_call.fields.kind.as_ref().map(kind_name);
+        if let Some(kind) = claimed {
+            turn.announce(&id, kind, &mut step);
         }
-        let kind = turn.kind_of(&id);
+        let kind = turn.kind_of(&id).or_else(|| claimed.map(ToOwned::to_owned));
         let refused = kind.as_deref().is_some_and(|kind| turn.is_refused(kind));
         (kind, refused)
     };
+    shared.apply(step);
     let asked = PermissionRequest {
         session_id: request.session_id.0.to_string(),
         tool_call_id: id,

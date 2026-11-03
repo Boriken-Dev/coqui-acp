@@ -1,6 +1,6 @@
 //! The turn state machine: updates in, events out. No I/O, no clock, no thread.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -15,11 +15,15 @@ use crate::event::Event;
 /// The default size, in UTF-8 bytes, at which text is flushed even mid-message, so it cannot grow without limit.
 pub(crate) const TEXT_FLUSH: usize = 64 * 1024;
 
+/// The default number of tool calls whose kind is kept: far more than a turn has in flight, in about a megabyte at
+/// UUID-length ids.
+pub(crate) const TOOL_KINDS: usize = 4096;
+
 /// What one input produced.
 #[derive(Debug, Default)]
 pub(crate) struct Step {
     pub(crate) events: Vec<Event>,
-    /// The session must end: a restricted tool ran without asking.
+    /// The session must end: a restricted tool ran without asking, or one could not be kept.
     pub(crate) abort: bool,
 }
 
@@ -30,6 +34,12 @@ pub(crate) struct Turn {
     /// The size, in UTF-8 bytes, at which `text` is flushed.
     text_flush: usize,
     kinds: BTreeMap<String, String>,
+    /// The ids in `kinds` first announced as a kind not refused, oldest first: the ones that may be forgotten. An id whose
+    /// kind became refused since stays here and is skipped.
+    forgettable: VecDeque<String>,
+    max_kinds: usize,
+    /// Whether a kind was forgotten, which is said once.
+    forgot: bool,
     finished: bool,
     /// Turns begun and not yet ended.
     open: usize,
@@ -56,8 +66,15 @@ impl Turn {
         Self {
             refused,
             text_flush: TEXT_FLUSH,
+            max_kinds: TOOL_KINDS,
             ..Self::default()
         }
+    }
+
+    /// Keeps the kinds of `calls` tool calls rather than [`TOOL_KINDS`].
+    pub(crate) const fn max_kinds(mut self, calls: usize) -> Self {
+        self.max_kinds = calls;
+        self
     }
 
     /// Flushes text at `bytes` rather than [`TEXT_FLUSH`].
@@ -87,14 +104,61 @@ impl Turn {
     }
 
     /// Records what the agent says a tool is. A refused kind stays, whatever a later message claims, since the agent
-    /// chooses what it says and only the first claim could have been weighed.
-    pub(crate) fn announce(&mut self, id: &str, kind: &str) {
-        let refused = self
-            .kinds
-            .get(id)
-            .is_some_and(|known| self.is_refused(known));
+    /// chooses what it says and only the first claim could have been weighed. At the limit the oldest tool of a kind not
+    /// refused is forgotten, which changes no refusal; when every one kept is refused, a refused kind ends the session.
+    pub(crate) fn announce(&mut self, id: &str, kind: &str, step: &mut Step) {
+        match self.kinds.get(id).map(|known| self.is_refused(known)) {
+            Some(true) => return,
+            Some(false) => {
+                self.kinds.insert(id.to_string(), kind.to_string());
+                return;
+            }
+            None => {}
+        }
+        let refused = self.is_refused(kind);
+        if self.kinds.len() >= self.max_kinds && !self.forget_oldest(step) {
+            if refused {
+                self.end(
+                    format!(
+                        "a tool of a refused kind could not be kept among the kinds of {} tool calls this session keeps; the session was ended",
+                        self.max_kinds
+                    ),
+                    step,
+                );
+            } else {
+                self.said_forgotten(step);
+            }
+            return;
+        }
+        self.kinds.insert(id.to_string(), kind.to_string());
         if !refused {
-            self.kinds.insert(id.to_string(), kind.to_string());
+            self.forgettable.push_back(id.to_string());
+        }
+    }
+
+    /// Forgets the oldest tool of a kind not refused; false when there is none.
+    fn forget_oldest(&mut self, step: &mut Step) -> bool {
+        while let Some(id) = self.forgettable.pop_front() {
+            if self
+                .kinds
+                .get(&id)
+                .is_some_and(|kind| !self.is_refused(kind))
+            {
+                self.kinds.remove(&id);
+                self.said_forgotten(step);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn said_forgotten(&mut self, step: &mut Step) {
+        if !self.forgot {
+            self.forgot = true;
+            step.events.push(Event::Notice(format!(
+                "this session keeps the kinds of {} tool calls and forgets older ones: a later message about one that does not say its kind is of unknown kind",
+                self.max_kinds
+            )));
         }
     }
 
@@ -140,8 +204,6 @@ impl Turn {
             SessionUpdate::ToolCall(call) => {
                 let kind = kind_name(&call.kind);
                 let id = call.tool_call_id.0.to_string();
-                self.announce(&id, kind);
-                let known = self.kind_of(&id).unwrap_or_else(|| kind.to_string());
                 step.events.extend(self.flush());
                 step.events.push(Event::Tool {
                     id: id.clone(),
@@ -149,14 +211,20 @@ impl Turn {
                     name: call.name,
                     kind: kind.to_string(),
                 });
+                self.announce(&id, kind, &mut step);
+                let known = self.kind_of(&id).unwrap_or_else(|| kind.to_string());
                 self.check_running(&known, call.status, &mut step);
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 let id = update.tool_call_id.0.to_string();
-                if let Some(kind) = update.fields.kind.as_ref() {
-                    self.announce(&id, kind_name(kind));
+                let claimed = update.fields.kind.as_ref().map(kind_name);
+                if let Some(kind) = claimed {
+                    self.announce(&id, kind, &mut step);
                 }
-                if let (Some(kind), Some(status)) = (self.kind_of(&id), update.fields.status) {
+                let known = self
+                    .kind_of(&id)
+                    .or_else(|| claimed.map(ToString::to_string));
+                if let (Some(kind), Some(status)) = (known, update.fields.status) {
                     self.check_running(&kind, status, &mut step);
                 }
             }
@@ -194,14 +262,22 @@ impl Turn {
                 status,
                 ToolCallStatus::InProgress | ToolCallStatus::Completed
             )
-            || self.ending
         {
             return;
         }
+        self.end(
+            format!("the agent ran a {kind} tool without leave; the session was ended"),
+            step,
+        );
+    }
+
+    /// Ends the session, once.
+    fn end(&mut self, why: String, step: &mut Step) {
+        if self.ending {
+            return;
+        }
         self.ending = true;
-        step.events.push(Event::Failed(format!(
-            "the agent ran a {kind} tool without leave; the session was ended"
-        )));
+        step.events.push(Event::Failed(why));
         step.abort = true;
     }
 }
@@ -290,7 +366,7 @@ mod tests {
         assert_eq!(turn.kind_of("1").as_deref(), Some("execute"));
 
         let mut turn = Turn::new(vec!["execute".to_string()]);
-        turn.announce("2", "execute");
+        turn.announce("2", "execute", &mut Step::default());
         assert!(turn.update(&tool("2", "read", "in_progress")).abort);
     }
 
@@ -303,6 +379,66 @@ mod tests {
             &json!({"kind": "execute", "status": "in_progress"}),
         ));
         assert!(step.abort);
+    }
+
+    fn notices(step: &Step) -> usize {
+        step.events
+            .iter()
+            .filter(|event| matches!(event, Event::Notice(_)))
+            .count()
+    }
+
+    #[test]
+    fn the_kinds_kept_are_bounded_and_forgetting_one_is_said_once() {
+        let mut turn = Turn::new(vec![]).max_kinds(2);
+        assert_eq!(notices(&turn.update(&tool("1", "read", "pending"))), 0);
+        assert_eq!(notices(&turn.update(&tool("2", "edit", "pending"))), 0);
+        let step = turn.update(&tool("3", "read", "pending"));
+        assert_eq!(notices(&step), 1, "{:?}", step.events);
+        assert_eq!(turn.kind_of("1"), None);
+        assert_eq!(turn.kind_of("3").as_deref(), Some("read"));
+        assert_eq!(notices(&turn.update(&tool("4", "read", "pending"))), 0);
+        assert_eq!(turn.kinds.len(), 2);
+    }
+
+    #[test]
+    fn a_refused_kind_is_never_forgotten_while_another_can_be() {
+        let mut turn = Turn::new(vec!["execute".to_string()]).max_kinds(2);
+        assert!(!turn.update(&tool("1", "execute", "pending")).abort);
+        assert!(!turn.update(&tool("2", "read", "completed")).abort);
+        assert!(!turn.update(&tool("3", "read", "completed")).abort);
+        assert!(!turn.update(&tool("4", "read", "completed")).abort);
+        assert_eq!(turn.kinds.len(), 2);
+        assert_eq!(turn.kind_of("1").as_deref(), Some("execute"));
+        assert!(
+            turn.update(&update("1", &json!({"status": "in_progress"})))
+                .abort
+        );
+    }
+
+    #[test]
+    fn a_refused_kind_that_cannot_be_kept_ends_the_session() {
+        let mut turn = Turn::new(vec!["execute".to_string()]).max_kinds(1);
+        assert!(!turn.update(&tool("1", "execute", "pending")).abort);
+        let step = turn.update(&tool("2", "execute", "pending"));
+        assert!(step.abort);
+        assert!(
+            step.events
+                .iter()
+                .any(|event| matches!(event, Event::Failed(text) if text.contains("refused kind"))),
+            "{:?}",
+            step.events
+        );
+
+        let mut turn = Turn::new(vec!["execute".to_string()]).max_kinds(0);
+        assert!(!turn.update(&tool("1", "read", "pending")).abort);
+        assert!(
+            turn.update(&update(
+                "2",
+                &json!({"kind": "execute", "status": "pending"})
+            ))
+            .abort
+        );
     }
 
     #[test]

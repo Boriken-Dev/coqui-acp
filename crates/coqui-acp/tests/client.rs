@@ -516,6 +516,84 @@ fn a_refused_kind_that_runs_unasked_ends_the_session() {
 }
 
 #[test]
+fn a_forgotten_tool_kind_is_said_once() {
+    let (transport, _) = agent_with(|method, _, agent| match method {
+        "session/prompt" => {
+            for id in ["t1", "t2", "t3"] {
+                agent.notify("session/update", &json!({"sessionId": "s1", "update": {"sessionUpdate": "tool_call", "toolCallId": id, "title": "Read", "kind": "read", "status": "pending"}}));
+            }
+            Some(json!({"stopReason": "end_turn"}))
+        }
+        other => plain(other),
+    });
+    let session = Client::builder("/w")
+        .prompt("go")
+        .max_tool_kinds(1)
+        .connect(transport)
+        .unwrap();
+    let events = events_until(&session, 5);
+    let notices = events
+        .iter()
+        .filter(|event| matches!(event, Event::Notice(text) if text.contains("1 tool")))
+        .count();
+    assert_eq!(notices, 1, "{events:?}");
+    assert!(matches!(&events[4], Event::Completed { .. }), "{events:?}");
+}
+
+#[test]
+fn a_refused_kind_the_session_cannot_keep_ends_it_and_is_still_refused() {
+    let outcome = Arc::new(Mutex::new(None));
+    let (agent, transport) = Agent::pair();
+    let kept = outcome.clone();
+    thread::spawn(move || {
+        let mut agent = agent;
+        while let Some(message) = agent.read() {
+            let id = message.get("id").cloned();
+            match message.get("method").and_then(Value::as_str) {
+                Some("session/prompt") => {
+                    agent.notify("session/update", &json!({"sessionId": "s1", "update": {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "kind": "execute", "status": "pending"}}));
+                    let answer = agent.ask("session/request_permission", &json!({
+                        "sessionId": "s1",
+                        "toolCall": {"toolCallId": "t2", "title": "Run", "kind": "execute", "status": "pending"},
+                        "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"}, {"optionId": "no", "name": "No", "kind": "reject_once"}],
+                    }));
+                    *kept.lock().unwrap() = Some(answer);
+                    agent.reply(id.as_ref().unwrap(), &json!({"stopReason": "end_turn"}));
+                }
+                Some(method) if id.is_some() => {
+                    agent.reply(id.as_ref().unwrap(), &plain(method).unwrap())
+                }
+                _ => {}
+            }
+        }
+    });
+    let session = Client::builder("/w")
+        .prompt("go")
+        .refuse_kinds(["execute"])
+        .max_tool_kinds(1)
+        .decider(Arc::new(Fixed(Decision::Allow)))
+        .connect(transport)
+        .unwrap();
+    let events = events_until(&session, 3);
+    assert!(
+        matches!(&events[1], Event::Failed(text) if text.contains("refused kind")),
+        "{events:?}"
+    );
+    assert!(
+        matches!(&events[2], Event::Permission { allowed: false, .. }),
+        "{events:?}"
+    );
+    let until = Instant::now() + WAIT;
+    while outcome.lock().unwrap().is_none() && Instant::now() < until {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        outcome.lock().unwrap().as_ref().unwrap()["outcome"]["optionId"],
+        "no"
+    );
+}
+
+#[test]
 fn turn_end_by_hands_turns_to_the_extension_and_ignores_standard_updates() {
     let (transport, _) = agent_with(|method, _, agent| match method {
         "initialize" => Some(
