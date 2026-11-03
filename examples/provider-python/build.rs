@@ -7,13 +7,17 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Prints the interpreter, its version and where a host finds its shared library. Windows needs
-/// `python3.dll`, for the stable ABI; elsewhere a host links the library the build found.
+/// `python3.dll`, for the stable ABI; elsewhere a host links the library the build found, which a Python
+/// unpacked anywhere has under its own prefix rather than where it was built for.
 const PROBE: &str = r#"
 import os, sys, sysconfig
 if os.name == "nt":
     lib = os.path.join(sys.base_prefix, "python3.dll")
 else:
-    lib = os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("LDLIBRARY") or "")
+    name = sysconfig.get_config_var("LDLIBRARY") or ""
+    lib = os.path.join(sysconfig.get_config_var("LIBDIR") or "", name)
+    if not os.path.isfile(lib):
+        lib = os.path.join(sys.base_prefix, "lib", name)
 print(sys.executable)
 print(sys.base_prefix)
 print(lib)

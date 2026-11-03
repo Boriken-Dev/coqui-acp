@@ -6,4 +6,4 @@ An echo agent written in Python and served over the [Agent Client Protocol](http
 cargo test -p provider-python
 ```
 
-The tests build the source, `guatiao-source-py`, from Cargo's checkout of Guatiao at the workspace's revision, against the Python `build.rs` found: `COQUI_ACP_TEST_PYTHON`, else `python3`, `python` or `py -3`. It has to have its shared library. Without one the build warns `NOT RUN` and the one test left is ignored. Elsewhere than a system Python, its `lib` directory goes on `LD_LIBRARY_PATH` (Linux) or `DYLD_FALLBACK_LIBRARY_PATH` (macOS).
+The tests build the source, `guatiao-source-py`, from Cargo's checkout of Guatiao at the workspace's revision, against the Python `build.rs` found: `COQUI_ACP_TEST_PYTHON`, else `python3`, `python` or `py -3`. It has to have its shared library. Without one the build warns `NOT RUN` and the one test left is ignored. Elsewhere than a system Python, its `lib` directory goes on `LD_LIBRARY_PATH` (Linux) or `DYLD_FALLBACK_LIBRARY_PATH` (macOS), and for one that reports another prefix than its own (a python-build-standalone download reports `/install`), on the linker's path too: `RUSTFLAGS="-L native=<prefix>/lib"`.
