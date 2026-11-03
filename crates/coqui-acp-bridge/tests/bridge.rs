@@ -1,6 +1,8 @@
 //! The real binary, a real agent process, a real socket, and for the browser method a real JavaScript initiator.
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
+mod method;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -27,6 +29,7 @@ impl Fixture {
         let output = Command::new(BRIDGE)
             .args(["keygen"])
             .arg(&path)
+            .args(["--method", method::name()])
             .output()
             .unwrap();
         assert!(
@@ -88,8 +91,16 @@ fn node() -> Option<PathBuf> {
     (major >= 22).then_some(found)
 }
 
-fn webcrypto_module() -> Option<PathBuf> {
-    let path = std::env::var_os("COQUI_ACP_TEST_WEBCRYPTO").map(PathBuf::from)?;
+/// The JavaScript module of this run's method, named by `COQUI_ACP_TEST_WEBCRYPTO` or `COQUI_ACP_TEST_NOISE`.
+fn module_variable() -> &'static str {
+    match method::method() {
+        coqui_agentic_peer::auth::Method::Noise => "COQUI_ACP_TEST_NOISE",
+        _ => "COQUI_ACP_TEST_WEBCRYPTO",
+    }
+}
+
+fn method_module() -> Option<PathBuf> {
+    let path = std::env::var_os(module_variable()).map(PathBuf::from)?;
     path.exists().then_some(path)
 }
 
@@ -107,6 +118,7 @@ impl Initiator {
         let mut child = Command::new(node)
             .arg(script)
             .arg(module)
+            .arg(method::name())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -201,6 +213,7 @@ fn keygen_never_replaces_a_file_and_help_takes_no_secret_value() {
     let again = Command::new(BRIDGE)
         .arg("keygen")
         .arg(&path)
+        .args(["--method", method::name()])
         .output()
         .unwrap();
     assert!(!again.status.success());
@@ -239,13 +252,14 @@ fn a_plain_listener_beyond_loopback_is_refused() {
 
 #[test]
 fn a_proven_browser_peer_gets_the_agent_and_a_stranger_never_reaches_it() {
-    let (Some(node), Some(module)) = (node(), webcrypto_module()) else {
+    let (Some(node), Some(module)) = (node(), method_module()) else {
         assert!(
-            std::env::var_os("COQUI_ACP_TEST_WEBCRYPTO").is_none(),
+            std::env::var_os(module_variable()).is_none(),
             "a module was named and could not be used"
         );
         eprintln!(
-            "SKIPPED: needs Node 22 or later and COQUI_ACP_TEST_WEBCRYPTO naming coqui-peer-webcrypto's bindings/js/coqui-peer-webcrypto/src/index.mjs"
+            "SKIPPED: needs Node 22 or later and {} naming that method's bindings/js/coqui-peer-<method>/src/index.mjs",
+            module_variable()
         );
         return;
     };
@@ -621,11 +635,12 @@ fn binary_dial(url: &url::Url) -> coqui_web::websocket::Channel {
 
 #[test]
 fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
+    use coqui_agentic_peer::auth::{Proof, Trust};
     use coqui_agentic_peer::auth::{Sealed, prove_out};
-    use coqui_peer_webcrypto::{Identity, Trust, TrustStore, WebCrypto};
+    use coqui_peer_webcrypto::TrustStore;
     let mut fixture = Fixture::new("removed");
     let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
-    let client = Identity::open_or_create(&fixture.dir.join("client.pem")).unwrap();
+    let client = method::identity(&fixture.dir.join("client.pem"));
     let peer = store.accept_key(&client.key_material()).unwrap();
     let log = fixture.dir.join("agent.log");
     let port = free_port();
@@ -633,7 +648,7 @@ fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
     let server = start_store_bridge(&mut fixture, &store_path, port, &log);
     let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/agent")).unwrap();
     let wait = Duration::from_secs(10);
-    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
 
     let channel = binary_dial(&url);
     let established = prove_out(&method, &channel, wait, 1 << 20).unwrap();
@@ -650,17 +665,34 @@ fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
 
     std::fs::remove_file(&log).unwrap();
     let again = binary_dial(&url);
-    assert!(prove_out(&method, &again, wait, 1 << 20).is_err());
+    // WebCrypto's initiator hears the refusal in the proof. Noise's finishes on its last message and hears it as the
+    // connection ending before anything is answered.
+    let proved = prove_out(&method, &again, wait, 1 << 20);
+    if method::method() == coqui_agentic_peer::auth::Method::WebCrypto {
+        assert!(proved.is_err());
+    }
+    if let Ok(established) = proved {
+        let sealed = Sealed::new(&again, established.session);
+        let _ = coqui_web::Channel::send(
+            &sealed,
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#,
+        );
+        assert!(!matches!(
+            coqui_web::Channel::receive(&sealed, Some(wait)),
+            Ok(Some(_))
+        ));
+    }
     assert!(!log.exists(), "a removed peer must not reach an agent");
 }
 
 #[test]
 fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
+    use coqui_agentic_peer::auth::{Proof, Trust};
     use coqui_agentic_peer::auth::{Sealed, prove_out};
-    use coqui_peer_webcrypto::{Identity, Trust, TrustStore, WebCrypto};
+    use coqui_peer_webcrypto::TrustStore;
     let mut fixture = Fixture::new("plainafter");
     let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
-    let client = Identity::open_or_create(&fixture.dir.join("client.pem")).unwrap();
+    let client = method::identity(&fixture.dir.join("client.pem"));
     store.accept_key(&client.key_material()).unwrap();
     let log = fixture.dir.join("agent.log");
     let port = free_port();
@@ -668,7 +700,7 @@ fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
     let server = start_store_bridge(&mut fixture, &store_path, port, &log);
     let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/agent")).unwrap();
     let wait = Duration::from_secs(10);
-    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
 
     let channel = binary_dial(&url);
     prove_out(&method, &channel, wait, 1 << 20).unwrap();
@@ -691,13 +723,13 @@ fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
 
 #[test]
 fn a_link_cut_before_the_close_record_is_a_failure_and_a_close_record_is_an_orderly_end() {
+    use coqui_agentic_peer::auth::{Proof, Trust};
     use coqui_agentic_peer::auth::{Sealed, prove, prove_out};
-    use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
     let fixture = Fixture::new("closerecord");
-    let near = Identity::open_or_create(&fixture.dir.join("near.pem")).unwrap();
-    let far = Identity::open_or_create(&fixture.dir.join("far.pem")).unwrap();
-    let near_method = WebCrypto::new(near.clone()).with_responders(Trust::pinned([far.peer_id()]));
-    let far_method = WebCrypto::new(far).with_initiators(Trust::pinned([near.peer_id()]));
+    let near = method::identity(&fixture.dir.join("near.pem"));
+    let far = method::identity(&fixture.dir.join("far.pem"));
+    let near_method = Proof::new(near.clone()).with_responders(Trust::pinned([far.peer_id()]));
+    let far_method = Proof::new(far).with_initiators(Trust::pinned([near.peer_id()]));
     let wait = Duration::from_secs(10);
     for cut in [false, true] {
         let listener = coqui_web::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), None)
@@ -807,6 +839,7 @@ fn start_in_band_dial(
         .arg(format!("wss://localhost:{port}/v1/agent"))
         .arg("--identity")
         .arg(fixture.dir.join("dialer.pem"))
+        .args(["--method", method::name()])
         .arg("--peer")
         .arg(peer)
         .arg("--ca-file")
@@ -823,15 +856,15 @@ fn start_in_band_dial(
 
 #[test]
 fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject() {
+    use coqui_agentic_peer::auth::{Proof, Trust};
     use coqui_agentic_peer::auth::{Sealed, prove};
-    use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
     let fixture = Fixture::new("dialproxy");
     // Built first: another test's build can hold the lock for longer than the listeners would wait.
     let agent = echo_agent();
-    let responder = Identity::open_or_create(&fixture.dir.join("responder.pem")).unwrap();
-    let dialer = Identity::open_or_create(&fixture.dir.join("dialer.pem")).unwrap();
+    let responder = method::identity(&fixture.dir.join("responder.pem"));
+    let dialer = method::identity(&fixture.dir.join("dialer.pem"));
     let peer = responder.peer_id().to_string();
-    let method = WebCrypto::new(responder).with_initiators(Trust::pinned([dialer.peer_id()]));
+    let method = Proof::new(responder).with_initiators(Trust::pinned([dialer.peer_id()]));
     let wait = Duration::from_secs(30);
     let backend = coqui_web::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), None)
         .unwrap()
@@ -867,9 +900,8 @@ fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject(
 
 #[test]
 fn dial_stops_when_the_remote_proves_the_wrong_key() {
-    use coqui_peer_webcrypto::Identity;
     let fixture = Fixture::new("dialwrong");
-    let stranger = Identity::open_or_create(&fixture.dir.join("stranger.pem")).unwrap();
+    let stranger = method::identity(&fixture.dir.join("stranger.pem"));
     let mut serving = {
         let (identity, _) = fixture.keygen("bridge.pem");
         Command::new(BRIDGE)
@@ -895,6 +927,7 @@ fn dial_stops_when_the_remote_proves_the_wrong_key() {
         .arg(format!("ws://{address}/"))
         .arg("--identity")
         .arg(fixture.dir.join("dialer.pem"))
+        .args(["--method", method::name()])
         .arg("--peer")
         .arg(stranger.peer_id().to_string())
         .arg("--")
@@ -1216,4 +1249,196 @@ fn a_client_certificate_can_come_from_a_store_or_a_ca() {
             Ok(Some(_))
         ));
     }
+}
+
+/// `serve` with `flags`, its first line of standard output, and what it says on standard error as lines arrive.
+fn serve_saying(
+    flags: &[&str],
+    home: Option<&Path>,
+) -> (Child, String, std::sync::mpsc::Receiver<String>) {
+    let mut command = Command::new(BRIDGE);
+    command
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .args(flags)
+        .arg("--")
+        .arg(echo_agent())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(home) = home {
+        command.env(coqui_agentic_peer::home::HOME_ENV, home);
+    }
+    let mut child = command.spawn().unwrap();
+    let said = child.stderr.take().unwrap();
+    let (lines, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(said).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut peer = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut peer)
+        .unwrap();
+    (child, peer.trim().to_owned(), heard)
+}
+
+/// The next line said that starts with `start`, within 20 seconds.
+fn heard_line(heard: &std::sync::mpsc::Receiver<String>, start: &str) -> String {
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match heard.recv_timeout(left) {
+            Ok(line) if line.starts_with(start) => return line,
+            Ok(_) => {}
+            Err(_) => panic!("nothing said starting {start:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_method_is_the_identitys_and_naming_another_is_refused() {
+    use coqui_agentic_peer::auth::{Identity, Method};
+    const ANYONE: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let fixture = Fixture::new("methods");
+    for (method, other) in [
+        (Method::WebCrypto, Method::Noise),
+        (Method::Noise, Method::WebCrypto),
+    ] {
+        let path = fixture.dir.join(format!("{method}.pem"));
+        let made = Command::new(BRIDGE)
+            .arg("keygen")
+            .arg(&path)
+            .args(["--method", method.name()])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        assert_eq!(Identity::read(&path).unwrap().unwrap().method(), method);
+        let refused = Command::new(BRIDGE)
+            .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
+            .arg(&path)
+            .args(["--allow", ANYONE, "--method", other.name(), "--", "x"])
+            .output()
+            .unwrap();
+        assert_eq!(refused.status.code(), Some(2));
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            said.contains(&format!("proves by {method}, not {other}")),
+            "{said}"
+        );
+    }
+    let path = fixture.dir.join("default.pem");
+    assert!(
+        Command::new(BRIDGE)
+            .arg("keygen")
+            .arg(&path)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        Identity::read(&path).unwrap().unwrap().method(),
+        Method::DEFAULT
+    );
+    let unknown = Command::new(BRIDGE)
+        .arg("keygen")
+        .arg(fixture.dir.join("unknown.pem"))
+        .args(["--method", "p256-spki"])
+        .output()
+        .unwrap();
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(!fixture.dir.join("unknown.pem").exists());
+
+    // A setting looser than the default is said.
+    let noise = fixture.dir.join("noise.pem");
+    let (mut serving, _, heard) = serve_saying(
+        &[
+            "--identity",
+            noise.to_str().unwrap(),
+            "--allow",
+            ANYONE,
+            "--key-limit",
+            "18446744073709551615",
+            "--no-rekey",
+        ],
+        None,
+    );
+    assert_eq!(heard_line(&heard, "proving by"), "proving by noise");
+    let weakened = [
+        heard_line(&heard, "weakened"),
+        heard_line(&heard, "weakened"),
+    ];
+    assert!(
+        weakened.iter().any(|line| line.contains("rekey")),
+        "{weakened:?}"
+    );
+    let _ = serving.kill();
+    let _ = serving.wait();
+}
+
+#[test]
+fn a_fresh_home_proves_by_the_default_and_a_webcrypto_home_keeps_serving_its_peers() {
+    use coqui_agentic_peer::auth::{Identity, Method, Proof, Sealed, Trust, prove_out};
+    use coqui_agentic_peer::home;
+    use coqui_peer_webcrypto::TrustStore;
+    let fixture = Fixture::new("homes");
+
+    let fresh = fixture.dir.join("fresh");
+    let (mut serving, peer, heard) = serve_saying(&["--paired"], Some(&fresh));
+    assert_eq!(
+        heard_line(&heard, "proving by"),
+        format!("proving by {}", Method::DEFAULT)
+    );
+    let made = Identity::read(&fresh.join(home::identity_file(Method::DEFAULT)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(made.peer_id().to_string(), peer);
+    let _ = serving.kill();
+    let _ = serving.wait();
+
+    // A home paired before Noise holds a WebCrypto identity, which keeps its method and its peers.
+    let old = fixture.dir.join("old");
+    let server = Identity::open_or_create(
+        &old.join(home::identity_file(Method::WebCrypto)),
+        Method::WebCrypto,
+    )
+    .unwrap();
+    let client = Identity::generate(Method::WebCrypto).unwrap();
+    TrustStore::open(&old.join("peers"))
+        .unwrap()
+        .accept_key(&client.key_material())
+        .unwrap();
+    let (mut serving, peer, heard) = serve_saying(&["--paired"], Some(&old));
+    assert_eq!(peer, server.peer_id().to_string());
+    let address = heard_line(&heard, "listening on")
+        .trim_start_matches("listening on ")
+        .to_owned();
+    assert_eq!(heard_line(&heard, "proving by"), "proving by webcrypto");
+    let url = url::Url::parse(&format!("ws://{address}/agent")).unwrap();
+    let channel = binary_dial(&url);
+    let method = Proof::new(client).with_responders(Trust::pinned([server.peer_id()]));
+    let established = prove_out(&method, &channel, Duration::from_secs(10), 1 << 20).unwrap();
+    initialize(&Sealed::new(&channel, established.session));
+
+    // A Noise client of the same home is refused, and the bridge says why.
+    let stranger = Identity::generate(Method::Noise).unwrap();
+    let method = Proof::new(stranger).with_responders(Trust::pinned([server.peer_id()]));
+    assert!(
+        prove_out(
+            &method,
+            &binary_dial(&url),
+            Duration::from_secs(10),
+            1 << 20
+        )
+        .is_err()
+    );
+    let refused = heard_line(&heard, "a connection was refused");
+    assert!(
+        refused.contains("the peer proves by noise, and this endpoint only by webcrypto"),
+        "{refused}"
+    );
+    let _ = serving.kill();
+    let _ = serving.wait();
 }

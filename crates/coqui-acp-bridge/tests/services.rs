@@ -1,15 +1,17 @@
 //! Several protocols on one proven link, through the real binary, with real agent processes.
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
+mod method;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use coqui_agentic_peer::auth::{Identity, Proof, Trust};
 use coqui_agentic_peer::auth::{Sealed, prove_out};
 use coqui_agentic_peer::link::capabilities;
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
-use coqui_peer_webcrypto::{Identity, Trust, WebCrypto};
 use coqui_web::Channel as _;
 
 const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
@@ -36,16 +38,22 @@ impl Fixture {
 
     fn identity(&self, name: &str) -> (PathBuf, Identity) {
         let path = self.dir.join(name);
-        let identity = Identity::open_or_create(&path).unwrap();
+        let identity = method::identity(&path);
         (path, identity)
     }
 
     /// `serve`, returning the peer id it prints, once it is listening.
     fn serve(&mut self, home: Option<&Path>, flags: &[&str], port: u16) -> String {
         let mut command = Command::new(BRIDGE);
+        let paired = ["--method", method::name()];
         command
             .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
             .args(flags)
+            .args(if flags.contains(&"--paired") {
+                &paired[..]
+            } else {
+                &[]
+            })
             .arg("--")
             .arg(echo_agent());
         if let Some(home) = home {
@@ -133,7 +141,7 @@ fn over_link(
     server: &str,
     body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web::websocket::Channel>>),
 ) {
-    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     let sealed = Sealed::new(&channel, established.session);
@@ -179,7 +187,7 @@ fn two_protocols_share_one_proof_and_a_plain_client_still_works() {
 
     // A client that knows nothing of streams gets the one protocol it speaks.
     let (_, again) = fixture.identity("client");
-    let method = WebCrypto::new(again).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::new(again).with_responders(Trust::pinned([server.parse().unwrap()]));
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     initialized(&Sealed::new(&channel, established.session));
@@ -222,6 +230,7 @@ fn pair(server_home: &Path, client_home: &Path) {
     let home = coqui_agentic_peer::home::HOME_ENV;
     let mut accept = Command::new(BRIDGE)
         .args(["pair-accept", "--listen", &format!("127.0.0.1:{port}")])
+        .args(["--method", method::name()])
         .env(home, server_home)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -233,6 +242,7 @@ fn pair(server_home: &Path, client_home: &Path) {
     printed.read_line(&mut pin).unwrap();
     let mut joining = Command::new(BRIDGE)
         .args(["pair-dial", &format!("ws://127.0.0.1:{port}/pair")])
+        .args(["--method", method::name()])
         .env(home, client_home)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -255,7 +265,9 @@ fn one_pairing_and_a_new_capability_is_a_grant_counted_at_once() {
     let mut fixture = Fixture::new("paired");
     let (server_home, client_home) = (fixture.dir.join("server"), fixture.dir.join("client"));
     pair(&server_home, &client_home);
-    let client = Identity::open_or_create(&client_home.join("identity")).unwrap();
+    let client = method::identity(
+        &client_home.join(coqui_agentic_peer::home::identity_file(method::method())),
+    );
     let peer = client.peer_id().to_string();
     let agent = echo_agent();
     let port = free_port();
@@ -646,7 +658,7 @@ fn one_peer_gets_only_so_many_links_and_others_are_not_affected() {
         "mcp=nothing",
     ];
     let server = fixture.serve(None, &flags, port);
-    let method = WebCrypto::new(greedy).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::new(greedy).with_responders(Trust::pinned([server.parse().unwrap()]));
     let opening = coqui_agentic_peer::mux::Frame::Open {
         stream: 1,
         protocol: "link/1".to_owned(),
@@ -825,7 +837,7 @@ fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
         &grant,
     ];
     let server = fixture.serve(None, &flags, port);
-    let method = WebCrypto::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     let sealed = Sealed::new(&channel, established.session);

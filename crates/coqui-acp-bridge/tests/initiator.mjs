@@ -1,10 +1,12 @@
-// A real JavaScript peer for the bridge's test: coqui-peer's WebCrypto initiator over Node's WebSocket, then one ACP turn.
-// A browser key cannot leave its process, so this prints its peer id first, and reads "<port> <expected peer>" from stdin
-// once the test has started a bridge that allows it, or one that does not.
+// A real JavaScript peer for the bridge's test: a coqui-peer method's initiator over Node's WebSocket, then one ACP turn. The
+// method is the module's, `webcrypto` or `noise`, the second argument. A browser key cannot leave its process, so this prints
+// its peer id first, and reads "<port> <expected peer>" from stdin once the test has started a bridge that allows it, or one
+// that does not.
 import {pathToFileURL} from 'node:url';
 import readline from 'node:readline';
 
 const {generateIdentity, createInitiator} = await import(pathToFileURL(process.argv[2]).href);
+const method = process.argv[3] ?? 'webcrypto';
 const identity = await generateIdentity();
 console.log(identity.peerId);
 
@@ -39,9 +41,17 @@ await new Promise((resolve) => socket.addEventListener('open', resolve));
 
 const text = (data) => (typeof data === 'string' ? data : new TextDecoder().decode(data));
 const proof = await createInitiator(identity, expected);
-socket.send(proof.hello());
-socket.send(await proof.answer(text(await next())));
-const {session} = await proof.finish(text(await next()));
+let session;
+if (method === 'noise') {
+  socket.send(await proof.hello());
+  const proved = await proof.answer(new Uint8Array(await next()));
+  socket.send(proved.reply);
+  ({session} = proved);
+} else {
+  socket.send(proof.hello());
+  socket.send(await proof.answer(text(await next())));
+  ({session} = await proof.finish(text(await next())));
+}
 
 // Every message from here on is one sealed record.
 const send = async (message) => socket.send(await session.seal(JSON.stringify(message)));

@@ -6,6 +6,8 @@
     clippy::needless_pass_by_value
 )]
 
+mod method;
+
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -14,9 +16,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use coqui_agentic_peer::auth::Identity;
 use coqui_agentic_peer::pairing;
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pairing, Pin, PinRole};
-use coqui_peer_webcrypto::{Identity, TrustStore, random};
+use coqui_peer_webcrypto::{TrustStore, random};
 use coqui_web::websocket::{self, Frames};
 use coqui_web::{Channel, Dialer, Kind};
 use rustls::pki_types::PrivatePkcs8KeyDer;
@@ -98,6 +101,7 @@ fn pair_accept(dir: &Dir, port: u16) -> (Child, String) {
         .arg(format!("127.0.0.1:{port}"))
         .arg("--identity")
         .arg(dir.path("server.pem"))
+        .args(["--method", method::name()])
         .arg("--store")
         .arg(dir.path("server-store"))
         .args(["--timeout-seconds", "20"])
@@ -123,6 +127,7 @@ fn pair_dial(dir: &Dir, url: &str, pin: &str, ca: Option<&Path>) -> std::process
         .arg(url)
         .arg("--identity")
         .arg(dir.path("client.pem"))
+        .args(["--method", method::name()])
         .arg("--store")
         .arg(dir.path("client-store"))
         .arg("--pin-file")
@@ -316,8 +321,8 @@ struct Sides {
 fn sides(name: &str) -> Sides {
     let dir = Dir::new(name);
     Sides {
-        server: Identity::open_or_create(&dir.path("s.pem")).unwrap(),
-        client: Identity::open_or_create(&dir.path("c.pem")).unwrap(),
+        server: method::identity(&dir.path("s.pem")),
+        client: method::identity(&dir.path("c.pem")),
         server_store: TrustStore::open(&dir.path("server-store")).unwrap(),
         client_store: TrustStore::open(&dir.path("client-store")).unwrap(),
         dir,
@@ -383,7 +388,7 @@ fn a_relay_that_changes_a_pairing_record_fails_both_sides() {
 #[test]
 fn a_relay_that_swaps_in_its_own_key_without_the_pin_fails_both_sides() {
     let sides = sides("swap");
-    let attacker = Identity::open_or_create(&sides.dir.path("a.pem")).unwrap();
+    let attacker = method::identity(&sides.dir.path("a.pem"));
     let attacker_store = TrustStore::open(&sides.dir.path("attacker-store")).unwrap();
     let attacker_store_two = TrustStore::open(&sides.dir.path("attacker-store-two")).unwrap();
     let (joiner_end, attacker_near) = binary_pair();

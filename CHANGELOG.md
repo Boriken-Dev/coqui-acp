@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `coqui-acp-bridge`: the Noise method (`coqui-peer-noise`) beside WebCrypto for the in-band proof and PIN pairing. `--method noise|webcrypto` on `keygen`, `serve`, `dial`, `forward`, `pair-accept` and `pair-dial`: an identity keeps the method of its key, naming another is refused, and nothing negotiates or falls back. `serve`, `dial` and `forward` say on standard error which method they prove by. A record and a descriptor `--advertise` publishes name the method.
+- `coqui-acp-bridge`: `--key-limit` and `--no-rekey` on `serve`, `dial` and `forward`, each method's own setting with its default. A setting looser than the default is said on standard error. WebCrypto has no key change, so it always ends a session at its limit.
+
 - `coqui-acp`: drive any Agent Client Protocol version 1 agent from blocking code, with permission deciding, resume, extensions and line transports.
 - `coqui_acp` for Dart: a client that speaks version 1 and version 2, whichever the agent selects. `openSession`, `setConfigOption`, `setMode` and `AcpCancel` for a client that shows what an agent offers. `listSessions` and `reopenSession` for earlier sessions, and `AcpAttachment` with `takesImages` and `takesFiles` for what goes with a prompt.
 - `coqui-acp-bridge`: a stdio ACP agent on the network under coqui-peer identity.

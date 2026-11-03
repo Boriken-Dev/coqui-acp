@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
 use coqui_acp_bridge::agent::{self, Agent};
 use coqui_acp_bridge::linger::{self, Keeper, Settings};
 use coqui_acp_bridge::relay::{LinkEnd, relay};
-use coqui_agentic_peer::auth::Sealed;
+use coqui_agentic_peer::auth::{Identity, Method, Proof, Sealed, Trust};
 use coqui_agentic_peer::discovery::{Advertised, Advertisement};
 use coqui_agentic_peer::forward::{self, Target};
 use coqui_agentic_peer::link::{self, Accepted, Prefilled, Services};
@@ -32,9 +32,9 @@ use coqui_agentic_peer::mux::{self, LinkStream, Side};
 use coqui_agentic_peer::peers::{FilePeers, NoEvents, PeerRecord, PeerStore};
 use coqui_agentic_peer::{Error, auth, companion, discovery, home, pairing};
 use coqui_net_acl::{Acl, Action, IpNet, Rule};
+use coqui_peer::pair::{CodeAlphabet, Pin};
+use coqui_peer::{PeerId, TrustStore};
 use coqui_peer_tls as tls;
-use coqui_peer_webcrypto::pair::{CodeAlphabet, Pin};
-use coqui_peer_webcrypto::{Identity, PeerId, Trust, TrustStore, WebCrypto};
 use coqui_web::websocket::Frames;
 use coqui_web::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
 use url::Url;
@@ -75,6 +75,9 @@ enum Mode {
     Keygen {
         /// Where to write the key. An existing file is never replaced.
         path: PathBuf,
+        /// The method the key is for: `noise`, or `webcrypto`. Without it, the default method.
+        #[arg(long, value_name = "METHOD")]
+        method: Option<Method>,
     },
     /// Wait for peers, prove each, and give it an agent of its own.
     Serve(Serve),
@@ -143,6 +146,26 @@ enum CompanionAction {
     Uninstall,
 }
 
+/// Which proof an endpoint runs. It is chosen here and never negotiated on a connection.
+#[derive(clap::Args, Debug, Clone, Copy)]
+struct MethodArgs {
+    /// The proof's method: `noise`, or `webcrypto` for a browser whose WebCrypto has no X25519. An identity keeps the method of its
+    /// key, and naming another is refused. Without it, the identity's own; a new identity gets the default method.
+    #[arg(long, value_name = "METHOD")]
+    method: Option<Method>,
+}
+
+/// The session's settings, each with its method's default and no floor. One looser than the default is said on standard error.
+#[derive(clap::Args, Debug, Clone, Copy)]
+struct SessionArgs {
+    /// What one key may carry in each direction, in bytes. Default 2^38, below where AES-GCM's margin thins.
+    #[arg(long, value_name = "BYTES")]
+    key_limit: Option<u64>,
+    /// Under Noise, end the session at the key limit instead of changing keys. WebCrypto has no key change, so it always ends.
+    #[arg(long)]
+    no_rekey: bool,
+}
+
 #[derive(clap::Args, Debug)]
 struct PairAccept {
     /// The address to wait on, for a WebSocket. On loopback it is plain, for a reverse proxy in front; any other address
@@ -161,6 +184,8 @@ struct PairAccept {
     /// How long the PIN waits for someone to use it, in seconds.
     #[arg(long, default_value_t = 900)]
     timeout_seconds: u64,
+    #[command(flatten)]
+    method: MethodArgs,
     /// A source network allowed to connect at all. Repeat for more. With any listed, everything else is dropped first.
     #[arg(long = "permit")]
     permit: Vec<String>,
@@ -190,6 +215,8 @@ struct PairDial {
     /// How long the exchange may take, in seconds.
     #[arg(long, default_value_t = 900)]
     timeout_seconds: u64,
+    #[command(flatten)]
+    method: MethodArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -301,6 +328,10 @@ struct Serve {
     /// A host name to publish in that record, for a certificate a browser accepts. Without it, clients get an address.
     #[arg(long, requires = "advertise", value_name = "NAME")]
     advertise_host: Option<String>,
+    #[command(flatten)]
+    method: MethodArgs,
+    #[command(flatten)]
+    session: SessionArgs,
     /// The agent program, then its arguments.
     #[arg(last = true, required = true)]
     agent: Vec<OsString>,
@@ -330,6 +361,10 @@ struct Forward {
     /// reaches nothing.
     #[arg(long = "allow-target", value_name = "HOST:PORT")]
     allow_targets: Vec<String>,
+    #[command(flatten)]
+    method: MethodArgs,
+    #[command(flatten)]
+    session: SessionArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -377,6 +412,10 @@ struct Dial {
     /// The longest wait between attempts to reconnect, in seconds.
     #[arg(long, default_value_t = 60)]
     max_backoff_seconds: u64,
+    #[command(flatten)]
+    method: MethodArgs,
+    #[command(flatten)]
+    session: SessionArgs,
     /// The agent program, then its arguments.
     #[arg(last = true, required = true)]
     agent: Vec<OsString>,
@@ -389,6 +428,51 @@ fn peers(list: &[String]) -> Result<BTreeSet<PeerId>, String> {
                 .map_err(|_| "a peer id is malformed".to_owned())
         })
         .collect()
+}
+
+/// The identity a proof runs under: this user's without `path`; with it, the file's, made when absent if `create`. Its key's
+/// method is its method, and naming another is refused.
+fn proof_identity(
+    path: Option<&Path>,
+    method: MethodArgs,
+    create: bool,
+) -> Result<Identity, String> {
+    let identity = match path {
+        Some(path) if !create => {
+            auth::read_identity(path).and_then(|identity| match method.method {
+                Some(named) => identity.of_method(named),
+                None => Ok(identity),
+            })
+        }
+        path => home::identity(path, method.method),
+    };
+    identity.map_err(|error| error.to_string())
+}
+
+/// `identity`'s proof with the session's settings.
+fn proof_of(identity: Identity, session: SessionArgs) -> Result<Proof, String> {
+    let mut proof = Proof::new(identity);
+    if let Some(bytes) = session.key_limit {
+        proof = proof.with_key_limit(bytes);
+    }
+    if session.no_rekey {
+        proof = proof.with_rekey(false).map_err(|error| error.to_string())?;
+    }
+    Ok(proof)
+}
+
+/// Says on standard error which method a proof runs, and each of its settings looser than the default. A parent that stopped
+/// reading standard error does not end the bridge for it.
+fn say_proof(proof: &Proof) {
+    let mut said = std::io::stderr().lock();
+    let _ = writeln!(said, "proving by {}", proof.method());
+    for weakened in proof.weakened() {
+        let _ = writeln!(
+            said,
+            "weakened: {} is {}, looser than {}",
+            weakened.setting, weakened.value, weakened.strict
+        );
+    }
 }
 
 fn split_agent(agent: &[OsString]) -> Result<(&OsString, &[OsString]), String> {
@@ -578,7 +662,7 @@ fn listen_for<C: Channel>(mux: &mux::Mux<'_, C>, local: SocketAddr, target: &Tar
 }
 
 struct Service {
-    method: Option<WebCrypto>,
+    method: Option<Proof>,
     store: Option<Arc<TrustStore>>,
     proof: Duration,
     agent: Vec<OsString>,
@@ -840,7 +924,7 @@ impl Service {
             method,
             channel,
             self.proof,
-            MAX_LINE + auth::RECORD_OVERHEAD,
+            method.method().record_length(MAX_LINE),
         ) {
             Ok(established) => {
                 drop(unproven);
@@ -1059,7 +1143,7 @@ fn admission(
 fn advertise(
     args: &Serve,
     bound: SocketAddr,
-    peer: Option<String>,
+    peer: Option<(String, Method)>,
     webtransport: Option<u16>,
     webtransport_hash: Option<String>,
 ) -> Result<Option<Advertised>, String> {
@@ -1097,7 +1181,8 @@ fn advertise(
     let advertisement =
         Advertisement::new(label, args.tls_identity.is_some() || args.tls_short_lived)
             .map_err(text)?
-            .with_peer(peer)
+            .with_peer(peer.as_ref().map(|(id, _)| id.clone()))
+            .with_method(peer.map_or(Method::WebCrypto, |(_, method)| method))
             .with_webtransport(webtransport)
             .with_webtransport_hash(webtransport_hash)
             .with_offers(&offers)
@@ -1143,8 +1228,13 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     }
     if certificates {
         // Silently dropping these would leave an operator believing they apply.
-        if args.identity.is_some() || args.proof_seconds.is_some() {
-            return Err("--identity and --proof-seconds belong to the in-band proof".to_owned());
+        if args.identity.is_some()
+            || args.proof_seconds.is_some()
+            || args.method.method.is_some()
+            || args.session.key_limit.is_some()
+            || args.session.no_rekey
+        {
+            return Err("--identity, --method, --key-limit, --no-rekey and --proof-seconds belong to the in-band proof".to_owned());
         }
         if args.webtransport_port.is_some() {
             return Err(
@@ -1205,13 +1295,13 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         );
     }
     let identity = if args.paired {
-        home::identity(None).map_err(|error| error.to_string())?
+        proof_identity(None, args.method, true)?
     } else {
         let identity = args
             .identity
             .as_deref()
             .ok_or("the in-band proof needs --identity (see keygen), or --paired")?;
-        auth::read_identity(identity).map_err(|error| error.to_string())?
+        proof_identity(Some(identity), args.method, false)?
     };
     let peer_id = identity.peer_id();
     let store = if args.paired {
@@ -1230,7 +1320,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         Some(store) => Trust::Store(TrustStore::clone(store)),
         None => Trust::pinned(peers(&args.allow)?),
     };
-    let method = WebCrypto::new(identity).with_initiators(trust);
+    let method = proof_of(identity, args.session)?.with_initiators(trust);
     println!("{peer_id}");
     let _ = std::io::stdout().flush();
     let proof = Duration::from_secs(args.proof_seconds.unwrap_or(15));
@@ -1277,7 +1367,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     let advertised = advertise(
         args,
         bound,
-        Some(peer_id.to_string()),
+        Some((peer_id.to_string(), method.method())),
         args.webtransport_port,
         hash,
     )?;
@@ -1288,6 +1378,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         advertised
     };
     eprintln!("listening on {bound}");
+    say_proof(&method);
     let keeper = linger.map(|settings| keeper(settings, store.as_ref()));
     let links = links(args, &running, keeper.as_ref())?;
     let reverses = args
@@ -1373,7 +1464,7 @@ fn serve_unproven(
 
 /// How `dial` knows its peer. Without an in-band proof, whatever TLS checked is all there is.
 enum DialProof {
-    InBand(WebCrypto, Option<Arc<TrustStore>>),
+    InBand(Proof, Option<Arc<TrustStore>>),
     Transport,
 }
 
@@ -1398,10 +1489,10 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
                     .to_owned(),
             );
         }
-        let identity = home::identity(None).map_err(|error| error.to_string())?;
+        let identity = proof_identity(None, args.method, true)?;
         let store = Arc::new(home::store(None).map_err(|error| error.to_string())?);
-        let method =
-            WebCrypto::new(identity).with_responders(Trust::Store(TrustStore::clone(&store)));
+        let method = proof_of(identity, args.session)?
+            .with_responders(Trust::Store(TrustStore::clone(&store)));
         return Ok((
             DialProof::InBand(method, Some(store)),
             in_band_dialer(args)?,
@@ -1418,7 +1509,7 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
                         .to_owned(),
                 );
             }
-            let identity = Identity::open_or_create(path).map_err(|error| error.to_string())?;
+            let identity = proof_identity(Some(path), args.method, true)?;
             let store = args
                 .trust_store
                 .as_deref()
@@ -1433,7 +1524,7 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
                 (Some(store), true) => Trust::Store(TrustStore::clone(store)),
                 (None, false) => Trust::pinned(peers(&args.peers)?),
             };
-            let method = WebCrypto::new(identity).with_responders(trust);
+            let method = proof_of(identity, args.session)?.with_responders(trust);
             Ok((DialProof::InBand(method, store), in_band_dialer(args)?))
         }
         (None, Some(path)) => {
@@ -1492,7 +1583,7 @@ fn dial_link(
         method,
         channel,
         DIAL_PROOF,
-        MAX_LINE + auth::RECORD_OVERHEAD,
+        method.method().record_length(MAX_LINE),
     ) {
         Ok(established) => {
             let peer = established.peer;
@@ -1518,6 +1609,9 @@ fn dial_link(
 
 fn dial(args: &Dial) -> Result<ExitCode, String> {
     let (proof, mut dialer) = dial_setup(args)?;
+    if let DialProof::InBand(method, _) = &proof {
+        say_proof(method);
+    }
     let (program, rest) = split_agent(&args.agent)?;
     let agent = Agent::spawn(program, rest, MAX_LINE)
         .map_err(|error| format!("the agent could not start: {error}"))?;
@@ -1584,8 +1678,8 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
 }
 
 fn pair_accept_mode(args: &PairAccept) -> Result<ExitCode, String> {
-    let identity =
-        Arc::new(home::identity(args.identity.as_deref()).map_err(|error| error.to_string())?);
+    let identity = Arc::new(proof_identity(args.identity.as_deref(), args.method, true)?);
+    eprintln!("pairing by {}", identity.method());
     let store = Arc::new(home::store(args.store.as_deref()).map_err(|error| error.to_string())?);
     let tls_config = args.tls_identity.as_deref().map(server_tls).transpose()?;
     let listener = websocket::Listener::bind(args.listen, tls_config)
@@ -1670,7 +1764,8 @@ fn pair_dial_mode(args: &PairDial) -> Result<ExitCode, String> {
     };
     let pin = Pin::parse(&CodeAlphabet::pin(), text.trim())
         .map_err(|_| "that is not a PIN".to_owned())?;
-    let identity = home::identity(args.identity.as_deref()).map_err(|error| error.to_string())?;
+    let identity = proof_identity(args.identity.as_deref(), args.method, true)?;
+    eprintln!("pairing by {}", identity.method());
     let store = home::store(args.store.as_deref()).map_err(|error| error.to_string())?;
     let mut dialer = websocket::Dialer::new()
         .with_frames(Frames::Binary)
@@ -1759,10 +1854,11 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
         return Err("--allow-target needs --peer: it says who may reach it".to_owned());
     }
     let (method, store) = if args.paired {
-        let identity = home::identity(None).map_err(|error| error.to_string())?;
+        let identity = proof_identity(None, args.method, true)?;
         let store = Arc::new(home::store(None).map_err(|error| error.to_string())?);
         (
-            WebCrypto::new(identity).with_responders(Trust::Store(TrustStore::clone(&store))),
+            proof_of(identity, args.session)?
+                .with_responders(Trust::Store(TrustStore::clone(&store))),
             Some(store),
         )
     } else {
@@ -1770,9 +1866,9 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
             .identity
             .as_deref()
             .ok_or("give --identity or --paired")?;
-        let identity = Identity::open_or_create(path).map_err(|error| error.to_string())?;
+        let identity = proof_identity(Some(path), args.method, true)?;
         (
-            WebCrypto::new(identity).with_responders(Trust::pinned(peers(&args.peers)?)),
+            proof_of(identity, args.session)?.with_responders(Trust::pinned(peers(&args.peers)?)),
             None,
         )
     };
@@ -1789,6 +1885,7 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
     let services = forward::serving(Services::default());
     let mut options = link::Options::default();
     options.limits.max_message = MAX_LINE;
+    say_proof(&method);
     let longest = Duration::from_secs(60);
     let mut wait = Duration::from_secs(1);
     loop {
@@ -1797,7 +1894,7 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
                 &method,
                 &channel,
                 DIAL_PROOF,
-                MAX_LINE + auth::RECORD_OVERHEAD,
+                method.method().record_length(MAX_LINE),
             ) {
                 Ok(established) => {
                     wait = Duration::from_secs(1);
@@ -1928,12 +2025,14 @@ fn main() -> ExitCode {
     }
     let cli = Cli::parse();
     let result = match &cli.command {
-        Mode::Keygen { path } => auth::create_identity(path)
-            .map(|peer| {
-                println!("{peer}");
-                ExitCode::SUCCESS
-            })
-            .map_err(|error| error.to_string()),
+        Mode::Keygen { path, method } => {
+            auth::create_identity(path, method.unwrap_or(Method::DEFAULT))
+                .map(|peer| {
+                    println!("{peer}");
+                    ExitCode::SUCCESS
+                })
+                .map_err(|error| error.to_string())
+        }
         Mode::PairAccept(args) => pair_accept_mode(args),
         Mode::PairDial(args) => pair_dial_mode(args),
         Mode::Serve(args) => serve(args),
