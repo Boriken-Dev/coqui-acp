@@ -586,9 +586,18 @@ impl Shared {
     }
 }
 
+/// An error's message with the agent's own reason, which agents put in `data` as text or as an object's `message`.
 fn error_text(error: &RpcError) -> String {
-    match &error.data {
-        Some(Value::String(detail)) if !detail.is_empty() => format!("{}: {detail}", error.message),
+    let detail = match &error.data {
+        Some(Value::String(detail)) => Some(detail),
+        Some(Value::Object(data)) => match data.get("message") {
+            Some(Value::String(detail)) => Some(detail),
+            _ => None,
+        },
+        _ => None,
+    };
+    match detail {
+        Some(detail) if !detail.is_empty() => format!("{}: {detail}", error.message),
         _ => error.message.clone(),
     }
 }
@@ -1553,5 +1562,46 @@ impl Exchange {
         worker.join().map_err(|_| Error::Closed)?.map_err(|error| {
             Error::Refused(format!("the ACP connection failed: {}", error_text(&error)))
         })?
+    }
+}
+
+#[cfg(test)]
+mod error_text_tests {
+    use super::*;
+
+    fn error(data: Option<Value>) -> RpcError {
+        let mut error = RpcError::internal_error();
+        error.data = data;
+        error
+    }
+
+    #[test]
+    fn a_reason_given_as_text_is_kept() {
+        let text = error_text(&error(Some(json!("out of credits"))));
+        assert_eq!(text, "Internal error: out of credits");
+    }
+
+    #[test]
+    fn a_reason_inside_an_object_is_kept() {
+        let data = json!({"message": "API error (status 402 Payment Required): out of credits", "http_status": 402});
+        let text = error_text(&error(Some(data)));
+        assert_eq!(
+            text,
+            "Internal error: API error (status 402 Payment Required): out of credits"
+        );
+    }
+
+    #[test]
+    fn data_with_no_reason_adds_nothing() {
+        assert_eq!(
+            error_text(&error(Some(json!({"http_status": 402})))),
+            "Internal error"
+        );
+        assert_eq!(
+            error_text(&error(Some(json!({"message": ""})))),
+            "Internal error"
+        );
+        assert_eq!(error_text(&error(Some(json!([1, 2])))), "Internal error");
+        assert_eq!(error_text(&error(None)), "Internal error");
     }
 }

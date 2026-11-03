@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `coqui-acp`: an error's text keeps the agent's reason when `data` is an object with a `message`, as the Grok CLI sends for a spent credit limit, not only when `data` is text.
 - **Breaking**, `coqui-acp` and `coqui_acp` for Dart: stop reason `cancelled` is `Event::Cancelled` and `AcpCancelled`, and no longer `Event::Blocked` and `AcpBlocked`, which now mean only a permission that could not be answered. It ends the turn, so a connection lost after it is no `Failed`.
 - `coqui-acp` and `coqui_acp` for Dart: a `session/update` of a session other than the client's own is dropped, and a `session/request_permission` of one is answered cancelled without asking the decider, so what an agent kept from an earlier connection says of its session never feeds this one.
 - `coqui_acp` for Dart: request ids start at a random point on each connection, so they do not repeat those of an earlier connection to the same agent.
