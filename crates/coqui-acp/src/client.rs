@@ -34,6 +34,8 @@ use crate::event::Event;
 use crate::state::{Turn, kind_name};
 
 const PROTOCOL_VERSION: u64 = 1;
+/// What `coqui-acp-bridge serve --linger` sends when it dropped output while nobody was connected.
+const OUTPUT_LOST: &str = "_dev.boriken.coqui.acp/output_lost";
 
 /// An `authenticate` call to make before the first session request.
 #[derive(Clone)]
@@ -451,10 +453,21 @@ impl Shared {
         }
     }
 
+    /// Whether a message's `sessionId` names this session. Before the session is known nothing does, so what an agent says of another,
+    /// such as one an earlier connection left running, never reaches this one.
+    fn is_mine(&self, params: &Value) -> bool {
+        let named = params.get("sessionId").and_then(Value::as_str);
+        let session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+        named.is_some() && named == session.as_deref()
+    }
+
     fn notification(&self, message: &UntypedMessage) {
         let method = message.method();
         if method == "session/update" {
-            if self.suppress.load(Ordering::SeqCst) || self.extension.load(Ordering::SeqCst) {
+            if self.suppress.load(Ordering::SeqCst)
+                || self.extension.load(Ordering::SeqCst)
+                || !self.is_mine(message.params())
+            {
                 return;
             }
             let step = self.turn().update(message.params());
@@ -465,6 +478,18 @@ impl Shared {
                 self.closing.store(true, Ordering::SeqCst);
                 let _ = self.commands.unbounded_send(Command::Abort);
             }
+        } else if method == OUTPUT_LOST {
+            let count = |key: &str| {
+                message
+                    .params()
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            };
+            self.emit(Event::OutputLost {
+                lines: count("lines"),
+                bytes: count("bytes"),
+            });
         } else if method.starts_with('_') {
             if self.extension.load(Ordering::SeqCst)
                 && self
@@ -559,6 +584,13 @@ fn not_decided(shared: &Shared, why: &str) -> Result<Value, RpcError> {
 }
 
 async fn permission(shared: &Arc<Shared>, params: Value) -> Result<Value, RpcError> {
+    // Another session's, such as one an earlier connection left waiting: the decider answers for this session only.
+    if params.get("sessionId").is_some_and(Value::is_string) && !shared.is_mine(&params) {
+        return serde_json::to_value(RequestPermissionResponse::new(
+            RequestPermissionOutcome::Cancelled,
+        ))
+        .map_err(|error| RpcError::internal_error().data(error.to_string()));
+    }
     let Ok(request) = serde_json::from_value::<RequestPermissionRequest>(params) else {
         return not_decided(
             shared,
@@ -859,6 +891,13 @@ async fn open(
         }
         other => other,
     };
+    // Known before the agent answers, so what it sends of this session meanwhile, a replay or a turn it kept running, is this session's.
+    if let Opening::Load(id) | Opening::Resume(id) = &options.opening {
+        *shared
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(id.clone());
+    }
     let (session, config) = match &options.opening {
         Opening::New => {
             let answer = call(

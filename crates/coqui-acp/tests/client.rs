@@ -169,6 +169,9 @@ fn matches_event(event: &Event, want: &Value) -> bool {
         Event::Failed(_) => ("failed", json!({})),
         Event::Cancelled => ("cancelled", json!({})),
         Event::Blocked(_) => ("blocked", json!({})),
+        Event::OutputLost { lines, bytes } => {
+            ("output_lost", json!({"lines": lines, "bytes": bytes}))
+        }
         _ => ("other", json!({})),
     };
     let mut wanted: Map<String, Value> = want.as_object().unwrap().clone();
@@ -226,7 +229,7 @@ fn every_v1_conversation_holds() {
             .join()
             .unwrap_or_else(|_| panic!("{name}: the script failed"));
     }
-    assert!(ran >= 6, "only {ran} v1 conversations ran");
+    assert!(ran >= 8, "only {ran} v1 conversations ran");
 }
 
 /// An agent answering by a closure, for what a script does not cover.

@@ -89,6 +89,10 @@ bool matchesEvent(AcpEvent event, Map<String, dynamic> want) => switch (event) {
   AcpFailed() => want['type'] == 'failed',
   AcpCancelled() => want['type'] == 'cancelled',
   AcpBlocked() => want['type'] == 'blocked',
+  AcpOutputLost(:final lines, :final bytes) =>
+    want['type'] == 'output_lost' &&
+        want['lines'] == lines &&
+        want['bytes'] == bytes,
   _ => false,
 };
 
@@ -273,6 +277,19 @@ void main() {
     return (agent, acp);
   }
 
+  /// As [opened], with session `s1` open on it.
+  Future<(Agent, AcpClient)> withSession({AcpDecider? decider}) async {
+    final (agent, acp) = await opened(decider: decider);
+    final creating = acp.createSession(cwd: '/w');
+    final asked = await agent.read();
+    agent.write({
+      'id': asked['id'],
+      'result': {'sessionId': 's1'},
+    });
+    await creating;
+    return (agent, acp);
+  }
+
   test('what an agent says about a new session reaches the caller', () async {
     final (agent, acp) = await opened();
     final opening = acp.openSession(cwd: '/work');
@@ -327,7 +344,7 @@ void main() {
   test(
     'a turn cancelled while a permission waits answers cancelled, not a refusal',
     () async {
-      final (agent, acp) = await opened(
+      final (agent, acp) = await withSession(
         decider: (_) async => const AcpCancel(),
       );
       agent.write({
@@ -356,7 +373,7 @@ void main() {
       AcpDecision decision,
     ) async {
       AcpPermissionRequest? seen;
-      final (agent, acp) = await opened(
+      final (agent, acp) = await withSession(
         decider: (request) async {
           seen = request;
           return decision;
@@ -435,7 +452,7 @@ void main() {
     test(
       'with no options is cancelled, never an error, and the decider is not asked',
       () async {
-        final (agent, acp) = await opened(
+        final (agent, acp) = await withSession(
           decider: (_) async => throw StateError('asked'),
         );
         agent.write({

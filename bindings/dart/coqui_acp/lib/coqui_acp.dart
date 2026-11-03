@@ -1,5 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+
+/// What `coqui-acp-bridge serve --linger` sends when it dropped output while nobody was connected.
+const acpOutputLost = '_dev.boriken.coqui.acp/output_lost';
 
 sealed class AcpEvent {
   const AcpEvent();
@@ -66,6 +70,19 @@ final class AcpBlocked extends AcpEvent {
   const AcpBlocked(this.message);
   @override
   String toString() => 'AcpBlocked($message)';
+}
+
+/// Output of the agent's was dropped before it reached this connection: `_dev.boriken.coqui.acp/output_lost`, which a bridge that kept
+/// the agent while nobody was connected sends first on the next connection. What the session shows has a gap there.
+final class AcpOutputLost extends AcpEvent {
+  /// Messages dropped.
+  final int lines;
+
+  /// Their bytes.
+  final int bytes;
+  const AcpOutputLost({required this.lines, required this.bytes});
+  @override
+  String toString() => 'AcpOutputLost(lines: $lines, bytes: $bytes)';
 }
 
 final class AcpNotice extends AcpEvent {
@@ -256,7 +273,14 @@ final class AcpClient {
   final _updates = StreamController<AcpSessionUpdate>.broadcast(sync: true);
   final StringBuffer _text = StringBuffer();
   late final StreamSubscription<String> _subscription;
-  int _counter = 0;
+
+  /// Ids start at a random point, so those of a new connection to an agent that outlived the last one are not the last one's, whose
+  /// late answers would be taken for theirs. The product stays below 2^53, which a JavaScript number holds exactly.
+  int _counter = Random.secure().nextInt(0x7fffffff) * 0x200000;
+
+  /// The sessions this client opened or used. An update or a request for any other, such as one an earlier connection left running
+  /// on the same agent, is not this client's: it is dropped, and a request is cancelled without asking the decider.
+  final Set<String> _sessions = {};
   bool _closed = false;
   int? _protocolVersion;
 
@@ -313,7 +337,11 @@ final class AcpClient {
       final id = envelope['id'];
       if (method is String) {
         if (id == null) {
-          if (method == 'session/update') _receiveUpdate(envelope['params']);
+          if (method == 'session/update') {
+            _receiveUpdate(envelope['params']);
+          } else if (method == acpOutputLost) {
+            _receiveOutputLost(envelope['params']);
+          }
         } else if (method == 'session/request_permission') {
           unawaited(_answerPermission(id, envelope['params']));
         } else {
@@ -355,6 +383,7 @@ final class AcpClient {
       params['sessionId'] as String,
       Map<String, dynamic>.from(params['update'] as Map),
     );
+    if (!_sessions.contains(update.sessionId)) return;
     if (!_closed) _updates.add(update);
     final raw = update.raw;
     switch (raw['sessionUpdate']) {
@@ -400,6 +429,13 @@ final class AcpClient {
     }
   }
 
+  void _receiveOutputLost(Object? params) {
+    int count(String key) =>
+        params is Map && params[key] is int ? params[key] as int : 0;
+    _flush();
+    _emit(AcpOutputLost(lines: count('lines'), bytes: count('bytes')));
+  }
+
   void _endTurn(String stop) {
     _flush();
     _emit(switch (stop) {
@@ -411,6 +447,17 @@ final class AcpClient {
   }
 
   Future<void> _answerPermission(Object id, Object? params) async {
+    // Another session's, such as one an earlier connection left waiting: the decider answers for this client's sessions only.
+    if (params is Map &&
+        params['sessionId'] is String &&
+        !_sessions.contains(params['sessionId'])) {
+      _reply(id, {
+        'result': {
+          'outcome': {'outcome': 'cancelled'},
+        },
+      });
+      return;
+    }
     // An agent has been seen to go ahead with the tool on an error answer, so what cannot be asked is cancelled, and said.
     if (params is! Map || params['options'] is! List) {
       _emit(
@@ -632,6 +679,22 @@ final class AcpClient {
   }) async {
     _ready();
     _checkCwd(cwd);
+    // Before asking, since the replay arrives before the answer.
+    return _using(id, () => _reopen(id, cwd));
+  }
+
+  /// Runs [opening] with [id] taken as this client's, which it stays only if [opening] succeeds and it was not already.
+  Future<T> _using<T>(String id, Future<T> Function() opening) async {
+    final added = _sessions.add(id);
+    try {
+      return await opening();
+    } catch (_) {
+      if (added) _sessions.remove(id);
+      rethrow;
+    }
+  }
+
+  Future<AcpOpenedSession> _reopen(String id, String cwd) async {
     final params = {'sessionId': id, 'cwd': cwd, 'mcpServers': <Object>[]};
     if (_protocolVersion == 2) {
       final reply = await _request('session/resume', {
@@ -681,6 +744,7 @@ final class AcpClient {
         if (id is! String || id.isEmpty) {
           throw const AcpFailure('Missing session ID');
         }
+        _sessions.add(id);
         return AcpOpenedSession(id, reply);
       },
     );
@@ -716,12 +780,15 @@ final class AcpClient {
   }) {
     _ready();
     _checkCwd(cwd);
-    return _request('session/resume', {
-      'sessionId': id,
-      'cwd': cwd,
-      'mcpServers': <Object>[],
-      if (replayHistory) 'replayFrom': {'type': 'start'},
-    });
+    return _using(
+      id,
+      () => _request('session/resume', {
+        'sessionId': id,
+        'cwd': cwd,
+        'mcpServers': <Object>[],
+        if (replayHistory) 'replayFrom': {'type': 'start'},
+      }),
+    );
   }
 
   /// Sends a turn. In v2 it answers the inserted message's id as soon as the agent acknowledges, and the turn ends by a
@@ -745,6 +812,7 @@ final class AcpClient {
         );
       }
     }
+    _sessions.add(sessionId);
     final params = {
       'sessionId': sessionId,
       'prompt': [
@@ -788,6 +856,7 @@ final class AcpClient {
   Future<void> closeSession(String sessionId) async {
     _ready();
     await _request('session/close', {'sessionId': sessionId});
+    _sessions.remove(sessionId);
   }
 
   Future<void> close() async {

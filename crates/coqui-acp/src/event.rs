@@ -53,7 +53,15 @@ pub enum Event {
     ///
     /// [`turn_end_by`]: crate::Builder::turn_end_by
     PromptFailed(String),
-    /// A notification whose method starts with `_`: an extension, passed on untouched.
+    /// Output of the agent's was dropped before it reached this connection: `_dev.boriken.coqui.acp/output_lost`, which a bridge that
+    /// kept the agent while nobody was connected sends first on the next connection. What the session shows has a gap there.
+    OutputLost {
+        /// Messages dropped.
+        lines: u64,
+        /// Their bytes.
+        bytes: u64,
+    },
+    /// A notification whose method starts with `_`, other than [`Event::OutputLost`]: an extension, passed on untouched.
     Extension {
         /// The method.
         method: String,

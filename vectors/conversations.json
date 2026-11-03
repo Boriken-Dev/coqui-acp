@@ -82,6 +82,33 @@
       "events": [{"type": "permission", "allowed": false}, {"type": "completed", "stop": "end_turn"}]
     },
     {
+      "name": "another session's updates go nowhere and its requests are cancelled, never decided",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello", "decider": "allow"},
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt", "params": {"sessionId": "s1"}}, "hold": true},
+        {"send": {"method": "session/update", "params": {"sessionId": "s0", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "old"}}}}},
+        {"ask": {"method": "session/request_permission", "params": {"sessionId": "s0", "toolCall": {"toolCallId": "t0", "title": "Run", "kind": "execute", "status": "pending"}, "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"}, {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}}, "answer": {"outcome": {"outcome": "cancelled"}}},
+        {"send": {"method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "new"}}}}},
+        {"release": {"stopReason": "end_turn"}}
+      ],
+      "events": [{"type": "text", "text": "new"}, {"type": "completed", "stop": "end_turn"}]
+    },
+    {
+      "name": "output a bridge dropped while nobody was connected is said, first",
+      "version": 1,
+      "client": {"cwd": "/work", "prompt": "hello"},
+      "steps": [
+        {"send": {"method": "_dev.boriken.coqui.acp/output_lost", "params": {"lines": 12, "bytes": 3456}}},
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}},
+        {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
+        {"expect": {"method": "session/prompt"}, "reply": {"stopReason": "end_turn"}}
+      ],
+      "events": [{"type": "output_lost", "lines": 12, "bytes": 3456}, {"type": "completed", "stop": "end_turn"}]
+    },
+    {
       "name": "a v2 turn ends with its idle state update, not the prompt answer",
       "version": 2,
       "client": {"cwd": "/work", "prompt": "hello"},

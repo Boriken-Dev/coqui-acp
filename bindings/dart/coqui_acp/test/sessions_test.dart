@@ -101,6 +101,18 @@ void main() {
     },
   );
 
+  test(
+    'request ids do not start again with a new connection, so a late answer is never taken for a new request',
+    () async {
+      final first = Agent(v1);
+      final second = Agent(v1);
+      await first.connected();
+      await second.connected();
+      expect(first.received.first['id'], isA<int>());
+      expect(first.received.first['id'], isNot(second.received.first['id']));
+    },
+  );
+
   test('a listing takes what is well formed, and bounds how much', () async {
     final agent = Agent(v2);
     agent.answers['session/list'] = (_) => {
