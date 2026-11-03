@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `coqui-acp-page`, and `package:coqui_acp/page.dart` for Dart: a person's agents from a page, over `document.acp`.
 - `coqui-acp-bridge`: `serve --linger` keeps a link's agent for a time and gives it back to the same proven peer on a new connection, with `--linger-per-peer`, `--linger-total`, `--linger-buffer-bytes` and `--linger-settle-ms`. Off by default. Output dropped while nobody was connected is said in a `_dev.boriken.coqui.acp/output_lost` notification, first on the next link.
 - `coqui-acp` and `coqui_acp` for Dart: `Event::OutputLost` and `AcpOutputLost` report `_dev.boriken.coqui.acp/output_lost`.
-- `coqui-acp`: `Builder::ends_turn` says which extension notifications end a turn, so a connection ending after one is no `Event::Failed`, and `Builder::disconnect_detail` says what became of a lost agent, in that event's text.
+- `coqui-acp`: `Builder::ends_turn` says which extension notifications end a turn, so a connection ending after one is no `Event::Failed`, and `Builder::disconnect_detail` says what became of a lost agent, in that event's text. Turns are counted, so a turn sent before the last one's ending arrived is still running when that ending comes.
 
 ### Changed
 

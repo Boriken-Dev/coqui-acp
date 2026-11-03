@@ -29,6 +29,8 @@ pub(crate) struct Turn {
     text: String,
     kinds: BTreeMap<String, String>,
     finished: bool,
+    /// Turns begun and not yet ended.
+    open: usize,
     ending: bool,
 }
 
@@ -56,16 +58,19 @@ impl Turn {
     }
 
     pub(crate) fn begin(&mut self) {
+        self.open = self.open.saturating_add(1);
         self.finished = false;
     }
 
+    /// Whether no turn is running: as many have ended as were begun, and at least one ended.
     pub(crate) const fn finished(&self) -> bool {
         self.finished
     }
 
-    /// Something other than the prompt's answer ended this turn.
+    /// One turn ended, by its answer or otherwise. A turn begun before an earlier one's ending arrived is still running.
     pub(crate) const fn finish(&mut self) {
-        self.finished = true;
+        self.open = self.open.saturating_sub(1);
+        self.finished = self.open == 0;
     }
 
     pub(crate) fn is_refused(&self, kind: &str) -> bool {
@@ -103,7 +108,7 @@ impl Turn {
             event,
             Event::Completed { .. } | Event::Failed(_) | Event::Cancelled
         ) {
-            self.finished = true;
+            self.finish();
         }
     }
 

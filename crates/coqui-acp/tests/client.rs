@@ -749,6 +749,45 @@ fn a_turn_after_one_an_extension_ended_can_still_fail() {
     assert!(matches!(session.next_event(WAIT), Some(Event::Failed(_))));
 }
 
+/// The ending of the first turn arrives after the second was sent, and ends only the first.
+#[test]
+fn a_turn_sent_before_the_last_ones_ending_arrived_can_still_fail() {
+    let (mut agent, transport) = Agent::pair();
+    let actor = thread::spawn(move || {
+        let mut prompts = 0;
+        while let Some(message) = agent.read() {
+            let method = message["method"].as_str().unwrap_or_default().to_owned();
+            match method.as_str() {
+                "initialize" => agent.reply(
+                    &message["id"],
+                    &json!({"protocolVersion": 1, "agentCapabilities": {"_meta": {EXTENSION: true}}}),
+                ),
+                "session/prompt" => {
+                    prompts += 1;
+                    if prompts == 2 {
+                        agent.notify("_example/event", &json!({"kind": "completed"}));
+                        return;
+                    }
+                }
+                _ => agent.reply(&message["id"], &plain(&method).unwrap()),
+            }
+        }
+    });
+    let session = Client::builder("/w")
+        .turn_end_by(EXTENSION)
+        .ends_turn(completed)
+        .prompt("one")
+        .connect(transport)
+        .unwrap();
+    session.send("two").unwrap();
+    actor.join().unwrap();
+    assert!(matches!(
+        session.next_event(WAIT),
+        Some(Event::Extension { .. })
+    ));
+    assert!(matches!(session.next_event(WAIT), Some(Event::Failed(_))));
+}
+
 #[test]
 fn an_agent_with_no_such_extension_is_not_asked_what_ends_a_turn() {
     let transport = agent_leaving_at_prompt(json!({}), |agent, _| {
