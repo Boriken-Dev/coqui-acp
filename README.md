@@ -11,6 +11,8 @@ command that puts a stdio agent on the network under a proven identity. It build
 | --- | --- |
 | `crates/coqui-acp` | the Rust library |
 | `crates/coqui-acp-bridge` | the bridge command |
+| `crates/coqui-acp-provider` | [agents as Guatiao providers](docs/provider.md), in any language, and a facade serving one over ACP |
+| `examples/provider-python` | an echo agent written in Python, through that facade |
 | `bindings/dart/coqui_acp` | the Dart client, for browsers and Flutter |
 | `bindings/js` | the page side of [ACP in the browser](docs/browser.md), its scope and its conformance checks |
 | `vectors/conversations.json` | scripted conversations both clients must pass |
