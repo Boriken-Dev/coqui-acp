@@ -1,8 +1,8 @@
 //! What an agent offers before any session: the options a session starts with, its modes, and the sessions it has.
 //!
-//! An agent's answer is untrusted, so it is read as ACP's own types and bounded: what cannot be read is skipped,
-//! lists are cut at their limit, an item whose identifier is longer than [`MAX_TEXT`] is dropped, since it could not
-//! be named back, and other text is cut there. Nothing in it is acted on.
+//! An agent's answer is untrusted, so it is read as ACP's own types and bounded by [`DescribeLimits`]: what cannot be
+//! read is skipped, lists are cut at their limit, an item whose identifier is longer than the text limit is dropped,
+//! since it could not be named back, and other text is cut there. Nothing in it is acted on.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -22,14 +22,88 @@ pub const SESSION_OPTIONS_CAPABILITY: &str = "dev.boriken.coqui.acp/session_opti
 /// agent cannot tell is left out and may say why under `unknown`.
 pub const SESSION_OPTIONS_METHOD: &str = "_coqui_acp/session_options";
 
-/// The most options, modes and sessions kept.
-const MAX_OPTIONS: usize = 64;
-const MAX_MODES: usize = 64;
-const MAX_SESSIONS: usize = 500;
-/// The most values one option keeps, across its groups.
-const MAX_VALUES: usize = 1024;
-/// The longest text kept, in UTF-8 bytes.
-const MAX_TEXT: usize = 4096;
+/// What [`Exchange::describe`](crate::Exchange::describe) keeps of an agent's answer, and how many pages of
+/// `session/list` it asks for. Every limit takes any value, 0 included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DescribeLimits {
+    /// The most options kept. Default 64.
+    pub options: usize,
+    /// The most values one option keeps, across its groups. Default 1024.
+    pub values: usize,
+    /// The most modes kept. Default 64.
+    pub modes: usize,
+    /// The most sessions kept, across pages. Default 500.
+    pub sessions: usize,
+    /// The longest text kept, in UTF-8 bytes: a longer identifier drops its item, other text is cut here. Default 4096.
+    pub text: usize,
+    /// The most `session/list` requests, each following the last page's `nextCursor`; 0 asks none. Default 10: the
+    /// 500 sessions at 50 a page, and at most ten request timeouts spent on an agent that always gives a cursor.
+    pub pages: usize,
+}
+
+impl Default for DescribeLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DescribeLimits {
+    /// The defaults each field names.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            options: 64,
+            values: 1024,
+            modes: 64,
+            sessions: 500,
+            text: 4096,
+            pages: 10,
+        }
+    }
+
+    /// The most options kept.
+    #[must_use]
+    pub const fn options(mut self, options: usize) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// The most values one option keeps, across its groups.
+    #[must_use]
+    pub const fn values(mut self, values: usize) -> Self {
+        self.values = values;
+        self
+    }
+
+    /// The most modes kept.
+    #[must_use]
+    pub const fn modes(mut self, modes: usize) -> Self {
+        self.modes = modes;
+        self
+    }
+
+    /// The most sessions kept, across pages.
+    #[must_use]
+    pub const fn sessions(mut self, sessions: usize) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    /// The longest text kept, in UTF-8 bytes.
+    #[must_use]
+    pub const fn text(mut self, bytes: usize) -> Self {
+        self.text = bytes;
+        self
+    }
+
+    /// The most `session/list` requests.
+    #[must_use]
+    pub const fn pages(mut self, pages: usize) -> Self {
+        self.pages = pages;
+        self
+    }
+}
 
 /// One part of what an agent offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,80 +125,81 @@ pub struct Description {
     pub options: Answer<Vec<SessionConfigOption>>,
     /// The modes a session can start in.
     pub modes: Answer<SessionModeState>,
-    /// The sessions the agent lists: `session/list`'s first page.
+    /// The sessions the agent lists, from `session/list`'s pages in order.
     pub sessions: Answer<Vec<SessionInfo>>,
 }
 
-/// `text` cut to [`MAX_TEXT`] bytes, on a character's boundary.
-pub(crate) fn cut(text: &str) -> String {
-    if text.len() <= MAX_TEXT {
+/// `text` cut to `max` bytes, on a character's boundary.
+pub(crate) fn cut(text: &str, max: usize) -> String {
+    if text.len() <= max {
         return text.to_string();
     }
-    let mut end = MAX_TEXT;
+    let mut end = max;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     text[..end].to_string()
 }
 
-fn cut_in_place(text: &mut String) {
-    if text.len() > MAX_TEXT {
-        *text = cut(text);
+fn cut_in_place(text: &mut String, max: usize) {
+    if text.len() > max {
+        *text = cut(text, max);
     }
 }
 
-fn cut_optional(text: &mut Option<String>) {
+fn cut_optional(text: &mut Option<String>, max: usize) {
     if let Some(text) = text {
-        cut_in_place(text);
+        cut_in_place(text, max);
     }
 }
 
-fn fits(id: &str) -> bool {
-    !id.is_empty() && id.len() <= MAX_TEXT
+fn fits(id: &str, max: usize) -> bool {
+    !id.is_empty() && id.len() <= max
 }
 
 /// One option, bounded, or `None` when it cannot be named.
-fn option(mut option: SessionConfigOption) -> Option<SessionConfigOption> {
-    if !fits(&option.id.0) {
+fn option(mut option: SessionConfigOption, limits: &DescribeLimits) -> Option<SessionConfigOption> {
+    let max = limits.text;
+    if !fits(&option.id.0, max) {
         return None;
     }
-    cut_in_place(&mut option.name);
-    cut_optional(&mut option.description);
+    cut_in_place(&mut option.name, max);
+    cut_optional(&mut option.description, max);
     option.meta = None;
     // A category is an identifier too, and a client does without one.
     if serde_json::to_value(&option.category)
         .ok()
         .and_then(|category| category.as_str().map(str::len))
-        .is_some_and(|length| length > MAX_TEXT)
+        .is_some_and(|length| length > max)
     {
         option.category = None;
     }
     if let SessionConfigKind::Select(select) = &mut option.kind {
-        if !fits(&select.current_value.0) {
+        if !fits(&select.current_value.0, max) {
             return None;
         }
-        let mut left = MAX_VALUES;
+        let mut left = limits.values;
         match &mut select.options {
             SessionConfigSelectOptions::Ungrouped(values) => {
-                values.retain(|value| fits(&value.value.0));
+                values.retain(|value| fits(&value.value.0, max));
                 values.truncate(left);
                 for value in values {
-                    cut_in_place(&mut value.name);
-                    cut_optional(&mut value.description);
+                    cut_in_place(&mut value.name, max);
+                    cut_optional(&mut value.description, max);
                     value.meta = None;
                 }
             }
             SessionConfigSelectOptions::Grouped(groups) => {
-                groups.retain(|group| fits(&group.group.0));
+                groups.retain(|group| fits(&group.group.0, max));
                 for group in groups.iter_mut() {
-                    cut_in_place(&mut group.name);
+                    cut_in_place(&mut group.name, max);
                     group.meta = None;
-                    group.options.retain(|value| fits(&value.value.0));
+                    group.options.retain(|value| fits(&value.value.0, max));
                     group.options.truncate(left);
                     left -= group.options.len();
                     for value in &mut group.options {
-                        cut_in_place(&mut value.name);
-                        cut_optional(&mut value.description);
+                        cut_in_place(&mut value.name, max);
+                        cut_optional(&mut value.description, max);
                         value.meta = None;
                     }
                 }
@@ -136,72 +211,80 @@ fn option(mut option: SessionConfigOption) -> Option<SessionConfigOption> {
 }
 
 /// What an answer says of `part`, when it does not hold the part itself.
-fn unknown(answer: &Value, part: &str) -> Answer<Vec<SessionConfigOption>> {
-    Answer::Unknown(why(answer, part))
+fn unknown(answer: &Value, part: &str, max: usize) -> Answer<Vec<SessionConfigOption>> {
+    Answer::Unknown(why(answer, part, max))
 }
 
-fn why(answer: &Value, part: &str) -> String {
+fn why(answer: &Value, part: &str, max: usize) -> String {
     match answer.get("unknown").and_then(|unknown| unknown.get(part)) {
-        Some(Value::String(reason)) => cut(reason),
+        Some(Value::String(reason)) => cut(reason, max),
         _ => format!("the agent did not say what {part} it has"),
     }
 }
 
 /// The options part of a [`SESSION_OPTIONS_METHOD`] answer.
-pub(crate) fn options(answer: &Value) -> Answer<Vec<SessionConfigOption>> {
+pub(crate) fn options(answer: &Value, limits: &DescribeLimits) -> Answer<Vec<SessionConfigOption>> {
     let Some(listed) = answer.get("configOptions").and_then(Value::as_array) else {
-        return unknown(answer, "configOptions");
+        return unknown(answer, "configOptions", limits.text);
     };
     Answer::Known(
         listed
             .iter()
             .filter_map(|item| serde_json::from_value::<SessionConfigOption>(item.clone()).ok())
-            .filter_map(option)
-            .take(MAX_OPTIONS)
+            .filter_map(|item| option(item, limits))
+            .take(limits.options)
             .collect(),
     )
 }
 
 /// The modes part of a [`SESSION_OPTIONS_METHOD`] answer.
-pub(crate) fn modes(answer: &Value) -> Answer<SessionModeState> {
+pub(crate) fn modes(answer: &Value, limits: &DescribeLimits) -> Answer<SessionModeState> {
+    let max = limits.text;
     let Some(modes) = answer.get("modes").filter(|modes| modes.is_object()) else {
-        return Answer::Unknown(why(answer, "modes"));
+        return Answer::Unknown(why(answer, "modes", max));
     };
     let Ok(mut modes) = serde_json::from_value::<SessionModeState>(modes.clone()) else {
         return Answer::Unknown("the agent's modes could not be read".to_string());
     };
-    if !fits(&modes.current_mode_id.0) {
+    if !fits(&modes.current_mode_id.0, max) {
         return Answer::Unknown("the agent's modes could not be read".to_string());
     }
     modes.meta = None;
-    modes.available_modes.retain(|mode| fits(&mode.id.0));
-    modes.available_modes.truncate(MAX_MODES);
+    modes.available_modes.retain(|mode| fits(&mode.id.0, max));
+    modes.available_modes.truncate(limits.modes);
     for mode in &mut modes.available_modes {
-        cut_in_place(&mut mode.name);
-        cut_optional(&mut mode.description);
+        cut_in_place(&mut mode.name, max);
+        cut_optional(&mut mode.description, max);
         mode.meta = None;
     }
     Answer::Known(modes)
 }
 
-/// A `session/list` answer.
-pub(crate) fn sessions(answer: Value) -> Answer<Vec<SessionInfo>> {
-    let Ok(listed) = serde_json::from_value::<ListSessionsResponse>(answer) else {
-        return Answer::Unknown("the agent's sessions could not be read".to_string());
-    };
-    Answer::Known(
+/// Adds one `session/list` page's sessions to `kept`, up to the sessions limit, and answers the next page's cursor:
+/// `Some(None)` when the agent gave none, or an empty one, and `None` when the page cannot be read.
+pub(crate) fn sessions_page(
+    answer: Value,
+    limits: &DescribeLimits,
+    kept: &mut Vec<SessionInfo>,
+) -> Option<Option<String>> {
+    let listed = serde_json::from_value::<ListSessionsResponse>(answer).ok()?;
+    let max = limits.text;
+    let room = limits.sessions.saturating_sub(kept.len());
+    kept.extend(
         listed
             .sessions
             .into_iter()
-            .filter(|session| fits(&session.session_id.0) && fits(&session.cwd.to_string_lossy()))
-            .take(MAX_SESSIONS)
+            .filter(|session| {
+                fits(&session.session_id.0, max) && fits(&session.cwd.to_string_lossy(), max)
+            })
+            .take(room)
             .map(|mut session| {
                 session.additional_directories.clear();
-                cut_optional(&mut session.title);
-                cut_optional(&mut session.updated_at);
+                cut_optional(&mut session.title, max);
+                cut_optional(&mut session.updated_at, max);
                 session.meta = None;
                 session
-            })
-            .collect(),
-    )
+            }),
+    );
+    Some(listed.next_cursor.filter(|cursor| !cursor.is_empty()))
 }

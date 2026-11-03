@@ -133,6 +133,36 @@ bool asDescribed(Object? got, Object? want) {
   return jsonEncode(canon(got)) == jsonEncode(canon(want));
 }
 
+/// [limits] as `vectors/describe.json` writes them.
+Map<String, int> limitsJson(AcpDescribeLimits limits) => {
+  'options': limits.options,
+  'values': limits.values,
+  'modes': limits.modes,
+  'sessions': limits.sessions,
+  'text': limits.text,
+  'pages': limits.pages,
+};
+
+/// The default limits, with those [set] names replaced, as `vectors/describe.json` writes them.
+AcpDescribeLimits limitsOf(Object? set) {
+  final named = set is Map ? set : const {};
+  final all = {...limitsJson(const AcpDescribeLimits())};
+  for (final MapEntry(:key, :value) in named.entries) {
+    if (!all.containsKey(key)) {
+      throw ArgumentError.value(key, 'set', 'no such limit');
+    }
+    all[key as String] = value as int;
+  }
+  return AcpDescribeLimits(
+    options: all['options']!,
+    values: all['values']!,
+    modes: all['modes']!,
+    sessions: all['sessions']!,
+    text: all['text']!,
+    pages: all['pages']!,
+  );
+}
+
 void main() {
   final vectors =
       jsonDecode(File('../../../vectors/conversations.json').readAsStringSync())
@@ -518,6 +548,7 @@ void main() {
           incoming: agent.toClient.stream,
           send: (line) async => agent.fromClient.add(line),
           maxProtocolVersion: vector['version'] as int,
+          describeLimits: limitsOf(vector['limits']),
         );
         final script = agent.play(vector['steps'] as List<dynamic>);
         await acp.initialize();
@@ -546,8 +577,11 @@ void main() {
       });
     }
 
-    test('a description is bounded as the vectors say', () async {
-      final limits = described['limits'] as Map<String, dynamic>;
+    /// Describes an agent whose every list is one past [limits], which the client [open] gives must keep.
+    Future<void> boundedBy(
+      Map<String, dynamic> limits,
+      AcpClient Function(Agent) open,
+    ) async {
       final text = limits['text'] as int;
       String long(int bytes) => 'é' * (bytes ~/ 2) + (bytes.isOdd ? 'x' : '');
       final options = [
@@ -571,11 +605,7 @@ void main() {
           {'id': 'o$at', 'name': 'o', 'type': 'boolean', 'currentValue': true},
       ];
       final agent = Agent();
-      final acp = AcpClient(
-        incoming: agent.toClient.stream,
-        send: (line) async => agent.fromClient.add(line),
-        maxProtocolVersion: 1,
-      );
+      final acp = open(agent);
       final script = agent.play([
         {
           'expect': {'method': 'initialize'},
@@ -630,6 +660,79 @@ void main() {
       final sessions = (description.sessions as AcpKnown).value as List;
       expect(sessions, hasLength(limits['sessions']));
       await acp.close();
+    }
+
+    test('a description is bounded as the vectors say', () async {
+      final limits = described['limits'] as Map<String, dynamic>;
+      await boundedBy(limits, (agent) {
+        final acp = AcpClient(
+          incoming: agent.toClient.stream,
+          send: (line) async => agent.fromClient.add(line),
+          maxProtocolVersion: 1,
+        );
+        expect(limitsJson(acp.describeLimits), limits);
+        return acp;
+      });
+    });
+
+    test('a description is bounded by the limits set', () async {
+      final limits = <String, dynamic>{
+        'options': 2,
+        'values': 3,
+        'modes': 2,
+        'sessions': 3,
+        'text': 16,
+      };
+      await boundedBy(
+        limits,
+        (agent) => AcpClient(
+          incoming: agent.toClient.stream,
+          send: (line) async => agent.fromClient.add(line),
+          maxProtocolVersion: 1,
+          describeLimits: limitsOf(limits),
+        ),
+      );
+    });
+
+    test('sessions are asked for ten pages at most by default', () async {
+      final agent = Agent();
+      final acp = AcpClient(
+        incoming: agent.toClient.stream,
+        send: (line) async => agent.fromClient.add(line),
+        maxProtocolVersion: 1,
+      );
+      final script = agent.play([
+        {
+          'expect': {'method': 'initialize'},
+          'reply': {
+            'protocolVersion': 1,
+            'agentCapabilities': {
+              'sessionCapabilities': {'list': <String, Object?>{}},
+            },
+          },
+        },
+        for (var page = 0; page < 10; page++)
+          {
+            'expect': {'method': 'session/list'},
+            'reply': {
+              'sessions': [
+                {'sessionId': 's$page', 'cwd': '/w'},
+              ],
+              'nextCursor': 'more',
+            },
+          },
+      ]);
+      await acp.initialize();
+      final description = await acp.describe();
+      await script.timeout(const Duration(seconds: 10));
+      await acp.close();
+      unawaited(agent.fromClient.close());
+      expect(
+        await agent._inbox.moveNext(),
+        isFalse,
+        reason: 'the client asked past the page limit',
+      );
+      expect((description.sessions as AcpKnown).value as List, hasLength(10));
     });
 
     test('describe before initialize is refused', () async {

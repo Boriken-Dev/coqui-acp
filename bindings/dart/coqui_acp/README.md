@@ -28,12 +28,32 @@ agent offers the question and could not tell, or `AcpNotSupported()` when it doe
   `_coqui_acp/session_options` request, sent only when the agent's capabilities advertise `dev.boriken.coqui.acp/session_options` in
   `_meta` (`acpSessionOptionsMethod`, `acpSessionOptionsCapability`).
 - `modes`: ACP's v1 `SessionModeState`, from the same request. v2 has no modes, so it is not supported there.
-- `sessions`: `session/list`'s first page, as `AcpSessionInfo`, when v1's `sessionCapabilities.list` is set; in v2 always asked,
-  and a method-not-found answer is not supported.
+- `sessions`: `session/list`, as `AcpSessionInfo`, when v1's `sessionCapabilities.list` is set; in v2 always asked, and a
+  method-not-found answer is not supported. Pages are followed by their `nextCursor` until one gives none or an empty one, the
+  sessions limit is reached, or the page limit is. A first page that fails decides the answer; a later one ends the list with the
+  pages before it. A page limit of 0 asks nothing, and the answer is `AcpUnknown`.
 
 A failed or late answer is `AcpUnknown`. What the agent says is untrusted and only read: items that are not ACP's shape are skipped,
-`_meta` is dropped, and at most 64 options, 1024 values per option, 64 modes and 500 sessions are kept; an identifier longer than
-4096 UTF-8 bytes drops its item, and other text is cut there. The Rust client keeps the same, as `vectors/describe.json` says.
+`_meta` is dropped, and `describeLimits` on the client bounds the rest. Each field of `AcpDescribeLimits` takes any value from 0 up:
+
+| Field | Default | Bounds |
+| --- | --- | --- |
+| `options` | 64 | options kept |
+| `values` | 1024 | values kept per option, across its groups |
+| `modes` | 64 | modes kept |
+| `sessions` | 500 | sessions kept, across pages |
+| `text` | 4096 | UTF-8 bytes: a longer identifier drops its item, and other text is cut there |
+| `pages` | 10 | `session/list` requests: the 500 sessions at 50 a page, and at most ten request timeouts on an agent that always gives a cursor |
+
+```dart
+final acp = AcpClient(
+  incoming: lines,
+  send: (line) async => socket.add(line),
+  describeLimits: const AcpDescribeLimits(sessions: 50, pages: 2),
+);
+```
+
+The Rust client keeps the same, with the same defaults, as `vectors/describe.json` says.
 
 A person's choice is set once the session exists, with `setConfigOption` or `setMode`.
 

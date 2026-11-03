@@ -17,7 +17,7 @@ use agent_client_protocol::schema::v1::{
     AuthMethod, InitializeResponse, NewSessionResponse, PermissionOptionKind,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOptions,
+    SessionConfigSelectOptions, SessionInfo,
 };
 use agent_client_protocol::{
     Agent, Client as Role, ConnectTo, ConnectionTo, Error as RpcError, Responder, UntypedMessage,
@@ -30,7 +30,7 @@ use serde_json::{Map, Value, json};
 
 use crate::decider::{Decider, Decision, PermissionOption, PermissionRequest, RefuseAll};
 use crate::describe::{
-    self, Answer, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD,
+    self, Answer, DescribeLimits, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD,
 };
 use crate::error::Error;
 use crate::event::Event;
@@ -828,14 +828,51 @@ fn offered(value: Option<&Value>) -> bool {
 }
 
 /// What a describing call's failure says, as an [`Answer::Unknown`].
-fn not_told<T>(error: &Error) -> Answer<T> {
-    Answer::Unknown(describe::cut(&format!("the agent could not say: {error}")))
+fn not_told<T>(error: &Error, limits: &DescribeLimits) -> Answer<T> {
+    Answer::Unknown(describe::cut(
+        &format!("the agent could not say: {error}"),
+        limits.text,
+    ))
+}
+
+/// `session/list`, page by page from the cursor each page gives, until one gives none, the sessions limit is reached
+/// or the page limit is. The first page decides the answer; a later one that fails ends the list there.
+async fn listing(
+    cx: &ConnectionTo<Agent>,
+    limits: &DescribeLimits,
+    limit: Option<Duration>,
+) -> Answer<Vec<SessionInfo>> {
+    if limits.pages == 0 {
+        return Answer::Unknown("the sessions were not asked: the page limit is 0".to_owned());
+    }
+    let mut kept = Vec::new();
+    let mut cursor: Option<String> = None;
+    for page in 0..limits.pages {
+        let params = cursor
+            .take()
+            .map_or_else(|| json!({}), |cursor| json!({"cursor": cursor}));
+        let read = match call(cx, "session/list", params, limit).await {
+            Ok(answer) => describe::sessions_page(answer, limits, &mut kept),
+            Err(error) if page == 0 => return not_told(&error, limits),
+            Err(_) => break,
+        };
+        match read {
+            Some(Some(next)) if kept.len() < limits.sessions => cursor = Some(next),
+            Some(_) => break,
+            None if page == 0 => {
+                return Answer::Unknown("the agent's sessions could not be read".to_owned());
+            }
+            None => break,
+        }
+    }
+    Answer::Known(kept)
 }
 
 /// Asks what `init` says the agent offers, and nothing it does not: no session is opened.
 async fn describing(
     cx: &ConnectionTo<Agent>,
     init: &Value,
+    limits: &DescribeLimits,
     limit: Option<Duration>,
 ) -> Description {
     let capabilities = &init["agentCapabilities"];
@@ -844,8 +881,11 @@ async fn describing(
         .and_then(|meta| meta.get(SESSION_OPTIONS_CAPABILITY));
     let (options, modes) = if offered(extension) {
         match call(cx, SESSION_OPTIONS_METHOD, json!({}), limit).await {
-            Ok(answer) => (describe::options(&answer), describe::modes(&answer)),
-            Err(error) => (not_told(&error), not_told(&error)),
+            Ok(answer) => (
+                describe::options(&answer, limits),
+                describe::modes(&answer, limits),
+            ),
+            Err(error) => (not_told(&error, limits), not_told(&error, limits)),
         }
     } else {
         (Answer::NotSupported, Answer::NotSupported)
@@ -855,10 +895,7 @@ async fn describing(
         .and_then(|session| session.get("list"))
         .is_some_and(Value::is_object);
     let sessions = if listed {
-        match call(cx, "session/list", json!({}), limit).await {
-            Ok(answer) => describe::sessions(answer),
-            Err(error) => not_told(&error),
-        }
+        listing(cx, limits, limit).await
     } else {
         Answer::NotSupported
     };
@@ -1303,6 +1340,7 @@ pub struct Exchange {
     authenticate: Option<Authenticate>,
     initialize_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
+    describe_limits: DescribeLimits,
 }
 
 impl Default for Exchange {
@@ -1320,6 +1358,7 @@ impl Exchange {
             authenticate: None,
             initialize_timeout: Some(Duration::from_secs(20)),
             request_timeout: Some(Duration::from_secs(30)),
+            describe_limits: DescribeLimits::new(),
         }
     }
 
@@ -1345,6 +1384,13 @@ impl Exchange {
     /// How long each call may take; `None` waits without limit. Default 30 s.
     pub const fn request_timeout(mut self, limit: Option<Duration>) -> Self {
         self.request_timeout = limit;
+        self
+    }
+
+    /// What [`Exchange::describe`] keeps of the agent's answer, and how many pages of sessions it asks for. Default
+    /// [`DescribeLimits::new`].
+    pub const fn describe_limits(mut self, limits: DescribeLimits) -> Self {
+        self.describe_limits = limits;
         self
     }
 
@@ -1419,7 +1465,8 @@ impl Exchange {
     /// session can start with and its modes, by [`SESSION_OPTIONS_METHOD`] when `initialize` advertises
     /// [`SESSION_OPTIONS_CAPABILITY`] in `agentCapabilities._meta`, and its sessions, by `session/list` when it
     /// advertises `sessionCapabilities.list`. What it does not advertise is [`Answer::NotSupported`], and nothing is
-    /// sent for it; a call that fails or times out is [`Answer::Unknown`].
+    /// sent for it; a call that fails or times out is [`Answer::Unknown`]. What it keeps, and how many pages of
+    /// sessions it asks for, is [`Exchange::describe_limits`].
     ///
     /// # Errors
     ///
@@ -1434,7 +1481,12 @@ impl Exchange {
                     transport,
                     async move |cx| {
                         Ok(match self.begin(&cx).await {
-                            Ok(init) => Ok(describing(&cx, &init, request_timeout).await),
+                            Ok(init) => {
+                                Ok(
+                                    describing(&cx, &init, &self.describe_limits, request_timeout)
+                                        .await,
+                                )
+                            }
                             Err(error) => Err(error),
                         })
                     },

@@ -61,7 +61,7 @@ session.close();
 | `Event`, `Error` | what happened, and why it could not |
 | `Decider`, `Decision`, `PermissionRequest` | answer an agent asking leave |
 | `Exchange` | calls that are not a session |
-| `Description`, `Answer` | what an agent offers before any session: `Exchange::describe` |
+| `Description`, `Answer`, `DescribeLimits` | what an agent offers before any session: `Exchange::describe`, and what it keeps |
 | `lines` | a transport over a process's pipes |
 | `sdk` | the protocol's own crate, for its transports |
 

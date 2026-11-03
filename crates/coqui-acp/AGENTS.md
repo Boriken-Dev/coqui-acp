@@ -92,6 +92,7 @@ pub fn client_info(self, name: impl Into<String>, version: impl Into<String>) ->
 pub fn authenticate(self, authenticate: Authenticate) -> Self
 pub const fn initialize_timeout(self, limit: Option<Duration>) -> Self
 pub const fn request_timeout(self, limit: Option<Duration>) -> Self
+pub const fn describe_limits(self, limits: DescribeLimits) -> Self
 pub fn run(
     self,
     transport: impl ConnectTo<sdk::Client> + 'static,
@@ -101,7 +102,7 @@ pub struct Authenticate { pub method: String, pub meta: Map<String, Value> }
 pub struct RpcFailure { pub code: i32, pub message: String }
 ```
 
-Initializes, authenticates when asked, and makes each call in turn: for questions that are no session. Each call has its own result; `code` is `-1` when no answer came in time. Defaults: calls itself `coqui-acp` at this crate's version, nothing to authenticate, 20 s `initialize`, 30 s each call; `None` waits without limit.
+Initializes, authenticates when asked, and makes each call in turn: for questions that are no session. Each call has its own result; `code` is `-1` when no answer came in time. Defaults: calls itself `coqui-acp` at this crate's version, nothing to authenticate, 20 s `initialize`, 30 s each call, `DescribeLimits::new()`; `None` waits without limit. `describe_limits` matters only to `describe`.
 
 ## Describing an agent (crate root)
 
@@ -116,6 +117,11 @@ pub struct Description {
 }
 pub enum Answer<T> { Known(T), Unknown(String), NotSupported }   // Clone, Debug, PartialEq, Eq
 
+#[non_exhaustive]                                               // Clone, Copy, Debug, Default, PartialEq, Eq
+pub struct DescribeLimits { pub options: usize, pub values: usize, pub modes: usize, pub sessions: usize, pub text: usize, pub pages: usize }
+pub const fn DescribeLimits::new() -> DescribeLimits            // 64, 1024, 64, 500, 4096, 10
+pub const fn options(self, options: usize) -> Self              // and values, modes, sessions, text, pages: one setter per field
+
 pub const SESSION_OPTIONS_CAPABILITY: &str = "dev.boriken.coqui.acp/session_options";
 pub const SESSION_OPTIONS_METHOD: &str = "_coqui_acp/session_options";
 ```
@@ -123,10 +129,10 @@ pub const SESSION_OPTIONS_METHOD: &str = "_coqui_acp/session_options";
 What an agent offers before any session, on a connection of its own that opens none: initialize, authenticate as `Exchange` does, then ask only what `initialize` advertised.
 
 - `options` and `modes`: `SESSION_OPTIONS_METHOD` with `{}`, sent only when `agentCapabilities._meta[SESSION_OPTIONS_CAPABILITY]` is `true` or an object; otherwise both are `NotSupported`. The answer is `{"configOptions": [SessionConfigOption], "modes": SessionModeState, "unknown": {"configOptions" | "modes": reason}}`: a part present is `Known`, at the values a session starts with; one left out is `Unknown` with the agent's reason, or `the agent did not say what <part> it has`. A model is the option of category `model`, an effort the one of category `thought_level`.
-- `sessions`: `session/list` with `{}`, its first page, sent only when `agentCapabilities.sessionCapabilities.list` is an object; otherwise `NotSupported`.
+- `sessions`: `session/list`, sent only when `agentCapabilities.sessionCapabilities.list` is an object; otherwise `NotSupported`. The first request is `{}`, and each next one `{"cursor": <the last page's nextCursor>}`, until a page gives no cursor or an empty one, `sessions` are kept, or `pages` requests were made. A first page that fails or cannot be read decides the answer; a later one ends the list with the pages before it. `pages` 0 asks nothing: `Unknown("the sessions were not asked: the page limit is 0")`.
 - A call that fails or gets no answer in time is `Unknown("the agent could not say: <why>")`. `Err` only when the connection, `initialize` or `authenticate` failed.
 
-The answer is the agent's, untrusted, and only read: each item is read as the ACP type or skipped, and `_meta` and `additionalDirectories` are dropped. At most 64 options, 1024 values per option across its groups, 64 modes and 500 sessions are kept. An item whose identifier (option, value, group, mode or session id, current value, `cwd`) is empty or longer than 4096 UTF-8 bytes is dropped, a category that long is left out, and other text (names, descriptions, titles, reasons) is cut there on a character boundary. The Dart client keeps the same; `vectors/describe.json` holds both to it.
+The answer is the agent's, untrusted, and only read: each item is read as the ACP type or skipped, and `_meta` and `additionalDirectories` are dropped. `DescribeLimits` bounds what is kept, and any value is taken, 0 included: at most `options` options (default 64), `values` values per option across its groups (1024), `modes` modes (64) and `sessions` sessions across pages (500). An item whose identifier (option, value, group, mode or session id, current value, `cwd`) is empty or longer than `text` UTF-8 bytes (4096) is dropped, a category that long is left out, and other text (names, descriptions, titles, reasons) is cut there on a character boundary. `pages` defaults to 10: the 500 sessions at 50 a page, and at most ten request timeouts spent on an agent that always gives a cursor. The Dart client keeps the same, with the same defaults; `vectors/describe.json` holds both to it.
 
 ## Lines (`coqui_acp::lines`)
 

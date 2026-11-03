@@ -13,8 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coqui_acp::{
-    Answer, Authenticate, Client, Decider, Decision, Error, Event, Exchange, PermissionRequest,
-    Session,
+    Answer, Authenticate, Client, Decider, Decision, DescribeLimits, Error, Event, Exchange,
+    PermissionRequest, Session,
 };
 use futures::SinkExt;
 use futures::channel::mpsc as async_mpsc;
@@ -976,6 +976,24 @@ fn describe_vectors() -> Value {
     serde_json::from_str(include_str!("../../../vectors/describe.json")).unwrap()
 }
 
+/// The default limits, with those `set` names replaced, as `vectors/describe.json` writes them.
+fn limits_of(set: &Value) -> DescribeLimits {
+    let mut limits = DescribeLimits::new();
+    for (name, value) in set.as_object().into_iter().flatten() {
+        let value = usize::try_from(value.as_u64().unwrap()).unwrap();
+        limits = match name.as_str() {
+            "options" => limits.options(value),
+            "values" => limits.values(value),
+            "modes" => limits.modes(value),
+            "sessions" => limits.sessions(value),
+            "text" => limits.text(value),
+            "pages" => limits.pages(value),
+            other => panic!("no limit {other}"),
+        };
+    }
+    limits
+}
+
 #[test]
 fn every_v1_description_holds() {
     let vectors = describe_vectors();
@@ -990,6 +1008,7 @@ fn every_v1_description_holds() {
         let steps = case["steps"].as_array().unwrap().clone();
         let actor = thread::spawn(move || play_only(agent, steps));
         let description = Exchange::new()
+            .describe_limits(limits_of(&case["limits"]))
             .describe(transport)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         let want = &case["describe"];
@@ -1023,7 +1042,7 @@ fn every_v1_description_holds() {
             .join()
             .unwrap_or_else(|_| panic!("{name}: the script failed"));
     }
-    assert!(ran >= 7, "only {ran} v1 descriptions ran");
+    assert!(ran >= 12, "only {ran} v1 descriptions ran");
 }
 
 /// Text of `bytes` UTF-8 bytes, of two-byte characters, so a cut lands inside one.
@@ -1034,6 +1053,41 @@ fn long(bytes: usize) -> String {
 #[test]
 fn a_description_is_bounded_as_the_vectors_say() {
     let limits = describe_vectors()["limits"].clone();
+    assert_eq!(DescribeLimits::new(), limits_of(&limits));
+    bounded_by(&limits, Exchange::new());
+}
+
+#[test]
+fn a_description_is_bounded_by_the_limits_set() {
+    let limits = json!({"options": 2, "values": 3, "modes": 2, "sessions": 3, "text": 16});
+    bounded_by(&limits, Exchange::new().describe_limits(limits_of(&limits)));
+}
+
+#[test]
+fn sessions_are_asked_for_ten_pages_at_most_by_default() {
+    let (transport, seen) = agent_with(move |method, _, _| match method {
+        "initialize" => Some(
+            json!({"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": {}}}}),
+        ),
+        "session/list" => {
+            Some(json!({"sessions": [{"sessionId": "s", "cwd": "/w"}], "nextCursor": "more"}))
+        }
+        other => plain(other),
+    });
+    let description = Exchange::new().describe(transport).unwrap();
+    let Answer::Known(sessions) = &description.sessions else {
+        panic!("{:?}", description.sessions);
+    };
+    assert_eq!(sessions.len(), 10);
+    let asked = seen
+        .try_iter()
+        .filter(|message| message["method"] == "session/list")
+        .count();
+    assert_eq!(asked, 10);
+}
+
+/// Describes an agent whose every list is one past `limits`, which `exchange` must keep.
+fn bounded_by(limits: &Value, exchange: Exchange) {
     let limit = |name: &str| usize::try_from(limits[name].as_u64().unwrap()).unwrap();
     let text = limit("text");
     let value = |id: String| json!({"value": id, "name": "v"});
@@ -1059,7 +1113,7 @@ fn a_description_is_bounded_as_the_vectors_say() {
         "session/list" => Some(json!({"sessions": sessions})),
         other => plain(other),
     });
-    let description = Exchange::new().describe(transport).unwrap();
+    let description = exchange.describe(transport).unwrap();
     let Answer::Known(options) = &description.options else {
         panic!("{:?}", description.options);
     };

@@ -41,6 +41,45 @@ final class AcpNotSupported<T> extends AcpAnswer<T> {
   String toString() => 'AcpNotSupported()';
 }
 
+/// What [AcpClient.describe] keeps of an agent's answer, and how many pages of `session/list` it asks for. Every limit takes any
+/// value from 0 up.
+final class AcpDescribeLimits {
+  const AcpDescribeLimits({
+    this.options = 64,
+    this.values = 1024,
+    this.modes = 64,
+    this.sessions = 500,
+    this.text = 4096,
+    this.pages = 10,
+  }) : assert(
+         options >= 0 &&
+             values >= 0 &&
+             modes >= 0 &&
+             sessions >= 0 &&
+             text >= 0 &&
+             pages >= 0,
+       );
+
+  /// The most options kept.
+  final int options;
+
+  /// The most values one option keeps, across its groups.
+  final int values;
+
+  /// The most modes kept.
+  final int modes;
+
+  /// The most sessions kept, across pages.
+  final int sessions;
+
+  /// The longest text kept, in UTF-8 bytes: a longer identifier drops its item, other text is cut here.
+  final int text;
+
+  /// The most `session/list` requests, each following the last page's `nextCursor`; 0 asks none. Default 10: the 500 sessions
+  /// at 50 a page, and at most ten request timeouts spent on an agent that always gives a cursor.
+  final int pages;
+}
+
 /// What an agent offers before any session; see [AcpClient.describe]. All of it is the agent's to say, read as ACP's own JSON
 /// and bounded.
 final class AcpDescription {
@@ -57,7 +96,7 @@ final class AcpDescription {
   /// The modes a session can start in, ACP's v1 `SessionModeState`. v2 has none, so it is not supported there.
   final AcpAnswer<Map<String, Object?>> modes;
 
-  /// The sessions the agent lists: `session/list`'s first page.
+  /// The sessions the agent lists, from `session/list`'s pages in order.
   final AcpAnswer<List<AcpSessionInfo>> sessions;
 }
 
@@ -306,6 +345,7 @@ final class AcpClient {
     this.clientName = 'coqui-acp',
     this.clientVersion = '0.0.0',
     this.requestTimeout = const Duration(seconds: 20),
+    this.describeLimits = const AcpDescribeLimits(),
   }) : _send = send,
        _closeSource = closeSource,
        _decider = decider {
@@ -324,6 +364,9 @@ final class AcpClient {
   final String clientName;
   final String clientVersion;
   final Duration requestTimeout;
+
+  /// What [describe] keeps of the agent's answer, and how many pages of sessions it asks for.
+  final AcpDescribeLimits describeLimits;
   final Future<void> Function(String) _send;
   final Future<void> Function()? _closeSource;
   final AcpDecider? _decider;
@@ -798,9 +841,11 @@ final class AcpClient {
   /// by [acpSessionOptionsMethod] when the agent's capabilities advertise [acpSessionOptionsCapability] in `_meta`, and its
   /// sessions, by `session/list` when v1's `sessionCapabilities.list` is set, or always in v2, where a method-not-found answer
   /// means not supported. What it does not advertise is [AcpNotSupported] and nothing is sent for it; a call that fails or
-  /// times out is [AcpUnknown]. Call it after [initialize].
+  /// times out is [AcpUnknown]. What it keeps, and how many pages of sessions it asks for, is [describeLimits]. Call it after
+  /// [initialize].
   Future<AcpDescription> describe() async {
     _ready();
+    final limits = describeLimits;
     final v2 = _protocolVersion == 2;
     final meta = _capabilities['_meta'];
     final extension = meta is Map ? meta[acpSessionOptionsCapability] : null;
@@ -809,10 +854,13 @@ final class AcpClient {
     if (extension != null && extension != false) {
       try {
         final answer = await _request(acpSessionOptionsMethod, {});
-        options = _describedOptions(answer, v2 ? 'configId' : 'id');
-        if (!v2) modes = _describedModes(answer);
+        options = _describedOptions(answer, v2 ? 'configId' : 'id', limits);
+        if (!v2) modes = _describedModes(answer, limits);
       } on AcpFailure catch (error) {
-        final why = _cut('the agent could not say: ${error.message}');
+        final why = _cut(
+          'the agent could not say: ${error.message}',
+          limits.text,
+        );
         options = AcpUnknown(why);
         if (!v2) modes = AcpUnknown(why);
       }
@@ -820,15 +868,47 @@ final class AcpClient {
     final session = _capabilities['sessionCapabilities'];
     AcpAnswer<List<AcpSessionInfo>> sessions = const AcpNotSupported();
     if (v2 || (session is Map && session['list'] is Map)) {
-      try {
-        sessions = _describedSessions(await _request('session/list', {}));
-      } on AcpFailure catch (error) {
-        sessions = v2 && error.code == -32601
-            ? const AcpNotSupported()
-            : AcpUnknown(_cut('the agent could not say: ${error.message}'));
-      }
+      sessions = await _listing(v2, limits);
     }
     return AcpDescription(options: options, modes: modes, sessions: sessions);
+  }
+
+  /// `session/list`, page by page from the cursor each page gives, until one gives none, the sessions limit is reached or the page
+  /// limit is. The first page decides the answer; a later one that fails ends the list there.
+  Future<AcpAnswer<List<AcpSessionInfo>>> _listing(
+    bool v2,
+    AcpDescribeLimits limits,
+  ) async {
+    if (limits.pages == 0) {
+      return const AcpUnknown(
+        'the sessions were not asked: the page limit is 0',
+      );
+    }
+    final kept = <AcpSessionInfo>[];
+    String? cursor;
+    for (var page = 0; page < limits.pages; page++) {
+      final Map<String, dynamic> answer;
+      try {
+        answer = await _request('session/list', {'cursor': ?cursor});
+      } on AcpFailure catch (error) {
+        if (page > 0) break;
+        return v2 && error.code == -32601
+            ? const AcpNotSupported()
+            : AcpUnknown(
+                _cut('the agent could not say: ${error.message}', limits.text),
+              );
+      }
+      if (!_keepSessions(answer, limits, kept)) {
+        if (page > 0) break;
+        return const AcpUnknown("the agent's sessions could not be read");
+      }
+      final next = answer['nextCursor'];
+      if (next is! String || next.isEmpty || kept.length >= limits.sessions) {
+        break;
+      }
+      cursor = next;
+    }
+    return AcpKnown(kept);
   }
 
   Future<String> createSession({required String cwd}) =>
@@ -994,60 +1074,55 @@ final class AcpClient {
 }
 
 // What [AcpClient.describe] keeps of an agent's answer, which is untrusted: what cannot be read as ACP's own types is skipped,
-// lists are cut at their limit, an item whose identifier is longer than [_maxText] is dropped, since it could not be named back,
-// and other text is cut there. The Rust client keeps the same, as vectors/describe.json says.
-const _maxOptions = 64;
-const _maxValues = 1024;
-const _maxModes = 64;
-const _maxSessions = 500;
+// lists are cut at their limit, an item whose identifier is longer than the text limit is dropped, since it could not be named
+// back, and other text is cut there, all by [AcpDescribeLimits]. The Rust client keeps the same, as vectors/describe.json says.
 
-/// The longest text kept, in UTF-8 bytes.
-const _maxText = 4096;
-
-String _cut(String text) {
+/// [text] cut to [max] UTF-8 bytes, on a character's boundary.
+String _cut(String text, int max) {
   final bytes = utf8.encode(text);
-  if (bytes.length <= _maxText) return text;
-  var end = _maxText;
+  if (bytes.length <= max) return text;
+  var end = max;
   while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
     end--;
   }
   return utf8.decode(bytes.sublist(0, end));
 }
 
-bool _fits(Object? id) =>
-    id is String && id.isNotEmpty && utf8.encode(id).length <= _maxText;
+bool _fits(Object? id, int max) =>
+    id is String && id.isNotEmpty && utf8.encode(id).length <= max;
 
 /// [into]'s [key] set from [from]'s, cut, when it is text; anything else is left out.
-void _text(Map<String, Object?> into, Map from, String key) {
+void _text(Map<String, Object?> into, Map from, String key, int max) {
   final value = from[key];
-  if (value is String) into[key] = _cut(value);
+  if (value is String) into[key] = _cut(value, max);
 }
 
 /// A select's value, or null when it is not one.
-Map<String, Object?>? _value(Object? item) {
+Map<String, Object?>? _value(Object? item, int max) {
   if (item is! Map || item['value'] is! String || item['name'] is! String) {
     return null;
   }
-  return {'value': item['value'], 'name': _cut(item['name'] as String)}
+  return {'value': item['value'], 'name': _cut(item['name'] as String, max)}
     ..addAll({
       if (item['description'] is String)
-        'description': _cut(item['description'] as String),
+        'description': _cut(item['description'] as String, max),
     });
 }
 
 /// A select's options, flat or grouped, bounded; null when they are neither.
-List<Map<String, Object?>>? _values(Object? options) {
+List<Map<String, Object?>>? _values(Object? options, AcpDescribeLimits limits) {
   if (options is! List) return null;
-  final flat = options.map(_value).toList();
+  final max = limits.text;
+  final flat = options.map((item) => _value(item, max)).toList();
   if (!flat.contains(null)) {
     return flat
         .cast<Map<String, Object?>>()
-        .where((value) => _fits(value['value']))
-        .take(_maxValues)
+        .where((value) => _fits(value['value'], max))
+        .take(limits.values)
         .toList();
   }
   final groups = <Map<String, Object?>>[];
-  var left = _maxValues;
+  var left = limits.values;
   for (final group in options) {
     if (group is! Map ||
         group['group'] is! String ||
@@ -1055,20 +1130,20 @@ List<Map<String, Object?>>? _values(Object? options) {
         !group.containsKey('options')) {
       return null;
     }
-    if (!_fits(group['group'])) continue;
+    if (!_fits(group['group'], max)) continue;
     final inside = group['options'] is List
         ? group['options'] as List
         : const [];
     final values = inside
-        .map(_value)
+        .map((item) => _value(item, max))
         .whereType<Map<String, Object?>>()
-        .where((value) => _fits(value['value']))
+        .where((value) => _fits(value['value'], max))
         .take(left)
         .toList();
     left -= values.length;
     groups.add({
       'group': group['group'],
-      'name': _cut(group['name'] as String),
+      'name': _cut(group['name'] as String, max),
       'options': values,
     });
   }
@@ -1076,23 +1151,28 @@ List<Map<String, Object?>>? _values(Object? options) {
 }
 
 /// One option, read as ACP's `SessionConfigOption` with its identifier under [idKey], or null.
-Map<String, Object?>? _option(Object? item, String idKey) {
-  if (item is! Map || !_fits(item[idKey]) || item['name'] is! String) {
+Map<String, Object?>? _option(
+  Object? item,
+  String idKey,
+  AcpDescribeLimits limits,
+) {
+  final max = limits.text;
+  if (item is! Map || !_fits(item[idKey], max) || item['name'] is! String) {
     return null;
   }
   final option = <String, Object?>{
     idKey: item[idKey],
-    'name': _cut(item['name'] as String),
+    'name': _cut(item['name'] as String, max),
   };
-  _text(option, item, 'description');
+  _text(option, item, 'description', max);
   final category = item['category'];
-  if (category is String && utf8.encode(category).length <= _maxText) {
+  if (category is String && utf8.encode(category).length <= max) {
     option['category'] = category;
   }
   switch (item['type']) {
     case 'select':
-      final values = _values(item['options']);
-      if (!_fits(item['currentValue']) || values == null) return null;
+      final values = _values(item['options'], limits);
+      if (!_fits(item['currentValue'], max) || values == null) return null;
       option['type'] = 'select';
       option['currentValue'] = item['currentValue'];
       option['options'] = values;
@@ -1106,33 +1186,41 @@ Map<String, Object?>? _option(Object? item, String idKey) {
   return option;
 }
 
-String _unsaid(Map<String, dynamic> answer, String part) {
+String _unsaid(Map<String, dynamic> answer, String part, int max) {
   final unknown = answer['unknown'];
   final reason = unknown is Map ? unknown[part] : null;
   return reason is String
-      ? _cut(reason)
+      ? _cut(reason, max)
       : 'the agent did not say what $part it has';
 }
 
 AcpAnswer<List<Map<String, Object?>>> _describedOptions(
   Map<String, dynamic> answer,
   String idKey,
+  AcpDescribeLimits limits,
 ) {
   final listed = answer['configOptions'];
-  if (listed is! List) return AcpUnknown(_unsaid(answer, 'configOptions'));
+  if (listed is! List) {
+    return AcpUnknown(_unsaid(answer, 'configOptions', limits.text));
+  }
   return AcpKnown(
     listed
-        .map((item) => _option(item, idKey))
+        .map((item) => _option(item, idKey, limits))
         .whereType<Map<String, Object?>>()
-        .take(_maxOptions)
+        .take(limits.options)
         .toList(),
   );
 }
 
-AcpAnswer<Map<String, Object?>> _describedModes(Map<String, dynamic> answer) {
+AcpAnswer<Map<String, Object?>> _describedModes(
+  Map<String, dynamic> answer,
+  AcpDescribeLimits limits,
+) {
+  final max = limits.text;
   final modes = answer['modes'];
-  if (modes is! Map) return AcpUnknown(_unsaid(answer, 'modes'));
-  if (!_fits(modes['currentModeId']) || !modes.containsKey('availableModes')) {
+  if (modes is! Map) return AcpUnknown(_unsaid(answer, 'modes', max));
+  if (!_fits(modes['currentModeId'], max) ||
+      !modes.containsKey('availableModes')) {
     return const AcpUnknown("the agent's modes could not be read");
   }
   final listed = modes['availableModes'] is List
@@ -1140,17 +1228,17 @@ AcpAnswer<Map<String, Object?>> _describedModes(Map<String, dynamic> answer) {
       : const [];
   final available = <Map<String, Object?>>[];
   for (final mode in listed) {
+    if (available.length >= limits.modes) break;
     if (mode is! Map || mode['id'] is! String || mode['name'] is! String) {
       continue;
     }
-    if (!_fits(mode['id'])) continue;
+    if (!_fits(mode['id'], max)) continue;
     final kept = <String, Object?>{
       'id': mode['id'],
-      'name': _cut(mode['name'] as String),
+      'name': _cut(mode['name'] as String, max),
     };
-    _text(kept, mode, 'description');
+    _text(kept, mode, 'description', max);
     available.add(kept);
-    if (available.length == _maxModes) break;
   }
   return AcpKnown({
     'currentModeId': modes['currentModeId'],
@@ -1158,23 +1246,27 @@ AcpAnswer<Map<String, Object?>> _describedModes(Map<String, dynamic> answer) {
   });
 }
 
-AcpAnswer<List<AcpSessionInfo>> _describedSessions(
+/// Adds one `session/list` page's sessions to [kept], up to the sessions limit, and answers whether the page could be read.
+bool _keepSessions(
   Map<String, dynamic> answer,
+  AcpDescribeLimits limits,
+  List<AcpSessionInfo> kept,
 ) {
-  if (!answer.containsKey('sessions')) {
-    return const AcpUnknown("the agent's sessions could not be read");
-  }
+  if (!answer.containsKey('sessions')) return false;
+  final max = limits.text;
   final listed = answer['sessions'] is List
       ? answer['sessions'] as List
       : const [];
-  final sessions = <AcpSessionInfo>[];
   for (final item in listed) {
-    if (item is! Map || !_fits(item['sessionId']) || !_fits(item['cwd'])) {
+    if (kept.length >= limits.sessions) break;
+    if (item is! Map ||
+        !_fits(item['sessionId'], max) ||
+        !_fits(item['cwd'], max)) {
       continue;
     }
     String? text(String key) =>
-        item[key] is String ? _cut(item[key] as String) : null;
-    sessions.add(
+        item[key] is String ? _cut(item[key] as String, max) : null;
+    kept.add(
       AcpSessionInfo(
         id: item['sessionId'] as String,
         cwd: item['cwd'] as String,
@@ -1182,7 +1274,6 @@ AcpAnswer<List<AcpSessionInfo>> _describedSessions(
         updatedAt: text('updatedAt'),
       ),
     );
-    if (sessions.length == _maxSessions) break;
   }
-  return AcpKnown(sessions);
+  return true;
 }

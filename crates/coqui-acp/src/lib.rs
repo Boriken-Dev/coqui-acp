@@ -15,7 +15,9 @@ mod state;
 pub use agent_client_protocol as sdk;
 pub use client::{Authenticate, Builder, Client, Exchange, RpcFailure, Session};
 pub use decider::{Decider, Decision, PermissionOption, PermissionRequest, RefuseAll};
-pub use describe::{Answer, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD};
+pub use describe::{
+    Answer, DescribeLimits, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD,
+};
 pub use error::Error;
 pub use event::Event;
 
