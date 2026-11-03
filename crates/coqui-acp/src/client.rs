@@ -35,7 +35,7 @@ use crate::describe::{
 };
 use crate::error::Error;
 use crate::event::Event;
-use crate::state::{Turn, kind_name};
+use crate::state::{TEXT_FLUSH, Turn, kind_name};
 
 const PROTOCOL_VERSION: u64 = 1;
 /// What `coqui-acp-bridge serve --linger` sends when it dropped output while nobody was connected.
@@ -90,6 +90,7 @@ pub struct Builder {
     request_timeout: Option<Duration>,
     close_grace: Option<Duration>,
     max_pending_events: usize,
+    text_flush: usize,
     decider: Arc<dyn Decider>,
     close_on_drop: bool,
     fail_on_disconnect: bool,
@@ -134,6 +135,7 @@ impl Client {
             request_timeout: Some(Duration::from_secs(30)),
             close_grace: Some(Duration::from_secs(2)),
             max_pending_events: 100_000,
+            text_flush: TEXT_FLUSH,
             decider: Arc::new(RefuseAll),
             close_on_drop: true,
             fail_on_disconnect: true,
@@ -270,6 +272,13 @@ impl Builder {
         self
     }
 
+    /// The UTF-8 bytes of agent text gathered before they are delivered as an [`Event::Text`], even mid-message, so a
+    /// long message cannot grow without limit. Default 64 KiB.
+    pub const fn text_flush(mut self, bytes: usize) -> Self {
+        self.text_flush = bytes;
+        self
+    }
+
     /// Answers permission requests. Default: [`RefuseAll`].
     pub fn decider(mut self, decider: Arc<dyn Decider>) -> Self {
         self.decider = decider;
@@ -321,7 +330,7 @@ impl Builder {
             extension: AtomicBool::new(false),
             suppress: AtomicBool::new(false),
             session: Mutex::new(None),
-            turn: Mutex::new(Turn::new(self.refuse_kinds.clone())),
+            turn: Mutex::new(Turn::new(self.refuse_kinds.clone()).text_flush(self.text_flush)),
         });
         let close_grace = self.close_grace;
         let worker = shared.clone();

@@ -75,7 +75,59 @@ final Map<String, Object?> v2 = {
   },
 };
 
+/// The texts of a turn whose agent sends [chunks], read through a client [open] gives.
+Future<List<String>> textsOf(
+  List<String> chunks,
+  AcpClient Function(Agent) open,
+) async {
+  final agent = Agent(v1);
+  agent.answers['session/new'] = (_) => {'sessionId': 's1'};
+  agent.answers['session/prompt'] = (_) {
+    for (final chunk in chunks) {
+      agent.toClient.add(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'method': 'session/update',
+          'params': {
+            'sessionId': 's1',
+            'update': {
+              'sessionUpdate': 'agent_message_chunk',
+              'content': {'type': 'text', 'text': chunk},
+            },
+          },
+        }),
+      );
+    }
+    return {'stopReason': 'end_turn'};
+  };
+  final client = open(agent);
+  final texts = <String>[];
+  client.events.listen((event) {
+    if (event is AcpText) texts.add(event.text);
+  });
+  await client.initialize();
+  final session = await client.openSession(cwd: '/w');
+  await client.prompt(session.id, 'go');
+  await client.close();
+  return texts;
+}
+
 void main() {
+  test('text is flushed at the size set, in UTF-8 bytes', () async {
+    AcpClient over(Agent agent, {int? flush}) => flush == null
+        ? AcpClient(incoming: agent.toClient.stream, send: agent.send)
+        : AcpClient(
+            incoming: agent.toClient.stream,
+            send: agent.send,
+            textFlush: flush,
+          );
+    expect(await textsOf(['é', 'ab'], over), ['éab']);
+    expect(await textsOf(['é', 'ab'], (agent) => over(agent, flush: 2)), [
+      'é',
+      'ab',
+    ]);
+  });
+
   test(
     'what an agent takes is read from each version, and nothing said is no',
     () async {

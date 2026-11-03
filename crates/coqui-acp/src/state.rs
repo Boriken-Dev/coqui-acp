@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::event::Event;
 
-/// Text is flushed at this size even mid-message, so it cannot grow without limit.
-const TEXT_LIMIT: usize = 64 * 1024;
+/// The default size, in UTF-8 bytes, at which text is flushed even mid-message, so it cannot grow without limit.
+pub(crate) const TEXT_FLUSH: usize = 64 * 1024;
 
 /// What one input produced.
 #[derive(Debug, Default)]
@@ -27,6 +27,8 @@ pub(crate) struct Step {
 pub(crate) struct Turn {
     refused: Vec<String>,
     text: String,
+    /// The size, in UTF-8 bytes, at which `text` is flushed.
+    text_flush: usize,
     kinds: BTreeMap<String, String>,
     finished: bool,
     /// Turns begun and not yet ended.
@@ -53,8 +55,15 @@ impl Turn {
     pub(crate) fn new(refused: Vec<String>) -> Self {
         Self {
             refused,
+            text_flush: TEXT_FLUSH,
             ..Self::default()
         }
+    }
+
+    /// Flushes text at `bytes` rather than [`TEXT_FLUSH`].
+    pub(crate) const fn text_flush(mut self, bytes: usize) -> Self {
+        self.text_flush = bytes;
+        self
     }
 
     pub(crate) fn begin(&mut self) {
@@ -123,7 +132,7 @@ impl Turn {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(text) = chunk.content {
                     self.text.push_str(&text.text);
-                    if self.text.len() >= TEXT_LIMIT {
+                    if self.text.len() >= self.text_flush {
                         step.events.extend(self.flush());
                     }
                 }
@@ -227,7 +236,7 @@ mod tests {
     #[test]
     fn text_is_flushed_at_its_limit() {
         let mut turn = Turn::new(vec![]);
-        let big = "x".repeat(TEXT_LIMIT);
+        let big = "x".repeat(TEXT_FLUSH);
         assert_eq!(turn.update(&chunk(&big)).events.len(), 1);
     }
 

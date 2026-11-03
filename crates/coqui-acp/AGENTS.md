@@ -35,6 +35,7 @@ pub const fn initialize_timeout(self, limit: Option<Duration>) -> Self
 pub const fn request_timeout(self, limit: Option<Duration>) -> Self
 pub const fn close_grace(self, limit: Option<Duration>) -> Self
 pub const fn max_pending_events(self, events: usize) -> Self
+pub const fn text_flush(self, bytes: usize) -> Self
 pub fn decider(self, decider: Arc<dyn Decider>) -> Self
 pub const fn close_on_drop(self, close: bool) -> Self
 pub const fn fail_on_disconnect(self, fail: bool) -> Self
@@ -48,7 +49,7 @@ pub fn connect(self, transport: impl ConnectTo<sdk::Client> + 'static) -> Result
 - `turn_end_by(key)`: when the agent advertises `key` in `agentCapabilities._meta`, its notifications carry turn endings: standard updates and config options are left alone, and a failed prompt is `Event::PromptFailed`.
 - `ends_turn(ends)`: while `turn_end_by` is active, says which of the extension's notifications end a turn, given their method and parameters, so a connection that ends after one is no `Event::Failed`. It runs on the connection's thread, in order and ahead of the connection's end, so it cannot race a reader; it must not block. Turns are counted: no turn runs only once as many endings have arrived as turns were sent, so a turn sent before the last one's ending arrived still counts as running. `PromptFailed` is still delivered after such a turn: the caller judges it.
 - `disconnect_detail(detail)`: appended to the `Event::Failed` of a lost connection as `<why>: <detail>`. Asked at most once, on the connection's thread, only when that event is due; it may wait a while for the agent's exit.
-- Defaults: 20 s `initialize`, 30 s other requests, 2 s close grace; `None` waits without limit. 100000 pending events, then the session ends with `Event::Failed`. `RefuseAll`. `close_on_drop` and `fail_on_disconnect` on.
+- Defaults: 20 s `initialize`, 30 s other requests, 2 s close grace; `None` waits without limit. 100000 pending events, then the session ends with `Event::Failed`. Agent text is delivered as an `Event::Text` once 64 KiB of UTF-8 has gathered (`text_flush`; any value is taken). `RefuseAll`. `close_on_drop` and `fail_on_disconnect` on.
 - `connect` initializes, authenticates, opens the session and sends the first prompt. It errors on the agent's refusal or silence, a protocol version other than 1, or a capability the session needs, such as HTTP MCP servers.
 
 ## `Session` (crate root)
@@ -72,7 +73,7 @@ Only this session's traffic counts: a `session/update` whose `sessionId` is not 
 
 ## `Event` (crate root)
 
-`#[non_exhaustive]`. `Text(String)`: agent text, gathered until the next tool or the end of the turn, and flushed at 64 KiB. `Tool { id, title, name: Option<String>, kind }`. `Cost { amount: f64, currency }`. `Notice(String)`. `Permission { tool, allowed: bool, reason: Option<String> }`. `Completed { stop }`: `end_turn`, `max_tokens` or `max_turn_requests`. `Failed(String)`: the turn failed, the agent refused, or the connection was lost. `Cancelled`: the agent ended the turn as cancelled, whether asked to or by itself. `Blocked(String)`: a permission request could not be answered, so the agent was told it was cancelled; the turn goes on until the agent ends it. `PromptFailed(String)`: see `turn_end_by`. `OutputLost { lines: u64, bytes: u64 }`: `_dev.boriken.coqui.acp/output_lost`, which a bridge sends first on a connection when it dropped the kept agent's output while nobody was connected; what the session shows has a gap there, so reconcile by `load` or tell the person. `Extension { method, params: Value }`: any other notification whose method starts with `_`, untouched.
+`#[non_exhaustive]`. `Text(String)`: agent text, gathered until the next tool or the end of the turn, and flushed at `Builder::text_flush` UTF-8 bytes (64 KiB). `Tool { id, title, name: Option<String>, kind }`. `Cost { amount: f64, currency }`. `Notice(String)`. `Permission { tool, allowed: bool, reason: Option<String> }`. `Completed { stop }`: `end_turn`, `max_tokens` or `max_turn_requests`. `Failed(String)`: the turn failed, the agent refused, or the connection was lost. `Cancelled`: the agent ended the turn as cancelled, whether asked to or by itself. `Blocked(String)`: a permission request could not be answered, so the agent was told it was cancelled; the turn goes on until the agent ends it. `PromptFailed(String)`: see `turn_end_by`. `OutputLost { lines: u64, bytes: u64 }`: `_dev.boriken.coqui.acp/output_lost`, which a bridge sends first on a connection when it dropped the kept agent's output while nobody was connected; what the session shows has a gap there, so reconcile by `load` or tell the person. `Extension { method, params: Value }`: any other notification whose method starts with `_`, untouched.
 
 ## `Decider` (crate root)
 

@@ -861,6 +861,42 @@ fn a_reader_past_the_event_limit_ends_the_session() {
     assert!(failed);
 }
 
+/// The texts of a turn whose agent sends `chunks`, read through a session `builder` makes.
+fn texts_of(chunks: &'static [&'static str], builder: coqui_acp::Builder) -> Vec<String> {
+    let (transport, _) = agent_with(move |method, _, agent| match method {
+        "session/prompt" => {
+            for chunk in chunks {
+                agent.notify(
+                    "session/update",
+                    &json!({"sessionId": "s1", "update": {
+                        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}}}),
+                );
+            }
+            Some(json!({"stopReason": "end_turn"}))
+        }
+        other => plain(other),
+    });
+    let session = builder.prompt("go").connect(transport).unwrap();
+    let mut texts = Vec::new();
+    while let Some(event) = session.next_event(Duration::from_secs(5)) {
+        match event {
+            Event::Text(text) => texts.push(text),
+            Event::Completed { .. } => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    texts
+}
+
+#[test]
+fn text_is_flushed_at_the_size_set_in_utf8_bytes() {
+    assert_eq!(texts_of(&["é", "ab"], Client::builder("/w")), ["éab"]);
+    assert_eq!(
+        texts_of(&["é", "ab"], Client::builder("/w").text_flush(2)),
+        ["é", "ab"]
+    );
+}
+
 #[test]
 fn exchange_makes_each_call_and_reports_each_failure() {
     let (transport, _) = agent_with(|method, _, _| match method {

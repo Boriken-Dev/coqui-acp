@@ -361,7 +361,9 @@ final class AcpClient {
     this.clientVersion = '0.0.0',
     this.requestTimeout = const Duration(seconds: 20),
     this.describeLimits = const AcpDescribeLimits(),
-  }) : _send = send,
+    this.textFlush = 64 * 1024,
+  }) : assert(textFlush >= 0),
+       _send = send,
        _closeSource = closeSource,
        _decider = decider {
     _subscription = incoming.listen(
@@ -382,6 +384,10 @@ final class AcpClient {
 
   /// What [describe] keeps of the agent's answer, and how many pages of sessions it asks for.
   final AcpDescribeLimits describeLimits;
+
+  /// The UTF-8 bytes of agent text gathered before they are delivered as an [AcpText], even mid-message, so a long message cannot
+  /// grow without limit. Default 64 KiB.
+  final int textFlush;
   final Future<void> Function(String) _send;
   final Future<void> Function()? _closeSource;
   final AcpDecider? _decider;
@@ -389,6 +395,9 @@ final class AcpClient {
   final _events = StreamController<AcpEvent>.broadcast(sync: true);
   final _updates = StreamController<AcpSessionUpdate>.broadcast(sync: true);
   final StringBuffer _text = StringBuffer();
+
+  /// [_text]'s size in UTF-8 bytes, which [textFlush] counts.
+  int _textBytes = 0;
   late final StreamSubscription<String> _subscription;
 
   /// Ids start at a random point, so those of a new connection to an agent that outlived the last one are not the last one's, whose
@@ -432,6 +441,7 @@ final class AcpClient {
     if (_text.isEmpty) return;
     _emit(AcpText(_text.toString()));
     _text.clear();
+    _textBytes = 0;
   }
 
   void _reply(Object? id, Map<String, Object?> body) {
@@ -513,7 +523,10 @@ final class AcpClient {
         if (content is Map &&
             content['type'] == 'text' &&
             content['text'] is String) {
-          _text.write(content['text'] as String);
+          final text = content['text'] as String;
+          _text.write(text);
+          _textBytes += utf8.encode(text).length;
+          if (_textBytes >= textFlush) _flush();
         }
       case 'tool_call':
         final id = raw['toolCallId'];
