@@ -63,7 +63,9 @@ A person's choice is set once the session exists, with `setConfigOption` or `set
 
 `openSession`, `prompt`, `cancel`, `closeSession`; `listSessions` and `reopenSession` for earlier sessions; `events` for one
 normalized stream of `AcpEvent`s and `updates` for every `session/update` as it arrives. Agent text in `events` gathers until
-something follows it, or until `textFlush` UTF-8 bytes have gathered (default 64 KiB, as in the Rust client; any value from 0 up). `takesImages` and `takesFiles` say what an
+something follows it, or until `textFlush` UTF-8 bytes have gathered (default 64 KiB, as in the Rust client; any value from 0 up).
+`listSessions` keeps at most `maxListedSessions` sessions of a page (default 500; any value from 0 up), and a page cut short by it
+says `the sessions limit was reached` in `AcpSessionPage.incomplete`. `takesImages` and `takesFiles` say what an
 `AcpAttachment` may be. `package:coqui_acp/page.dart` is a person's agents from a page, over `document.acp`.
 
 ## Development

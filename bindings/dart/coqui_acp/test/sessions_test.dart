@@ -192,13 +192,49 @@ void main() {
     expect(page.sessions[1].id, 'b');
     expect(page.sessions[1].cwd, isNull);
     expect(page.sessions[1].title, isNull);
-    expect(
-      page.sessions.length,
-      lessThanOrEqualTo(AcpClient.maxListedSessions),
-    );
+    expect(page.sessions, hasLength(500));
+    expect(page.sessions.last.id, 'n497');
+    expect(page.incomplete, 'the sessions limit was reached');
     expect(page.nextCursor, 'more');
     expect(agent.last('session/list')['params'], {'cwd': '/w'});
   });
+
+  test(
+    'the sessions kept of a page are a setting, and a page cut short says so',
+    () async {
+      Future<AcpSessionPage> listed(int count, int? keep) async {
+        final agent = Agent(v2);
+        agent.answers['session/list'] = (_) => {
+          'sessions': [
+            {'title': 'no id'},
+            for (var i = 0; i < count; i++) {'sessionId': 'n$i'},
+          ],
+        };
+        final client = keep == null
+            ? AcpClient(incoming: agent.toClient.stream, send: agent.send)
+            : AcpClient(
+                incoming: agent.toClient.stream,
+                send: agent.send,
+                maxListedSessions: keep,
+              );
+        expect(client.maxListedSessions, keep ?? 500);
+        await client.initialize();
+        return client.listSessions();
+      }
+
+      final cut = await listed(3, 2);
+      expect(cut.sessions.map((session) => session.id), ['n0', 'n1']);
+      expect(cut.incomplete, 'the sessions limit was reached');
+      final whole = await listed(2, 2);
+      expect(whole.sessions, hasLength(2));
+      expect(whole.incomplete, isNull);
+      final none = await listed(1, 0);
+      expect(none.sessions, isEmpty);
+      expect(none.incomplete, 'the sessions limit was reached');
+      expect((await listed(0, 0)).incomplete, isNull);
+      expect((await listed(500, null)).incomplete, isNull);
+    },
+  );
 
   test(
     'a v1 agent that does not offer a list is not asked, and a v2 one that fails says so',

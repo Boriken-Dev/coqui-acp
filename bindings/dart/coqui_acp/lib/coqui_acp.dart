@@ -287,9 +287,12 @@ final class AcpSessionInfo {
 
 /// One page of what an agent lists. Ask again with [nextCursor] for more.
 final class AcpSessionPage {
-  const AcpSessionPage(this.sessions, this.nextCursor);
+  const AcpSessionPage(this.sessions, this.nextCursor, {this.incomplete});
   final List<AcpSessionInfo> sessions;
   final String? nextCursor;
+
+  /// `the sessions limit was reached` when [AcpClient.maxListedSessions] left out a session the page held, otherwise null.
+  final String? incomplete;
 }
 
 /// Something sent with a prompt. An agent says what it takes: see [AcpClient.takesImages] and [AcpClient.takesFiles].
@@ -362,7 +365,9 @@ final class AcpClient {
     this.requestTimeout = const Duration(seconds: 20),
     this.describeLimits = const AcpDescribeLimits(),
     this.textFlush = 64 * 1024,
+    this.maxListedSessions = 500,
   }) : assert(textFlush >= 0),
+       assert(maxListedSessions >= 0),
        _send = send,
        _closeSource = closeSource,
        _decider = decider {
@@ -373,9 +378,6 @@ final class AcpClient {
           _fail(const AcpFailure('Connection lost; pending outcomes unknown')),
     );
   }
-
-  /// As many of a page of sessions as this takes: an agent chooses how many it sends.
-  static const maxListedSessions = 500;
 
   final int maxProtocolVersion;
   final String clientName;
@@ -388,6 +390,10 @@ final class AcpClient {
   /// The UTF-8 bytes of agent text gathered before they are delivered as an [AcpText], even mid-message, so a long message cannot
   /// grow without limit. Default 64 KiB.
   final int textFlush;
+
+  /// The sessions [listSessions] keeps of one page, whose size the agent chooses; a page cut short says so in
+  /// [AcpSessionPage.incomplete]. Default 500.
+  final int maxListedSessions;
   final Future<void> Function(String) _send;
   final Future<void> Function()? _closeSource;
   final AcpDecider? _decider;
@@ -779,12 +785,17 @@ final class AcpClient {
     });
     final listed = reply['sessions'];
     final sessions = <AcpSessionInfo>[];
+    String? incomplete;
     if (listed is List) {
-      for (final item in listed.take(maxListedSessions)) {
+      for (final item in listed) {
         if (item is! Map ||
             item['sessionId'] is! String ||
             (item['sessionId'] as String).isEmpty) {
           continue;
+        }
+        if (sessions.length >= maxListedSessions) {
+          incomplete = 'the sessions limit was reached';
+          break;
         }
         String? text(String key) =>
             item[key] is String ? item[key] as String : null;
@@ -802,6 +813,7 @@ final class AcpClient {
     return AcpSessionPage(
       sessions,
       next is String && next.isNotEmpty ? next : null,
+      incomplete: incomplete,
     );
   }
 
