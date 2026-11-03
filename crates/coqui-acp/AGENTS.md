@@ -103,6 +103,31 @@ pub struct RpcFailure { pub code: i32, pub message: String }
 
 Initializes, authenticates when asked, and makes each call in turn: for questions that are no session. Each call has its own result; `code` is `-1` when no answer came in time. Defaults: calls itself `coqui-acp` at this crate's version, nothing to authenticate, 20 s `initialize`, 30 s each call; `None` waits without limit.
 
+## Describing an agent (crate root)
+
+```rust
+pub fn Exchange::describe(self, transport: impl ConnectTo<sdk::Client> + 'static) -> Result<Description, Error>
+
+#[non_exhaustive]
+pub struct Description {
+    pub options: Answer<Vec<sdk::schema::v1::SessionConfigOption>>,
+    pub modes: Answer<sdk::schema::v1::SessionModeState>,
+    pub sessions: Answer<Vec<sdk::schema::v1::SessionInfo>>,
+}
+pub enum Answer<T> { Known(T), Unknown(String), NotSupported }   // Clone, Debug, PartialEq, Eq
+
+pub const SESSION_OPTIONS_CAPABILITY: &str = "dev.boriken.coqui.acp/session_options";
+pub const SESSION_OPTIONS_METHOD: &str = "_coqui_acp/session_options";
+```
+
+What an agent offers before any session, on a connection of its own that opens none: initialize, authenticate as `Exchange` does, then ask only what `initialize` advertised.
+
+- `options` and `modes`: `SESSION_OPTIONS_METHOD` with `{}`, sent only when `agentCapabilities._meta[SESSION_OPTIONS_CAPABILITY]` is `true` or an object; otherwise both are `NotSupported`. The answer is `{"configOptions": [SessionConfigOption], "modes": SessionModeState, "unknown": {"configOptions" | "modes": reason}}`: a part present is `Known`, at the values a session starts with; one left out is `Unknown` with the agent's reason, or `the agent did not say what <part> it has`. A model is the option of category `model`, an effort the one of category `thought_level`.
+- `sessions`: `session/list` with `{}`, its first page, sent only when `agentCapabilities.sessionCapabilities.list` is an object; otherwise `NotSupported`.
+- A call that fails or gets no answer in time is `Unknown("the agent could not say: <why>")`. `Err` only when the connection, `initialize` or `authenticate` failed.
+
+The answer is the agent's, untrusted, and only read: each item is read as the ACP type or skipped, and `_meta` and `additionalDirectories` are dropped. At most 64 options, 1024 values per option across its groups, 64 modes and 500 sessions are kept. An item whose identifier (option, value, group, mode or session id, current value, `cwd`) is empty or longer than 4096 UTF-8 bytes is dropped, a category that long is left out, and other text (names, descriptions, titles, reasons) is cut there on a character boundary. The Dart client keeps the same; `vectors/describe.json` holds both to it.
+
 ## Lines (`coqui_acp::lines`)
 
 ```rust

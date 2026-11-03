@@ -29,6 +29,9 @@ use futures::future::{self, Either};
 use serde_json::{Map, Value, json};
 
 use crate::decider::{Decider, Decision, PermissionOption, PermissionRequest, RefuseAll};
+use crate::describe::{
+    self, Answer, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD,
+};
 use crate::error::Error;
 use crate::event::Event;
 use crate::state::{Turn, kind_name};
@@ -819,6 +822,53 @@ fn needs_http_mcp(servers: &[Value]) -> bool {
     })
 }
 
+/// Whether a capability is set: `true` or an object. Absent, `null` and `false` are not.
+fn offered(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| !matches!(value, Value::Null | Value::Bool(false)))
+}
+
+/// What a describing call's failure says, as an [`Answer::Unknown`].
+fn not_told<T>(error: &Error) -> Answer<T> {
+    Answer::Unknown(describe::cut(&format!("the agent could not say: {error}")))
+}
+
+/// Asks what `init` says the agent offers, and nothing it does not: no session is opened.
+async fn describing(
+    cx: &ConnectionTo<Agent>,
+    init: &Value,
+    limit: Option<Duration>,
+) -> Description {
+    let capabilities = &init["agentCapabilities"];
+    let extension = capabilities
+        .get("_meta")
+        .and_then(|meta| meta.get(SESSION_OPTIONS_CAPABILITY));
+    let (options, modes) = if offered(extension) {
+        match call(cx, SESSION_OPTIONS_METHOD, json!({}), limit).await {
+            Ok(answer) => (describe::options(&answer), describe::modes(&answer)),
+            Err(error) => (not_told(&error), not_told(&error)),
+        }
+    } else {
+        (Answer::NotSupported, Answer::NotSupported)
+    };
+    let listed = capabilities
+        .get("sessionCapabilities")
+        .and_then(|session| session.get("list"))
+        .is_some_and(Value::is_object);
+    let sessions = if listed {
+        match call(cx, "session/list", json!({}), limit).await {
+            Ok(answer) => describe::sessions(answer),
+            Err(error) => not_told(&error),
+        }
+    } else {
+        Answer::NotSupported
+    };
+    Description {
+        options,
+        modes,
+        sessions,
+    }
+}
+
 fn initialize_params(name: &str, version: &str) -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
@@ -1313,34 +1363,16 @@ impl Exchange {
         transport: impl ConnectTo<Role> + 'static,
         calls: Vec<(String, Value)>,
     ) -> Result<Vec<Result<Value, RpcFailure>>, Error> {
-        let Self {
-            client_name,
-            client_version,
-            authenticate,
-            initialize_timeout,
-            request_timeout,
-        } = self;
+        let request_timeout = self.request_timeout;
         let worker = std::thread::Builder::new()
             .name("coqui-acp-exchange".to_owned())
             .spawn(move || {
-                let name = client_name.clone();
+                let name = self.client_name.clone();
                 futures::executor::block_on(Role.builder().name(name).connect_with(
                     transport,
                     async move |cx| {
-                        let params = initialize_params(&client_name, &client_version);
-                        if let Err(error) =
-                            call(&cx, "initialize", params, initialize_timeout).await
-                        {
+                        if let Err(error) = self.begin(&cx).await {
                             return Ok(Err(error));
-                        }
-                        if let Some(auth) = authenticate {
-                            let mut params = json!({"methodId": auth.method});
-                            params["_meta"] = Value::Object(auth.meta);
-                            if let Err(error) =
-                                call(&cx, "authenticate", params, request_timeout).await
-                            {
-                                return Ok(Err(error));
-                            }
                         }
                         let mut results = Vec::new();
                         for (method, params) in calls {
@@ -1362,6 +1394,49 @@ impl Exchange {
                             );
                         }
                         Ok(Ok(results))
+                    },
+                ))
+            })
+            .map_err(|_| Error::Thread)?;
+        worker.join().map_err(|_| Error::Closed)?.map_err(|error| {
+            Error::Refused(format!("the ACP connection failed: {}", error_text(&error)))
+        })?
+    }
+
+    /// Initializes and authenticates when asked: `initialize`'s answer.
+    async fn begin(&self, cx: &ConnectionTo<Agent>) -> Result<Value, Error> {
+        let params = initialize_params(&self.client_name, &self.client_version);
+        let init = call(cx, "initialize", params, self.initialize_timeout).await?;
+        if let Some(auth) = &self.authenticate {
+            let mut params = json!({"methodId": auth.method});
+            params["_meta"] = Value::Object(auth.meta.clone());
+            call(cx, "authenticate", params, self.request_timeout).await?;
+        }
+        Ok(init)
+    }
+
+    /// What the agent offers before any session, asked over `transport` without opening one: the options a
+    /// session can start with and its modes, by [`SESSION_OPTIONS_METHOD`] when `initialize` advertises
+    /// [`SESSION_OPTIONS_CAPABILITY`] in `agentCapabilities._meta`, and its sessions, by `session/list` when it
+    /// advertises `sessionCapabilities.list`. What it does not advertise is [`Answer::NotSupported`], and nothing is
+    /// sent for it; a call that fails or times out is [`Answer::Unknown`].
+    ///
+    /// # Errors
+    ///
+    /// The connection, `initialize` or `authenticate` failed.
+    pub fn describe(self, transport: impl ConnectTo<Role> + 'static) -> Result<Description, Error> {
+        let request_timeout = self.request_timeout;
+        let worker = std::thread::Builder::new()
+            .name("coqui-acp-describe".to_owned())
+            .spawn(move || {
+                let name = self.client_name.clone();
+                futures::executor::block_on(Role.builder().name(name).connect_with(
+                    transport,
+                    async move |cx| {
+                        Ok(match self.begin(&cx).await {
+                            Ok(init) => Ok(describing(&cx, &init, request_timeout).await),
+                            Err(error) => Err(error),
+                        })
                     },
                 ))
             })

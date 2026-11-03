@@ -17,6 +17,7 @@ deciding, and line transports. It knows nothing of the application above it. Doc
 - `Decider`: answers permission requests, on a thread of its own. The default refuses everything.
 - Refused tool kinds: refused without asking, and a tool of such a kind that runs unasked ends the session.
 - Extensions: `_meta`, `_`-prefixed notifications both ways, and `turn_end_by` for an agent with its own turn events.
+- `Exchange::describe`: an agent's start options, modes and sessions before any session, each known, unknown with a reason, or not supported.
 - No async runtime required, and a finite default on every wait.
 
 ACP version 1. A v2 agent selects version 1 when asked for it.
@@ -60,6 +61,7 @@ session.close();
 | `Event`, `Error` | what happened, and why it could not |
 | `Decider`, `Decision`, `PermissionRequest` | answer an agent asking leave |
 | `Exchange` | calls that are not a session |
+| `Description`, `Answer` | what an agent offers before any session: `Exchange::describe` |
 | `lines` | a transport over a process's pipes |
 | `sdk` | the protocol's own crate, for its transports |
 

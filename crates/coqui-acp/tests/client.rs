@@ -13,7 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coqui_acp::{
-    Authenticate, Client, Decider, Decision, Error, Event, Exchange, PermissionRequest, Session,
+    Answer, Authenticate, Client, Decider, Decision, Error, Event, Exchange, PermissionRequest,
+    Session,
 };
 use futures::SinkExt;
 use futures::channel::mpsc as async_mpsc;
@@ -923,4 +924,165 @@ fn an_exchange_with_no_answer_in_time_says_so_for_that_call() {
         .run(transport, vec![("_slow".to_owned(), json!({}))])
         .unwrap();
     assert_eq!(results[0].as_ref().unwrap_err().code, -1);
+}
+
+/// An outcome as `vectors/describe.json` writes it.
+fn outcome<T>(answer: &Answer<T>, known: impl Fn(&T) -> Value) -> Value {
+    match answer {
+        Answer::Known(value) => json!({"known": known(value)}),
+        Answer::Unknown(reason) => json!({"unknown": reason}),
+        Answer::NotSupported => json!("not_supported"),
+    }
+}
+
+/// Whether `got` is the outcome `want` says: the same known value, a reason holding its text, or not supported.
+fn as_described(got: &Value, want: &Value) -> bool {
+    match (got.get("unknown"), want.get("unknown")) {
+        (Some(Value::String(reason)), Some(Value::String(text))) => reason.contains(text.as_str()),
+        _ => got == want,
+    }
+}
+
+/// Plays `steps` as the agent, and fails if the client sends anything after them.
+fn play_only(mut agent: Agent, steps: Vec<Value>) {
+    for step in &steps {
+        let expect = &step["expect"];
+        let message = agent
+            .read()
+            .expect("the client sends what the script expects");
+        assert_eq!(
+            message["method"], expect["method"],
+            "the message was {message}"
+        );
+        if let Some(params) = expect.get("params") {
+            assert!(
+                holds(&message["params"], params),
+                "params {} should hold {params}",
+                message["params"]
+            );
+        }
+        if let Some(reply) = step.get("reply") {
+            agent.reply(&message["id"], reply);
+        } else if let Some(error) = step.get("error") {
+            agent.fail(&message["id"], error);
+        }
+    }
+    if let Some(message) = agent.read() {
+        panic!("the client sent {message} after the script");
+    }
+}
+
+fn describe_vectors() -> Value {
+    serde_json::from_str(include_str!("../../../vectors/describe.json")).unwrap()
+}
+
+#[test]
+fn every_v1_description_holds() {
+    let vectors = describe_vectors();
+    let mut ran = 0;
+    for case in vectors["cases"].as_array().unwrap() {
+        if case["version"] != 1 {
+            continue;
+        }
+        ran += 1;
+        let name = case["name"].as_str().unwrap();
+        let (agent, transport) = Agent::pair();
+        let steps = case["steps"].as_array().unwrap().clone();
+        let actor = thread::spawn(move || play_only(agent, steps));
+        let description = Exchange::new()
+            .describe(transport)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let want = &case["describe"];
+        for (part, got) in [
+            (
+                "options",
+                outcome(&description.options, |value| {
+                    serde_json::to_value(value).unwrap()
+                }),
+            ),
+            (
+                "modes",
+                outcome(&description.modes, |value| {
+                    serde_json::to_value(value).unwrap()
+                }),
+            ),
+            (
+                "sessions",
+                outcome(&description.sessions, |value| {
+                    serde_json::to_value(value).unwrap()
+                }),
+            ),
+        ] {
+            assert!(
+                as_described(&got, &want[part]),
+                "{name}: {part} was {got}, wanted {}",
+                want[part]
+            );
+        }
+        actor
+            .join()
+            .unwrap_or_else(|_| panic!("{name}: the script failed"));
+    }
+    assert!(ran >= 7, "only {ran} v1 descriptions ran");
+}
+
+/// Text of `bytes` UTF-8 bytes, of two-byte characters, so a cut lands inside one.
+fn long(bytes: usize) -> String {
+    "é".repeat(bytes / 2) + if bytes % 2 == 1 { "x" } else { "" }
+}
+
+#[test]
+fn a_description_is_bounded_as_the_vectors_say() {
+    let limits = describe_vectors()["limits"].clone();
+    let limit = |name: &str| usize::try_from(limits[name].as_u64().unwrap()).unwrap();
+    let text = limit("text");
+    let value = |id: String| json!({"value": id, "name": "v"});
+    let mut options = vec![json!({
+        "id": "many", "name": long(text + 11), "type": "select", "currentValue": "v0",
+        "options": (0..=limit("values")).map(|at| value(format!("v{at}"))).collect::<Vec<_>>(),
+    })];
+    options.push(json!({"id": long(text + 1), "name": "too long to name", "type": "boolean", "currentValue": true}));
+    options.extend((0..limit("options")).map(
+        |at| json!({"id": format!("o{at}"), "name": "o", "type": "boolean", "currentValue": true}),
+    ));
+    let modes = (0..=limit("modes"))
+        .map(|at| json!({"id": format!("m{at}"), "name": "m"}))
+        .collect::<Vec<_>>();
+    let sessions = (0..=limit("sessions"))
+        .map(|at| json!({"sessionId": format!("s{at}"), "cwd": "/w"}))
+        .collect::<Vec<_>>();
+    let answer = json!({"configOptions": options, "modes": {"currentModeId": "m0", "availableModes": modes}});
+    let (transport, _) = agent_with(move |method, _, _| match method {
+        "initialize" => Some(json!({"protocolVersion": 1, "agentCapabilities": {
+            "sessionCapabilities": {"list": {}}, "_meta": {coqui_acp::SESSION_OPTIONS_CAPABILITY: true}}})),
+        "_coqui_acp/session_options" => Some(answer.clone()),
+        "session/list" => Some(json!({"sessions": sessions})),
+        other => plain(other),
+    });
+    let description = Exchange::new().describe(transport).unwrap();
+    let Answer::Known(options) = &description.options else {
+        panic!("{:?}", description.options);
+    };
+    assert_eq!(options.len(), limit("options"));
+    let first = serde_json::to_value(&options[0]).unwrap();
+    assert_eq!(first["options"].as_array().unwrap().len(), limit("values"));
+    let name = first["name"].as_str().unwrap();
+    assert!(
+        name.len() <= text && name.len() > text - 2,
+        "{}",
+        name.len()
+    );
+    assert_eq!(
+        options[1].id.0.as_ref(),
+        "o0",
+        "an id too long to name is dropped"
+    );
+    let Answer::Known(modes) = &description.modes else {
+        panic!("{:?}", description.modes);
+    };
+    assert_eq!(modes.available_modes.len(), limit("modes"));
+    let Answer::Known(sessions) = &description.sessions else {
+        panic!("{:?}", description.sessions);
+    };
+    assert_eq!(sessions.len(), limit("sessions"));
 }

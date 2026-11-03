@@ -1,0 +1,132 @@
+{
+  "about": "What an agent offers before any session, as both clients' describe calls must report it. `steps` use the grammar of conversations.json, and the client must send nothing after them: no session is opened, and nothing the agent did not advertise is asked. `describe` is each part's outcome: {\"known\": value} must equal what the client reports, as ACP's own JSON; {\"unknown\": text} is a reason that must contain the text; \"not_supported\" was not asked. `limits` are what both clients keep of an answer: options, values per option, modes and sessions, and text in UTF-8 bytes. An identifier longer than the text limit drops its item; other text is cut there.",
+  "limits": {"options": 64, "values": 1024, "modes": 64, "sessions": 500, "text": 4096},
+  "cases": [
+    {
+      "name": "a plain agent offers none of it and is asked nothing",
+      "version": 1,
+      "steps": [
+        {"expect": {"method": "initialize", "params": {"protocolVersion": 1}}, "reply": {"protocolVersion": 1, "agentCapabilities": {}}}
+      ],
+      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": "not_supported"}
+    },
+    {
+      "name": "an agent that advertises the extension and the list is asked both",
+      "version": 1,
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": {}}, "_meta": {"dev.boriken.coqui.acp/session_options": true}}}},
+        {"expect": {"method": "_coqui_acp/session_options", "params": {}}, "reply": {
+          "configOptions": [
+            {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "alpha", "options": [{"value": "alpha", "name": "Alpha"}, {"value": "beta", "name": "Beta", "description": "slower"}]},
+            {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "low", "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
+            {"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "ask", "options": [{"value": "ask", "name": "Ask"}, {"value": "code", "name": "Code"}]},
+            {"id": "region", "name": "Region", "description": "where it runs", "category": "model_config", "type": "select", "currentValue": "us", "options": [{"group": "americas", "name": "Americas", "options": [{"value": "us", "name": "US"}]}]},
+            {"id": "fast", "name": "Fast", "category": "_speed", "type": "boolean", "currentValue": false}
+          ],
+          "modes": {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}, {"id": "code", "name": "Code", "description": "writes files"}]}
+        }},
+        {"expect": {"method": "session/list", "params": {}}, "reply": {"sessions": [{"sessionId": "s0", "cwd": "/work", "title": "Earlier", "updatedAt": "2026-11-01T10:00:00Z"}]}}
+      ],
+      "describe": {
+        "options": {"known": [
+          {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "alpha", "options": [{"value": "alpha", "name": "Alpha"}, {"value": "beta", "name": "Beta", "description": "slower"}]},
+          {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "low", "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
+          {"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "ask", "options": [{"value": "ask", "name": "Ask"}, {"value": "code", "name": "Code"}]},
+          {"id": "region", "name": "Region", "description": "where it runs", "category": "model_config", "type": "select", "currentValue": "us", "options": [{"group": "americas", "name": "Americas", "options": [{"value": "us", "name": "US"}]}]},
+          {"id": "fast", "name": "Fast", "category": "_speed", "type": "boolean", "currentValue": false}
+        ]},
+        "modes": {"known": {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}, {"id": "code", "name": "Code", "description": "writes files"}]}},
+        "sessions": {"known": [{"sessionId": "s0", "cwd": "/work", "title": "Earlier", "updatedAt": "2026-11-01T10:00:00Z"}]}
+      }
+    },
+    {
+      "name": "an agent that cannot tell says why",
+      "version": 1,
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": {}}, "_meta": {"dev.boriken.coqui.acp/session_options": {}}}}},
+        {"expect": {"method": "_coqui_acp/session_options"}, "reply": {"unknown": {"configOptions": "the provider was not asked", "modes": "this harness has no modes it can name"}}},
+        {"expect": {"method": "session/list"}, "error": {"code": -32603, "message": "the session store is offline"}}
+      ],
+      "describe": {
+        "options": {"unknown": "the provider was not asked"},
+        "modes": {"unknown": "this harness has no modes it can name"},
+        "sessions": {"unknown": "the session store is offline"}
+      }
+    },
+    {
+      "name": "a failed answer is unknown, never a guess",
+      "version": 1,
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"_meta": {"dev.boriken.coqui.acp/session_options": true}}}},
+        {"expect": {"method": "_coqui_acp/session_options"}, "error": {"code": -32603, "message": "boom"}}
+      ],
+      "describe": {"options": {"unknown": "boom"}, "modes": {"unknown": "boom"}, "sessions": "not_supported"}
+    },
+    {
+      "name": "a part the agent leaves out is unknown",
+      "version": 1,
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"_meta": {"dev.boriken.coqui.acp/session_options": true}}}},
+        {"expect": {"method": "_coqui_acp/session_options"}, "reply": {"configOptions": []}}
+      ],
+      "describe": {"options": {"known": []}, "modes": {"unknown": "did not say"}, "sessions": "not_supported"}
+    },
+    {
+      "name": "a capability set false or null is not advertised",
+      "version": 1,
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": null}, "_meta": {"dev.boriken.coqui.acp/session_options": false}}}}
+      ],
+      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": "not_supported"}
+    },
+    {
+      "name": "what cannot be read is skipped, and _meta is not kept",
+      "version": 1,
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": {}}, "_meta": {"dev.boriken.coqui.acp/session_options": true}}}},
+        {"expect": {"method": "_coqui_acp/session_options"}, "reply": {
+          "configOptions": [
+            "not an option",
+            {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "alpha", "options": [{"value": "alpha", "name": "Alpha", "_meta": {"x": 1}}], "_meta": {"secret": "kept by nobody"}},
+            {"id": "nameless", "type": "select", "currentValue": "a", "options": [{"value": "a", "name": "A"}]},
+            {"id": "slider", "name": "Slider", "type": "slider", "currentValue": 3},
+            {"id": "half", "name": "Half", "type": "select", "currentValue": "a", "options": [{"value": "a"}]}
+          ],
+          "modes": {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask", "_meta": {"x": 1}}, {"name": "no id"}], "_meta": {"y": 2}}
+        }},
+        {"expect": {"method": "session/list"}, "reply": {"sessions": [{"sessionId": "s0", "cwd": "/work", "_meta": {"z": 3}}, {"sessionId": "s1"}, {"sessionId": "", "cwd": "/work"}]}}
+      ],
+      "describe": {
+        "options": {"known": [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "alpha", "options": [{"value": "alpha", "name": "Alpha"}]}]},
+        "modes": {"known": {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}]}},
+        "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}]}
+      }
+    },
+    {
+      "name": "a v2 agent's options are v2's, it has no modes, and its sessions are listed",
+      "version": 2,
+      "steps": [
+        {"expect": {"method": "initialize", "params": {"protocolVersion": 2}}, "reply": {"protocolVersion": 2, "info": {"name": "agent", "version": "1"}, "capabilities": {"session": {}, "_meta": {"dev.boriken.coqui.acp/session_options": true}}}},
+        {"expect": {"method": "_coqui_acp/session_options"}, "reply": {
+          "configOptions": [{"configId": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "alpha", "options": [{"value": "alpha", "name": "Alpha"}]}, {"id": "old", "name": "A v1 option", "type": "boolean", "currentValue": true}],
+          "modes": {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}]}
+        }},
+        {"expect": {"method": "session/list"}, "reply": {"sessions": [{"sessionId": "s0", "cwd": "/work"}]}}
+      ],
+      "describe": {
+        "options": {"known": [{"configId": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "alpha", "options": [{"value": "alpha", "name": "Alpha"}]}]},
+        "modes": "not_supported",
+        "sessions": {"known": [{"sessionId": "s0", "cwd": "/work"}]}
+      }
+    },
+    {
+      "name": "a v2 agent that does not list is not supported there",
+      "version": 2,
+      "steps": [
+        {"expect": {"method": "initialize"}, "reply": {"protocolVersion": 2, "info": {"name": "agent", "version": "1"}, "capabilities": {"session": {}}}},
+        {"expect": {"method": "session/list"}, "error": {"code": -32601, "message": "Method not found"}}
+      ],
+      "describe": {"options": "not_supported", "modes": "not_supported", "sessions": "not_supported"}
+    }
+  ]
+}
