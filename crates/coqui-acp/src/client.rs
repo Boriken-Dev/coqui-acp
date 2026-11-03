@@ -1204,66 +1204,131 @@ pub struct RpcFailure {
     pub message: String,
 }
 
-/// Connects, initializes, authenticates when asked, and makes each of `calls` in turn: for a question or an order
-/// that is no session. The outer error is why the exchange could not take place; each call has its own.
-///
-/// # Errors
-///
-/// The connection, `initialize` or `authenticate` failed.
-///
-/// # Panics
-///
-/// Never by design; a panic on its worker thread is reported as [`Error::Closed`].
-pub fn exchange(
-    transport: impl ConnectTo<Role> + 'static,
+/// Calls that are no session, for a question or an order: connects, initializes, authenticates when asked, and makes each in
+/// turn. See [`Exchange::run`].
+#[derive(Clone, Debug)]
+#[must_use]
+pub struct Exchange {
+    client_name: String,
+    client_version: String,
     authenticate: Option<Authenticate>,
     initialize_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
-    calls: Vec<(String, Value)>,
-) -> Result<Vec<Result<Value, RpcFailure>>, Error> {
-    let worker = std::thread::Builder::new()
-        .name("coqui-acp-exchange".to_owned())
-        .spawn(move || {
-            futures::executor::block_on(Role.builder().name("coqui-acp").connect_with(
-                transport,
-                async move |cx| {
-                    let params = initialize_params("coqui-acp", env!("CARGO_PKG_VERSION"));
-                    if let Err(error) = call(&cx, "initialize", params, initialize_timeout).await {
-                        return Ok(Err(error));
-                    }
-                    if let Some(auth) = authenticate {
-                        let mut params = json!({"methodId": auth.method});
-                        params["_meta"] = Value::Object(auth.meta);
-                        if let Err(error) = call(&cx, "authenticate", params, request_timeout).await
+}
+
+impl Default for Exchange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Exchange {
+    /// Calls as `coqui-acp`, with the waits [`Client::builder`] starts with and nothing to authenticate.
+    pub fn new() -> Self {
+        Self {
+            client_name: "coqui-acp".to_owned(),
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            authenticate: None,
+            initialize_timeout: Some(Duration::from_secs(20)),
+            request_timeout: Some(Duration::from_secs(30)),
+        }
+    }
+
+    /// What this client calls itself in `initialize`.
+    pub fn client_info(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
+        self.client_name = name.into();
+        self.client_version = version.into();
+        self
+    }
+
+    /// Calls `authenticate` before the first call.
+    pub fn authenticate(mut self, authenticate: Authenticate) -> Self {
+        self.authenticate = Some(authenticate);
+        self
+    }
+
+    /// How long `initialize` may take; `None` waits without limit. Default 20 s.
+    pub const fn initialize_timeout(mut self, limit: Option<Duration>) -> Self {
+        self.initialize_timeout = limit;
+        self
+    }
+
+    /// How long each call may take; `None` waits without limit. Default 30 s.
+    pub const fn request_timeout(mut self, limit: Option<Duration>) -> Self {
+        self.request_timeout = limit;
+        self
+    }
+
+    /// Connects over `transport` and makes `calls`, as `(method, params)`. The outer error is why the exchange could not take
+    /// place; each call has its own.
+    ///
+    /// # Errors
+    ///
+    /// The connection, `initialize` or `authenticate` failed.
+    ///
+    /// # Panics
+    ///
+    /// Never by design; a panic on its worker thread is reported as [`Error::Closed`].
+    pub fn run(
+        self,
+        transport: impl ConnectTo<Role> + 'static,
+        calls: Vec<(String, Value)>,
+    ) -> Result<Vec<Result<Value, RpcFailure>>, Error> {
+        let Self {
+            client_name,
+            client_version,
+            authenticate,
+            initialize_timeout,
+            request_timeout,
+        } = self;
+        let worker = std::thread::Builder::new()
+            .name("coqui-acp-exchange".to_owned())
+            .spawn(move || {
+                let name = client_name.clone();
+                futures::executor::block_on(Role.builder().name(name).connect_with(
+                    transport,
+                    async move |cx| {
+                        let params = initialize_params(&client_name, &client_version);
+                        if let Err(error) =
+                            call(&cx, "initialize", params, initialize_timeout).await
                         {
                             return Ok(Err(error));
                         }
-                    }
-                    let mut results = Vec::new();
-                    for (method, params) in calls {
-                        let message = UntypedMessage::new(method.as_str(), params)?;
-                        results.push(
-                            match within(request_timeout, cx.send_request(message).block_task())
-                                .await
+                        if let Some(auth) = authenticate {
+                            let mut params = json!({"methodId": auth.method});
+                            params["_meta"] = Value::Object(auth.meta);
+                            if let Err(error) =
+                                call(&cx, "authenticate", params, request_timeout).await
                             {
-                                Ok(Ok(value)) => Ok(value),
-                                Ok(Err(error)) => Err(RpcFailure {
-                                    code: i32::from(error.code),
-                                    message: error_text(&error),
-                                }),
-                                Err(()) => Err(RpcFailure {
-                                    code: -1,
-                                    message: "no answer in time".to_owned(),
-                                }),
-                            },
-                        );
-                    }
-                    Ok(Ok(results))
-                },
-            ))
-        })
-        .map_err(|_| Error::Thread)?;
-    worker.join().map_err(|_| Error::Closed)?.map_err(|error| {
-        Error::Refused(format!("the ACP connection failed: {}", error_text(&error)))
-    })?
+                                return Ok(Err(error));
+                            }
+                        }
+                        let mut results = Vec::new();
+                        for (method, params) in calls {
+                            let message = UntypedMessage::new(method.as_str(), params)?;
+                            results.push(
+                                match within(request_timeout, cx.send_request(message).block_task())
+                                    .await
+                                {
+                                    Ok(Ok(value)) => Ok(value),
+                                    Ok(Err(error)) => Err(RpcFailure {
+                                        code: i32::from(error.code),
+                                        message: error_text(&error),
+                                    }),
+                                    Err(()) => Err(RpcFailure {
+                                        code: -1,
+                                        message: "no answer in time".to_owned(),
+                                    }),
+                                },
+                            );
+                        }
+                        Ok(Ok(results))
+                    },
+                ))
+            })
+            .map_err(|_| Error::Thread)?;
+        worker.join().map_err(|_| Error::Closed)?.map_err(|error| {
+            Error::Refused(format!("the ACP connection failed: {}", error_text(&error)))
+        })?
+    }
 }

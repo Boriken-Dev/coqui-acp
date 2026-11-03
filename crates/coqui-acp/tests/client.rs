@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coqui_acp::{
-    Authenticate, Client, Decider, Decision, Error, Event, PermissionRequest, Session, exchange,
+    Authenticate, Client, Decider, Decision, Error, Event, Exchange, PermissionRequest, Session,
 };
 use futures::SinkExt;
 use futures::channel::mpsc as async_mpsc;
@@ -824,20 +824,61 @@ fn exchange_makes_each_call_and_reports_each_failure() {
         "initialize" | "authenticate" | "_known" => plain(method),
         _ => None,
     });
-    let results = exchange(
-        transport,
-        Some(Authenticate {
+    let results = Exchange::new()
+        .authenticate(Authenticate {
             method: "token".to_owned(),
             meta: Map::new(),
-        }),
-        Some(WAIT),
-        Some(WAIT),
-        vec![
-            ("_known".to_owned(), json!({})),
-            ("_unknown".to_owned(), json!({})),
-        ],
-    )
-    .unwrap();
+        })
+        .initialize_timeout(Some(WAIT))
+        .request_timeout(Some(WAIT))
+        .run(
+            transport,
+            vec![
+                ("_known".to_owned(), json!({})),
+                ("_unknown".to_owned(), json!({})),
+            ],
+        )
+        .unwrap();
     assert!(results[0].is_ok());
     assert_eq!(results[1].as_ref().unwrap_err().code, -32601);
+}
+
+#[test]
+fn exchange_calls_itself_what_it_is_told_and_coqui_acp_otherwise() {
+    let (transport, messages) = agent_with(|method, _, _| plain(method));
+    Exchange::new()
+        .client_info("ai6", "1.2.3")
+        .run(transport, Vec::new())
+        .unwrap();
+    let initialize = messages.recv_timeout(WAIT).unwrap();
+    assert_eq!(initialize["method"], "initialize", "{initialize}");
+    assert_eq!(
+        initialize["params"]["clientInfo"],
+        json!({"name": "ai6", "version": "1.2.3"}),
+        "{initialize}"
+    );
+
+    let (transport, messages) = agent_with(|method, _, _| plain(method));
+    Exchange::default().run(transport, Vec::new()).unwrap();
+    let initialize = messages.recv_timeout(WAIT).unwrap();
+    assert_eq!(
+        initialize["params"]["clientInfo"]["name"], "coqui-acp",
+        "{initialize}"
+    );
+}
+
+#[test]
+fn an_exchange_with_no_answer_in_time_says_so_for_that_call() {
+    let (transport, _) = agent_with(|method, _, _| match method {
+        "_slow" => {
+            thread::sleep(Duration::from_millis(500));
+            Some(json!({}))
+        }
+        other => plain(other),
+    });
+    let results = Exchange::new()
+        .request_timeout(Some(Duration::from_millis(50)))
+        .run(transport, vec![("_slow".to_owned(), json!({}))])
+        .unwrap();
+    assert_eq!(results[0].as_ref().unwrap_err().code, -1);
 }

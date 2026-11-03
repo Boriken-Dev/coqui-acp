@@ -59,7 +59,7 @@ session.close();
 | `Client`, `Builder`, `Session` | open and drive a session |
 | `Event`, `Error` | what happened, and why it could not |
 | `Decider`, `Decision`, `PermissionRequest` | answer an agent asking leave |
-| `exchange` | calls that are not a session |
+| `Exchange` | calls that are not a session |
 | `lines` | a transport over a process's pipes |
 | `sdk` | the protocol's own crate, for its transports |
 

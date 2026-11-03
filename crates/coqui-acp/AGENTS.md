@@ -82,21 +82,24 @@ pub struct RefuseAll;
 
 A decider may block: it runs on a thread of its own. `PermissionRequest` (`#[non_exhaustive]`): `session_id`, `tool_call_id`, `title: Option<String>`, `kind: Option<String>`, `raw_input: Option<Value>`, `options: Vec<PermissionOption>`. `PermissionOption`: `option_id`, `kind`. `raw_input` is what the agent wants to do: untrusted.
 
-## `exchange` (crate root)
+## `Exchange` (crate root)
 
 ```rust
-pub fn exchange(
+pub fn Exchange::new() -> Exchange      // also Default
+pub fn client_info(self, name: impl Into<String>, version: impl Into<String>) -> Self
+pub fn authenticate(self, authenticate: Authenticate) -> Self
+pub const fn initialize_timeout(self, limit: Option<Duration>) -> Self
+pub const fn request_timeout(self, limit: Option<Duration>) -> Self
+pub fn run(
+    self,
     transport: impl ConnectTo<sdk::Client> + 'static,
-    authenticate: Option<Authenticate>,
-    initialize_timeout: Option<Duration>,
-    request_timeout: Option<Duration>,
     calls: Vec<(String, Value)>,
 ) -> Result<Vec<Result<Value, RpcFailure>>, Error>
 pub struct Authenticate { pub method: String, pub meta: Map<String, Value> }
 pub struct RpcFailure { pub code: i32, pub message: String }
 ```
 
-Initializes, authenticates when asked, and makes each call in turn: for questions that are no session. Each call has its own result; `code` is `-1` when no answer came in time.
+Initializes, authenticates when asked, and makes each call in turn: for questions that are no session. Each call has its own result; `code` is `-1` when no answer came in time. Defaults: calls itself `coqui-acp` at this crate's version, nothing to authenticate, 20 s `initialize`, 30 s each call; `None` waits without limit.
 
 ## Lines (`coqui_acp::lines`)
 

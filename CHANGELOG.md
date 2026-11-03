@@ -24,3 +24,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Breaking**, `coqui-acp` and `coqui_acp` for Dart: stop reason `cancelled` is `Event::Cancelled` and `AcpCancelled`, and no longer `Event::Blocked` and `AcpBlocked`, which now mean only a permission that could not be answered. It ends the turn, so a connection lost after it is no `Failed`.
+- **Breaking**, `coqui-acp`: the function `exchange` is now `Exchange::new()...run(transport, calls)`, a builder with `client_info`, `authenticate`, `initialize_timeout` and `request_timeout`, so a caller can name itself rather than always being `coqui-acp`. Its waits default to those of `Client::builder`.
