@@ -42,11 +42,8 @@ const POLL: Duration = Duration::from_millis(50);
 const RELAY_POLL: Duration = Duration::from_millis(5);
 /// How long something that connected has to show the token, in all.
 const TOKEN_WAIT: Duration = Duration::from_secs(2);
-/// As many waiting to show one: past this the longest waiting goes. Each is read as soon as it connects, which is when a shim has shown
-/// it, so connecting in a flood does not keep a real shim out.
+/// As many waiting to show one: past this the longest waiting goes.
 const MAX_KNOCKING: usize = 16;
-/// How many are taken in one turn, so that a flood of them cannot hold up the shims already let in.
-const MAX_ACCEPTS: usize = 64;
 /// How long a shim that showed the token waits for a stream. The peer opens the next one when it hears the last was taken.
 const STREAM_WAIT: Duration = Duration::from_secs(3);
 /// A shim's whole patience with a door: longer than the door's own for a stream, so it hears the answer.
@@ -283,49 +280,34 @@ impl Door {
         let mut knocking: Vec<Knock> = Vec::new();
         let mut admitted: Vec<(TcpStream, Instant)> = Vec::new();
         while !self.stop.load(Ordering::SeqCst) {
-            let mut accepted = 0;
-            while accepted < MAX_ACCEPTS {
-                let Ok((connection, _)) = listener.accept() else {
-                    break;
-                };
-                accepted += 1;
+            // All that are waiting, so however many connected first cannot put off the real one by a turn each.
+            while let Ok((connection, _)) = listener.accept() {
                 if connection.set_nonblocking(true).is_err() {
                     continue;
                 }
-                let mut knock = Knock {
+                if knocking.len() >= MAX_KNOCKING {
+                    knocking.remove(0);
+                }
+                knocking.push(Knock {
                     connection,
                     shown: Vec::with_capacity(self.token.len() + 1),
                     since: Instant::now(),
-                };
-                if self.heard(&mut knock, &mut admitted) {
-                    if knocking.len() >= MAX_KNOCKING {
-                        knocking.remove(0);
+                });
+            }
+            knocking.retain_mut(|knock| match knock.read(&self.token) {
+                Knocked::Waiting => true,
+                Knocked::Wrong => false,
+                Knocked::Right => {
+                    if admitted.len() < MAX_KNOCKING
+                        && let Ok(connection) = knock.connection.try_clone()
+                    {
+                        admitted.push((connection, Instant::now()));
                     }
-                    knocking.push(knock);
+                    false
                 }
-            }
-            knocking.retain_mut(|knock| self.heard(knock, &mut admitted));
+            });
             admitted.retain(|(connection, since)| self.place(connection, *since));
-            // Straight back round while they keep coming, since one left waiting can be pushed out.
-            if accepted == 0 {
-                thread::sleep(POLL);
-            }
-        }
-    }
-
-    /// Reads what a connection has shown, and lets it in if that was the token. True while it is still to show it.
-    fn heard(&self, knock: &mut Knock, admitted: &mut Vec<(TcpStream, Instant)>) -> bool {
-        match knock.read(&self.token) {
-            Knocked::Waiting => true,
-            Knocked::Wrong => false,
-            Knocked::Right => {
-                if admitted.len() < MAX_KNOCKING
-                    && let Ok(connection) = knock.connection.try_clone()
-                {
-                    admitted.push((connection, Instant::now()));
-                }
-                false
-            }
+            thread::sleep(POLL);
         }
     }
 

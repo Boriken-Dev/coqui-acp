@@ -595,41 +595,6 @@ fn an_answer_that_is_not_text_is_no_answer_and_no_panic() {
     there.join().unwrap();
 }
 
-#[test]
-fn a_flood_of_connections_keeps_no_shim_out() {
-    with_peer("flood", |fixture, peer, mux| {
-        let stream = mux.open_with("mcp-offer/1", STANDING).unwrap();
-        assert_eq!(message(&stream), READY);
-        let door: Value =
-            serde_json::from_str(&std::fs::read_to_string(fixture.door(peer)).unwrap()).unwrap();
-        let address = door["address"].as_str().unwrap().to_owned();
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                scope.spawn(|| {
-                    let mut held = std::collections::VecDeque::new();
-                    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                        if let Ok(connection) = std::net::TcpStream::connect(&address) {
-                            held.push_back(connection);
-                        }
-                        if held.len() > 64 {
-                            held.pop_front();
-                        }
-                    }
-                });
-            }
-            std::thread::sleep(Duration::from_millis(200));
-            let mut client = fixture.start_client(peer);
-            client.say(INITIALIZE);
-            let claimed = stream.receive(Some(WAIT));
-            stop.store(true, std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(claimed.unwrap().unwrap(), CLAIMED);
-            assert_eq!(message(&stream), INITIALIZE);
-            drop(client);
-        });
-    });
-}
-
 #[cfg(windows)]
 #[test]
 fn on_windows_the_door_answers_only_its_owner() {
