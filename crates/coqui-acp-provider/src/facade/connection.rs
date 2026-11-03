@@ -21,9 +21,10 @@ use agent_client_protocol::{Client, ConnectionTo, Error as RpcError, Responder, 
 use futures::channel::oneshot;
 use guatiao::Alloc;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::operation::{Launch, Operation};
+use super::options::{self, OptionTarget};
 use super::{AcpFacade, EVENTS_CAPABILITY, FacadeAuth, LAUNCH_META_KEY, Settings, updates};
 use crate::kind::AgentProvider;
 
@@ -219,6 +220,8 @@ impl Connection {
             "authenticate" => self.authenticate(params),
             _ if !self.authenticated.load(Ordering::SeqCst) => Err(RpcError::auth_required()),
             "session/new" => self.new_session(params, cx),
+            "session/set_config_option" => self.set_config_option(params),
+            "session/set_mode" => self.set_mode(params),
             "session/prompt" => {
                 return self.prompt(params, responder);
             }
@@ -335,6 +338,17 @@ impl Connection {
             }
             environment.insert(name, value);
         }
+        let declared = &self.settings.options;
+        let mut choices = options::defaults(declared);
+        for (target, wanted) in [
+            (OptionTarget::Model, &meta.model),
+            (OptionTarget::Effort, &meta.effort),
+        ] {
+            if let (Some(option), Some(wanted)) = (options::for_target(declared, &target), wanted) {
+                options::choose(declared, &mut choices, &option.id, wanted)
+                    .map_err(|why| invalid(&why))?;
+            }
+        }
         let opaque = meta
             .meta
             .as_ref()
@@ -348,6 +362,7 @@ impl Connection {
             model: meta.model,
             effort: meta.effort,
             meta: opaque,
+            choices,
         })
     }
 
@@ -372,8 +387,41 @@ impl Connection {
     ) -> Result<Value, RpcError> {
         let launch = self.launch(params)?;
         let id = uuid::Uuid::new_v4().to_string();
-        self.admit(Operation::new(id.clone(), launch, self.clone(), cx))?;
-        Ok(json!({"sessionId": id}))
+        let mut answer = Map::new();
+        answer.insert("sessionId".to_string(), json!(id));
+        options::session_fields(&self.settings.options, &launch.choices, &mut answer);
+        self.admit(Operation::new(id, launch, self.clone(), cx))?;
+        Ok(Value::Object(answer))
+    }
+
+    /// `session/set_config_option`: a value from the option's own list, before the provider starts.
+    fn set_config_option(&self, params: &Value) -> Result<Value, RpcError> {
+        let operation = self.operation(params)?;
+        let option = params
+            .get("configId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("the request names no configId"))?;
+        // Every option here is a select, so only a value id is one of its values.
+        let value = params
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid(&format!("the option {option} takes a value id")))?;
+        let choices = operation.choose(option, value)?;
+        Ok(json!({"configOptions": options::config_options(&self.settings.options, &choices)}))
+    }
+
+    /// `session/set_mode`: the option of category `mode`, as `session/set_config_option` sets it.
+    fn set_mode(&self, params: &Value) -> Result<Value, RpcError> {
+        let operation = self.operation(params)?;
+        let value = params
+            .get("modeId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("the request names no modeId"))?;
+        let Some(option) = options::mode_option(&self.settings.options) else {
+            return Err(invalid("this agent has no modes"));
+        };
+        operation.choose(&option.id, value)?;
+        Ok(json!({}))
     }
 
     fn prompt(&self, params: &Value, responder: Responder<Value>) {

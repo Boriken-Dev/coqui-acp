@@ -122,7 +122,7 @@ pub fn serve(&self, transport: impl ConnectTo<sdk::Agent> + 'static) -> Result<J
 
 `run` serves one connection on the calling thread until its transport closes, then closes its sessions and waits for them, up to `close_timeout`. `serve` is that on a thread. Sessions belong to the connection that opened them: another connection cannot name one, and a client that vanishes mid-turn has its sessions closed.
 
-What ACP sees: `initialize` answers version 1, whatever the client asked. `authenticate` as below. `session/new` checks what it is given and makes no provider call; the first `session/prompt` calls `start` and later ones `send_message`, one turn at a time. `session/cancel` calls `interrupt` for that turn alone, and the prompt is answered `cancelled`, however the provider ended the turn; an `interrupt` still running when its turn is over is not called again for it, and one not yet called is dropped. `session/resume` calls `resume` and its answer waits for the provider's, so a session that no longer exists fails there in the provider's words; a prompt before that answer is refused. Its `sessionId` is the provider's identity, it stays the ACP session's, and it is refused while another session of the facade, on any connection, holds that identity. `session/close` answers when the provider's `close` returned. `session/load` and everything else is method not found. A prompt is text and resource links, a link passing as its address; any other block is refused. A client's `mcpServers` other than an empty list is refused: no field of the kind carries them.
+What ACP sees: `initialize` answers version 1, whatever the client asked. `authenticate` as below. `session/new` checks what it is given and makes no provider call; the first `session/prompt` calls `start` and later ones `send_message`, one turn at a time. `session/cancel` calls `interrupt` for that turn alone, and the prompt is answered `cancelled`, however the provider ended the turn; an `interrupt` still running when its turn is over is not called again for it, and one not yet called is dropped. `session/resume` calls `resume` and its answer waits for the provider's, so a session that no longer exists fails there in the provider's words; a prompt before that answer is refused. Its `sessionId` is the provider's identity, it stays the ACP session's, and it is refused while another session of the facade, on any connection, holds that identity. `session/close` answers when the provider's `close` returned. `session/set_config_option` and `session/set_mode` as in [Options](#options). `session/load` and everything else is method not found. A prompt is text and resource links, a link passing as its address; any other block is refused. A client's `mcpServers` other than an empty list is refused: no field of the kind carries them.
 
 ### What ACP has no field for
 
@@ -132,7 +132,7 @@ pub const EVENTS_CAPABILITY: &str = "dev.boriken.coqui.acp/events";
 pub const EVENT_NOTIFICATION: &str = "_coqui_acp/event";
 ```
 
-`_meta[LAUNCH_META_KEY]` on `session/new` and `session/resume`: `{"context": [text], "environment": {name: text}, "model": text, "effort": text, "meta": any}`, each optional. An unknown key is refused. An environment name not in `Settings::client_environment` is refused.
+`_meta[LAUNCH_META_KEY]` on `session/new` and `session/resume`: `{"context": [text], "environment": {name: text}, "model": text, "effort": text, "meta": any}`, each optional. An unknown key is refused. An environment name not in `Settings::client_environment` is refused. A `model` or `effort` the host declared an option for must be one of its values, or it is refused; one it declared none for passes as written.
 
 `EVENT_NOTIFICATION`, advertised under `agentCapabilities._meta[EVENTS_CAPABILITY]`, is `{"sessionId", "providerSessionId", "event"}`: the event as JSON, for what ACP has no update for. With no `event` it says the provider's identity is now known, once; that identity is what a later `session/resume` names. An identity with a character a terminal acts on, or longer than `max_label_bytes`, is never told, since it could not be named back as it is. In an event the kind, tool names and quota strings are cut as titles, the text and bytes as below; an event that still does not fit a line is replaced by its kind and a note that it was larger.
 
@@ -171,12 +171,49 @@ A failure with no prompt waiting goes as `EVENT_NOTIFICATION`, with kind `failed
 | `working_roots: Vec<PathBuf>` | empty | A `cwd` must be under one, compared as written, with no `..` or `.`; empty takes any absolute path. |
 | `environment: BTreeMap<String, String>` | empty | Given to every `start` and `resume`. |
 | `client_environment: Vec<String>` | empty | The names a client may set, over `environment`. A client that can set `PATH` runs what it likes. |
+| `options: Vec<StartOption>` | empty | What a client may choose before a session starts; see [Options](#options). Empty offers none. |
 
 `max_sessions` is per connection, and so is everything above: a host serving many connections caps how many it accepts. When `run` returns, a session whose provider has not returned from a call counts against nothing but holds its identity until it does.
 
 **What a client that never reads can cost.** The protocol library queues what goes out without limit and does not say what the client has read, so the bound is on what is sent: at most `max_connection_bytes` per connection, plus the answers to the client's own requests and a short update per tool call as its turn ends. No line is longer than `max_update_bytes`, twice `max_label_bytes` and 5 KiB, as long as `max_label_bytes` is set below `max_update_bytes`.
 
 `Debug` shows the environment's names, never its values.
+
+### Options
+
+```rust
+#[non_exhaustive]
+pub struct StartOption {
+    pub id: String,                   // what session/set_config_option names
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,     // ACP's: "model", "thought_level", "mode", "model_config", or "_..."
+    pub values: Vec<OptionValue>,
+    pub default: String,              // a value's id
+    pub target: OptionTarget,
+}
+pub fn StartOption::new(id, name, target: OptionTarget, values: Vec<OptionValue>, default) -> StartOption
+pub fn StartOption::model(values: Vec<OptionValue>, default) -> StartOption    // id "model", category "model", OptionTarget::Model
+pub fn StartOption::effort(values: Vec<OptionValue>, default) -> StartOption   // id "effort", category "thought_level", OptionTarget::Effort
+pub fn category(self, category: impl Into<String>) -> Self
+pub fn description(self, description: impl Into<String>) -> Self
+
+#[non_exhaustive]
+pub struct OptionValue { pub id: String, pub name: String, pub description: Option<String> }
+pub fn OptionValue::new(id: impl Into<String>, name: impl Into<String>) -> OptionValue
+pub fn description(self, description: impl Into<String>) -> Self
+
+#[non_exhaustive]
+pub enum OptionTarget { Model, Effort, Environment(String) }
+```
+
+The host declares them in `Settings::options`, since the kind cannot be asked what a provider takes. Each is a select of its own values, and a session holds one value of each, starting at `default`. The provider receives the values in `start` or `resume`: `Model` as `model`, `Effort` as `effort`, `Environment(name)` as that environment value, over `Settings::environment` and the client's. With no option of a target, `model` and `effort` are what the launch said, as before.
+
+- `session/new` and `session/resume` answer `configOptions`: each option as ACP version 1's select `SessionConfigOption` (`id`, `name`, `description`, `category`, `"type": "select"`, `currentValue`, `options: [{value, name, description}]`) at the session's value. The option of category `mode` is also `modes`, ACP's `SessionModeState` (`currentModeId`, `availableModes: [{id, name, description}]`), kept the same. With no options, neither is in the answer.
+- `session/set_config_option` `{sessionId, configId, value}` sets one and answers every option, `{"configOptions": [...]}`. `session/set_mode` `{sessionId, modeId}` sets the mode option and answers `{}`.
+- A value not among the option's values, an option not declared, or a value that is not an id is refused, invalid params, and changes nothing. Once the first `session/prompt` has been taken, or for a resumed session at once, the provider has its values and a change is refused, invalid request: the kind has no way to switch.
+
+`run` checks the options first and answers `Error::Settings` when an id or a value repeats, a value list is empty, a default is not among the values, two options share a target, or two are of category `mode`.
 
 ### `FacadeAuth`
 
@@ -189,7 +226,7 @@ Every request but `initialize` and `authenticate` answers auth required until an
 
 ## Errors
 
-`Error` (`#[non_exhaustive]`): `Connection(String)` in the protocol library's words; `Thread(io::Error)`, a thread could not start; `Stuck(usize)`, this many sessions' providers had not returned from `close` when the connection ended.
+`Error` (`#[non_exhaustive]`): `Connection(String)` in the protocol library's words; `Thread(io::Error)`, a thread could not start; `Stuck(usize)`, this many sessions' providers had not returned from `close` when the connection ended; `Settings(String)`, `Settings::options` cannot be served, and why.
 
 ## Gotchas
 
@@ -199,4 +236,4 @@ Every request but `initialize` and `authenticate` answers auth required until an
 - **A panic stops at the call**, and its words are not told: they can hold anything the provider held. Through a Guatiao table it is a status; in a trait object called directly, `the provider panicked in <call>`.
 - **Nothing reaches a provider's environment from a client by default**, and a provider's `meta` is whatever a client wrote.
 - **Standard output is the transport** for a facade served on standard input and output, so a provider in that process must not print to it.
-- `model` and `effort` come through `LAUNCH_META_KEY`: `coqui_acp`'s `Builder::model` works through config options, which this facade does not offer.
+- `model` and `effort` reach a provider through config options only for a host that declared them in `Settings::options`, which is what `coqui_acp`'s `Builder::model` and `Builder::effort` use; otherwise only through `LAUNCH_META_KEY`.

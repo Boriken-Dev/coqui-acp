@@ -13,6 +13,7 @@
 - `AgentProvider` and `AgentSession`: a Guatiao provider kind and object kind, described as data for languages with no Rust. A provider owns its own process.
 - `AgentEvent`: one string vocabulary (`text`, `tool`, `blocked`, `completed`, `failed`, `cancelled`, `limit`, `denied`), crossing as a Guatiao value and as JSON.
 - `AcpFacade`: `session/new`, `session/prompt`, `session/cancel`, `session/resume`, `session/close`, optional authentication. One provider session per ACP session, and every session ends with its connection.
+- `StartOption`: the models, efforts and modes a host lets a client choose, as ACP's config options and modes, each value from the host's list.
 - A provider that blocks, fails or panics costs one session, never the connection. Every limit is a `Settings` field with a safe default.
 
 ACP version 1.
@@ -123,6 +124,7 @@ Everything is at the crate root.
 | `StartRequest`, `ResumeRequest`, `AgentMessage` | what goes in |
 | `AgentEvent`, `TokenUsage`, `UsageLimit`, `QuotaReport`, the `*_EVENT` constants, `TURN_CANCELLED` | what comes out |
 | `AcpFacade`, `Settings`, `FacadeAuth`, `Credential`, `Error` | a provider as an ACP agent |
+| `StartOption`, `OptionValue`, `OptionTarget` | what a client may choose before a session starts |
 | `LAUNCH_META_KEY`, `EVENT_NOTIFICATION`, `EVENTS_CAPABILITY` | what the facade adds to ACP |
 | `sdk`, `guatiao` | the protocol's own crate and Guatiao, re-exported so a provider names one version of each |
 

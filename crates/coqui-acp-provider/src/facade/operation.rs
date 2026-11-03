@@ -20,10 +20,11 @@ use std::time::Instant;
 
 use agent_client_protocol::{Client, ConnectionTo, Error as RpcError, Responder, UntypedMessage};
 use guatiao::library::{Object, ProviderError};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::EVENT_NOTIFICATION;
 use super::connection::Connection;
+use super::options::{self, Choices, OptionTarget};
 use super::updates::{self, Ending};
 use crate::kind::{
     AgentEvent, AgentMessage, AgentSession, FAILED_EVENT, ResumeRequest, StartRequest,
@@ -40,30 +41,58 @@ pub(super) struct Launch {
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,
     pub(super) meta: Option<guatiao::Value>,
+    /// The declared options at their values when the session opened.
+    pub(super) choices: Choices,
+}
+
+/// What the provider is given: the launch, with each declared option's value where its host said.
+struct Given {
+    environment: BTreeMap<String, String>,
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 impl Launch {
-    fn start(&self, prompt: String) -> StartRequest {
+    fn given(&self, declared: &[options::StartOption], choices: &Choices) -> Given {
+        let mut given = Given {
+            environment: self.environment.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        };
+        for option in declared {
+            let value = choices.get(&option.id).unwrap_or(&option.default).clone();
+            match &option.target {
+                OptionTarget::Model => given.model = Some(value),
+                OptionTarget::Effort => given.effort = Some(value),
+                OptionTarget::Environment(name) => {
+                    given.environment.insert(name.clone(), value);
+                }
+            }
+        }
+        given
+    }
+
+    fn start(&self, prompt: String, given: Given) -> StartRequest {
         StartRequest {
             working_directory: self.working_directory.clone(),
             prompt,
             context: self.context.clone(),
-            environment: self.environment.clone(),
-            model: self.model.clone(),
-            effort: self.effort.clone(),
+            environment: given.environment,
+            model: given.model,
+            effort: given.effort,
             meta: self.meta.clone(),
         }
     }
 
-    fn resume(&self, session_id: &str) -> ResumeRequest {
+    fn resume(&self, session_id: &str, given: Given) -> ResumeRequest {
         ResumeRequest {
             session_id: session_id.to_string(),
             working_directory: self.working_directory.clone(),
             prompt: None,
             context: self.context.clone(),
-            environment: self.environment.clone(),
-            model: self.model.clone(),
-            effort: self.effort.clone(),
+            environment: given.environment,
+            model: given.model,
+            effort: given.effort,
             meta: self.meta.clone(),
         }
     }
@@ -110,6 +139,10 @@ struct State {
     /// `session/close` calls waiting for the provider's.
     closing: Vec<Responder<Value>>,
     closed: bool,
+    /// The declared options' values, which the provider takes when it starts.
+    choices: Choices,
+    /// The provider has been given the options, by a first prompt or a resume, so they cannot change.
+    fixed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +218,7 @@ impl Operation {
         connection: Arc<Connection>,
         cx: ConnectionTo<Client>,
     ) -> Arc<Self> {
+        let choices = launch.choices.clone();
         Arc::new(Self {
             id,
             launch,
@@ -202,6 +236,8 @@ impl Operation {
                 resuming: None,
                 closing: Vec::new(),
                 closed: false,
+                choices,
+                fixed: false,
             }),
             calls: Mutex::new(Vec::new()),
             next_call: AtomicU64::new(0),
@@ -358,7 +394,10 @@ impl Operation {
                 Some("this session is closing".to_string())
             } else {
                 match state.turn {
-                    Turn::Idle => None,
+                    Turn::Idle => {
+                        state.fixed = true;
+                        None
+                    }
                     Turn::Active { .. } => Some("a turn is in progress".to_string()),
                     Turn::Draining(_) => {
                         Some("the provider has not ended the cancelled turn".to_string())
@@ -411,8 +450,39 @@ impl Operation {
         }
     }
 
+    /// What the provider is given now: the options as they stand.
+    fn given(&self) -> Given {
+        let choices = self.state().choices.clone();
+        self.launch
+            .given(&self.connection.settings.options, &choices)
+    }
+
+    /// Sets a declared option, until the provider has been given them. Every option at its value.
+    pub(super) fn choose(&self, option: &str, value: &str) -> Result<Choices, RpcError> {
+        let mut state = self.state();
+        if state.dead.is_some() || self.closing.load(Ordering::SeqCst) {
+            return Err(RpcError::invalid_request().data("this session has ended".to_string()));
+        }
+        if state.fixed {
+            return Err(RpcError::invalid_request().data(
+                "the provider has started this session, and its options cannot change now"
+                    .to_string(),
+            ));
+        }
+        let mut choices = state.choices.clone();
+        options::choose(
+            &self.connection.settings.options,
+            &mut choices,
+            option,
+            value,
+        )
+        .map_err(|why| RpcError::invalid_params().data(why))?;
+        state.choices.clone_from(&choices);
+        Ok(choices)
+    }
+
     fn start(self: &Arc<Self>, prompt: String) -> Result<(), String> {
-        let request = self.launch.start(prompt);
+        let request = self.launch.start(prompt, self.given());
         let provider = self.connection.provider.clone();
         let limit = self.connection.settings.start_timeout;
         self.starting.store(true, Ordering::SeqCst);
@@ -424,9 +494,13 @@ impl Operation {
 
     /// Resumes on a thread of its own, and answers `session/resume` with how it went.
     pub(super) fn resume(self: &Arc<Self>, responder: Responder<Value>) {
-        self.state().resuming = Some(responder);
+        {
+            let mut state = self.state();
+            state.resuming = Some(responder);
+            state.fixed = true;
+        }
         let spawned = self.spawn("resume", |this| {
-            let request = this.launch.resume(&this.id);
+            let request = this.launch.resume(&this.id, this.given());
             let provider = this.connection.provider.clone();
             let limit = this.connection.settings.start_timeout;
             this.starting.store(true, Ordering::SeqCst);
@@ -437,7 +511,14 @@ impl Operation {
             match adopted {
                 Ok(()) => {
                     if let Some(responder) = responder {
-                        let _ = responder.respond(json!({}));
+                        let mut answer = Map::new();
+                        let choices = this.state().choices.clone();
+                        options::session_fields(
+                            &this.connection.settings.options,
+                            &choices,
+                            &mut answer,
+                        );
+                        let _ = responder.respond(Value::Object(answer));
                     }
                 }
                 // The session ends before it leaves the books, so nothing that came meanwhile can start

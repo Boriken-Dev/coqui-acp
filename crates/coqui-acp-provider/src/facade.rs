@@ -22,9 +22,11 @@ use crate::kind::AgentProvider;
 
 mod connection;
 mod operation;
+mod options;
 mod updates;
 
 use connection::Connection;
+pub use options::{OptionTarget, OptionValue, StartOption};
 
 /// The `_meta` key of `session/new` and `session/resume` that carries what ACP has no field for:
 /// `{"context": [text], "environment": {name: text}, "model": text, "effort": text, "meta": any}`, each
@@ -109,6 +111,11 @@ pub struct Settings {
     /// The environment names a client may set through [`LAUNCH_META_KEY`], over `environment`; any other is
     /// refused. A client that can set `PATH` runs what it likes, so the default is none.
     pub client_environment: Vec<String>,
+    /// What a client may choose before a session starts, each from its own list: `session/new` and
+    /// `session/resume` answer them as `configOptions`, one of category `mode` also as `modes`, and
+    /// `session/set_config_option` and `session/set_mode` change them until the provider starts. Empty, the
+    /// default, offers none, and a launch's `model` and `effort` pass as the client wrote them.
+    pub options: Vec<StartOption>,
 }
 
 impl fmt::Debug for Settings {
@@ -130,6 +137,7 @@ impl fmt::Debug for Settings {
             .field("working_roots", &self.working_roots)
             .field("environment", &self.environment.keys())
             .field("client_environment", &self.client_environment)
+            .field("options", &self.options)
             .finish()
     }
 }
@@ -152,6 +160,7 @@ impl Default for Settings {
             working_roots: Vec::new(),
             environment: BTreeMap::new(),
             client_environment: Vec::new(),
+            options: Vec::new(),
         }
     }
 }
@@ -167,6 +176,9 @@ pub enum Error {
     /// This many sessions' providers had not returned from `close` when the connection ended. Their
     /// threads stay until they do.
     Stuck(usize),
+    /// [`Settings::options`] cannot be served, and why: an id or a value twice, a default not among the
+    /// values, two options with one target, or two of category `mode`.
+    Settings(String),
 }
 
 impl fmt::Display for Error {
@@ -175,6 +187,7 @@ impl fmt::Display for Error {
             Self::Connection(why) => write!(f, "the ACP connection failed: {why}"),
             Self::Thread(_) => f.write_str("a thread could not be started"),
             Self::Stuck(count) => write!(f, "{count} sessions did not close in time"),
+            Self::Settings(why) => write!(f, "the settings cannot be served: {why}"),
         }
     }
 }
@@ -253,8 +266,10 @@ impl AcpFacade {
     ///
     /// [`Error::Connection`] when the transport or the protocol failed; [`Error::Thread`] when the
     /// connection's supervising thread could not start; [`Error::Stuck`] when a provider's `close` had not
-    /// returned within [`Settings::close_timeout`].
+    /// returned within [`Settings::close_timeout`]; [`Error::Settings`] before anything is served, when
+    /// [`Settings::options`] cannot be.
     pub fn run(&self, transport: impl ConnectTo<Agent> + 'static) -> Result<(), Error> {
+        options::check(&self.settings.options).map_err(Error::Settings)?;
         let (stop, stopped) = oneshot::channel::<()>();
         let connection = Connection::new(self, stop);
         let supervisor = connection.supervise().map_err(Error::Thread)?;

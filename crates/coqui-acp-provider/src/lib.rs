@@ -10,7 +10,7 @@ mod kind;
 pub use agent_client_protocol as sdk;
 pub use facade::{
     AcpFacade, Credential, EVENT_NOTIFICATION, EVENTS_CAPABILITY, Error, FacadeAuth,
-    LAUNCH_META_KEY, Settings,
+    LAUNCH_META_KEY, OptionTarget, OptionValue, Settings, StartOption,
 };
 pub use guatiao;
 pub use kind::{
