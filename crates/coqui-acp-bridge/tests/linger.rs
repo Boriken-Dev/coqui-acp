@@ -1,6 +1,7 @@
 //! `serve --linger`: the real binary, a scripted agent process and a real socket, with a link cut as a page reload cuts it.
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -51,13 +52,20 @@ impl Fixture {
     /// `serve` on a port it chose, with `flags` and the scripted agent given `agent_args`, returning the port and its peer id. What
     /// it says on standard error is kept, for a failure to report.
     fn serve(&mut self, flags: &[&str], agent_args: &[&str]) -> (u16, String) {
+        let agent: Vec<OsString> = core::iter::once(turn_agent().into_os_string())
+            .chain(agent_args.iter().map(OsString::from))
+            .collect();
+        self.serve_program(flags, &agent)
+    }
+
+    /// As [`Self::serve`], with `agent` as the program and its arguments.
+    fn serve_program(&mut self, flags: &[&str], agent: &[OsString]) -> (u16, String) {
         let mut command = Command::new(BRIDGE);
         command
             .args(["serve", "--listen", "127.0.0.1:0"])
             .args(flags)
             .arg("--")
-            .arg(turn_agent())
-            .args(agent_args)
+            .args(agent)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
@@ -532,8 +540,9 @@ fn output_past_the_buffer_loses_the_oldest_and_the_next_link_is_told_first() {
     });
 }
 
+/// The newer agent is the fresh one a connection got while the older link was still up, so the older holds the session that link was in.
 #[test]
-fn a_peer_keeps_one_agent_and_its_older_one_ends() {
+fn a_peer_keeps_one_agent_and_the_one_started_later_ends() {
     let mut fixture = Fixture::new("perpeer");
     let peer = serving(
         &mut fixture,
@@ -557,10 +566,10 @@ fn a_peer_keeps_one_agent_and_its_older_one_ends() {
     }
     assert!(alive(older_pid), "one is within the bound");
     cut(&newer);
-    fixture.expect_gone(older_pid, "the older agent of a peer past its bound");
-    assert!(alive(newer_pid));
+    fixture.expect_gone(newer_pid, "the agent started later, past its peer's bound");
+    assert!(alive(older_pid));
     peer.on_link(|client, _| {
-        assert_eq!(client.pid(), newer_pid, "{}", fixture.said());
+        assert_eq!(client.pid(), older_pid, "{}", fixture.said());
     });
 }
 
@@ -766,6 +775,163 @@ fn a_peer_removed_from_the_store_does_not_leave_an_agent_behind() {
     });
 }
 
+/// Waits until the bridge has said `what` `times` times.
+fn said_times(fixture: &Fixture, what: &str, times: usize) {
+    let until = Instant::now() + WAIT;
+    while fixture.said().matches(what).count() < times {
+        assert!(Instant::now() < until, "{}", fixture.said());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_kept_agent_ends_when_its_peer_is_removed_and_is_not_given_back_when_it_returns() {
+    let mut fixture = Fixture::new("revoked");
+    let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
+    let (key, _) = fixture.identity("server");
+    let (_, client) = fixture.identity("client");
+    let material = client.key_material();
+    let listed = store.accept_key(&material).unwrap();
+    let flags = [
+        "--identity",
+        key.to_str().unwrap(),
+        "--allow-store",
+        fixture.dir.join("peers").to_str().unwrap(),
+        "--linger",
+        "300",
+    ]
+    .map(str::to_owned);
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let (port, server) = fixture.serve(&flags, &[]);
+    let peer = Peer::new(client, port, &server);
+    let pid = peer.on_link(|client, channel| {
+        let pid = client.pid();
+        let session = client.new_session();
+        // A turn that outlasts the test, so only the removal can end it.
+        client.prompt(3, &session, "chunks 1000 100");
+        client.chunk_arrives(1);
+        cut(channel);
+        pid
+    });
+    said_times(&fixture, "left:", 1);
+    store.remove(&listed).unwrap();
+    fixture.expect_gone(pid, "a kept agent whose peer was removed");
+    assert!(
+        fixture.said().contains("no longer accepted"),
+        "{}",
+        fixture.said()
+    );
+    store.accept_key(&material).unwrap();
+    peer.on_link(|client, _| {
+        assert_ne!(client.pid(), pid, "{}", fixture.said());
+        assert!(client.chunks().is_empty(), "{:?}", client.seen);
+    });
+}
+
+/// `cmd /c start "" /b PROGRAM` on Windows, and a shell putting it in the background elsewhere: the agent's own process exits at
+/// once, and what it started holds its standard input and output.
+fn launched(args: &[&str]) -> Vec<OsString> {
+    let agent = turn_agent().into_os_string();
+    let mut launcher: Vec<OsString> = if cfg!(windows) {
+        ["cmd", "/c", "start", "", "/b"]
+            .map(OsString::from)
+            .to_vec()
+    } else {
+        // A background job's standard input is /dev/null unless it is given another, so it gets a copy made first.
+        ["sh", "-c", r#"exec 3<&0; "$0" "$@" <&3 3<&- &"#]
+            .map(OsString::from)
+            .to_vec()
+    };
+    launcher.push(agent);
+    launcher.extend(args.iter().map(OsString::from));
+    launcher
+}
+
+fn serving_launched(fixture: &mut Fixture, extra: &[&str]) -> Peer {
+    let (key, _) = fixture.identity("server");
+    let (_, client) = fixture.identity("client");
+    let allowed = client.peer_id().to_string();
+    let mut flags = vec!["--identity", key.to_str().unwrap(), "--allow", &allowed];
+    flags.extend_from_slice(extra);
+    let (port, server) = fixture.serve_program(&flags, &launched(&["--ignore-eof"]));
+    Peer::new(client, port, &server)
+}
+
+#[test]
+fn an_agent_whose_launcher_exited_is_kept_and_given_back() {
+    let mut fixture = Fixture::new("launcher");
+    let peer = serving_launched(&mut fixture, &["--linger", "60"]);
+    let pid = peer.on_link(|client, channel| {
+        let pid = client.pid();
+        cut(channel);
+        pid
+    });
+    said_times(&fixture, "left:", 1);
+    peer.on_link(|client, _| {
+        assert_eq!(client.pid(), pid, "{}", fixture.said());
+    });
+}
+
+#[test]
+fn killing_the_bridge_ends_an_agent_whose_launcher_exited() {
+    let mut fixture = Fixture::new("launcherkilled");
+    let peer = serving_launched(&mut fixture, &["--linger", "300"]);
+    let pid = peer.on_link(|client, channel| {
+        let pid = client.pid();
+        cut(channel);
+        pid
+    });
+    said_times(&fixture, "left:", 1);
+    let bridge = fixture.bridge.as_mut().unwrap();
+    bridge.kill().unwrap();
+    bridge.wait().unwrap();
+    fixture.expect_gone(
+        pid,
+        "an agent whose launcher exited, after its bridge was killed",
+    );
+}
+
+#[test]
+fn an_agent_that_exits_while_kept_still_hands_its_peer_what_it_wrote() {
+    let mut fixture = Fixture::new("lastwords");
+    let peer = serving(&mut fixture, &["--linger", "60"]);
+    let pid = peer.on_link(|client, channel| {
+        let pid = client.pid();
+        let session = client.new_session();
+        client.prompt(3, &session, "last 5 500");
+        client.chunk_arrives(0);
+        cut(channel);
+        pid
+    });
+    fixture.expect_gone(pid, "an agent that exited");
+    said_times(&fixture, "ended", 1);
+    peer.on_link(|client, _| {
+        assert_ne!(client.pid(), pid, "a fresh agent. {}", fixture.said());
+        assert_eq!(client.chunks(), [1, 2, 3, 4], "{:?}", client.seen);
+    });
+}
+
+#[test]
+fn a_settle_too_long_to_count_waits_for_the_old_link_rather_than_not_at_all() {
+    use coqui_acp_bridge::linger::{Keeper, Settings};
+    let mut settings = Settings::new(Duration::from_secs(5));
+    settings.settle = Duration::MAX;
+    let keeper = Keeper::new(settings, |_: &str| true, |_| {});
+    let first = keeper.arrive("peer");
+    let (arrived, told) = mpsc::channel();
+    let second = keeper.clone();
+    let waiting = std::thread::spawn(move || {
+        let arrival = second.arrive("peer");
+        let _ = arrived.send(());
+        drop(arrival);
+    });
+    let early = told.recv_timeout(Duration::from_millis(500));
+    drop(first);
+    assert!(early.is_err(), "it should wait while the first link is up");
+    told.recv_timeout(WAIT).unwrap();
+    waiting.join().unwrap();
+}
+
 #[test]
 fn killing_the_bridge_ends_a_kept_agent_that_ignores_its_input_closing() {
     let mut fixture = Fixture::new("killedkept");
@@ -881,6 +1047,8 @@ fn a_helper_told_the_agent_was_dealt_with_leaves_it_alone_and_one_not_told_ends_
     started.stop().unwrap();
 }
 
+/// On Windows there is no helper: the job object does its work.
+#[cfg(unix)]
 #[test]
 fn stopping_a_guarded_agent_dismisses_its_helper() {
     use coqui_acp_bridge::agent::Agent;
@@ -946,7 +1114,11 @@ fn a_line_the_link_could_not_take_goes_first_on_the_next() {
     use coqui_acp_bridge::linger::{Keeper, Settings};
     use coqui_acp_bridge::relay::LinkEnd;
     let program = turn_agent().into_os_string();
-    let keeper = Keeper::new(Settings::new(Duration::from_secs(5)), |_| {});
+    let keeper = Keeper::new(
+        Settings::new(Duration::from_secs(5)),
+        |_: &str| true,
+        |_| {},
+    );
     let dying = Scripted {
         incoming: Mutex::new(vec![
             r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"chunks 5 0"}]}}"#,
@@ -975,6 +1147,65 @@ fn a_line_the_link_could_not_take_goes_first_on_the_next() {
     let sent = next.sent.lock().unwrap();
     let chunks: Vec<u64> = sent.iter().filter_map(chunk_number).collect();
     assert_eq!(chunks, [0, 1, 2, 3, 4], "{sent:?}");
+}
+
+/// Asked again when the peer comes back, so a removal between the watcher's checks still counts.
+#[test]
+fn a_kept_agent_is_not_given_back_to_a_peer_no_longer_accepted() {
+    use coqui_acp_bridge::agent::Agent;
+    use coqui_acp_bridge::linger::{Keeper, Settings};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let program = turn_agent().into_os_string();
+    let accepted = Arc::new(AtomicBool::new(true));
+    let asked = Arc::clone(&accepted);
+    let keeper = Keeper::new(
+        Settings::new(Duration::from_secs(60)),
+        move |_: &str| asked.load(Ordering::SeqCst),
+        |_| {},
+    );
+    const INITIALIZE: &str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#;
+    // The agent's answer is what this link fails to send, which ends it as a lost path.
+    let dying = Scripted {
+        incoming: Mutex::new(vec![INITIALIZE]),
+        sent_ok: Some(0),
+        until_id: None,
+        sent: Mutex::default(),
+    };
+    let first = Arc::new(Mutex::new(None));
+    let started = Arc::clone(&first);
+    let arrival = keeper.arrive("peer");
+    let _ = arrival
+        .serve(&dying, || {
+            let agent = Agent::spawn(&program, &[], 1 << 20)?;
+            *started.lock().unwrap() = Some(agent.pid());
+            Ok(agent)
+        })
+        .unwrap();
+    drop(arrival);
+    let pid = first.lock().unwrap().unwrap();
+    accepted.store(false, Ordering::SeqCst);
+    // Were the kept agent given back, this link would end with its answer.
+    let next = Scripted {
+        incoming: Mutex::new(vec![INITIALIZE]),
+        sent_ok: Some(0),
+        until_id: None,
+        sent: Mutex::default(),
+    };
+    let fresh = AtomicBool::new(false);
+    let arrival = keeper.arrive("peer");
+    let _ = arrival.serve(&next, || {
+        fresh.store(true, Ordering::SeqCst);
+        Err(std::io::Error::other(
+            "enough: only whether a fresh agent was asked for counts",
+        ))
+    });
+    assert!(fresh.load(Ordering::SeqCst), "a fresh agent was asked for");
+    let until = Instant::now() + WAIT;
+    while alive(u64::from(pid)) {
+        assert!(Instant::now() < until, "the kept agent was ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -1042,4 +1273,46 @@ fn linger_is_refused_where_no_key_was_proved_and_its_settings_need_it() {
     let mut endless = base.to_vec();
     endless.extend_from_slice(&["--linger", "18446744073709551615"]);
     refused(&endless, "--linger");
+    let mut huge = base.to_vec();
+    huge.extend_from_slice(&["--linger", "5", "--linger-buffer-bytes", "1099511627776"]);
+    refused(&huge, "--linger-buffer-bytes");
+}
+
+#[cfg(unix)]
+fn listed(pid: u32) -> String {
+    let listed = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&listed.stdout).trim().to_owned()
+}
+
+/// Until it is collected, an ended process keeps its id and its group's, so ending the group then cannot reach anyone else's.
+#[cfg(unix)]
+#[test]
+fn saying_an_agent_ended_leaves_its_id_reserved_until_it_is_stopped() {
+    use coqui_acp_bridge::agent::Agent;
+    let started = Agent::spawn(
+        &OsString::from("sh"),
+        &[OsString::from("-c"), OsString::from("exit 3")],
+        1 << 20,
+    )
+    .unwrap();
+    let pid = started.pid();
+    let until = Instant::now() + WAIT;
+    let status = loop {
+        if let Some(status) = started.try_status().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < until, "it should have ended");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(3));
+    assert!(
+        listed(pid).starts_with('Z'),
+        "still listed, not collected: {:?}",
+        listed(pid)
+    );
+    assert_eq!(started.stop().unwrap().code(), Some(3));
+    assert_eq!(listed(pid), "", "stop collects it");
 }

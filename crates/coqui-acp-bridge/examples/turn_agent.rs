@@ -4,6 +4,7 @@
 //! - `chunks N MS`: one chunk at once, the others MS apart, then the prompt's answer. A chunk's text starts with its number.
 //! - `flood N BYTES MS`: one chunk at once, then after MS the others, each BYTES longer, as fast as they go, then the answer.
 //! - `exit MS`: one chunk at once, then after MS it exits.
+//! - `last N MS`: one chunk at once, then after MS the others, and it exits without answering.
 //!
 //! It ends when its standard input does, unless started with `--ignore-eof`, which is for what that costs a bridge going away.
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
@@ -63,6 +64,14 @@ fn turn(out: &Out, id: &Value, session: &str, script: &str) {
         Some("exit") => {
             chunk(out, session, "0");
             thread::sleep(Duration::from_millis(number(1)));
+            std::process::exit(9);
+        }
+        Some("last") => {
+            chunk(out, session, "0");
+            thread::sleep(Duration::from_millis(number(2)));
+            for n in 1..number(1) {
+                chunk(out, session, &n.to_string());
+            }
             std::process::exit(9);
         }
         _ => {}

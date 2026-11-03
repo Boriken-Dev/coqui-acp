@@ -34,16 +34,21 @@ pub(crate) enum WriteEnd {
     Stopped,
 }
 
-/// A running agent. Dropping it ends the process.
+/// A running agent. Dropping it ends the process and what it started.
 #[derive(Debug)]
 pub struct Agent {
     child: Mutex<Child>,
     input: SyncSender<Vec<u8>>,
     output: Mutex<Receiver<Output>>,
     queued: Arc<AtomicUsize>,
+    /// Set once nothing more can come from the agent's output: whatever holds it, the agent or what it started, has closed it.
+    output_closed: Arc<AtomicBool>,
     write_limit: Duration,
     stopped: AtomicBool,
     guard: Mutex<Option<Guard>>,
+    /// Holds the agent and everything it starts; the system ends them all when the last handle closes, this process ending included.
+    #[cfg(windows)]
+    job: Mutex<Option<win32job::Job>>,
 }
 
 /// A helper process waiting to end this agent if this process goes first.
@@ -53,25 +58,66 @@ struct Guard {
     told: ChildStdin,
 }
 
-/// What a helper started by [`Agent::guarded`] does: waits on `from_bridge`, its standard input, and ends the process tree of `agent`
-/// unless a byte arrives first. A pipe that ends with no byte means the bridge went, however it went.
+/// What a helper started by [`Agent::guarded`] does: waits on `from_bridge`, its standard input, and ends the process group of `agent`
+/// unless a byte arrives first. A pipe that ends with no byte means the bridge went, however it went. An id of 0 or 1 names no agent
+/// (as a group they mean this group, or every process), so nothing is done for one.
 pub fn watch(agent: u32, mut from_bridge: impl Read) {
     if from_bridge.read_exact(&mut [0_u8]).is_err() {
         end_tree(agent);
     }
 }
 
-/// Ends a process and what it started. A failure here only means less was ended than asked: `stop` still ends the child itself.
+/// Ends the process group `pid` leads. A failure here only means less was ended than asked: `stop` still ends the child itself.
+#[cfg(unix)]
 fn end_tree(pid: u32) {
-    #[cfg(windows)]
-    let ended = Command::new("taskkill")
+    if let Some(group) = group_of(pid) {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+}
+
+/// The group `pid` leads, for an id that can name one alone: not 0 or 1, and within what the system counts.
+#[cfg(unix)]
+fn group_of(pid: u32) -> Option<rustix::process::Pid> {
+    i32::try_from(pid)
+        .ok()
+        .filter(|pid| *pid > 1)
+        .and_then(rustix::process::Pid::from_raw)
+}
+
+/// Ends a process and what it started, by the system's own `taskkill`. The bridge ends its agents by their job objects; this is only for
+/// [`watch`], which has a process id.
+#[cfg(windows)]
+fn end_tree(pid: u32) {
+    if pid <= 1 {
+        return;
+    }
+    let system = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+    let taskkill = std::path::Path::new(&system)
+        .join("System32")
+        .join("taskkill.exe");
+    let _ = Command::new(taskkill)
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .output();
-    #[cfg(not(windows))]
-    let ended = Command::new("kill")
-        .args(["-s", "KILL", "--", &format!("-{pid}")])
-        .output();
-    drop(ended);
+}
+
+/// Whether the process has ended and how, leaving it uncollected: until it is collected its id, and its group's, stay its own.
+#[cfg(unix)]
+fn peek(pid: u32) -> io::Result<Option<ExitStatus>> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    use std::os::unix::process::ExitStatusExt;
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| io::Error::other("not a process id"))?;
+    let status = waitid(
+        WaitId::Pid(pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    )?;
+    // A wait status: the exit code in the second byte, or the signal in the low seven bits.
+    Ok(status.map(|status| match status.exit_status() {
+        Some(code) => ExitStatus::from_raw((code & 0xff) << 8),
+        None => ExitStatus::from_raw(status.terminating_signal().unwrap_or(0) & 0x7f),
+    }))
 }
 
 impl Agent {
@@ -79,7 +125,7 @@ impl Agent {
     ///
     /// # Errors
     ///
-    /// The operating system could not start it.
+    /// The operating system could not start it, or on Windows could not put it in a job object of its own.
     pub fn spawn(program: &OsString, args: &[OsString], max_line: usize) -> io::Result<Self> {
         let mut command = Command::new(program);
         command
@@ -91,6 +137,15 @@ impl Agent {
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = command.spawn()?;
+        #[cfg(windows)]
+        let job = match contain(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         let mut stdin = child
             .stdin
             .take()
@@ -112,84 +167,60 @@ impl Agent {
         let (lines, output) = mpsc::sync_channel(QUEUED_LINES);
         let queued = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&queued);
+        let output_closed = Arc::new(AtomicBool::new(false));
+        let closed = Arc::clone(&output_closed);
         thread::Builder::new()
             .name("coqui-acp-bridge-agent".to_owned())
             .spawn(move || {
-                let limit = u64::try_from(max_line)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1);
-                let mut reader = BufReader::new(stdout);
-                loop {
-                    let mut line = Vec::new();
-                    match (&mut reader).take(limit).read_until(b'\n', &mut line) {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) if line.len() > max_line && line.last() != Some(&b'\n') => {
-                            let _ = lines.send(Output::TooLong);
-                            return;
-                        }
-                        Ok(_) => {
-                            while matches!(line.last(), Some(b'\n' | b'\r')) {
-                                line.pop();
-                            }
-                            if line.is_empty() {
-                                continue;
-                            }
-                            // The count has one other holder for as long as anyone can take a line.
-                            while counted.load(Ordering::SeqCst) > 0
-                                && counted.load(Ordering::SeqCst).saturating_add(line.len())
-                                    > QUEUED_BYTES
-                            {
-                                if Arc::strong_count(&counted) == 1 {
-                                    return;
-                                }
-                                thread::sleep(POLL);
-                            }
-                            counted.fetch_add(line.len(), Ordering::SeqCst);
-                            if lines.send(Output::Line(line)).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
+                read_output(stdout, max_line, &lines, &counted);
+                closed.store(true, Ordering::SeqCst);
             })?;
         Ok(Self {
             child: Mutex::new(child),
             input,
             output: Mutex::new(output),
             queued,
+            output_closed,
             write_limit: Duration::from_secs(30),
             stopped: AtomicBool::new(false),
             guard: Mutex::new(None),
+            #[cfg(windows)]
+            job: Mutex::new(Some(job)),
         })
     }
 
-    /// Starts `program args... PID`, which has to call [`watch`] with this agent's id and its standard input, so this agent does not
-    /// outlive this process, whatever ends it and whether or not the agent reads its input. It is apart from a terminal's Ctrl-C,
-    /// which has to leave it standing to do this.
+    /// On Unix, starts `program args... PID`, which has to call [`watch`] with this agent's id and its standard input, so that what is
+    /// left of this agent's process group is ended if this process goes, whatever ends it and whether or not the agent reads its input.
+    /// It is apart from a terminal's Ctrl-C, which has to leave it standing to do this. It is cleanup at best: a process that leaves the
+    /// group escapes it, and anything that can signal it can end it first.
+    ///
+    /// On Windows it starts nothing: every agent is in a job object, which the system ends with this process.
     ///
     /// # Errors
     ///
     /// The operating system could not start it, and this agent has been ended.
     pub fn guarded(self, program: &OsStr, args: &[&str]) -> io::Result<Self> {
-        let pid = self.pid();
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .arg(pid.to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        // CREATE_NO_WINDOW: a console of its own, so the bridge's console closing or its Ctrl-C does not end it too.
         #[cfg(windows)]
-        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
-        let mut process = command.spawn()?;
-        let told = process
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("no standard input"))?;
-        *self.guard.lock().unwrap_or_else(PoisonError::into_inner) = Some(Guard { process, told });
+        let _ = (program, args);
+        #[cfg(unix)]
+        {
+            let pid = self.pid();
+            let mut command = Command::new(program);
+            command
+                .args(args)
+                .arg(pid.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            std::os::unix::process::CommandExt::process_group(&mut command, 0);
+            let mut process = command.spawn()?;
+            let told = process
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("no standard input"))?;
+            *self.guard.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(Guard { process, told });
+        }
         Ok(self)
     }
 
@@ -233,6 +264,12 @@ impl Agent {
         Ok(next)
     }
 
+    /// Whether the agent can still say anything: its output is open, whether its own process holds it or one it started does, as when
+    /// the program run is a launcher that has exited. Lines it wrote before may still wait in the queue.
+    pub(crate) fn output_open(&self) -> bool {
+        !self.output_closed.load(Ordering::SeqCst)
+    }
+
     /// The process's id.
     #[must_use]
     pub fn pid(&self) -> u32 {
@@ -242,7 +279,7 @@ impl Agent {
             .id()
     }
 
-    /// The id of the helper [`Self::guarded`] started, until it has been dismissed.
+    /// The id of the helper [`Self::guarded`] started, until it has been dismissed. Always `None` on Windows.
     #[must_use]
     pub fn guard_pid(&self) -> Option<u32> {
         self.guard
@@ -252,26 +289,40 @@ impl Agent {
             .map(|guard| guard.process.id())
     }
 
-    /// Whether the process has ended, and how.
+    /// Whether the process has ended, and how. It is not collected until [`Self::stop`], so its id stays its own until then.
     ///
     /// # Errors
     ///
     /// The operating system could not say.
     pub fn try_status(&self) -> io::Result<Option<ExitStatus>> {
-        self.child
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .try_wait()
+        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        #[cfg(unix)]
+        if !self.stopped.load(Ordering::SeqCst) {
+            return peek(child.id());
+        }
+        child.try_wait()
     }
 
-    /// Ends the process and collects its status. Only this process: one it started itself is not reached.
+    /// Ends the process and what it started, and collects its status: by process group on Unix, by job object on Windows.
     ///
     /// # Errors
     ///
     /// The operating system could not end it.
     pub fn stop(&self) -> io::Result<ExitStatus> {
-        let status = self.end_process()?;
-        // Once it has been reaped its id is free to be someone else's, so the helper has to be told not to look for it.
+        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            // Before collecting it: until then its id and its group's cannot be anyone else's.
+            #[cfg(unix)]
+            end_tree(child.id());
+            #[cfg(windows)]
+            drop(
+                self.job
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take(),
+            );
+        }
+        // Dismissed before the agent is collected, after which a helper ending that group could reach someone else's.
         if let Some(mut guard) = self
             .guard
             .lock()
@@ -281,15 +332,6 @@ impl Agent {
             let _ = guard.told.write_all(b"x");
             drop(guard.told);
             let _ = guard.process.wait();
-        }
-        Ok(status)
-    }
-
-    fn end_process(&self) -> io::Result<ExitStatus> {
-        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
-        // Before looking at the child: once it has been reaped its id is free to be someone else's.
-        if !self.stopped.swap(true, Ordering::SeqCst) {
-            end_tree(child.id());
         }
         if let Some(status) = child.try_wait()? {
             return Ok(status);
@@ -302,5 +344,78 @@ impl Agent {
 impl Drop for Agent {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+/// Puts a process just started in a job object of its own that ends everything in it when its last handle closes. A process it
+/// starts in the moment before this is not in the job.
+#[cfg(windows)]
+fn contain(child: &Child) -> io::Result<win32job::Job> {
+    use std::os::windows::io::AsRawHandle;
+    let mut limits = win32job::ExtendedLimitInfo::new();
+    limits.limit_kill_on_job_close();
+    let job = win32job::Job::create_with_limit_info(&limits).map_err(io::Error::other)?;
+    job.assign_process(child.as_raw_handle() as isize)
+        .map_err(io::Error::other)?;
+    Ok(job)
+}
+
+/// Reads the agent's output into `lines` until it ends, holding back while the queue is full.
+fn read_output(
+    stdout: impl Read,
+    max_line: usize,
+    lines: &SyncSender<Output>,
+    counted: &Arc<AtomicUsize>,
+) {
+    let limit = u64::try_from(max_line)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut reader = BufReader::new(stdout);
+    loop {
+        let mut line = Vec::new();
+        match (&mut reader).take(limit).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) if line.len() > max_line && line.last() != Some(&b'\n') => {
+                let _ = lines.send(Output::TooLong);
+                return;
+            }
+            Ok(_) => {
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                if line.is_empty() {
+                    continue;
+                }
+                // The count has one other holder for as long as anyone can take a line.
+                while counted.load(Ordering::SeqCst) > 0
+                    && counted.load(Ordering::SeqCst).saturating_add(line.len()) > QUEUED_BYTES
+                {
+                    if Arc::strong_count(counted) == 1 {
+                        return;
+                    }
+                    thread::sleep(POLL);
+                }
+                counted.fetch_add(line.len(), Ordering::SeqCst);
+                if lines.send(Output::Line(line)).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_id_that_would_name_this_group_or_every_process_names_no_group() {
+        assert!(group_of(0).is_none());
+        assert!(group_of(1).is_none());
+        assert!(group_of(u32::MAX).is_none());
+        assert_eq!(
+            group_of(2).map(rustix::process::Pid::as_raw_nonzero),
+            core::num::NonZeroI32::new(2)
+        );
     }
 }

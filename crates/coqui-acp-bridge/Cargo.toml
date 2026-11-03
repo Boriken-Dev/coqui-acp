@@ -31,6 +31,14 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde_json.workspace = true
 url = "2.5"
 
+# Ends an agent's process group, and sees an agent end without collecting it, through safe calls rather than a `kill` found on PATH.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+
+# A job object per agent, which the system ends with everything in it when the bridge's handle closes, however the bridge ends.
+[target.'cfg(windows)'.dependencies]
+win32job = "2.0.3"
+
 [dev-dependencies]
 serde_json.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

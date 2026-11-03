@@ -42,13 +42,15 @@ person or the application decides what to send again.
 
 ## Keeping an agent through a reconnect
 
-`coqui-acp-bridge serve --linger SECONDS` keeps a link's agent that long after the link ends, and gives it to the next connection that proves the same key, never to another. Nothing else about the connection changes: the bridge reads no ACP, so nothing says an agent was kept, and the client asks with `session/resume`. An agent past its time, or one that ended, is a fresh agent on the new connection, which answers in its own words.
+`coqui-acp-bridge serve --linger SECONDS` keeps a link's agent that long after the link ends, and gives it to the next connection that proves the same key, never to another, and only while that key is still accepted. Nothing else about the connection changes: the bridge reads no ACP, so nothing says an agent was kept, and the client asks with `session/resume`. An agent past its time, or one that ended, is a fresh agent on the new connection, which answers in its own words; what an agent that ended wrote while nobody was connected comes first.
+
+The key is the whole of what is checked. Where several programs on one machine prove the same key, as every tool of a user does under `--paired`, any of them can be given another's kept agent, with its session and what it wrote.
 
 A client talking to a bridge that may do this has to allow for four things:
 
 - **`initialize` comes twice** to the same agent.
-- **What the agent wrote while nobody was connected comes first**, up to a limit, ahead of the answer to `initialize`: updates of a session not yet resumed, and requests such as `session/request_permission`.
-- **Answers to the old connection's requests arrive on the new one, with their old ids.** In version 1 the answer to a `session/prompt` is the only thing that says a turn ended, so a client that wants to see one finish keeps that id across the reload. A client's ids must not repeat across connections to one agent, or a late answer is taken for a new request's.
+- **What the agent wrote while nobody was connected comes first**, up to a limit, ahead of the answer to `initialize`: updates of a session not yet resumed, and requests such as `session/request_permission`. A client takes a `session/update` or a `session/request_permission` only for a session it opened or resumed on this connection, and cancels any other request without asking anyone, so an old session's output never feeds a new one and nobody answers for a session they cannot see. A request of the session about to be resumed that arrives before the client asked to resume it is cancelled too: the turn goes on without that tool.
+- **Answers to the old connection's requests arrive on the new one, with their old ids.** In version 1 the answer to a `session/prompt` is the only thing that says a turn ended, so a client that wants to see one finish keeps that id across the reload. A client's ids must not repeat across connections to one agent, or a late answer is taken for a new request's: these clients start each connection's ids at a random point (Dart) or use UUIDs (Rust).
 - **A reconnect can always hide a gap.** What a link had accepted and never delivered when it was cut is lost with no notice, since nothing acknowledges it.
 
 ### `_dev.boriken.coqui.acp/output_lost`
@@ -59,4 +61,4 @@ Past the limit the oldest lines are dropped, since the newest hold the answer th
 {"jsonrpc":"2.0","method":"_dev.boriken.coqui.acp/output_lost","params":{"lines":12,"bytes":3456}}
 ```
 
-ACP has no message for this. A notification whose method starts with `_` is the extension point it offers, and a client that does not know this one ignores it, as ACP requires, and sees only the gap it would have had anyway. It is the one message the bridge writes itself, and it travels inside the proven session like any other. A client that reads it reconciles by `session/load`, or tells the person.
+ACP has no message for this. A notification whose method starts with `_` is the extension point it offers, and a client that does not know this one ignores it, as ACP requires, and sees only the gap it would have had anyway. It is the one message the bridge writes itself, and it travels inside the proven session like any other. A client that reads it reconciles by `session/load`, or tells the person. These clients report it as `Event::OutputLost` (Rust) and `AcpOutputLost` (Dart).

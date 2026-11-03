@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clap::{Parser, Subcommand};
 use coqui_acp_bridge::agent::{self, Agent};
-use coqui_acp_bridge::linger::{Keeper, Settings};
+use coqui_acp_bridge::linger::{self, Keeper, Settings};
 use coqui_acp_bridge::relay::{LinkEnd, relay};
 use coqui_agentic_peer::auth::Sealed;
 use coqui_agentic_peer::discovery::{Advertised, Advertisement};
@@ -118,8 +118,8 @@ enum Mode {
         #[arg(long, default_value = standing::DEFAULT_NAME)]
         name: String,
     },
-    /// Waits on standard input, and ends this process's tree if it closes with nothing said: `serve --linger` starts one for each
-    /// agent, so none outlives the bridge. Nothing else starts it.
+    /// Waits on standard input, and ends the agent's process group if it closes with nothing said: `serve --linger` starts one for each
+    /// agent on Unix, to clean up after a bridge that went. Nothing else starts it.
     AgentGuard {
         /// The agent's process id.
         pid: u32,
@@ -259,16 +259,17 @@ struct Serve {
     /// `session/resume` reaches a live session. Needs the in-band proof. Without it, or with 0, the agent ends with its link.
     #[arg(long, value_name = "SECONDS")]
     linger: Option<u64>,
-    /// Agents kept for one peer, past which its oldest ends. The bridge reads no ACP, so it cannot tell which agent holds the session
-    /// a peer wants: above 1, a peer can be given the wrong one.
+    /// Agents kept for one peer, past which the one of them started last ends: a peer has two only when it connected while an earlier
+    /// link was still up, and the earlier holds that link's session. The bridge reads no ACP, so it cannot tell which agent holds the
+    /// session a peer wants: above 1, a peer can be given the wrong one.
     #[arg(long, requires = "linger", value_name = "N", default_value = "1")]
     linger_per_peer: NonZeroUsize,
-    /// Agents kept for everyone together, past which the oldest ends. These take no place among --max-peers.
+    /// Agents kept for everyone together, past which the one kept longest ends. These take no place among --max-peers.
     #[arg(long, requires = "linger", value_name = "N", default_value = "4")]
     linger_total: NonZeroUsize,
-    /// Bytes of a kept agent's output to hold while nobody is connected. Past this the oldest lines are dropped, and the next link
-    /// is told first, in a notification of its own.
-    #[arg(long, requires = "linger", value_name = "BYTES", default_value_t = 16 * 1024 * 1024)]
+    /// Bytes of a kept agent's output to hold while nobody is connected, each line counted with what holding it takes, at most 256 MiB.
+    /// Past this the oldest lines are dropped, and the next link is told first, in a notification of its own.
+    #[arg(long, requires = "linger", value_name = "BYTES", default_value_t = 16 * 1024 * 1024, value_parser = buffer_bytes)]
     linger_buffer_bytes: usize,
     /// How long a new connection waits for a link of the same peer to end, so a reload faster than the old link's end finds its agent.
     #[arg(long, requires = "linger", value_name = "MS", default_value_t = 500)]
@@ -933,7 +934,7 @@ impl Service {
 }
 
 /// What `--linger` asks for, if anything. Only a key a proof named can be told apart from another, so nothing else has it.
-fn keeper(args: &Serve, no_key: bool) -> Result<Option<Keeper>, String> {
+fn linger(args: &Serve, no_key: bool) -> Result<Option<Settings>, String> {
     let Some(seconds) = args.linger.filter(|seconds| *seconds > 0) else {
         return Ok(None);
     };
@@ -952,7 +953,32 @@ fn keeper(args: &Serve, no_key: bool) -> Result<Option<Keeper>, String> {
     settings.total = args.linger_total;
     settings.buffer = args.linger_buffer_bytes;
     settings.settle = Duration::from_millis(args.linger_settle_ms);
-    Ok(Some(Keeper::new(settings, |said| eprintln!("{said}"))))
+    Ok(Some(settings))
+}
+
+/// Keeps agents by `settings` for peers `store` still accepts, or with no store, for every peer the command line allowed.
+fn keeper(settings: Settings, store: Option<&Arc<TrustStore>>) -> Keeper {
+    let report = |said: &str| eprintln!("{said}");
+    match store {
+        Some(store) => {
+            let store = Arc::clone(store);
+            let accepted = move |peer: &str| {
+                peer.parse::<PeerId>()
+                    .is_ok_and(|peer| store.is_accepted(&peer))
+            };
+            Keeper::new(settings, accepted, report)
+        }
+        None => Keeper::new(settings, |_: &str| true, report),
+    }
+}
+
+/// `--linger-buffer-bytes`, which holds at most [`linger::MAX_BUFFER`] for each agent.
+fn buffer_bytes(text: &str) -> Result<usize, String> {
+    let bytes: usize = text.parse().map_err(|error| format!("{error}"))?;
+    if bytes > linger::MAX_BUFFER {
+        return Err(format!("at most {} bytes", linger::MAX_BUFFER));
+    }
+    Ok(bytes)
 }
 
 /// Takes connections for ever, each handshake and proof on a thread of its own, so one slow peer holds up nobody. Past the
@@ -1111,7 +1137,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     if args.tls_short_lived && (args.no_peer_proof || certificates) {
         return Err("--tls-short-lived needs the in-band proof: a client cannot pin this certificate for long".to_owned());
     }
-    let keeper = keeper(args, args.no_peer_proof || certificates)?;
+    let linger = linger(args, args.no_peer_proof || certificates)?;
     if args.no_peer_proof {
         return serve_unproven(args, admit, unproven, running);
     }
@@ -1262,6 +1288,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         advertised
     };
     eprintln!("listening on {bound}");
+    let keeper = linger.map(|settings| keeper(settings, store.as_ref()));
     let links = links(args, &running, keeper.as_ref())?;
     let reverses = args
         .reverses
