@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use coqui_acp::{Authenticate, Client, Event, RpcFailure, Session, exchange};
+use coqui_acp::{Authenticate, Client, Event, Exchange, RpcFailure, Session};
 use coqui_acp_provider::{
     AcpFacade, AgentEvent, BLOCKED_EVENT, CANCELLED_EVENT, COMPLETED_EVENT, DENIED_EVENT,
     EVENT_NOTIFICATION, EVENTS_CAPABILITY, FAILED_EVENT, FacadeAuth, LAUNCH_META_KEY, LIMIT_EVENT,
@@ -42,8 +42,8 @@ fn turn(session: &Session) -> Vec<Event> {
             .unwrap_or_else(|| panic!("the turn did not end: {events:?}"));
         let ended = matches!(
             event,
-            Event::Completed { .. } | Event::Failed(_) | Event::Blocked(_)
-        ) || format!("{event:?}").starts_with("Cancelled");
+            Event::Completed { .. } | Event::Failed(_) | Event::Cancelled
+        );
         events.push(event);
         if ended {
             return events;
@@ -524,14 +524,14 @@ fn a_method_this_agent_lacks_is_not_found() {
     facade(&probe, quick())
         .serve(agent)
         .expect("a thread starts");
-    let answers = exchange(
-        client,
-        None,
-        Some(WAIT),
-        Some(WAIT),
-        vec![("session/load".to_owned(), json!({"sessionId": "x"}))],
-    )
-    .unwrap();
+    let answers = Exchange::new()
+        .initialize_timeout(Some(WAIT))
+        .request_timeout(Some(WAIT))
+        .run(
+            client,
+            vec![("session/load".to_owned(), json!({"sessionId": "x"}))],
+        )
+        .unwrap();
     assert!(
         matches!(&answers[0], Err(RpcFailure { code: -32601, .. })),
         "{answers:?}"

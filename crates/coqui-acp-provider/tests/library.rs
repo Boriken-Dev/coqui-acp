@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use coqui_acp::{Client, Event, exchange};
+use coqui_acp::{Client, Event, Exchange};
 use coqui_acp_provider::guatiao::library::Registry;
 use coqui_acp_provider::{AcpFacade, AgentProvider};
 
@@ -52,14 +52,14 @@ fn a_provider_in_a_library_answers_initialize() {
     let (_registry, facade) = loaded();
     let (agent, client) = coqui_acp::duplex();
     facade.serve(agent).expect("a thread starts");
-    let answers = exchange(
-        client,
-        None,
-        Some(WAIT),
-        Some(WAIT),
-        vec![("session/load".to_owned(), serde_json::json!({}))],
-    )
-    .expect("initialize is answered");
+    let answers = Exchange::new()
+        .initialize_timeout(Some(WAIT))
+        .request_timeout(Some(WAIT))
+        .run(
+            client,
+            vec![("session/load".to_owned(), serde_json::json!({}))],
+        )
+        .expect("initialize is answered");
     assert_eq!(answers.len(), 1);
 }
 

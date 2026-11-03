@@ -26,7 +26,7 @@ mod with_python {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
-    use coqui_acp::{Client, Event, RpcFailure, Session, exchange, lines};
+    use coqui_acp::{Client, Event, Exchange, RpcFailure, Session, lines};
     use serde_json::{Value, json};
 
     const WAIT: Duration = Duration::from_secs(60);
@@ -160,8 +160,8 @@ mod with_python {
                 .unwrap_or_else(|| panic!("the turn did not end: {events:?}"));
             let ended = matches!(
                 event,
-                Event::Completed { .. } | Event::Failed(_) | Event::Blocked(_)
-            ) || format!("{event:?}").starts_with("Cancelled");
+                Event::Completed { .. } | Event::Failed(_) | Event::Cancelled
+            );
             events.push(event);
             if ended {
                 return events;
@@ -182,14 +182,11 @@ mod with_python {
     #[test]
     fn a_python_provider_answers_initialize() {
         let (_host, transport) = Host::start();
-        let answers = exchange(
-            transport,
-            None,
-            Some(WAIT),
-            Some(WAIT),
-            vec![("session/load".to_owned(), json!({}))],
-        )
-        .expect("initialize is answered, through a provider written in Python");
+        let answers = Exchange::new()
+            .initialize_timeout(Some(WAIT))
+            .request_timeout(Some(WAIT))
+            .run(transport, vec![("session/load".to_owned(), json!({}))])
+            .expect("initialize is answered, through a provider written in Python");
         assert!(
             matches!(&answers[0], Err(RpcFailure { code: -32601, .. })),
             "{answers:?}"
