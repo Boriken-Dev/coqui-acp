@@ -5,6 +5,7 @@ members = [
     "crates/coqui-acp-bridge",
     "crates/coqui-acp-page",
     "crates/coqui-acp-provider",
+    "examples/provider-python",
 ]
 
 [workspace.package]

@@ -1,0 +1,26 @@
+[package]
+name = "provider-python"
+description = "An echo agent written in Python: a Guatiao provider, served over the Agent Client Protocol by coqui-acp-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "provider-python-host"
+path = "src/main.rs"
+
+[dependencies]
+coqui-acp = { path = "../../crates/coqui-acp" }
+coqui-acp-provider = { path = "../../crates/coqui-acp-provider" }
+# A direct dependency so that build.rs learns where Cargo checked out Guatiao, whose Python binding
+# and source of Python libraries the test needs.
+guatiao = { workspace = true, features = ["provider", "load"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

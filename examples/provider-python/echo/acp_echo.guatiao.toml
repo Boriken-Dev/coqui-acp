@@ -1,0 +1,6 @@
+# What the Python source reads before importing anything: the module, which is the library, and the kinds its
+# providers serve. `paths` go on sys.path while it is open, relative to this file.
+type = "python"
+module = "acp_echo"
+kinds = ["agent_provider"]
+paths = ["."]
