@@ -453,6 +453,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-acp-provider"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "agent-client-protocol",
+ "coqui-acp",
+ "futures",
+ "guatiao",
+ "guatiao-serde",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
 source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=33be56624cd44f0948468ab2e0c1fb53b5ea5de1#33be56624cd44f0948468ab2e0c1fb53b5ea5de1"
@@ -1113,6 +1127,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "guatiao"
+version = "0.0.0-alpha.1"
+source = "git+https://github.com/Boriken-Dev/guatiao?rev=a67fd4be0aa319795614ac6fe12d35d856ec3d8b#a67fd4be0aa319795614ac6fe12d35d856ec3d8b"
+dependencies = [
+ "guatiao-derive",
+ "libloading",
+ "object",
+]
+
+[[package]]
+name = "guatiao-derive"
+version = "0.0.0-alpha.1"
+source = "git+https://github.com/Boriken-Dev/guatiao?rev=a67fd4be0aa319795614ac6fe12d35d856ec3d8b#a67fd4be0aa319795614ac6fe12d35d856ec3d8b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "guatiao-serde"
+version = "0.0.0-alpha.1"
+source = "git+https://github.com/Boriken-Dev/guatiao?rev=a67fd4be0aa319795614ac6fe12d35d856ec3d8b#a67fd4be0aa319795614ac6fe12d35d856ec3d8b"
+dependencies = [
+ "guatiao",
+ "serde",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1471,6 +1514,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1578,6 +1631,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "object"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

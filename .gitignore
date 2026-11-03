@@ -14,6 +14,9 @@ CLAUDE*
 /target/
 /Cargo.lock
 
+# Python
+__pycache__/
+
 # Dart
 .dart_tool/
 /bindings/dart/coqui_acp/pubspec.lock

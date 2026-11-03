@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/coqui-acp", "crates/coqui-acp-bridge", "crates/coqui-acp-page"]
+members = [
+    "crates/coqui-acp",
+    "crates/coqui-acp-bridge",
+    "crates/coqui-acp-page",
+    "crates/coqui-acp-provider",
+]
 
 [workspace.package]
 version = "0.0.0-alpha.0"
@@ -15,7 +20,16 @@ homepage = "https://boriken-dev.github.io/coqui-acp/"
 agent-client-protocol = { version = "3.6", default-features = false }
 # Its executor and channels: the SDK runs on `futures`, so no Tokio is forced on a consumer.
 futures = "0.3"
+# The provider kind and what crosses it. Alpha, by revision: every project building against the kind needs the same
+# one, and nothing else carries a kind across languages.
+guatiao = { git = "https://github.com/Boriken-Dev/guatiao", rev = "a67fd4be0aa319795614ac6fe12d35d856ec3d8b" }
+# A launch's opaque JSON as a Guatiao value: only the adapter, no text format.
+guatiao-serde = { git = "https://github.com/Boriken-Dev/guatiao", rev = "a67fd4be0aa319795614ac6fe12d35d856ec3d8b", default-features = false }
+# The event types' JSON shape.
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = "1"
+# Session and tool call identifiers no client can guess.
+uuid = { version = "1", default-features = false, features = ["v4"] }
 
 
 [workspace.lints.rust]

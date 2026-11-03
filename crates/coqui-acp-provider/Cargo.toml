@@ -1,0 +1,35 @@
+[package]
+name = "coqui-acp-provider"
+description = "Agents as Guatiao providers, in any language Guatiao hosts, and a facade that serves one over the Agent Client Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["acp", "agent", "provider", "guatiao"]
+categories = ["network-programming"]
+exclude = [".*", "*.local.*", "__pycache__"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+agent-client-protocol.workspace = true
+futures.workspace = true
+guatiao = { workspace = true, features = ["provider"] }
+guatiao-serde.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+coqui-acp = { path = "../coqui-acp" }
+guatiao = { workspace = true, features = ["provider", "load"] }
+
+[lints]
+workspace = true
