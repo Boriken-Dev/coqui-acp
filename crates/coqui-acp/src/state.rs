@@ -94,7 +94,10 @@ impl Turn {
 
     /// Marks the end of a turn for an event that ends one.
     pub(crate) fn note(&mut self, event: &Event) {
-        if matches!(event, Event::Completed { .. } | Event::Failed(_)) {
+        if matches!(
+            event,
+            Event::Completed { .. } | Event::Failed(_) | Event::Cancelled
+        ) {
             self.finished = true;
         }
     }
@@ -159,7 +162,7 @@ impl Turn {
                 stop: stop.to_string(),
             },
             Some("refusal") => Event::Failed("the agent refused to continue".to_string()),
-            Some("cancelled") => Event::Blocked("the turn was cancelled".to_string()),
+            Some("cancelled") => Event::Cancelled,
             Some(other) => Event::Failed(format!("the agent ended the turn with {other}")),
             None => Event::Failed("the agent ended the turn with no stop reason".to_string()),
         }
@@ -293,7 +296,7 @@ mod tests {
             }
         );
         assert!(matches!(turn.stopped(Some("refusal")), Event::Failed(_)));
-        assert!(matches!(turn.stopped(Some("cancelled")), Event::Blocked(_)));
+        assert_eq!(turn.stopped(Some("cancelled")), Event::Cancelled);
         assert!(matches!(turn.stopped(Some("what")), Event::Failed(_)));
         assert!(matches!(turn.stopped(None), Event::Failed(_)));
     }

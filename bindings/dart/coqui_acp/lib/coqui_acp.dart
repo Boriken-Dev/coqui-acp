@@ -53,6 +53,14 @@ final class AcpFailed extends AcpEvent {
   String toString() => 'AcpFailed($message)';
 }
 
+/// The agent ended the turn as cancelled, whether asked to or by itself.
+final class AcpCancelled extends AcpEvent {
+  const AcpCancelled();
+  @override
+  String toString() => 'AcpCancelled()';
+}
+
+/// A permission request could not be answered, so the agent was told it was cancelled. The turn goes on until the agent ends it.
 final class AcpBlocked extends AcpEvent {
   final String message;
   const AcpBlocked(this.message);
@@ -396,7 +404,7 @@ final class AcpClient {
     _flush();
     _emit(switch (stop) {
       'end_turn' || 'max_tokens' || 'max_turn_requests' => AcpCompleted(stop),
-      'cancelled' => const AcpBlocked('the turn was cancelled'),
+      'cancelled' => const AcpCancelled(),
       'refusal' => const AcpFailed('the agent refused to continue'),
       _ => AcpFailed('the agent ended the turn with $stop'),
     });

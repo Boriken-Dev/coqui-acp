@@ -43,7 +43,10 @@ pub enum Event {
     },
     /// The turn failed, the agent refused, or the connection was lost.
     Failed(String),
-    /// The turn stopped short: it was cancelled, or a permission could not be answered.
+    /// The agent ended the turn as cancelled, whether asked to or by itself.
+    Cancelled,
+    /// A permission request could not be answered, so the agent was told it was cancelled. The turn goes on until the agent
+    /// ends it.
     Blocked(String),
     /// A `session/prompt` failed while an extension owns turn endings ([`turn_end_by`]). The extension
     /// may have ended the turn already, so the caller judges this.

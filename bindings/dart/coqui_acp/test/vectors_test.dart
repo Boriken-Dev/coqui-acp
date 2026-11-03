@@ -87,6 +87,7 @@ bool matchesEvent(AcpEvent event, Map<String, dynamic> want) => switch (event) {
   AcpCompleted(:final stop) =>
     want['type'] == 'completed' && want['stop'] == stop,
   AcpFailed() => want['type'] == 'failed',
+  AcpCancelled() => want['type'] == 'cancelled',
   AcpBlocked() => want['type'] == 'blocked',
   _ => false,
 };

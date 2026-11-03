@@ -34,7 +34,7 @@
       "events": [{"type": "failed"}]
     },
     {
-      "name": "a cancelled turn is blocked, not failed",
+      "name": "a cancelled turn is cancelled, neither blocked nor failed",
       "version": 1,
       "client": {"cwd": "/work", "prompt": "hello"},
       "steps": [
@@ -42,7 +42,7 @@
         {"expect": {"method": "session/new"}, "reply": {"sessionId": "s1"}},
         {"expect": {"method": "session/prompt"}, "reply": {"stopReason": "cancelled"}}
       ],
-      "events": [{"type": "blocked"}]
+      "events": [{"type": "cancelled"}]
     },
     {
       "name": "a failed prompt fails the turn",

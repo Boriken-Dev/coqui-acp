@@ -19,3 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `coqui-acp-provider`: `AgentProvider` and `AgentSession`, a Guatiao provider kind for agents in any language Guatiao hosts, pinned at Guatiao `a67fd4be`; `AgentEvent` and its string contract (`text`, `tool`, `blocked`, `completed`, `failed`, `cancelled`, `limit`, `denied`); `AcpFacade`, which serves any such provider as an ACP version 1 agent over any transport, with a `Settings` limit for sessions per connection (8), provider calls (`start` 60 s, others 30 s), cancel (10 s), close (10 s), prompt size (8 MiB), output per turn (64 MiB) and per connection (256 MiB), and failed authentication (5), and optional working roots. `coqui-acp` itself does not depend on Guatiao.
 - `coqui-acp-bridge`: `mcp-config` and `mcp-shim --peer`, so an MCP client with no ACP session reaches a peer's own tools from one stable entry. A peer keeps a stream of `mcp-offer/1` standing, with the metadata `standing/1`, and each program gets a stream of its own.
 - `coqui-acp-page`, and `package:coqui_acp/page.dart` for Dart: a person's agents from a page, over `document.acp`.
+
+### Changed
+
+- **Breaking**, `coqui-acp` and `coqui_acp` for Dart: stop reason `cancelled` is `Event::Cancelled` and `AcpCancelled`, and no longer `Event::Blocked` and `AcpBlocked`, which now mean only a permission that could not be answered. It ends the turn, so a connection lost after it is no `Failed`.

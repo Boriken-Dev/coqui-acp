@@ -167,6 +167,7 @@ fn matches_event(event: &Event, want: &Value) -> bool {
         Event::Permission { allowed, .. } => ("permission", json!({"allowed": allowed})),
         Event::Completed { stop } => ("completed", json!({"stop": stop})),
         Event::Failed(_) => ("failed", json!({})),
+        Event::Cancelled => ("cancelled", json!({})),
         Event::Blocked(_) => ("blocked", json!({})),
         _ => ("other", json!({})),
     };
@@ -609,6 +610,48 @@ fn a_lost_connection_is_reported_once_and_on_close_runs() {
     assert_eq!(session.next_event(Duration::from_millis(100)), None);
     session.close();
     assert!(*closed.lock().unwrap());
+}
+
+/// An agent that answers what opens a session, runs `at_prompt` on the first prompt, and leaves.
+fn agent_leaving_at_prompt(
+    capabilities: Value,
+    at_prompt: impl FnOnce(&Agent, &Value) + Send + 'static,
+) -> Transport {
+    let (mut agent, transport) = Agent::pair();
+    thread::spawn(move || {
+        while let Some(message) = agent.read() {
+            let method = message["method"].as_str().unwrap_or_default().to_owned();
+            match method.as_str() {
+                "initialize" => agent.reply(
+                    &message["id"],
+                    &json!({"protocolVersion": 1, "agentCapabilities": capabilities}),
+                ),
+                "session/prompt" => {
+                    at_prompt(&agent, &message["id"]);
+                    return;
+                }
+                _ if message.get("id").is_some() => {
+                    agent.reply(&message["id"], &plain(&method).unwrap());
+                }
+                _ => {}
+            }
+        }
+    });
+    transport
+}
+
+#[test]
+fn a_lost_connection_after_a_cancelled_turn_is_no_failure() {
+    let transport = agent_leaving_at_prompt(json!({}), |agent, id| {
+        agent.reply(id, &json!({"stopReason": "cancelled"}));
+    });
+    let session = Client::builder("/w")
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    assert_eq!(session.next_event(WAIT), Some(Event::Cancelled));
+    assert_eq!(session.next_event(Duration::from_millis(300)), None);
+    assert!(session.connection_lost());
 }
 
 #[test]

@@ -44,7 +44,7 @@ let session = Client::builder("/work").prompt("Say hello").connect(transport)?;
 while let Some(event) = session.next_event(Duration::from_secs(60)) {
     match event {
         Event::Text(text) => println!("{text}"),
-        Event::Completed { .. } | Event::Failed(_) | Event::Blocked(_) => break,
+        Event::Completed { .. } | Event::Failed(_) | Event::Cancelled => break,
         _ => {}
     }
 }
