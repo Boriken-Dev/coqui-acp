@@ -37,6 +37,8 @@ use coqui_web::websocket::Frames;
 use coqui_web::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
 use url::Url;
 
+mod standing;
+
 const MAX_LINE: usize = 16 * 1024 * 1024;
 /// Connections that have not proved themselves yet, each a thread for at most the handshake and proof limits.
 const MAX_UNPROVEN: usize = 64;
@@ -97,8 +99,23 @@ enum Mode {
         #[arg(long, default_value_t = 3)]
         seconds: u64,
     },
-    /// The stdio MCP server `mcp-offer/1` declares to an agent: carries its lines to the peer that offered it. Nothing else starts it.
-    McpShim,
+    /// The stdio MCP server `mcp-offer/1` declares to an agent: carries its lines to the peer that offered it. With `--peer`, it is what
+    /// `mcp-config` prints, and finds that peer's standing stream.
+    McpShim {
+        /// The peer whose tools to reach, by its id.
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Print the `mcpServers` entry that gives an MCP client on this machine a peer's tools, such as a browser's. It holds nothing secret
+    /// and stays good across restarts of either side.
+    McpConfig {
+        /// The peer whose tools to reach, by its id.
+        #[arg(long)]
+        peer: String,
+        /// What the client calls this server.
+        #[arg(long, default_value = standing::DEFAULT_NAME)]
+        name: String,
+    },
     /// Let a browser extension ask this program who is around, over native messaging.
     Companion {
         #[command(subcommand)]
@@ -714,7 +731,10 @@ fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
             .join("offers");
         services = services.with(
             mcp_offer::OFFER_PROTOCOL,
-            mcp_offer::handler(program, vec!["mcp-shim".to_owned()], tokens),
+            standing::handler(
+                mcp_offer::handler(program, vec!["mcp-shim".to_owned()], tokens),
+                standing::dir()?,
+            ),
         );
         every.push(mcp_offer::OFFER_PROTOCOL.to_owned());
     }
@@ -1826,9 +1846,14 @@ fn main() -> ExitCode {
             revoke,
         } => grant_mode(peer, protocol, *revoke),
         Mode::Discover { seconds } => discover_mode(*seconds),
-        Mode::McpShim => mcp_offer::shim(std::io::stdin(), std::io::stdout())
+        Mode::McpShim { peer: None } => mcp_offer::shim(std::io::stdin(), std::io::stdout())
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
+        Mode::McpShim { peer: Some(peer) } => standing::shim(peer),
+        Mode::McpConfig { peer, name } => standing::config(peer, name).map(|config| {
+            println!("{config}");
+            ExitCode::SUCCESS
+        }),
         Mode::Companion { action } => companion_mode(action),
     };
     match result {
