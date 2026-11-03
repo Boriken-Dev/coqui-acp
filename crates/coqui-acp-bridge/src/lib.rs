@@ -5,4 +5,5 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 pub mod agent;
+pub mod linger;
 pub mod relay;

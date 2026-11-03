@@ -39,3 +39,24 @@ A URL, a host name or server TLS alone proves no peer.
 
 A prompt whose answer was lost has an unknown outcome. After a new connection proves the same peer, the client reconciles by `session/resume` or `session/load`, and a
 person or the application decides what to send again.
+
+## Keeping an agent through a reconnect
+
+`coqui-acp-bridge serve --linger SECONDS` keeps a link's agent that long after the link ends, and gives it to the next connection that proves the same key, never to another. Nothing else about the connection changes: the bridge reads no ACP, so nothing says an agent was kept, and the client asks with `session/resume`. An agent past its time, or one that ended, is a fresh agent on the new connection, which answers in its own words.
+
+A client talking to a bridge that may do this has to allow for four things:
+
+- **`initialize` comes twice** to the same agent.
+- **What the agent wrote while nobody was connected comes first**, up to a limit, ahead of the answer to `initialize`: updates of a session not yet resumed, and requests such as `session/request_permission`.
+- **Answers to the old connection's requests arrive on the new one, with their old ids.** In version 1 the answer to a `session/prompt` is the only thing that says a turn ended, so a client that wants to see one finish keeps that id across the reload. A client's ids must not repeat across connections to one agent, or a late answer is taken for a new request's.
+- **A reconnect can always hide a gap.** What a link had accepted and never delivered when it was cut is lost with no notice, since nothing acknowledges it.
+
+### `_dev.boriken.coqui.acp/output_lost`
+
+Past the limit the oldest lines are dropped, since the newest hold the answer that ends a turn. The next connection's first message then says so:
+
+```json
+{"jsonrpc":"2.0","method":"_dev.boriken.coqui.acp/output_lost","params":{"lines":12,"bytes":3456}}
+```
+
+ACP has no message for this. A notification whose method starts with `_` is the extension point it offers, and a client that does not know this one ignores it, as ACP requires, and sees only the gap it would have had anyway. It is the one message the bridge writes itself, and it travels inside the proven session like any other. A client that reads it reconciles by `session/load`, or tells the person.

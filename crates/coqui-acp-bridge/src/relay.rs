@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use coqui_web::{Channel, Failure};
 
 use crate::agent::{Agent, Output, WriteEnd};
+use crate::linger::Backlog;
 
 /// How often each direction looks up to see whether the other has ended.
 const POLL: Duration = Duration::from_millis(50);
@@ -30,9 +31,30 @@ pub enum LinkEnd {
     Protocol,
 }
 
+impl LinkEnd {
+    /// Whether a link that ended like this leaves an agent worth keeping: the peer left, or the path went. A refusal, a peer that
+    /// broke the wire format and an agent that ended or stopped reading leave nothing to come back to.
+    pub(crate) const fn keeps_agent(self) -> bool {
+        match self {
+            Self::PeerClosed => true,
+            Self::Failed(failure) => failure.is_path(),
+            Self::AgentEnded | Self::AgentStuck | Self::Protocol => false,
+        }
+    }
+}
+
 /// Relays until the agent or the link ends. A line the peer could not take stays lost: ACP's own session
 /// recovery is the only safe answer to that, so nothing here replays anything.
 pub fn relay<C: Channel + ?Sized>(channel: &C, agent: &Agent) -> LinkEnd {
+    relay_holding(channel, agent, &mut Backlog::new(0))
+}
+
+/// As [`relay`], sending what `backlog` holds before anything newer. What this link could not take stays in it, for the next.
+pub(crate) fn relay_holding<C: Channel + ?Sized>(
+    channel: &C,
+    agent: &Agent,
+    backlog: &mut Backlog,
+) -> LinkEnd {
     let stop = AtomicBool::new(false);
     thread::scope(|scope| {
         let inbound = scope.spawn(|| {
@@ -40,10 +62,14 @@ pub fn relay<C: Channel + ?Sized>(channel: &C, agent: &Agent) -> LinkEnd {
             stop.store(true, Ordering::SeqCst);
             ended
         });
-        let outbound = to_peer(channel, agent, &stop);
+        let outbound = to_peer(channel, agent, &stop, backlog);
         stop.store(true, Ordering::SeqCst);
         let inbound = inbound.join().unwrap_or(Some(LinkEnd::Protocol));
-        outbound.or(inbound).unwrap_or(LinkEnd::PeerClosed)
+        match (outbound, inbound) {
+            // A refusal closes the channel, so the other direction reports only a lost path: the refusal is why this link ended.
+            (Some(out), Some(end)) if out.keeps_agent() && !end.keeps_agent() => end,
+            (out, end) => out.or(end).unwrap_or(LinkEnd::PeerClosed),
+        }
     })
 }
 
@@ -74,11 +100,27 @@ fn from_peer<C: Channel + ?Sized>(
     None
 }
 
-fn to_peer<C: Channel + ?Sized>(channel: &C, agent: &Agent, stop: &AtomicBool) -> Option<LinkEnd> {
+fn to_peer<C: Channel + ?Sized>(
+    channel: &C,
+    agent: &Agent,
+    stop: &AtomicBool,
+    backlog: &mut Backlog,
+) -> Option<LinkEnd> {
+    while !stop.load(Ordering::SeqCst) {
+        let Some(message) = backlog.next() else {
+            break;
+        };
+        if let Some(end) = deliver(channel, &message, stop) {
+            return Some(end);
+        }
+        drop(message);
+        backlog.sent();
+    }
     while !stop.load(Ordering::SeqCst) {
         match agent.next_output(POLL) {
             Ok(Output::Line(line)) => {
                 if let Some(end) = deliver(channel, &line, stop) {
+                    backlog.push(line);
                     return Some(end);
                 }
             }

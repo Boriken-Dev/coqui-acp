@@ -9,6 +9,7 @@ bridge passes complete messages and reads none of them, so what the agent may do
 ## Features
 
 - `serve`: wait for peers, each with an agent of its own. WebSocket, and WebTransport beside it.
+- `serve --linger SECONDS`: keep a link's agent for a time, and give it back to the same proven peer on a new connection, so `session/resume` reaches a live session. Output while nobody is connected is held up to a limit, and what is dropped past it is said on the next link.
 - `serve --service mcp=PROGRAM`: another protocol on the same proven link. `grant PEER TOKEN` adds one to a peer already paired, with no second pairing.
 - `serve --forward`, `forward`: TCP over the link in either direction, each target its own grant.
 - `serve --mcp-offers`: a peer can give its agent the peer's own MCP tools, through a stdio server every agent can start.

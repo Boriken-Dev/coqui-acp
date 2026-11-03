@@ -4,14 +4,15 @@ Header-file-style reference for the `coqui-acp-bridge` crate: its command line a
 
 No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `coqui-net-acl`, `clap`, `rustls`, `mdns-sd`, `serde_json` and `url`.
 
-No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `relay`. Proof, pairing, discovery and the companion are `coqui-agentic-peer`'s; see its `AGENTS.md`.
+No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `linger`, `relay`. Proof, pairing, discovery and the companion are `coqui-agentic-peer`'s; see its `AGENTS.md`.
 
 ## Command line
 
 ```text
 coqui-acp-bridge keygen PATH
 coqui-acp-bridge serve --identity FILE (--allow PEER... | --allow-store DIR) [--listen ADDR] [--tls-identity FILE] [--webtransport-port PORT]
-                       [--origin URL...] [--permit NET...] [--deny NET...] [--proof-seconds N] [--max-peers N] -- PROGRAM ARGS...
+                       [--origin URL...] [--permit NET...] [--deny NET...] [--proof-seconds N] [--max-peers N]
+                       [--linger SECONDS [--linger-per-peer N] [--linger-total N] [--linger-buffer-bytes BYTES] [--linger-settle-ms MS]] -- PROGRAM ARGS...
 coqui-acp-bridge serve --tls-identity FILE (--allow-cert FP... | --allow-cert-store DIR | --client-ca FILE) [--listen ADDR] [--origin URL...] [--permit NET...] [--deny NET...] [--max-peers N] -- PROGRAM ARGS...
 coqui-acp-bridge serve --no-peer-proof [--tls-identity FILE] [--listen ADDR] [--origin URL...] [--permit NET...] [--deny NET...] [--max-peers N] -- PROGRAM ARGS...
 coqui-acp-bridge dial URL --identity FILE (--peer ID... | --trust-store DIR) [--ca-file FILE [--bearer-file FILE]] [--max-backoff-seconds N] -- PROGRAM ARGS...
@@ -40,6 +41,13 @@ Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`. W
 - **Nothing connected:** the shim says why on standard error, answers its client's first message with a JSON-RPC error saying the same, and exits with status 1. A stream ending, which is the peer going away or turning this off, ends the shim, which its client sees as a stdio server closing. A client has to start the server again to come back, from the same entry. A peer gone without a word, over WebTransport, can take that link's idle timeout to be noticed (about 25 seconds, measured), and a program starting meanwhile gets in and hears nothing.
 - **Same user:** any program running as this user can read that file and use what the peer has granted. Another user cannot, on Unix by the file's and directory's modes, which the shim also checks, and on Windows by an ACL for its owner alone with nothing inherited, which `icacls` sets before anything is written, or there is no door. An offer's `.token` files take their directory's permissions, which on Windows are `%LOCALAPPDATA%`'s.
 - **Forwarding TCP:** `serve --forward` serves `tcp/1`, and grants nothing: a peer needs `--grant PEER=tcp/1:HOST:PORT` or `grant PEER tcp/1:HOST:PORT`, exact, with no wildcards. `forward --local` listens here and reaches a target from the remote. `serve --reverse LOCAL=PEER=TARGET` and `forward --allow-target` are the other direction, with the dialing side deciding. `--allow-target` needs `--peer`, which says who may reach it. A listener has to be on loopback, and anyone on this machine who can reach it, a web page included, gets what this peer was granted. One peer holds at most 8 links, and everyone together 256; a proven peer has a minute to say which it is. `--service` cannot name `tcp/1`, `link/1` or `acp/1`, and revoking `tcp/1` also clears its targets.
+- **Keeping an agent through a reconnect:** `serve --linger SECONDS`, with the in-band proof only, keeps a link's `acp/1` agent that long when the link ends, orderly or cut, and gives it to the next connection proving the same key, whether a plain client or a stream of a link; `--service` programs are not kept. A peer no longer accepted, one that broke the wire format, and an agent that ended or stopped reading leave nothing kept. Off by default, and with 0. The bridge still reads no ACP, so a client asks with `session/resume`, and an agent that has gone answers in its own words from a fresh one. An agent gets a second `initialize` this way.
+  - Limits: `--linger-per-peer` 1, past which that peer's oldest kept agent ends. Above 1 a peer can be given the wrong agent, since nothing here can tell which holds its session; the oldest comes back first. `--linger-total` 4, past which the oldest of anyone's ends. Kept agents take no place among `--max-peers`, and getting one back needs a place.
+  - A connection while another of the same peer is up gets an agent of its own, or what is kept: one stdio pipe has one reader. It first waits up to `--linger-settle-ms` (500) for that link to end, so a reload faster than the old link's end still finds its agent. A link whose peer vanished without closing lasts until the channel notices, up to 2 minutes, so a reconnect sooner than that gets a fresh agent.
+  - Output while nobody is connected: `--linger-buffer-bytes` (16 MiB) of the newest lines per agent. Past it the oldest are dropped, since the newest hold the answer that ends a turn, and the next link's first message is a JSON-RPC notification, method `_dev.boriken.coqui.acp/output_lost`, params `{"lines": N, "bytes": N}`. That is the one message the bridge writes itself. Whichever connection of that peer comes next gets all of this.
+  - What this does not cover: what a link had accepted and never delivered when it was cut is lost with no notice, since nothing acknowledges it, so a client treats any reconnect as a possible gap. What the agent answers on a new link may be to a request of the old one, with its id. A request the agent is waiting on an answer to stays open while nobody is connected.
+  - Agent input while nobody is connected: nothing new is written and its standard input stays open. Lines already queued to it are written; one still waiting when the link ended is dropped, so what a peer sent last has an unknown outcome.
+  - No agent outlives the bridge under `--linger`: each has a helper process, `coqui-acp-bridge agent-guard PID`, that ends its tree when the bridge goes by any means, a kill included. Without `--linger`, an agent is told only by its input closing.
 - **Stopping an agent:** ends what it started too, by process group on Unix and process tree on Windows. An agent runs in its own group, so a terminal's Ctrl-C reaches the bridge and not it directly; the bridge ends it.
 - **Failover:** `dial --fallback URL` tries the next endpoint when one cannot be reached. Each has to prove what the first would, and they share a scheme.
 - **One pairing:** `pair-accept` and `pair-dial` default to this user's own identity and trust store (`coqui_agentic_peer::home`), and `serve --paired` and `dial --paired` read them, so one pairing serves every command, with nothing to name.
@@ -67,16 +75,33 @@ pub enum LinkEnd { AgentEnded, AgentStuck, PeerClosed, Failed(Failure), Protocol
 
 Passes complete messages until one side ends, reading none of them. A message holding a raw newline ends the link as `Protocol`, since it would forge a second line. A slow side feels back-pressure; a line that waits past the limit ends the link, as `AgentStuck` when the agent stopped reading. Nothing is replayed.
 
+## `coqui_acp_bridge::linger`
+
+```rust
+pub const OUTPUT_LOST: &str;   // "_dev.boriken.coqui.acp/output_lost"
+pub struct Settings { pub keep: Duration, pub per_peer: NonZeroUsize, pub total: NonZeroUsize, pub buffer: usize, pub settle: Duration }   // non_exhaustive
+pub const fn Settings::new(keep: Duration) -> Settings   // per_peer 1, total 4, buffer 16 MiB, settle 500 ms
+pub fn Keeper::new(settings: Settings, report: impl Fn(&str) + Send + Sync + 'static) -> Keeper   // Clone: clones share
+pub fn Keeper::arrive(&self, peer: &str) -> Arrival
+pub fn Arrival::serve<C: Channel + ?Sized>(&self, channel: &C, start: impl FnOnce() -> io::Result<Agent>) -> io::Result<LinkEnd>
+```
+
+`arrive` waits up to `settle` while a link of this peer is up. Hold the `Arrival` until the connection's agent has been dealt with, and drop anything limiting links first. `serve` relays with the agent kept for this peer, or else one from `start`, then keeps it or ends it by how the link ended. `peer` has to be what a proof showed. `report` hears what became of each agent, in a sentence.
+
 ## `coqui_acp_bridge::agent`
 
 ```rust
 pub fn Agent::spawn(program: &OsString, args: &[OsString], max_line: usize) -> io::Result<Agent>
 pub const fn Agent::with_write_limit(self, limit: Duration) -> Agent   // default 30 s
+pub fn Agent::guarded(self, program: &OsStr, args: &[&str]) -> io::Result<Agent>
+pub fn Agent::pid(&self) -> u32
+pub fn Agent::guard_pid(&self) -> Option<u32>
 pub fn Agent::try_status(&self) -> io::Result<Option<ExitStatus>>
 pub fn Agent::stop(&self) -> io::Result<ExitStatus>
+pub fn watch(agent: u32, from_bridge: impl Read)
 ```
 
-Standard error stays on this process's. Dropping an `Agent` ends the process, not any process it started.
+Standard error stays on this process's. Dropping an `Agent` ends the process, not any process it started. `guarded` starts `program args... PID`, which has to call `watch` with that id and its standard input: a pipe ending with nothing said ends that process's tree, so the agent cannot outlive this process however it ends. `stop` dismisses it.
 
 ## Gotchas
 
@@ -86,6 +111,6 @@ Standard error stays on this process's. Dropping an `Agent` ends the process, no
 - `serve --advertise` beyond loopback needs the in-band proof, since a client has to be able to check the key a record names; a record naming no key is ignored.
 - A browser cannot do the PIN exchange from this crate; `pair-dial` is native.
 - Behind a reverse proxy every peer has the proxy's address, so `--permit`, `--deny` and the store's per-source limit on waiting entries see the proxy. Bind to loopback and filter at the proxy.
-- `dial` keeps the agent across links, so lines not yet sent go to the next link, which may be another allowed peer.
+- `dial` keeps the agent across links, so lines not yet sent go to the next link, which may be another allowed peer. `serve --linger` never does: an agent goes back only to the key it served.
 - A key file's permissions are set only on Unix; elsewhere it takes its directory's. Nothing checks them on reading. Keep keys in a directory only their owner can read.
 - Removing a peer from a store does not affect `--allow-cert`, which has no store.

@@ -1,9 +1,9 @@
 //! The agent process: lines out through a bounded queue, lines in through a queue to a thread of their own, since a write to an
 //! agent that has stopped reading never returns.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -43,6 +43,22 @@ pub struct Agent {
     queued: Arc<AtomicUsize>,
     write_limit: Duration,
     stopped: AtomicBool,
+    guard: Mutex<Option<Guard>>,
+}
+
+/// A helper process waiting to end this agent if this process goes first.
+#[derive(Debug)]
+struct Guard {
+    process: Child,
+    told: ChildStdin,
+}
+
+/// What a helper started by [`Agent::guarded`] does: waits on `from_bridge`, its standard input, and ends the process tree of `agent`
+/// unless a byte arrives first. A pipe that ends with no byte means the bridge went, however it went.
+pub fn watch(agent: u32, mut from_bridge: impl Read) {
+    if from_bridge.read_exact(&mut [0_u8]).is_err() {
+        end_tree(agent);
+    }
 }
 
 /// Ends a process and what it started. A failure here only means less was ended than asked: `stop` still ends the child itself.
@@ -143,7 +159,38 @@ impl Agent {
             queued,
             write_limit: Duration::from_secs(30),
             stopped: AtomicBool::new(false),
+            guard: Mutex::new(None),
         })
+    }
+
+    /// Starts `program args... PID`, which has to call [`watch`] with this agent's id and its standard input, so this agent does not
+    /// outlive this process, whatever ends it and whether or not the agent reads its input. It is apart from a terminal's Ctrl-C,
+    /// which has to leave it standing to do this.
+    ///
+    /// # Errors
+    ///
+    /// The operating system could not start it, and this agent has been ended.
+    pub fn guarded(self, program: &OsStr, args: &[&str]) -> io::Result<Self> {
+        let pid = self.pid();
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .arg(pid.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        // CREATE_NO_WINDOW: a console of its own, so the bridge's console closing or its Ctrl-C does not end it too.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+        let mut process = command.spawn()?;
+        let told = process
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("no standard input"))?;
+        *self.guard.lock().unwrap_or_else(PoisonError::into_inner) = Some(Guard { process, told });
+        Ok(self)
     }
 
     /// How long a line may wait on an agent that has stopped reading, after which the link ends as
@@ -186,6 +233,25 @@ impl Agent {
         Ok(next)
     }
 
+    /// The process's id.
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .id()
+    }
+
+    /// The id of the helper [`Self::guarded`] started, until it has been dismissed.
+    #[must_use]
+    pub fn guard_pid(&self) -> Option<u32> {
+        self.guard
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|guard| guard.process.id())
+    }
+
     /// Whether the process has ended, and how.
     ///
     /// # Errors
@@ -204,6 +270,22 @@ impl Agent {
     ///
     /// The operating system could not end it.
     pub fn stop(&self) -> io::Result<ExitStatus> {
+        let status = self.end_process()?;
+        // Once it has been reaped its id is free to be someone else's, so the helper has to be told not to look for it.
+        if let Some(mut guard) = self
+            .guard
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let _ = guard.told.write_all(b"x");
+            drop(guard.told);
+            let _ = guard.process.wait();
+        }
+        Ok(status)
+    }
+
+    fn end_process(&self) -> io::Result<ExitStatus> {
         let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
         // Before looking at the child: once it has been reaped its id is free to be someone else's.
         if !self.stopped.swap(true, Ordering::SeqCst) {

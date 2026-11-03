@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,7 +20,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use clap::{Parser, Subcommand};
-use coqui_acp_bridge::agent::Agent;
+use coqui_acp_bridge::agent::{self, Agent};
+use coqui_acp_bridge::linger::{Keeper, Settings};
 use coqui_acp_bridge::relay::{LinkEnd, relay};
 use coqui_agentic_peer::auth::Sealed;
 use coqui_agentic_peer::discovery::{Advertised, Advertisement};
@@ -115,6 +117,12 @@ enum Mode {
         /// What the client calls this server.
         #[arg(long, default_value = standing::DEFAULT_NAME)]
         name: String,
+    },
+    /// Waits on standard input, and ends this process's tree if it closes with nothing said: `serve --linger` starts one for each
+    /// agent, so none outlives the bridge. Nothing else starts it.
+    AgentGuard {
+        /// The agent's process id.
+        pid: u32,
     },
     /// Let a browser extension ask this program who is around, over native messaging.
     Companion {
@@ -247,6 +255,24 @@ struct Serve {
     /// Proven peers served at once, each with an agent of its own. Another is turned away while this many run.
     #[arg(long, default_value_t = 4)]
     max_peers: usize,
+    /// When a link ends, keep its agent this many seconds and give it back to the same proven peer on a new connection, so ACP's
+    /// `session/resume` reaches a live session. Needs the in-band proof. Without it, or with 0, the agent ends with its link.
+    #[arg(long, value_name = "SECONDS")]
+    linger: Option<u64>,
+    /// Agents kept for one peer, past which its oldest ends. The bridge reads no ACP, so it cannot tell which agent holds the session
+    /// a peer wants: above 1, a peer can be given the wrong one.
+    #[arg(long, requires = "linger", value_name = "N", default_value = "1")]
+    linger_per_peer: NonZeroUsize,
+    /// Agents kept for everyone together, past which the oldest ends. These take no place among --max-peers.
+    #[arg(long, requires = "linger", value_name = "N", default_value = "4")]
+    linger_total: NonZeroUsize,
+    /// Bytes of a kept agent's output to hold while nobody is connected. Past this the oldest lines are dropped, and the next link
+    /// is told first, in a notification of its own.
+    #[arg(long, requires = "linger", value_name = "BYTES", default_value_t = 16 * 1024 * 1024)]
+    linger_buffer_bytes: usize,
+    /// How long a new connection waits for a link of the same peer to end, so a reload faster than the old link's end finds its agent.
+    #[arg(long, requires = "linger", value_name = "MS", default_value_t = 500)]
+    linger_settle_ms: u64,
     /// Serve another protocol on the same link, as TOKEN=PROGRAM, such as mcp=my-server. Repeat for more. The agent after `--` is
     /// `acp/1`. A client opens streams on one proven link, with no second proof and no second pairing.
     #[arg(long = "service", value_name = "TOKEN=PROGRAM")]
@@ -557,6 +583,7 @@ struct Service {
     agent: Vec<OsString>,
     unproven: Gate,
     peers: Gate,
+    keeper: Option<Keeper>,
     links: Option<Links>,
     reverses: Vec<Reverse>,
 }
@@ -665,22 +692,43 @@ impl PeerStore for PairedGrants {
     }
 }
 
-fn agent_handler(program: Vec<OsString>, gate: Gate) -> link::Handler {
+/// An agent for `peer` until this link ends, and `None` if it got none. With a keeper it may be one kept from an earlier link, and may be
+/// kept again. The slot among --max-peers is held only while a link is up, and is free again before the arrival says so.
+fn serve_agent<C: Channel + ?Sized>(
+    program: &[OsString],
+    gate: &Gate,
+    keeper: Option<&Keeper>,
+    channel: &C,
+    peer: &str,
+) -> Option<LinkEnd> {
+    let arrival = keeper.map(|keeper| keeper.arrive(peer));
+    let Some(_running) = gate.enter() else {
+        eprintln!("{peer} was turned away: --max-peers are running");
+        return None;
+    };
+    let start = || {
+        let (program, args) = split_agent(program).map_err(std::io::Error::other)?;
+        Agent::spawn(program, args, MAX_LINE)
+    };
+    let ended = match &arrival {
+        Some(arrival) => arrival.serve(channel, || {
+            start()?.guarded(std::env::current_exe()?.as_os_str(), &["agent-guard"])
+        }),
+        None => start().map(|running| {
+            let end = relay(channel, &running);
+            let _ = running.stop();
+            end
+        }),
+    };
+    ended
+        .map_err(|error| eprintln!("the agent could not start: {error}"))
+        .ok()
+}
+
+fn agent_handler(program: Vec<OsString>, gate: Gate, keeper: Option<Keeper>) -> link::Handler {
     Box::new(move |stream: &dyn LinkStream, accepted: &Accepted| {
-        let Some(_running) = gate.enter() else {
-            return eprintln!("{} was turned away: --max-peers are running", accepted.peer);
-        };
-        let started = split_agent(&program).and_then(|(program, args)| {
-            Agent::spawn(program, args, MAX_LINE)
-                .map_err(|error| format!("the agent could not start: {error}"))
-        });
-        match started {
-            Ok(running) => {
-                let end = relay(stream, &running);
-                eprintln!("{} left {}: {end:?}", accepted.peer, accepted.protocol);
-                let _ = running.stop();
-            }
-            Err(why) => eprintln!("{why}"),
+        if let Some(end) = serve_agent(&program, &gate, keeper.as_ref(), stream, &accepted.peer) {
+            eprintln!("{} left {}: {end:?}", accepted.peer, accepted.protocol);
         }
     })
 }
@@ -708,16 +756,18 @@ fn parse_service(text: &str) -> Result<(String, OsString), String> {
 }
 
 /// What `--service` and `--grant` ask for, if anything.
-fn links(args: &Serve, gate: &Gate) -> Result<Option<Links>, String> {
+fn links(args: &Serve, gate: &Gate, keeper: Option<&Keeper>) -> Result<Option<Links>, String> {
     if args.services.is_empty() && !args.forward && args.reverses.is_empty() && !args.mcp_offers {
         return Ok(None);
     }
-    let mut services =
-        Services::default().with(ACP, agent_handler(args.agent.clone(), gate.clone()));
+    let mut services = Services::default().with(
+        ACP,
+        agent_handler(args.agent.clone(), gate.clone(), keeper.cloned()),
+    );
     let mut every = vec![ACP.to_owned()];
     for text in &args.services {
         let (token, program) = parse_service(text)?;
-        services = services.with(&token, agent_handler(vec![program], gate.clone()));
+        services = services.with(&token, agent_handler(vec![program], gate.clone(), None));
         every.push(token);
     }
     if args.forward {
@@ -869,22 +919,40 @@ impl Service {
 
     fn give_agent<C: Channel>(&self, channel: &C, peer: &str) {
         eprintln!("{peer} proven");
-        let Some(_running) = self.peers.enter() else {
-            return eprintln!("{peer} was turned away: --max-peers are running");
-        };
-        let started = split_agent(&self.agent).and_then(|(program, args)| {
-            Agent::spawn(program, args, MAX_LINE)
-                .map_err(|error| format!("the agent could not start: {error}"))
-        });
-        match started {
-            Ok(running) => {
-                let end = relay(channel, &running);
-                eprintln!("{peer} left: {end:?}");
-                let _ = running.stop();
-            }
-            Err(why) => eprintln!("{why}"),
+        let end = serve_agent(
+            &self.agent,
+            &self.peers,
+            self.keeper.as_ref(),
+            channel,
+            peer,
+        );
+        if let Some(end) = end {
+            eprintln!("{peer} left: {end:?}");
         }
     }
+}
+
+/// What `--linger` asks for, if anything. Only a key a proof named can be told apart from another, so nothing else has it.
+fn keeper(args: &Serve, no_key: bool) -> Result<Option<Keeper>, String> {
+    let Some(seconds) = args.linger.filter(|seconds| *seconds > 0) else {
+        return Ok(None);
+    };
+    if no_key {
+        return Err(
+            "--linger needs the in-band proof: an agent goes back only to the key that proved itself"
+                .to_owned(),
+        );
+    }
+    let keep = Duration::from_secs(seconds);
+    if Instant::now().checked_add(keep).is_none() {
+        return Err("--linger is longer than this machine's clock can count".to_owned());
+    }
+    let mut settings = Settings::new(keep);
+    settings.per_peer = args.linger_per_peer;
+    settings.total = args.linger_total;
+    settings.buffer = args.linger_buffer_bytes;
+    settings.settle = Duration::from_millis(args.linger_settle_ms);
+    Ok(Some(Keeper::new(settings, |said| eprintln!("{said}"))))
 }
 
 /// Takes connections for ever, each handshake and proof on a thread of its own, so one slow peer holds up nobody. Past the
@@ -1043,6 +1111,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
     if args.tls_short_lived && (args.no_peer_proof || certificates) {
         return Err("--tls-short-lived needs the in-band proof: a client cannot pin this certificate for long".to_owned());
     }
+    let keeper = keeper(args, args.no_peer_proof || certificates)?;
     if args.no_peer_proof {
         return serve_unproven(args, admit, unproven, running);
     }
@@ -1099,6 +1168,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             agent: args.agent.clone(),
             unproven,
             peers: running,
+            keeper: None,
             links: None,
             reverses: Vec::new(),
         });
@@ -1192,7 +1262,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         advertised
     };
     eprintln!("listening on {bound}");
-    let links = links(args, &running)?;
+    let links = links(args, &running, keeper.as_ref())?;
     let reverses = args
         .reverses
         .iter()
@@ -1205,6 +1275,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         agent: args.agent.clone(),
         unproven,
         peers: running,
+        keeper,
         links,
         reverses,
     });
@@ -1262,6 +1333,7 @@ fn serve_unproven(
         agent: args.agent.clone(),
         unproven,
         peers: running,
+        keeper: None,
         links: None,
         reverses: Vec::new(),
     });
@@ -1854,6 +1926,10 @@ fn main() -> ExitCode {
             println!("{config}");
             ExitCode::SUCCESS
         }),
+        Mode::AgentGuard { pid } => {
+            agent::watch(*pid, std::io::stdin().lock());
+            Ok(ExitCode::SUCCESS)
+        }
         Mode::Companion { action } => companion_mode(action),
     };
     match result {
