@@ -689,6 +689,26 @@ final class AcpClient {
             kind: option['kind'] as String,
           ),
     ].take(maxPermissionOptions).toList();
+    // An id the agent gave two options could be taken for either, so no answer can say which was meant.
+    final ids = <String>{};
+    for (final option in params['options'] as List) {
+      if (option is Map &&
+          option['optionId'] is String &&
+          !ids.add(option['optionId'] as String)) {
+        _flush();
+        _emit(
+          AcpBlocked(
+            'the agent asked leave for $tool with two options of the same id',
+          ),
+        );
+        _reply(id, {
+          'result': {
+            'outcome': {'outcome': 'cancelled'},
+          },
+        });
+        return;
+      }
+    }
     AcpDecision decision;
     final decider = _decider;
     if (decider == null) {
@@ -780,13 +800,11 @@ final class AcpClient {
         reason: decision is AcpDeny ? decision.reason : null,
       ),
     );
-    for (final option in params['options'] as List) {
-      if (option is Map &&
-          option['kind'] == wanted &&
-          option['optionId'] is String) {
+    for (final option in options) {
+      if (option.kind == wanted) {
         _reply(id, {
           'result': {
-            'outcome': {'outcome': 'selected', 'optionId': option['optionId']},
+            'outcome': {'outcome': 'selected', 'optionId': option.optionId},
           },
         });
         return;

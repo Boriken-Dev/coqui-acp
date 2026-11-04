@@ -78,12 +78,13 @@ without an id or a kind is left out, and at most `maxPermissionOptions` are kept
 | Decision | Answer |
 | --- | --- |
 | `AcpSelect(optionId)` | that option, which has to be one of the request's own; any other is answered `cancelled`, with an `AcpBlocked` |
-| `AcpAllow()` | the first `allow_once` option, else `cancelled` with an `AcpBlocked` |
-| `AcpDeny(reason)` | the first `reject_once` option, else `cancelled` with an `AcpBlocked` |
+| `AcpAllow()` | the first `allow_once` option of those kept, else `cancelled` with an `AcpBlocked` |
+| `AcpDeny(reason)` | the first `reject_once` option of those kept, else `cancelled` with an `AcpBlocked` |
 | `AcpCancel()` | `cancelled`, as ACP requires for a request still open when its turn is cancelled |
 
 What an `allow_always` or `reject_always` answer remembers, and for how long, is the agent's: the client passes the choice on and
-keeps nothing. A request with no `options` list, or another session's, is answered `cancelled` without asking the decider. Each
+keeps nothing. A request with no `options` list, one whose options repeat an id (which the agent could take for either), or
+another session's, is answered `cancelled` without asking the decider, the first two with an `AcpBlocked`. Each
 answer is also an `AcpPermission` event, whose `optionId` names the option an `AcpSelect` chose.
 
 ## Development
