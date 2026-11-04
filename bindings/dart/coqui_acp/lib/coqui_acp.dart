@@ -322,6 +322,78 @@ final class AcpOpenedSession {
   final bool replayed;
 }
 
+/// How an MCP server is reached.
+enum AcpMcpTransport { stdio, http, sse }
+
+/// An MCP server a session starts with, by a [name] unique in the session.
+sealed class AcpMcpServer {
+  const AcpMcpServer(this.name);
+  final String name;
+  AcpMcpTransport get transport;
+}
+
+/// A program the agent starts, speaking MCP on its standard streams. ACP asks for an absolute [command]; [env] is added to
+/// what the agent gives it, and is never shown.
+final class AcpMcpStdio extends AcpMcpServer {
+  const AcpMcpStdio({
+    required String name,
+    required this.command,
+    this.args = const [],
+    this.env = const {},
+  }) : super(name);
+  final String command;
+  final List<String> args;
+  final Map<String, String> env;
+  @override
+  AcpMcpTransport get transport => AcpMcpTransport.stdio;
+  @override
+  String toString() =>
+      'AcpMcpStdio($name, $command, env: ${env.keys.join(', ')})';
+}
+
+/// A server the agent reaches over HTTP, or HTTP with server-sent events when [sse]. [headers] are never shown.
+final class AcpMcpHttp extends AcpMcpServer {
+  const AcpMcpHttp({
+    required String name,
+    required this.url,
+    this.headers = const {},
+    this.sse = false,
+  }) : super(name);
+  final String url;
+  final Map<String, String> headers;
+  final bool sse;
+  @override
+  AcpMcpTransport get transport =>
+      sse ? AcpMcpTransport.sse : AcpMcpTransport.http;
+  @override
+  String toString() =>
+      'AcpMcpHttp($name, $url, headers: ${headers.keys.join(', ')})';
+}
+
+/// What a session starts with besides its working directory. The client refuses, before sending, what the agent does not
+/// say it takes: see [AcpClient.takesMcp], [AcpClient.takesSystemPrompt] and [AcpClient.takesAdditionalDirectories].
+final class AcpSessionSetup {
+  const AcpSessionSetup({
+    this.mcpServers = const [],
+    this.systemPrompt,
+    this.additionalDirectories = const [],
+    this.meta,
+  });
+
+  final List<AcpMcpServer> mcpServers;
+
+  /// Text added after the agent's own system prompt: ACP's `systemPrompt` in `append` mode.
+  final String? systemPrompt;
+
+  /// Absolute directories the session may work in besides its own.
+  final List<String> additionalDirectories;
+
+  /// The request's `_meta`, for what an agent documents there.
+  final Map<String, Object?>? meta;
+
+  static const none = AcpSessionSetup();
+}
+
 /// A session an agent says it has. All of it is the agent's to say.
 final class AcpSessionInfo {
   const AcpSessionInfo({
@@ -947,6 +1019,100 @@ final class AcpClient {
         : const ['promptCapabilities', 'embeddedContext'],
   );
 
+  /// Whether this agent starts MCP servers reached by [transport]. Stdio is in v1's baseline and v2 says it; v2 has no SSE.
+  bool takesMcp(AcpMcpTransport transport) => _protocolVersion == 2
+      ? switch (transport) {
+          AcpMcpTransport.stdio => _says(const ['session', 'mcp', 'stdio']),
+          AcpMcpTransport.http => _says(const ['session', 'mcp', 'http']),
+          AcpMcpTransport.sse => false,
+        }
+      : switch (transport) {
+          AcpMcpTransport.stdio => true,
+          AcpMcpTransport.http => _says(const ['mcpCapabilities', 'http']),
+          AcpMcpTransport.sse => _says(const ['mcpCapabilities', 'sse']),
+        };
+
+  /// Whether this agent takes a `systemPrompt` with a session, in `append` mode at least.
+  bool get takesSystemPrompt => _says(
+    _protocolVersion == 2
+        ? const ['session', 'systemPrompt']
+        : const ['sessionCapabilities', 'systemPrompt'],
+  );
+
+  /// Whether this agent takes `additionalDirectories` with a session.
+  bool get takesAdditionalDirectories => _says(
+    _protocolVersion == 2
+        ? const ['session', 'additionalDirectories']
+        : const ['sessionCapabilities', 'additionalDirectories'],
+  );
+
+  /// [setup] as the fields of a session request in the version spoken. Throws [ArgumentError] for a relative command or
+  /// directory or a repeated name, and [AcpFailure] for what the agent does not say it takes, before anything is sent.
+  Map<String, Object?> _setupParams(AcpSessionSetup setup) {
+    final names = <String>{};
+    List<Map<String, String>> pairs(Map<String, String> values) => [
+      for (final MapEntry(:key, :value) in values.entries)
+        {'name': key, 'value': value},
+    ];
+    final servers = <Map<String, Object?>>[];
+    for (final server in setup.mcpServers) {
+      if (!names.add(server.name)) {
+        throw ArgumentError.value(
+          server.name,
+          'mcpServers',
+          'Two servers have this name',
+        );
+      }
+      if (!takesMcp(server.transport)) {
+        throw AcpFailure(
+          'This agent does not start MCP servers over ${server.transport.name}',
+        );
+      }
+      servers.add(switch (server) {
+        AcpMcpStdio(:final command, :final args, :final env) => () {
+          _checkAbsolute(command, 'command');
+          return {
+            // v1's stdio form has no type, and an agent may skip one that has.
+            if (_protocolVersion == 2) 'type': 'stdio',
+            'name': server.name,
+            'command': command,
+            'args': args,
+            'env': pairs(env),
+          };
+        }(),
+        AcpMcpHttp(:final url, :final headers, :final sse) => {
+          'type': sse ? 'sse' : 'http',
+          'name': server.name,
+          'url': url,
+          'headers': pairs(headers),
+        },
+      });
+    }
+    final prompt = setup.systemPrompt;
+    if (prompt != null && !takesSystemPrompt) {
+      throw const AcpFailure('This agent does not take a system prompt');
+    }
+    if (setup.additionalDirectories.isNotEmpty && !takesAdditionalDirectories) {
+      throw const AcpFailure('This agent does not take more directories');
+    }
+    for (final directory in setup.additionalDirectories) {
+      _checkAbsolute(directory, 'additionalDirectories');
+    }
+    return {
+      'mcpServers': servers,
+      if (prompt != null)
+        'systemPrompt': {
+          'mode': 'append',
+          'content': [
+            {'type': 'text', 'text': prompt},
+          ],
+        },
+      if (setup.additionalDirectories.isNotEmpty)
+        'additionalDirectories': setup.additionalDirectories,
+      '_meta': ?setup.meta,
+    };
+  }
+
   /// Whether an earlier session can be opened again. It is part of v2, and each of its two forms is optional in v1.
   bool get canReopenSessions =>
       _protocolVersion == 2 ||
@@ -1004,11 +1170,13 @@ final class AcpClient {
   Future<AcpOpenedSession> reopenSession(
     String id, {
     required String cwd,
+    AcpSessionSetup setup = AcpSessionSetup.none,
   }) async {
     _ready();
     _checkCwd(cwd);
+    final fields = _setupParams(setup);
     // Before asking, since the replay arrives before the answer.
-    return _using(id, () => _reopen(id, cwd));
+    return _using(id, () => _reopen(id, cwd, fields));
   }
 
   /// Runs [opening] with [id] taken as this client's, which it stays only if [opening] succeeds and it was not already.
@@ -1022,8 +1190,12 @@ final class AcpClient {
     }
   }
 
-  Future<AcpOpenedSession> _reopen(String id, String cwd) async {
-    final params = {'sessionId': id, 'cwd': cwd, 'mcpServers': <Object>[]};
+  Future<AcpOpenedSession> _reopen(
+    String id,
+    String cwd,
+    Map<String, Object?> fields,
+  ) async {
+    final params = {'sessionId': id, 'cwd': cwd, ...fields};
     if (_protocolVersion == 2) {
       final reply = await _request('session/resume', {
         ...params,
@@ -1053,9 +1225,11 @@ final class AcpClient {
     }
   }
 
-  void _checkCwd(String cwd) {
-    if (!(cwd.startsWith('/') || RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(cwd))) {
-      throw ArgumentError.value(cwd, 'cwd', 'Must be an absolute path');
+  void _checkCwd(String cwd) => _checkAbsolute(cwd, 'cwd');
+
+  void _checkAbsolute(String path, String name) {
+    if (!(path.startsWith('/') || RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(path))) {
+      throw ArgumentError.value(path, name, 'Must be an absolute path');
     }
   }
 
@@ -1161,23 +1335,27 @@ final class AcpClient {
     );
   }
 
-  Future<String> createSession({required String cwd}) =>
-      openSession(cwd: cwd).then((session) => session.id);
+  Future<String> createSession({
+    required String cwd,
+    AcpSessionSetup setup = AcpSessionSetup.none,
+  }) => openSession(cwd: cwd, setup: setup).then((session) => session.id);
 
   /// As [createSession], with what the agent said about the session. It is the agent's to say: an agent may send neither.
-  Future<AcpOpenedSession> openSession({required String cwd}) {
+  Future<AcpOpenedSession> openSession({
+    required String cwd,
+    AcpSessionSetup setup = AcpSessionSetup.none,
+  }) async {
     _ready();
     _checkCwd(cwd);
-    return _request('session/new', {'cwd': cwd, 'mcpServers': <Object>[]}).then(
-      (reply) {
-        final id = reply['sessionId'];
-        if (id is! String || id.isEmpty) {
-          throw const AcpFailure('Missing session ID');
-        }
-        _sessions.add(id);
-        return AcpOpenedSession(id, reply);
-      },
-    );
+    final fields = _setupParams(setup);
+    return _request('session/new', {'cwd': cwd, ...fields}).then((reply) {
+      final id = reply['sessionId'];
+      if (id is! String || id.isEmpty) {
+        throw const AcpFailure('Missing session ID');
+      }
+      _sessions.add(id);
+      return AcpOpenedSession(id, reply);
+    });
   }
 
   /// Sets one of the agent's `configOptions`, such as the model. The answer can change others, so read `configOptions` from it.
@@ -1207,15 +1385,17 @@ final class AcpClient {
     String id, {
     required String cwd,
     bool replayHistory = false,
-  }) {
+    AcpSessionSetup setup = AcpSessionSetup.none,
+  }) async {
     _ready();
     _checkCwd(cwd);
+    final fields = _setupParams(setup);
     return _using(
       id,
       () => _request('session/resume', {
         'sessionId': id,
         'cwd': cwd,
-        'mcpServers': <Object>[],
+        ...fields,
         if (replayHistory) 'replayFrom': {'type': 'start'},
       }),
     );
