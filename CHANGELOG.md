@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `coqui_acp` for Dart: a permission request's options reach the decider as `AcpPermissionRequest.options`, each an `AcpPermissionOption` with the agent's id, name and kind, at most `AcpClient.maxPermissionOptions` (16) of them, and `AcpSelect(optionId)` answers with any one of them, `allow_always` and `reject_always` included. An option the request did not offer is answered `cancelled`, with an `AcpBlocked`. `AcpPermission.optionId` names the option chosen.
 - `coqui-acp-bridge`: the Noise method (`coqui-peer-noise`) beside WebCrypto for the in-band proof and PIN pairing. `--method noise|webcrypto` on `keygen`, `serve`, `dial`, `forward`, `pair-accept` and `pair-dial`: an identity keeps the method of its key, naming another is refused, and nothing negotiates or falls back. `serve`, `dial` and `forward` say on standard error which method they prove by. A record and a descriptor `--advertise` publishes name the method.
 - `coqui-acp-bridge`: `--key-limit` and `--no-rekey` on `serve`, `dial` and `forward`, each method's own setting with its default. A setting looser than the default is said on standard error. WebCrypto has no key change, so it always ends a session at its limit.
 

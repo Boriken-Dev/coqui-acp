@@ -546,6 +546,163 @@ void main() {
       },
     );
 
+    const always = [
+      {'optionId': 'no-ever', 'name': 'Never', 'kind': 'reject_always'},
+      {'optionId': 'yes', 'name': 'Yes', 'kind': 'allow_once'},
+      {'optionId': 'yes-ever', 'name': 'Always', 'kind': 'allow_always'},
+      {'optionId': 'no', 'name': 'No', 'kind': 'reject_once'},
+      {'optionId': 'plan', 'name': 'Keep planning', 'kind': '_vendor'},
+    ];
+    final aboutEdit = {
+      'sessionId': 's1',
+      'title': 'Edit a.txt',
+      'subject': {
+        'type': 'tool_call',
+        'toolCall': {'toolCallId': 't1'},
+      },
+      'options': always,
+    };
+
+    test(
+      'with every option the agent offered, in its order and with its names',
+      () async {
+        final (_, seen) = await asked(aboutEdit, const AcpDeny('no'));
+        expect(
+          [
+            for (final option in seen.options)
+              (option.optionId, option.name, option.kind),
+          ],
+          [
+            ('no-ever', 'Never', 'reject_always'),
+            ('yes', 'Yes', 'allow_once'),
+            ('yes-ever', 'Always', 'allow_always'),
+            ('no', 'No', 'reject_once'),
+            ('plan', 'Keep planning', '_vendor'),
+          ],
+        );
+        expect(
+          [for (final option in seen.options) option.allows],
+          [false, true, true, false, false],
+        );
+        expect(
+          [for (final option in seen.options) option.rejects],
+          [true, false, false, true, false],
+        );
+      },
+    );
+
+    for (final (id, allowed) in [
+      ('yes-ever', true),
+      ('no-ever', false),
+      ('plan', false),
+    ]) {
+      test('answered with the option chosen, $id', () async {
+        final events = <AcpEvent>[];
+        final (agent, acp) = await withSession(
+          decider: (_) async => AcpSelect(id),
+        );
+        acp.events.listen(events.add);
+        agent.write({
+          'id': 9,
+          'method': 'session/request_permission',
+          'params': aboutEdit,
+        });
+        final answer = await agent.read();
+        expect(answer['result'], {
+          'outcome': {'outcome': 'selected', 'optionId': id},
+        });
+        final said = events.whereType<AcpPermission>().single;
+        expect(said.allowed, allowed);
+        expect(said.optionId, id);
+        await acp.close();
+      });
+    }
+
+    test(
+      'an option the agent did not offer is cancelled and said, never sent',
+      () async {
+        final events = <AcpEvent>[];
+        final (agent, acp) = await withSession(
+          decider: (_) async => const AcpSelect('made-up'),
+        );
+        acp.events.listen(events.add);
+        agent.write({
+          'id': 9,
+          'method': 'session/request_permission',
+          'params': aboutEdit,
+        });
+        final answer = await agent.read();
+        expect(answer['result'], {
+          'outcome': {'outcome': 'cancelled'},
+        });
+        expect(
+          events.whereType<AcpBlocked>().single.message,
+          contains('made-up'),
+        );
+        expect(events.whereType<AcpPermission>(), isEmpty);
+        await acp.close();
+      },
+    );
+
+    test(
+      'options that are not ACP\'s shape are left out, and at most maxPermissionOptions are kept',
+      () async {
+        AcpPermissionRequest? seen;
+        final agent = Agent();
+        final acp = AcpClient(
+          incoming: agent.toClient.stream,
+          send: (line) async => agent.fromClient.add(line),
+          maxPermissionOptions: 2,
+          decider: (request) async {
+            seen = request;
+            return const AcpDeny('no');
+          },
+        );
+        final opening = acp.initialize();
+        final init = await agent.read();
+        agent.write({
+          'id': init['id'],
+          'result': {
+            'protocolVersion': 1,
+            'agentCapabilities': <String, Object?>{},
+          },
+        });
+        await opening;
+        final creating = acp.createSession(cwd: '/w');
+        final created = await agent.read();
+        agent.write({
+          'id': created['id'],
+          'result': {'sessionId': 's1'},
+        });
+        await creating;
+        agent.write({
+          'id': 9,
+          'method': 'session/request_permission',
+          'params': {
+            'sessionId': 's1',
+            'toolCall': {'toolCallId': 't1', 'title': 'x'},
+            'options': [
+              7,
+              {'optionId': '', 'name': 'Empty', 'kind': 'allow_once'},
+              {'optionId': 'a', 'kind': 'allow_once'},
+              {'optionId': 'b', 'name': 'B', 'kind': 3},
+              {'optionId': 'c', 'name': 'C', 'kind': 'reject_once'},
+              {'optionId': 'd', 'name': 'D', 'kind': 'reject_always'},
+            ],
+          },
+        });
+        final answer = await agent.read();
+        expect(
+          [for (final option in seen!.options) (option.optionId, option.name)],
+          [('a', ''), ('c', 'C')],
+        );
+        expect(answer['result'], {
+          'outcome': {'outcome': 'selected', 'optionId': 'c'},
+        });
+        await acp.close();
+      },
+    );
+
     test(
       'with no options is cancelled, never an error, and the decider is not asked',
       () async {

@@ -68,6 +68,24 @@ something follows it, or until `textFlush` UTF-8 bytes have gathered (default 64
 says `the sessions limit was reached` in `AcpSessionPage.incomplete`. `takesImages` and `takesFiles` say what an
 `AcpAttachment` may be. `package:coqui_acp/page.dart` is a person's agents from a page, over `document.acp`.
 
+## Permission requests
+
+The `decider` answers each `session/request_permission` of this client's sessions. `AcpPermissionRequest.options` holds what the
+agent offers, in its order, as `AcpPermissionOption`s: `optionId`, the agent's `name` (empty when it sent none) and `kind`
+(`allow_once`, `allow_always`, `reject_once`, `reject_always`, or another the agent named), with `allows` and `rejects`. An option
+without an id or a kind is left out, and at most `maxPermissionOptions` are kept (default 16; any value from 0 up).
+
+| Decision | Answer |
+| --- | --- |
+| `AcpSelect(optionId)` | that option, which has to be one of the request's own; any other is answered `cancelled`, with an `AcpBlocked` |
+| `AcpAllow()` | the first `allow_once` option, else `cancelled` with an `AcpBlocked` |
+| `AcpDeny(reason)` | the first `reject_once` option, else `cancelled` with an `AcpBlocked` |
+| `AcpCancel()` | `cancelled`, as ACP requires for a request still open when its turn is cancelled |
+
+What an `allow_always` or `reject_always` answer remembers, and for how long, is the agent's: the client passes the choice on and
+keeps nothing. A request with no `options` list, or another session's, is answered `cancelled` without asking the decider. Each
+answer is also an `AcpPermission` event, whose `optionId` names the option an `AcpSelect` chose.
+
 ## Development
 
 ```sh

@@ -147,10 +147,18 @@ final class AcpPermission extends AcpEvent {
   final String tool;
   final bool allowed;
   final String? reason;
-  const AcpPermission({required this.tool, required this.allowed, this.reason});
+
+  /// The option the answer selected, when the decider chose one by [AcpSelect].
+  final String? optionId;
+  const AcpPermission({
+    required this.tool,
+    required this.allowed,
+    this.reason,
+    this.optionId,
+  });
   @override
   String toString() =>
-      'AcpPermission(tool: $tool, allowed: $allowed, reason: $reason)';
+      'AcpPermission(tool: $tool, allowed: $allowed, reason: $reason, optionId: $optionId)';
 }
 
 final class AcpCompleted extends AcpEvent {
@@ -236,6 +244,43 @@ final class AcpCancel extends AcpDecision {
   String toString() => 'AcpCancel()';
 }
 
+/// One of the request's own [AcpPermissionRequest.options], by its id. One the request did not offer is never sent: the request is
+/// answered cancelled, and an [AcpBlocked] says why.
+final class AcpSelect extends AcpDecision {
+  final String optionId;
+  const AcpSelect(this.optionId);
+  @override
+  String toString() => 'AcpSelect($optionId)';
+}
+
+/// A way the agent offers to answer a permission request, as it sent it. What an "always" kind remembers, and for how long, is the
+/// agent's to decide: the client only passes the choice on.
+final class AcpPermissionOption {
+  const AcpPermissionOption({
+    required this.optionId,
+    required this.name,
+    required this.kind,
+  });
+
+  /// The agent's identifier, which [AcpSelect] names.
+  final String optionId;
+
+  /// The agent's label for it; empty when it sent none.
+  final String name;
+
+  /// `allow_once`, `allow_always`, `reject_once`, `reject_always`, or another kind the agent named, as it named it.
+  final String kind;
+
+  /// Whether this lets the tool run.
+  bool get allows => kind == 'allow_once' || kind == 'allow_always';
+
+  /// Whether this refuses it.
+  bool get rejects => kind == 'reject_once' || kind == 'reject_always';
+
+  @override
+  String toString() => 'AcpPermissionOption($optionId, $name, $kind)';
+}
+
 final class AcpPermissionRequest {
   final String sessionId;
   final String toolCallId;
@@ -248,6 +293,9 @@ final class AcpPermissionRequest {
 
   /// Why the agent says it needs this, in v2.
   final String? description;
+
+  /// What the agent lets the client answer, in its order: those with an id and a kind, up to [AcpClient.maxPermissionOptions].
+  final List<AcpPermissionOption> options;
   const AcpPermissionRequest({
     required this.sessionId,
     required this.toolCallId,
@@ -256,6 +304,7 @@ final class AcpPermissionRequest {
     this.rawInput,
     this.toolCall,
     this.description,
+    this.options = const [],
   });
 }
 
@@ -366,8 +415,10 @@ final class AcpClient {
     this.describeLimits = const AcpDescribeLimits(),
     this.textFlush = 64 * 1024,
     this.maxListedSessions = 500,
+    this.maxPermissionOptions = 16,
   }) : assert(textFlush >= 0),
        assert(maxListedSessions >= 0),
+       assert(maxPermissionOptions >= 0),
        _send = send,
        _closeSource = closeSource,
        _decider = decider {
@@ -394,6 +445,9 @@ final class AcpClient {
   /// The sessions [listSessions] keeps of one page, whose size the agent chooses; a page cut short says so in
   /// [AcpSessionPage.incomplete]. Default 500.
   final int maxListedSessions;
+
+  /// The options of one permission request the decider is given, in the agent's order. Default 16.
+  final int maxPermissionOptions;
   final Future<void> Function(String) _send;
   final Future<void> Function()? _closeSource;
   final AcpDecider? _decider;
@@ -623,6 +677,18 @@ final class AcpClient {
         : const {};
     final title = params['title'] is String ? params['title'] : call['title'];
     final tool = title is String ? title : 'a tool';
+    final options = <AcpPermissionOption>[
+      for (final option in params['options'] as List)
+        if (option is Map &&
+            option['optionId'] is String &&
+            (option['optionId'] as String).isNotEmpty &&
+            option['kind'] is String)
+          AcpPermissionOption(
+            optionId: option['optionId'] as String,
+            name: option['name'] is String ? option['name'] as String : '',
+            kind: option['kind'] as String,
+          ),
+    ].take(maxPermissionOptions).toList();
     AcpDecision decision;
     final decider = _decider;
     if (decider == null) {
@@ -648,6 +714,7 @@ final class AcpClient {
             description: params['description'] is String
                 ? params['description'] as String
                 : null,
+            options: options,
           ),
         );
       } catch (error) {
@@ -666,6 +733,40 @@ final class AcpClient {
       _reply(id, {
         'result': {
           'outcome': {'outcome': 'cancelled'},
+        },
+      });
+      return;
+    }
+    if (decision is AcpSelect) {
+      final chosen = decision.optionId;
+      final option = options
+          .where((option) => option.optionId == chosen)
+          .firstOrNull;
+      _flush();
+      if (option == null) {
+        _emit(
+          AcpBlocked(
+            'the answer for $tool chose $chosen, which the agent did not offer',
+          ),
+        );
+        _reply(id, {
+          'result': {
+            'outcome': {'outcome': 'cancelled'},
+          },
+        });
+        return;
+      }
+      _emit(
+        AcpPermission(
+          tool: tool,
+          allowed: option.allows,
+          reason: option.allows ? null : 'the answer was ${option.kind}',
+          optionId: option.optionId,
+        ),
+      );
+      _reply(id, {
+        'result': {
+          'outcome': {'outcome': 'selected', 'optionId': option.optionId},
         },
       });
       return;
