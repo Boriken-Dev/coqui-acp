@@ -87,6 +87,21 @@ keeps nothing. A request with no `options` list, one whose options repeat an id 
 another session's, is answered `cancelled` without asking the decider, the first two with an `AcpBlocked`. Each
 answer is also an `AcpPermission` event, whose `optionId` names the option an `AcpSelect` chose.
 
+## Questions as forms
+
+With an `elicitor`, the client advertises form elicitation (`elicitation.form`, under `clientCapabilities` in v1 and
+`capabilities` in v2) and puts each `elicitation/create` of its sessions to it as an `AcpElicitation`: `message`, `title`,
+`description`, `toolCallId` and its `fields`, in the agent's order: `AcpTextField`, `AcpChoiceField`, `AcpChoicesField`,
+`AcpNumberField` (`integer` for a whole number), `AcpBooleanField`, or `AcpUnsupportedField` for a type this client does not
+know, never to be rendered as a known control. The elicitor answers `AcpElicitAccept(content)`, `AcpElicitDecline()` or
+`AcpElicitCancel()`. Without an elicitor nothing is advertised and the request is not taken (method not found).
+
+Another session's question is answered `cancel` without asking. One that cannot be put to a person (URL mode, which is not
+offered, no session, no form, more than `maxElicitationFields` questions (64) or a question with more than
+`maxElicitationOptions` choices (256)) is answered `cancel` with an `AcpBlocked`. An accepted answer is sent only when it fits
+the form, every required field there and each value of its type within its bounds; otherwise `cancel` and an `AcpBlocked`. The
+Rust client does the same, as `vectors/elicitation.json` says. Everything in a form is the agent's text: show it as data.
+
 ## Development
 
 ```sh

@@ -38,6 +38,9 @@ pub const fn max_pending_events(self, events: usize) -> Self
 pub const fn text_flush(self, bytes: usize) -> Self
 pub const fn max_tool_kinds(self, calls: usize) -> Self
 pub fn decider(self, decider: Arc<dyn Decider>) -> Self
+pub fn elicitor(self, elicitor: Arc<dyn Elicitor>) -> Self
+pub const fn max_elicitation_fields(self, fields: usize) -> Self
+pub const fn max_elicitation_options(self, options: usize) -> Self
 pub const fn close_on_drop(self, close: bool) -> Self
 pub const fn fail_on_disconnect(self, fail: bool) -> Self
 pub fn on_close(self, on_close: impl FnOnce() + Send + 'static) -> Self
@@ -75,7 +78,7 @@ Only this session's traffic counts: a `session/update` whose `sessionId` is not 
 
 ## `Event` (crate root)
 
-`#[non_exhaustive]`. `Text(String)`: agent text, gathered until the next tool or the end of the turn, and flushed at `Builder::text_flush` UTF-8 bytes (64 KiB). `Tool { id, title, name: Option<String>, kind }`. `Cost { amount: f64, currency }`. `Notice(String)`. `Permission { tool, allowed: bool, reason: Option<String> }`. `Completed { stop }`: `end_turn`, `max_tokens` or `max_turn_requests`. `Failed(String)`: the turn failed, the agent refused, or the connection was lost. `Cancelled`: the agent ended the turn as cancelled, whether asked to or by itself. `Blocked(String)`: a permission request could not be answered, so the agent was told it was cancelled; the turn goes on until the agent ends it. `PromptFailed(String)`: see `turn_end_by`. `OutputLost { lines: u64, bytes: u64 }`: `_dev.boriken.coqui.acp/output_lost`, which a bridge sends first on a connection when it dropped the kept agent's output while nobody was connected; what the session shows has a gap there, so reconcile by `load` or tell the person. `Extension { method, params: Value }`: any other notification whose method starts with `_`, untouched.
+`#[non_exhaustive]`. `Text(String)`: agent text, gathered until the next tool or the end of the turn, and flushed at `Builder::text_flush` UTF-8 bytes (64 KiB). `Tool { id, title, name: Option<String>, kind }`. `Cost { amount: f64, currency }`. `Notice(String)`. `Permission { tool, allowed: bool, reason: Option<String> }`. `Completed { stop }`: `end_turn`, `max_tokens` or `max_turn_requests`. `Failed(String)`: the turn failed, the agent refused, or the connection was lost. `Cancelled`: the agent ended the turn as cancelled, whether asked to or by itself. `Blocked(String)`: a permission request or a question could not be answered, so the agent was told it was cancelled; the turn goes on until the agent ends it. `PromptFailed(String)`: see `turn_end_by`. `OutputLost { lines: u64, bytes: u64 }`: `_dev.boriken.coqui.acp/output_lost`, which a bridge sends first on a connection when it dropped the kept agent's output while nobody was connected; what the session shows has a gap there, so reconcile by `load` or tell the person. `Extension { method, params: Value }`: any other notification whose method starts with `_`, untouched.
 
 ## `Decider` (crate root)
 
@@ -86,6 +89,17 @@ pub struct RefuseAll;
 ```
 
 A decider may block: it runs on a thread of its own. `PermissionRequest` (`#[non_exhaustive]`): `session_id`, `tool_call_id`, `title: Option<String>`, `kind: Option<String>`, `raw_input: Option<Value>`, `options: Vec<PermissionOption>`. `PermissionOption`: `option_id`, `kind`. `raw_input` is what the agent wants to do: untrusted.
+
+## `Elicitor` (crate root)
+
+```rust
+pub trait Elicitor: Send + Sync { fn elicit(&self, request: &Elicitation) -> ElicitationAnswer; }
+pub enum ElicitationAnswer { Accept(Map<String, Value>), Decline, Cancel }
+```
+
+An agent's `elicitation/create`, in form mode, put to the person. Without `Builder::elicitor` nothing is advertised and the request is answered method-not-found; with one, `initialize` advertises `clientCapabilities.elicitation.form`, and an elicitor may block: it runs on a thread of its own. `Elicitation` (`#[non_exhaustive]`): `session_id`, `tool_call_id: Option<String>`, `message`, `title`, `description`, `fields: Vec<Field>`. `Field`: `name`, `title`, `description`, `required`, `kind: FieldKind` (`#[non_exhaustive]`): `Text { min_length, max_length, format, default }`, `Choice { options, default }`, `Choices { options, min_items, max_items, default }`, `Number { minimum, maximum, default }` (f64), `Integer { .. }` (i64), `Boolean { default }`, or `Unsupported { kind }`, never rendered as a known control. `ChoiceOption`: `value`, `title` (the value when the agent gave none), `description`. A bound or default of the wrong type is left out; a choice default not offered is left out.
+
+Another session's question is answered `cancel` without asking. One that cannot be put to a person (not form mode, URL mode included, tied to no session, no `message`, `requestedSchema.properties` not an object, more than `max_elicitation_fields` questions (64) or a question with more than `max_elicitation_options` choices (256)) is answered `cancel` with an `Event::Blocked`. `Accept` is sent only when it fits the form: no field it did not ask, every required one, each value of its field's type and within its bounds (text length in characters, choices each offered and none twice, a whole number for an integer); otherwise `cancel` and `Event::Blocked`. Never an error answer. All of it is the agent's text, untrusted. The Dart client keeps the same, as `vectors/elicitation.json` says.
 
 ## `Exchange` (crate root)
 
