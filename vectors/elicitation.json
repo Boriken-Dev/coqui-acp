@@ -1,0 +1,219 @@
+{
+  "about": "An agent's elicitation/create, as both clients answer it, in ACP version 1. After initialize and session/new (session s1), the agent sends one elicitation/create with `params`. `elicitor` says whether the client was given one; `limits` replaces its defaults (fields 64, options 256). `asked` is what the elicitor is given, normalized: fields in the schema's order, each with `name`, `type` (text, choice, choices, number, integer, boolean or unsupported), `required`, and what the schema says of it that the client keeps; null when the elicitor is not asked. `answer` is what the elicitor answers. `response` is the client's whole answer: `result` or `error`, the error compared by code only. `blocked` says whether the client also reports that the request could not be answered. A client with an elicitor advertises `advertised` under clientCapabilities (v1) or capabilities (v2), and one without advertises no elicitation.",
+  "advertised": {"elicitation": {"form": {}}},
+  "cases": [
+    {
+      "name": "a form with every field type is given to the elicitor, and its answer is sent",
+      "elicitor": true,
+      "params": {
+        "mode": "form",
+        "sessionId": "s1",
+        "toolCallId": "t1",
+        "message": "A few questions",
+        "requestedSchema": {
+          "type": "object",
+          "title": "Setup",
+          "description": "Before I start",
+          "properties": {
+            "name": {"type": "string", "title": "Name", "description": "Yours", "minLength": 1, "maxLength": 40, "default": "Ana", "pattern": "^.*$"},
+            "email": {"type": "string", "format": "email"},
+            "color": {"type": "string", "title": "Color", "oneOf": [{"const": "r", "title": "Red", "description": "warm"}, {"const": "g", "title": "Green"}], "default": "g"},
+            "size": {"type": "string", "enum": ["s", "m"]},
+            "count": {"type": "integer", "minimum": 1, "maximum": 9, "default": 2},
+            "ratio": {"type": "number", "minimum": 0, "maximum": 1},
+            "ok": {"type": "boolean", "default": true},
+            "tags": {"type": "array", "title": "Tags", "minItems": 1, "maxItems": 2, "items": {"anyOf": [{"const": "a", "title": "A"}, {"const": "b", "title": "B"}]}, "default": ["a"]},
+            "plain": {"type": "array", "items": {"type": "string", "enum": ["x", "y"]}}
+          },
+          "required": ["name", "color"]
+        }
+      },
+      "asked": {
+        "sessionId": "s1",
+        "toolCallId": "t1",
+        "message": "A few questions",
+        "title": "Setup",
+        "description": "Before I start",
+        "fields": [
+          {"name": "name", "type": "text", "required": true, "title": "Name", "description": "Yours", "minLength": 1, "maxLength": 40, "default": "Ana"},
+          {"name": "email", "type": "text", "required": false, "format": "email"},
+          {"name": "color", "type": "choice", "required": true, "title": "Color", "options": [{"value": "r", "title": "Red", "description": "warm"}, {"value": "g", "title": "Green"}], "default": "g"},
+          {"name": "size", "type": "choice", "required": false, "options": [{"value": "s", "title": "s"}, {"value": "m", "title": "m"}]},
+          {"name": "count", "type": "integer", "required": false, "minimum": 1, "maximum": 9, "default": 2},
+          {"name": "ratio", "type": "number", "required": false, "minimum": 0, "maximum": 1},
+          {"name": "ok", "type": "boolean", "required": false, "default": true},
+          {"name": "tags", "type": "choices", "required": false, "title": "Tags", "options": [{"value": "a", "title": "A"}, {"value": "b", "title": "B"}], "minItems": 1, "maxItems": 2, "default": ["a"]},
+          {"name": "plain", "type": "choices", "required": false, "options": [{"value": "x", "title": "x"}, {"value": "y", "title": "y"}]}
+        ]
+      },
+      "answer": {"action": "accept", "content": {"name": "Bo", "color": "r", "size": "m", "count": 3, "ratio": 0.5, "ok": false, "tags": ["a", "b"], "plain": ["y"]}},
+      "response": {"result": {"action": "accept", "content": {"name": "Bo", "color": "r", "size": "m", "count": 3, "ratio": 0.5, "ok": false, "tags": ["a", "b"], "plain": ["y"]}}},
+      "blocked": false
+    },
+    {
+      "name": "a decline is sent as the person's refusal",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"q": {"type": "string", "oneOf": [{"const": "a", "title": "A"}]}}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "q", "type": "choice", "required": false, "options": [{"value": "a", "title": "A"}]}]},
+      "answer": {"action": "decline"},
+      "response": {"result": {"action": "decline"}},
+      "blocked": false
+    },
+    {
+      "name": "a cancel is sent as cancelled",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": []},
+      "answer": {"action": "cancel"},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": false
+    },
+    {
+      "name": "a client given no elicitor does not take the request",
+      "elicitor": false,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {}}},
+      "asked": null,
+      "answer": null,
+      "response": {"error": {"code": -32601}},
+      "blocked": false
+    },
+    {
+      "name": "another session's request is cancelled without asking",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "other", "message": "Which?", "requestedSchema": {"type": "object", "properties": {}}},
+      "asked": null,
+      "answer": null,
+      "response": {"result": {"action": "cancel"}},
+      "blocked": false
+    },
+    {
+      "name": "a request tied to no session is cancelled without asking",
+      "elicitor": true,
+      "params": {"mode": "form", "requestId": 7, "message": "Which?", "requestedSchema": {"type": "object", "properties": {}}},
+      "asked": null,
+      "answer": null,
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "a URL request, which this client does not offer, is cancelled without asking",
+      "elicitor": true,
+      "params": {"mode": "url", "sessionId": "s1", "elicitationId": "e1", "url": "https://example.org/login", "message": "Sign in"},
+      "asked": null,
+      "answer": null,
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "a schema that is not an object of properties is cancelled without asking",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": ["q"]}},
+      "asked": null,
+      "answer": null,
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "a form with more fields than the limit is cancelled without asking",
+      "elicitor": true,
+      "limits": {"fields": 2},
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"a": {"type": "boolean"}, "b": {"type": "boolean"}, "c": {"type": "boolean"}}}},
+      "asked": null,
+      "answer": null,
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "a field with more choices than the limit is cancelled without asking",
+      "elicitor": true,
+      "limits": {"options": 1},
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"q": {"type": "string", "enum": ["a", "b"]}}}},
+      "asked": null,
+      "answer": null,
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "a field of a type the client does not know is given as unsupported, and what does not fit a field is left out of it",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {
+        "map": {"type": "_vendor_map", "title": "Map"},
+        "n": {"type": "integer", "minimum": "low", "default": 2.5},
+        "c": {"type": "string", "enum": ["a", 7, "b"], "default": "z"},
+        "t": {"type": "string", "minLength": -1, "default": 3}
+      }, "required": ["map", "missing"]}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [
+        {"name": "map", "type": "unsupported", "required": true, "title": "Map"},
+        {"name": "n", "type": "integer", "required": false},
+        {"name": "c", "type": "choice", "required": false, "options": [{"value": "a", "title": "a"}, {"value": "b", "title": "b"}]},
+        {"name": "t", "type": "text", "required": false}
+      ]},
+      "answer": {"action": "decline"},
+      "response": {"result": {"action": "decline"}},
+      "blocked": false
+    },
+    {
+      "name": "an answer missing a required field is not sent",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"q": {"type": "string"}, "r": {"type": "boolean"}}, "required": ["q"]}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "q", "type": "text", "required": true}, {"name": "r", "type": "boolean", "required": false}]},
+      "answer": {"action": "accept", "content": {"r": true}},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "an answer naming a field the form does not have is not sent",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"q": {"type": "string"}}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "q", "type": "text", "required": false}]},
+      "answer": {"action": "accept", "content": {"q": "x", "extra": "y"}},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "an answer for an unsupported field is not sent",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"m": {"type": "_vendor_map"}}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "m", "type": "unsupported", "required": false}]},
+      "answer": {"action": "accept", "content": {"m": "x"}},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "an answer outside a field's bounds is not sent",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1, "maximum": 3}}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "n", "type": "integer", "required": false, "minimum": 1, "maximum": 3}]},
+      "answer": {"action": "accept", "content": {"n": 4}},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "an answer of the wrong type is not sent",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"n": {"type": "integer"}}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "n", "type": "integer", "required": false}]},
+      "answer": {"action": "accept", "content": {"n": 2.5}},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "an answer choosing what was not offered is not sent",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"c": {"type": "string", "enum": ["a"]}, "t": {"type": "array", "maxItems": 1, "items": {"type": "string", "enum": ["x", "y"]}}}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "c", "type": "choice", "required": false, "options": [{"value": "a", "title": "a"}]}, {"name": "t", "type": "choices", "required": false, "options": [{"value": "x", "title": "x"}, {"value": "y", "title": "y"}], "maxItems": 1}]},
+      "answer": {"action": "accept", "content": {"c": "a", "t": ["x", "y"]}},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    },
+    {
+      "name": "text longer than its field allows is not sent",
+      "elicitor": true,
+      "params": {"mode": "form", "sessionId": "s1", "message": "Which?", "requestedSchema": {"type": "object", "properties": {"t": {"type": "string", "maxLength": 3}}}},
+      "asked": {"sessionId": "s1", "message": "Which?", "fields": [{"name": "t", "type": "text", "required": false, "maxLength": 3}]},
+      "answer": {"action": "accept", "content": {"t": "four"}},
+      "response": {"result": {"action": "cancel"}},
+      "blocked": true
+    }
+  ]
+}

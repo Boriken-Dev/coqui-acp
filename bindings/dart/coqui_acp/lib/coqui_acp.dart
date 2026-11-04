@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+part 'src/elicit.dart';
+
 /// What `coqui-acp-bridge serve --linger` sends when it dropped output while nobody was connected.
 const acpOutputLost = '_dev.boriken.coqui.acp/output_lost';
 
@@ -408,6 +410,7 @@ final class AcpClient {
     required Future<void> Function(String) send,
     Future<void> Function()? closeSource,
     AcpDecider? decider,
+    AcpElicitor? elicitor,
     this.maxProtocolVersion = 2,
     this.clientName = 'coqui-acp',
     this.clientVersion = '0.0.0',
@@ -416,9 +419,14 @@ final class AcpClient {
     this.textFlush = 64 * 1024,
     this.maxListedSessions = 500,
     this.maxPermissionOptions = 16,
+    this.maxElicitationFields = 64,
+    this.maxElicitationOptions = 256,
   }) : assert(textFlush >= 0),
        assert(maxListedSessions >= 0),
        assert(maxPermissionOptions >= 0),
+       assert(maxElicitationFields >= 0),
+       assert(maxElicitationOptions >= 0),
+       _elicitor = elicitor,
        _send = send,
        _closeSource = closeSource,
        _decider = decider {
@@ -448,6 +456,13 @@ final class AcpClient {
 
   /// The options of one permission request the decider is given, in the agent's order. Default 16.
   final int maxPermissionOptions;
+
+  /// The most questions one of the agent's forms may hold; one with more is answered cancelled without asking. Default 64.
+  final int maxElicitationFields;
+
+  /// The most choices one question of a form may offer; a form with more is answered cancelled without asking. Default 256.
+  final int maxElicitationOptions;
+  final AcpElicitor? _elicitor;
   final Future<void> Function(String) _send;
   final Future<void> Function()? _closeSource;
   final AcpDecider? _decider;
@@ -531,6 +546,8 @@ final class AcpClient {
           }
         } else if (method == 'session/request_permission') {
           unawaited(_answerPermission(id, envelope['params']));
+        } else if (method == 'elicitation/create' && _elicitor != null) {
+          unawaited(_answerElicitation(id, envelope['params']));
         } else {
           _reply(id, {
             'error': {'code': -32601, 'message': 'Unsupported method'},
@@ -822,12 +839,57 @@ final class AcpClient {
     });
   }
 
+  /// Answers `elicitation/create` through the elicitor. Another session's question is cancelled without asking; one that cannot
+  /// be put to a person, or an answer that does not fit its form, is cancelled and said in an [AcpBlocked]. Never an error, as
+  /// with a permission request.
+  Future<void> _answerElicitation(Object id, Object? params) async {
+    void answer(Map<String, Object?> result) => _reply(id, {'result': result});
+    const cancel = {'action': 'cancel'};
+    if (params is Map &&
+        params['sessionId'] is String &&
+        !_sessions.contains(params['sessionId'])) {
+      return answer(cancel);
+    }
+    final (request, why) = _readElicitation(
+      params,
+      maxElicitationFields,
+      maxElicitationOptions,
+    );
+    if (request == null) {
+      _flush();
+      _emit(AcpBlocked(why!));
+      return answer(cancel);
+    }
+    AcpElicitationAnswer said;
+    try {
+      said = await _elicitor!(request);
+    } catch (_) {
+      said = const AcpElicitCancel();
+    }
+    switch (said) {
+      case AcpElicitAccept(:final content):
+        final misfit = _misfit(request, content);
+        if (misfit != null) {
+          _flush();
+          _emit(AcpBlocked(misfit));
+          return answer(cancel);
+        }
+        answer({'action': 'accept', 'content': content});
+      case AcpElicitDecline():
+        answer({'action': 'decline'});
+      case AcpElicitCancel():
+        answer(cancel);
+    }
+  }
+
   Future<void> initialize() async {
     if (_protocolVersion != null) return;
     final reply = await _request('initialize', {
       'protocolVersion': maxProtocolVersion,
       if (maxProtocolVersion >= 2) ...{
-        'capabilities': <String, Object?>{},
+        'capabilities': <String, Object?>{
+          if (_elicitor != null) 'elicitation': {'form': <String, Object?>{}},
+        },
         'info': {
           'name': clientName,
           'title': clientName,
@@ -837,6 +899,7 @@ final class AcpClient {
         'clientCapabilities': {
           'fs': {'readTextFile': false, 'writeTextFile': false},
           'terminal': false,
+          if (_elicitor != null) 'elicitation': {'form': <String, Object?>{}},
         },
         'clientInfo': {'name': clientName, 'version': clientVersion},
       },

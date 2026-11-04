@@ -7,6 +7,7 @@ extern crate alloc;
 mod client;
 mod decider;
 mod describe;
+mod elicit;
 mod error;
 mod event;
 pub mod lines;
@@ -19,6 +20,7 @@ pub use describe::{
     Answer, DescribeLimits, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD,
     SessionList,
 };
+pub use elicit::{ChoiceOption, Elicitation, ElicitationAnswer, Elicitor, Field, FieldKind};
 pub use error::Error;
 pub use event::Event;
 

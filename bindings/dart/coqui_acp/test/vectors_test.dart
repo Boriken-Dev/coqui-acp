@@ -820,6 +820,168 @@ void main() {
     );
   });
 
+  group('elicitation', () {
+    final vectors =
+        jsonDecode(File('../../../vectors/elicitation.json').readAsStringSync())
+            as Map<String, dynamic>;
+
+    /// An elicitation as `vectors/elicitation.json` writes what the elicitor is given.
+    Map<String, Object?> normalized(AcpElicitation request) {
+      List<Map<String, Object?>> options(List<AcpChoice> choices) => [
+        for (final choice in choices)
+          {
+            'value': choice.value,
+            'title': choice.title,
+            'description': ?choice.description,
+          },
+      ];
+      return {
+        'sessionId': request.sessionId,
+        'toolCallId': ?request.toolCallId,
+        'message': request.message,
+        'title': ?request.title,
+        'description': ?request.description,
+        'fields': [
+          for (final field in request.fields)
+            {
+              'name': field.name,
+              ...switch (field) {
+                AcpTextField() => {
+                  'type': 'text',
+                  'minLength': ?field.minLength,
+                  'maxLength': ?field.maxLength,
+                  'format': ?field.format,
+                  'default': ?field.defaultValue,
+                },
+                AcpChoiceField() => {
+                  'type': 'choice',
+                  'options': options(field.options),
+                  'default': ?field.defaultValue,
+                },
+                AcpChoicesField() => {
+                  'type': 'choices',
+                  'options': options(field.options),
+                  'minItems': ?field.minItems,
+                  'maxItems': ?field.maxItems,
+                  'default': ?field.defaultValue,
+                },
+                AcpNumberField() => {
+                  'type': field.integer ? 'integer' : 'number',
+                  'minimum': ?field.minimum,
+                  'maximum': ?field.maximum,
+                  'default': ?field.defaultValue,
+                },
+                AcpBooleanField() => {
+                  'type': 'boolean',
+                  'default': ?field.defaultValue,
+                },
+                AcpUnsupportedField() => {'type': 'unsupported'},
+              },
+              'required': field.required,
+              'title': ?field.title,
+              'description': ?field.description,
+            },
+        ],
+      };
+    }
+
+    for (final raw in vectors['cases'] as List<dynamic>) {
+      final vector = raw as Map<String, dynamic>;
+      test(vector['name'] as String, () async {
+        AcpElicitation? asked;
+        final events = <AcpEvent>[];
+        final answer = vector['answer'] as Map<String, dynamic>?;
+        final limits = (vector['limits'] as Map<String, dynamic>?) ?? const {};
+        final agent = Agent();
+        final acp = AcpClient(
+          incoming: agent.toClient.stream,
+          send: (line) async => agent.fromClient.add(line),
+          maxProtocolVersion: 1,
+          maxElicitationFields: limits['fields'] as int? ?? 64,
+          maxElicitationOptions: limits['options'] as int? ?? 256,
+          elicitor: vector['elicitor'] == true
+              ? (request) async {
+                  asked = request;
+                  return switch (answer?['action']) {
+                    'accept' => AcpElicitAccept(
+                      Map<String, Object?>.from(answer!['content'] as Map),
+                    ),
+                    'decline' => const AcpElicitDecline(),
+                    _ => const AcpElicitCancel(),
+                  };
+                }
+              : null,
+        );
+        acp.events.listen(events.add);
+        final opening = acp.initialize();
+        final init = await agent.read();
+        final capability =
+            (init['params']['clientCapabilities'] as Map)['elicitation'];
+        expect(
+          capability,
+          vector['elicitor'] == true
+              ? (vectors['advertised'] as Map)['elicitation']
+              : isNull,
+        );
+        agent.write({
+          'id': init['id'],
+          'result': {
+            'protocolVersion': 1,
+            'agentCapabilities': <String, Object?>{},
+          },
+        });
+        await opening;
+        final creating = acp.createSession(cwd: '/w');
+        final created = await agent.read();
+        agent.write({
+          'id': created['id'],
+          'result': {'sessionId': 's1'},
+        });
+        await creating;
+        agent.write({
+          'id': 9,
+          'method': 'elicitation/create',
+          'params': vector['params'],
+        });
+        final said = await agent.read();
+        final response = vector['response'] as Map<String, dynamic>;
+        if (response['error'] case final Map<String, dynamic> error) {
+          expect((said['error'] as Map)['code'], error['code']);
+        } else {
+          expect(said['result'], response['result']);
+        }
+        expect(asked == null ? null : normalized(asked!), vector['asked']);
+        await Future<void>.delayed(Duration.zero);
+        expect(events.whereType<AcpBlocked>().isNotEmpty, vector['blocked']);
+        await acp.close();
+      });
+    }
+
+    test('a v2 client advertises it under capabilities', () async {
+      final agent = Agent();
+      final acp = AcpClient(
+        incoming: agent.toClient.stream,
+        send: (line) async => agent.fromClient.add(line),
+        elicitor: (_) async => const AcpElicitCancel(),
+      );
+      final opening = acp.initialize();
+      final init = await agent.read();
+      expect(
+        (init['params']['capabilities'] as Map)['elicitation'],
+        (vectors['advertised'] as Map)['elicitation'],
+      );
+      agent.write({
+        'id': init['id'],
+        'result': {
+          'protocolVersion': 2,
+          'capabilities': {'session': <String, Object?>{}},
+        },
+      });
+      await opening;
+      await acp.close();
+    });
+  });
+
   group('describe', () {
     final described =
         jsonDecode(File('../../../vectors/describe.json').readAsStringSync())

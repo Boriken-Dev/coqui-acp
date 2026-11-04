@@ -13,8 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coqui_acp::{
-    Answer, Authenticate, Client, Decider, Decision, DescribeLimits, Error, Event, Exchange,
-    PermissionRequest, Session, SessionList,
+    Answer, Authenticate, ChoiceOption, Client, Decider, Decision, DescribeLimits, Elicitation,
+    ElicitationAnswer, Elicitor, Error, Event, Exchange, FieldKind, PermissionRequest, Session,
+    SessionList,
 };
 use futures::SinkExt;
 use futures::channel::mpsc as async_mpsc;
@@ -231,6 +232,223 @@ fn every_v1_conversation_holds() {
             .unwrap_or_else(|_| panic!("{name}: the script failed"));
     }
     assert!(ran >= 8, "only {ran} v1 conversations ran");
+}
+
+/// Answers as a vector says, and keeps what it was asked.
+struct Scripted {
+    answer: ElicitationAnswer,
+    asked: Mutex<Option<Elicitation>>,
+}
+
+impl Elicitor for Scripted {
+    fn elicit(&self, request: &Elicitation) -> ElicitationAnswer {
+        *self.asked.lock().unwrap() = Some(request.clone());
+        self.answer.clone()
+    }
+}
+
+/// An elicitation as `vectors/elicitation.json` writes what the elicitor is given.
+fn normalized(request: &Elicitation) -> Value {
+    fn options(options: &[ChoiceOption]) -> Value {
+        options
+            .iter()
+            .map(|option| {
+                let mut kept = json!({"value": option.value, "title": option.title});
+                if let Some(description) = &option.description {
+                    kept["description"] = json!(description);
+                }
+                kept
+            })
+            .collect()
+    }
+    let fields: Vec<Value> = request
+        .fields
+        .iter()
+        .map(|field| {
+            let mut kept = Map::new();
+            kept.insert("name".to_owned(), json!(field.name));
+            let mut put = |key: &str, value: Value| {
+                if !value.is_null() {
+                    kept.insert(key.to_owned(), value);
+                }
+            };
+            let kind = match &field.kind {
+                FieldKind::Text {
+                    min_length,
+                    max_length,
+                    format,
+                    default,
+                } => {
+                    put("minLength", json!(min_length));
+                    put("maxLength", json!(max_length));
+                    put("format", json!(format));
+                    put("default", json!(default));
+                    "text"
+                }
+                FieldKind::Choice {
+                    options: offered,
+                    default,
+                } => {
+                    put("options", options(offered));
+                    put("default", json!(default));
+                    "choice"
+                }
+                FieldKind::Choices {
+                    options: offered,
+                    min_items,
+                    max_items,
+                    default,
+                } => {
+                    put("options", options(offered));
+                    put("minItems", json!(min_items));
+                    put("maxItems", json!(max_items));
+                    put("default", json!(default));
+                    "choices"
+                }
+                FieldKind::Number {
+                    minimum,
+                    maximum,
+                    default,
+                } => {
+                    put("minimum", json!(minimum));
+                    put("maximum", json!(maximum));
+                    put("default", json!(default));
+                    "number"
+                }
+                FieldKind::Integer {
+                    minimum,
+                    maximum,
+                    default,
+                } => {
+                    put("minimum", json!(minimum));
+                    put("maximum", json!(maximum));
+                    put("default", json!(default));
+                    "integer"
+                }
+                FieldKind::Boolean { default } => {
+                    put("default", json!(default));
+                    "boolean"
+                }
+                _ => "unsupported",
+            };
+            put("type", json!(kind));
+            put("required", json!(field.required));
+            put("title", json!(field.title));
+            put("description", json!(field.description));
+            Value::Object(kept)
+        })
+        .collect();
+    let mut asked =
+        json!({"sessionId": request.session_id, "message": request.message, "fields": fields});
+    for (key, value) in [
+        ("toolCallId", &request.tool_call_id),
+        ("title", &request.title),
+        ("description", &request.description),
+    ] {
+        if let Some(value) = value {
+            asked[key] = json!(value);
+        }
+    }
+    asked
+}
+
+/// Equal as JSON, a number compared by its value whichever way it was written.
+fn same(got: &Value, want: &Value) -> bool {
+    match (got, want) {
+        (Value::Number(got), Value::Number(want)) => got.as_f64() == want.as_f64(),
+        (Value::Array(got), Value::Array(want)) => {
+            got.len() == want.len() && got.iter().zip(want).all(|(got, want)| same(got, want))
+        }
+        (Value::Object(got), Value::Object(want)) => {
+            got.len() == want.len()
+                && want
+                    .iter()
+                    .all(|(key, want)| got.get(key).is_some_and(|got| same(got, want)))
+        }
+        _ => got == want,
+    }
+}
+
+#[test]
+fn every_elicitation_vector_holds() {
+    let vectors: Value =
+        serde_json::from_str(include_str!("../../../vectors/elicitation.json")).unwrap();
+    for case in vectors["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap().to_owned();
+        let (mut agent, transport) = Agent::pair();
+        let params = case["params"].clone();
+        let advertised = vectors["advertised"]["elicitation"].clone();
+        let gives = case["elicitor"] == true;
+        let named = name.clone();
+        // The agent asks once the client has its session, as an agent asks during a turn.
+        let (opened, open) = mpsc::channel::<()>();
+        let actor = thread::spawn(move || {
+            let init = agent.read().expect("initialize");
+            let capability = &init["params"]["clientCapabilities"]["elicitation"];
+            assert_eq!(
+                *capability,
+                if gives { advertised } else { Value::Null },
+                "{named}"
+            );
+            agent.reply(
+                &init["id"],
+                &json!({"protocolVersion": 1, "agentCapabilities": {}}),
+            );
+            let new = agent.read().expect("session/new");
+            agent.reply(&new["id"], &json!({"sessionId": "s1"}));
+            open.recv().expect("the client opened its session");
+            let said = agent.ask_raw("elicitation/create", &params);
+            thread::spawn(move || while agent.read().is_some() {});
+            said
+        });
+        let answer = match case["answer"].get("action").and_then(Value::as_str) {
+            Some("accept") => {
+                ElicitationAnswer::Accept(case["answer"]["content"].as_object().unwrap().clone())
+            }
+            Some("decline") => ElicitationAnswer::Decline,
+            _ => ElicitationAnswer::Cancel,
+        };
+        let elicitor = Arc::new(Scripted {
+            answer,
+            asked: Mutex::new(None),
+        });
+        let mut builder = Client::builder("/w");
+        if gives {
+            builder = builder.elicitor(elicitor.clone());
+        }
+        if let Some(fields) = case["limits"]["fields"].as_u64() {
+            builder = builder.max_elicitation_fields(usize::try_from(fields).unwrap());
+        }
+        if let Some(options) = case["limits"]["options"].as_u64() {
+            builder = builder.max_elicitation_options(usize::try_from(options).unwrap());
+        }
+        let session = builder
+            .connect(transport)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        opened.send(()).unwrap();
+        let said = actor
+            .join()
+            .unwrap_or_else(|_| panic!("{name}: the agent failed"));
+        match case["response"].get("error") {
+            Some(error) => assert_eq!(said["error"]["code"], error["code"], "{name}: {said}"),
+            None => assert!(
+                same(&said["result"], &case["response"]["result"]),
+                "{name}: {said}"
+            ),
+        }
+        let asked = elicitor.asked.lock().unwrap().as_ref().map(normalized);
+        match (&asked, &case["asked"]) {
+            (None, Value::Null) => {}
+            (Some(got), want) => assert!(same(got, want), "{name}: asked {got}"),
+            (None, want) => panic!("{name}: the elicitor was not asked {want}"),
+        }
+        let mut blocked = false;
+        while let Some(event) = session.next_event(Duration::from_millis(50)) {
+            blocked |= matches!(event, Event::Blocked(_));
+        }
+        assert_eq!(blocked, case["blocked"] == true, "{name}");
+        session.close();
+    }
 }
 
 /// An agent answering by a closure, for what a script does not cover.

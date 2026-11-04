@@ -33,6 +33,7 @@ use crate::describe::{
     self, Answer, DescribeLimits, Description, SESSION_OPTIONS_CAPABILITY, SESSION_OPTIONS_METHOD,
     SessionList,
 };
+use crate::elicit::{self, ElicitationAnswer, Elicitor};
 use crate::error::Error;
 use crate::event::Event;
 use crate::state::{Step, TEXT_FLUSH, TOOL_KINDS, Turn, kind_name};
@@ -93,6 +94,8 @@ pub struct Builder {
     text_flush: usize,
     max_tool_kinds: usize,
     decider: Arc<dyn Decider>,
+    elicitor: Option<Arc<dyn Elicitor>>,
+    elicitation_limits: elicit::Limits,
     close_on_drop: bool,
     fail_on_disconnect: bool,
     on_close: Option<Box<dyn FnOnce() + Send>>,
@@ -139,6 +142,11 @@ impl Client {
             text_flush: TEXT_FLUSH,
             max_tool_kinds: TOOL_KINDS,
             decider: Arc::new(RefuseAll),
+            elicitor: None,
+            elicitation_limits: elicit::Limits {
+                fields: 64,
+                options: 256,
+            },
             close_on_drop: true,
             fail_on_disconnect: true,
             on_close: None,
@@ -295,6 +303,25 @@ impl Builder {
         self
     }
 
+    /// Puts the agent's questions (`elicitation/create`, in form mode) to the person, and advertises that this client takes them.
+    /// Without one, nothing is advertised and such a request is not answered as one this client takes.
+    pub fn elicitor(mut self, elicitor: Arc<dyn Elicitor>) -> Self {
+        self.elicitor = Some(elicitor);
+        self
+    }
+
+    /// The most questions one form may hold. Default 64; a form with more is answered cancelled without asking.
+    pub const fn max_elicitation_fields(mut self, fields: usize) -> Self {
+        self.elicitation_limits.fields = fields;
+        self
+    }
+
+    /// The most choices one question may offer. Default 256; a form with more is answered cancelled without asking.
+    pub const fn max_elicitation_options(mut self, options: usize) -> Self {
+        self.elicitation_limits.options = options;
+        self
+    }
+
     /// Whether dropping the session without closing it closes the agent's session. Default on. Off for an
     /// agent that outlives the connection, which a later connection reattaches to.
     pub const fn close_on_drop(mut self, close: bool) -> Self {
@@ -331,6 +358,8 @@ impl Builder {
             max_pending: self.max_pending_events,
             commands: commands_tx.clone(),
             decider: self.decider.clone(),
+            elicitor: self.elicitor.clone(),
+            elicitation_limits: self.elicitation_limits,
             ends_turn: self.ends_turn.take(),
             disconnect_detail: Mutex::new(self.disconnect_detail.take()),
             fail_on_disconnect: self.fail_on_disconnect,
@@ -369,6 +398,11 @@ impl Builder {
                                         Ok(value) => responder.respond(value),
                                         Err(error) => responder.respond_with_error(error),
                                     }
+                                } else if message.method() == "elicitation/create"
+                                    && for_requests.elicitor.is_some()
+                                {
+                                    let params = message.params().clone();
+                                    responder.respond(elicitation(&for_requests, params).await)
                                 } else {
                                     responder.respond_with_error(RpcError::method_not_found())
                                 }
@@ -431,6 +465,8 @@ struct Shared {
     max_pending: usize,
     commands: async_mpsc::UnboundedSender<Command>,
     decider: Arc<dyn Decider>,
+    elicitor: Option<Arc<dyn Elicitor>>,
+    elicitation_limits: elicit::Limits,
     ends_turn: Option<EndsTurn>,
     disconnect_detail: Mutex<Option<DisconnectDetail>>,
     fail_on_disconnect: bool,
@@ -718,6 +754,50 @@ async fn permission(shared: &Arc<Shared>, params: Value) -> Result<Value, RpcErr
         .map_err(|error| RpcError::internal_error().data(error.to_string()))
 }
 
+/// Answers `elicitation/create` through the elicitor, on a thread of its own: it may wait for a person. Another session's
+/// question is cancelled without asking, and one that cannot be put to a person, or an answer that does not fit its form, is
+/// cancelled and said in an [`Event::Blocked`]. Never an error, as with a permission request.
+async fn elicitation(shared: &Arc<Shared>, params: Value) -> Value {
+    let cancel = || json!({"action": "cancel"});
+    let Some(elicitor) = shared.elicitor.clone() else {
+        return cancel();
+    };
+    if params.get("sessionId").is_some_and(Value::is_string) && !shared.is_mine(&params) {
+        return cancel();
+    }
+    let request = match elicit::read(&params, shared.elicitation_limits) {
+        Ok(request) => request,
+        Err(why) => {
+            shared.emit(Event::Blocked(why));
+            return cancel();
+        }
+    };
+    let (answer, answered) = oneshot::channel();
+    let asked = request.clone();
+    let spawned = std::thread::Builder::new()
+        .name("coqui-acp-elicitation".to_owned())
+        .spawn(move || {
+            let _ = answer.send(elicitor.elicit(&asked));
+        });
+    if spawned.is_err() {
+        shared.emit(Event::Blocked(
+            "nothing could be started to put the agent's question".to_owned(),
+        ));
+        return cancel();
+    }
+    match answered.await.unwrap_or(ElicitationAnswer::Cancel) {
+        ElicitationAnswer::Accept(content) => match elicit::fits(&request, &content) {
+            Ok(()) => json!({"action": "accept", "content": content}),
+            Err(why) => {
+                shared.emit(Event::Blocked(why));
+                cancel()
+            }
+        },
+        ElicitationAnswer::Decline => json!({"action": "decline"}),
+        ElicitationAnswer::Cancel => cancel(),
+    }
+}
+
 /// Runs `future`, or gives up. The timer thread ends as soon as the future does.
 async fn within<T>(limit: Option<Duration>, future: impl Future<Output = T>) -> Result<T, ()> {
     let Some(limit) = limit else {
@@ -972,12 +1052,16 @@ async fn describing(
     }
 }
 
-fn initialize_params(name: &str, version: &str) -> Value {
-    json!({
+fn initialize_params(name: &str, version: &str, elicits: bool) -> Value {
+    let mut params = json!({
         "protocolVersion": PROTOCOL_VERSION,
         "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
         "clientInfo": {"name": name, "version": version},
-    })
+    });
+    if elicits {
+        params["clientCapabilities"]["elicitation"] = json!({"form": {}});
+    }
+    params
 }
 
 /// initialize, authenticate, new or resume, config options. The session id.
@@ -989,7 +1073,11 @@ async fn open(
     let init = call(
         cx,
         "initialize",
-        initialize_params(&options.client_name, &options.client_version),
+        initialize_params(
+            &options.client_name,
+            &options.client_version,
+            options.elicitor.is_some(),
+        ),
         options.initialize_timeout,
     )
     .await?;
@@ -1517,7 +1605,7 @@ impl Exchange {
 
     /// Initializes and authenticates when asked: `initialize`'s answer.
     async fn begin(&self, cx: &ConnectionTo<Agent>) -> Result<Value, Error> {
-        let params = initialize_params(&self.client_name, &self.client_version);
+        let params = initialize_params(&self.client_name, &self.client_version, false);
         let init = call(cx, "initialize", params, self.initialize_timeout).await?;
         if let Some(auth) = &self.authenticate {
             let mut params = json!({"methodId": auth.method});
