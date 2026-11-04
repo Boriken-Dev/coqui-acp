@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `coqui-acp-bridge`: coqui-web is pinned at `445007a` and coqui-agentic-peer at `9b1fee4`, which pins the same coqui-web, the revision Guatiao's remote source pins.
 - `coqui-acp`: an error's text keeps the agent's reason when `data` is an object with a `message`, as the Grok CLI sends for a spent credit limit, not only when `data` is text.
 - `coqui-acp-bridge`: a new identity, from `keygen`, `pair-accept`, `pair-dial`, `dial` or `serve --paired` on a fresh home, proves by Noise unless `--method webcrypto` is given. An identity made before keeps WebCrypto, and its paired peers keep working; moving them to Noise means pairing them again under a Noise identity, which `pair-accept --method noise` makes and records as the home's method.
 - `coqui-acp-bridge pair-accept` refuses a browser unless `--origin` lists its origin, so a page cannot spend the PIN; `--run-seconds` (120) bounds one connection, and `--timeout-seconds` defaults to the PIN's own 600 seconds, as does `pair-dial`'s.
