@@ -342,6 +342,32 @@ void main() {
     expect(() => client.prompt('s', ' '), throwsA(isA<ArgumentError>()));
   });
 
+  test('a v2 choice names its value type, which v1 leaves out', () async {
+    final v2agent = Agent(v2);
+    v2agent.answers['session/set_config_option'] = (_) => {
+      'configOptions': <Object>[],
+    };
+    final client2 = await v2agent.connected();
+    await client2.setConfigOption('s', 'model', 'b');
+    expect(v2agent.last('session/set_config_option')['params'], {
+      'sessionId': 's',
+      'configId': 'model',
+      'type': 'id',
+      'value': 'b',
+    });
+    final v1agent = Agent({'protocolVersion': 1});
+    v1agent.answers['session/set_config_option'] = (_) => {
+      'configOptions': <Object>[],
+    };
+    final client1 = await v1agent.connected();
+    await client1.setConfigOption('s', 'model', 'b');
+    expect(v1agent.last('session/set_config_option')['params'], {
+      'sessionId': 's',
+      'configId': 'model',
+      'value': 'b',
+    });
+  });
+
   test(
     'what an agent does not take is refused before anything is sent',
     () async {

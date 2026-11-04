@@ -1365,9 +1365,11 @@ final class AcpClient {
     String value,
   ) {
     _ready();
+    // v2 names the value's type, `id` for a select's value; v1 has no type and reads its absence as that.
     return _request('session/set_config_option', {
       'sessionId': sessionId,
       'configId': configId,
+      if (_protocolVersion == 2) 'type': 'id',
       'value': value,
     });
   }

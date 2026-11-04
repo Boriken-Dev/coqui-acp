@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `coqui_acp` for Dart: under v2, `setConfigOption` sends `type: "id"` beside the value, which v2's `session/set_config_option` requires; a v2 agent holding to the schema refused the request without it. v1's has no type.
 - **Breaking** for a provider in Python, `coqui-acp-provider`: Guatiao is pinned at `266baf9c`, and `AgentSession`'s `close` slot is `close` in Python, no longer `close_`, in `python/coqui_acp_provider_kinds.py` as `python -m guatiao.kinds` writes it. The kinds' floor hashes are unchanged. A Guatiao manifest is now `<name>.guatiao`: `examples/provider-python`'s is `echo/acp_echo.guatiao`.
 - `coqui-acp-bridge`: coqui-web is pinned at `445007a` and coqui-agentic-peer at `9b1fee4`, which pins the same coqui-web, the revision Guatiao's remote source pins.
 - `coqui-acp`: an error's text keeps the agent's reason when `data` is an object with a `message`, as the Grok CLI sends for a spent credit limit, not only when `data` is text.

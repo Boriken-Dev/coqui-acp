@@ -57,7 +57,8 @@ final acp = AcpClient(
 
 The Rust client keeps the same, with the same defaults, as `vectors/describe.json` says.
 
-A person's choice is set once the session exists, with `setConfigOption` or `setMode`.
+A person's choice is set once the session exists, with `setConfigOption` or `setMode`. Under v2 `setConfigOption` names the
+value's type, `id`, as v2 requires; v1 has no type.
 
 ## Sessions
 
