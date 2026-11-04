@@ -61,11 +61,18 @@ mod with_python {
     }
 
     /// Builds the source once per test binary. A copy, since a build writes `Cargo.lock` beside the manifest
-    /// and Cargo's checkout of a dependency is not this test's to write in.
+    /// and Cargo's checkout of a dependency is not this test's to write in. The copy is named after the
+    /// checkout's directory, which Cargo names by revision, so another pin builds from a copy of its own.
     fn source() -> &'static Path {
         static SOURCE: OnceLock<PathBuf> = OnceLock::new();
         SOURCE.get_or_init(|| {
-            let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("guatiao-source-py");
+            let checkout = guatiao();
+            let revision = checkout
+                .file_name()
+                .expect("Cargo's checkout is a directory of its own");
+            let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                .join("guatiao-source-py")
+                .join(revision);
             let copy = scratch.join("guatiao");
             if !copy.join("Cargo.toml").is_file() {
                 copy_tree(&guatiao().join("crates"), &copy.join("crates"));
