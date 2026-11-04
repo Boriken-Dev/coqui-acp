@@ -1159,17 +1159,19 @@ dependencies = [
 [[package]]
 name = "guatiao"
 version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/guatiao?rev=a67fd4be0aa319795614ac6fe12d35d856ec3d8b#a67fd4be0aa319795614ac6fe12d35d856ec3d8b"
+source = "git+https://github.com/Boriken-Dev/guatiao?rev=266baf9c9e0c4e03bedf8a830d8e434279f83b94#266baf9c9e0c4e03bedf8a830d8e434279f83b94"
 dependencies = [
  "guatiao-derive",
  "libloading",
  "object",
+ "sha2 0.10.9",
+ "winapi-util",
 ]
 
 [[package]]
 name = "guatiao-derive"
 version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/guatiao?rev=a67fd4be0aa319795614ac6fe12d35d856ec3d8b#a67fd4be0aa319795614ac6fe12d35d856ec3d8b"
+source = "git+https://github.com/Boriken-Dev/guatiao?rev=266baf9c9e0c4e03bedf8a830d8e434279f83b94#266baf9c9e0c4e03bedf8a830d8e434279f83b94"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1179,7 +1181,7 @@ dependencies = [
 [[package]]
 name = "guatiao-serde"
 version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/guatiao?rev=a67fd4be0aa319795614ac6fe12d35d856ec3d8b#a67fd4be0aa319795614ac6fe12d35d856ec3d8b"
+source = "git+https://github.com/Boriken-Dev/guatiao?rev=266baf9c9e0c4e03bedf8a830d8e434279f83b94#266baf9c9e0c4e03bedf8a830d8e434279f83b94"
 dependencies = [
  "guatiao",
  "serde",
@@ -2875,6 +2877,15 @@ checksum = "8c6a6724ccfbf34154a8691bd868b0fcd2be2ca3f7b47b32614654f1a01b191c"
 dependencies = [
  "thiserror 1.0.69",
  "windows",
+]
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

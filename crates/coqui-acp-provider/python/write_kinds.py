@@ -1,13 +1,12 @@
 """Writes `coqui_acp_provider_kinds.py` from the kinds' description, or with `--check` says whether it is
 current (exit 1 if not). Needs Guatiao's Python binding on `PYTHONPATH`.
 
-Guatiao's Python classes keep the name `close` for a remote's own method and find a slot by position, so
-this kind's `close` slot is `close_` in Python, which `python -m guatiao.kinds` would not write.
+It writes what `python -m guatiao.kinds` writes, with the paths in the module's header relative to the
+crate whatever the directory it runs from.
 """
 
 from __future__ import annotations
 
-import json
 import pathlib
 import sys
 
@@ -16,16 +15,11 @@ from guatiao.kinds import generate
 HERE = pathlib.Path(__file__).resolve().parent
 DOCUMENT = HERE.parent / "include" / "coqui_acp_provider.kinds.json"
 MODULE = HERE / "coqui_acp_provider_kinds.py"
-RENAMED = {"close": "close_"}
 
 
 def written() -> str:
-    document = json.loads(DOCUMENT.read_text(encoding="utf-8"))
-    for kind in document["kinds"]:
-        for slot in kind["slots"]:
-            slot["name"] = RENAMED.get(slot["name"], slot["name"])
     return generate(
-        json.dumps(document),
+        DOCUMENT.read_text(encoding="utf-8"),
         source="include/coqui_acp_provider.kinds.json",
         command="python python/write_kinds.py",
     )

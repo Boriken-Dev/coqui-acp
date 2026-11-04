@@ -92,7 +92,7 @@ connection.join().expect("the connection's thread did not panic")?;
 # Ok::<(), coqui_acp_provider::Error>(())
 ```
 
-A provider in Python implements the same kinds, from `python/coqui_acp_provider_kinds.py`. In Python this kind's `close` is `close_`, since Guatiao's classes keep that name for themselves:
+A provider in Python implements the same kinds, from `python/coqui_acp_provider_kinds.py`:
 
 ```python
 from coqui_acp_provider_kinds import AgentProvider, AgentSession
@@ -106,7 +106,7 @@ class Conversation(AgentSession):
     def send_message(self, message: Ref): ...
     def next_event(self, timeout_ms: int): ...   # a dict, such as {"kind": "text", "text": "hi"}, or None
     def interrupt(self): ...
-    def close_(self): ...
+    def close(self): ...
 
 class Echo(provide.Provider, AgentProvider):
     def start(self, request: Ref) -> Conversation: ...   # request.to_python() is the StartRequest as a dict

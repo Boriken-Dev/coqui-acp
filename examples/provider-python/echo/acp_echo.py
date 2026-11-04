@@ -64,7 +64,7 @@ class Conversation(AgentSession):
     def interrupt(self) -> None:
         self.events.put({"kind": "cancelled"})
 
-    def close_(self) -> None:
+    def close(self) -> None:
         self.closed = True
 
 

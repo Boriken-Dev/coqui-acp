@@ -39,7 +39,7 @@ Any method may be called while another runs, from another thread: `next_event` b
 - `interrupt` asks the provider to interrupt the running turn, which then ends with an event as any turn does.
 - `close` returns once the harness has exited, or after a short wait when that cannot be told: the caller may remove the working directory next. It is called once.
 
-A provider in another language: every method takes and answers plain data. `start`'s request is a read-only value, valid for the call; the Python binding reads it with `request.to_python()`. An event may leave out anything but `kind`. In Python this kind's `close` slot is `close_`, since Guatiao's Python classes keep the name `close` for themselves; `python -m guatiao.kinds` does not know that, so `python/write_kinds.py` writes the module.
+A provider in another language: every method takes and answers plain data. `start`'s request is a read-only value, valid for the call; the Python binding reads it with `request.to_python()`. An event may leave out anything but `kind`. The Python module is what `python -m guatiao.kinds` writes, through `python/write_kinds.py`, and its `close` slot is `close`, as in Rust: a Guatiao older than the pinned revision refuses a Python slot of that name.
 
 ## Requests
 

@@ -50,7 +50,7 @@ class AgentSession(KindProtocol, Protocol, kind="agent_session", floor_hash=1414
 
     @required
     @fallible
-    def close_(self) -> None:
+    def close(self) -> None:
         """Closes the operation and releases what it holds. It returns once the harness has exited, or after a
         short wait when that cannot be told, since the caller may remove the working directory next.
         """
