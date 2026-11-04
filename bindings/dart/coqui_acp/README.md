@@ -68,6 +68,13 @@ something follows it, or until `textFlush` UTF-8 bytes have gathered (default 64
 says `the sessions limit was reached` in `AcpSessionPage.incomplete`. `takesImages` and `takesFiles` say what an
 `AcpAttachment` may be. `package:coqui_acp/page.dart` is a person's agents from a page, over `document.acp`.
 
+`openSession`, `createSession`, `reopenSession` and `resumeSession` take an `AcpSessionSetup`: `mcpServers` (`AcpMcpStdio`
+with an absolute `command`, `AcpMcpHttp`, SSE with `sse: true`), `systemPrompt` (text appended to the agent's own, ACP's `append`
+mode), `additionalDirectories` and `_meta`. Each goes in the shape of the version spoken: v1's stdio entry has no `type`, v2's
+has one, and v2 has no SSE. `takesMcp`, `takesSystemPrompt` and `takesAdditionalDirectories` say what the agent advertises, and
+a setup asking for anything else fails with `AcpFailure` before anything is sent; a relative command or directory, or two
+servers of one name, with `ArgumentError`. A server's `toString` names its variables and headers, never their values.
+
 ## Permission requests
 
 The `decider` answers each `session/request_permission` of this client's sessions. `AcpPermissionRequest.options` holds what the
