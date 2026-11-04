@@ -67,7 +67,7 @@ normalized stream of `AcpEvent`s and `updates` for every `session/update` as it 
 something follows it, or until `textFlush` UTF-8 bytes have gathered (default 64 KiB, as in the Rust client; any value from 0 up).
 `listSessions` keeps at most `maxListedSessions` sessions of a page (default 500; any value from 0 up), and a page cut short by it
 says `the sessions limit was reached` in `AcpSessionPage.incomplete`. `takesImages` and `takesFiles` say what an
-`AcpAttachment` may be. `package:coqui_acp/page.dart` is a person's agents from a page, over `document.acp`.
+`AcpAttachment` may be; `AcpAttachment.link`, a `resource_link`, goes to any agent, which ACP has every agent take. `package:coqui_acp/page.dart` is a person's agents from a page, over `document.acp`.
 
 `openSession`, `createSession`, `reopenSession` and `resumeSession` take an `AcpSessionSetup`: `mcpServers` (`AcpMcpStdio`
 with an absolute `command`, `AcpMcpHttp`, SSE with `sse: true`), `systemPrompt` (text appended to the agent's own, ACP's `append`

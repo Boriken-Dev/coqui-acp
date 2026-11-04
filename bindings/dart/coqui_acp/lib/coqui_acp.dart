@@ -441,8 +441,31 @@ final class AcpAttachment {
         },
       });
 
+  /// A link to a resource the agent reads itself, such as a file by its `file:` URI. Every agent takes links, whatever it
+  /// advertises.
+  factory AcpAttachment.link(
+    String name,
+    String uri, {
+    String? mimeType,
+    int? size,
+  }) {
+    if (uri.isEmpty) {
+      throw ArgumentError.value(uri, 'uri', 'A link needs a URI');
+    }
+    return AcpAttachment._(name, false, {
+      'type': 'resource_link',
+      'name': name,
+      'uri': uri,
+      'mimeType': ?mimeType,
+      'size': ?size,
+    });
+  }
+
   final String name;
   final bool isImage;
+
+  /// Whether this is a link, which needs no capability of the agent's.
+  bool get isLink => _block['type'] == 'resource_link';
   final Map<String, Object?> _block;
 }
 
@@ -1418,6 +1441,7 @@ final class AcpClient {
       throw ArgumentError.value(text, 'text');
     }
     for (final attachment in attachments) {
+      if (attachment.isLink) continue;
       if (attachment.isImage ? !takesImages : !takesFiles) {
         throw AcpFailure(
           'This agent does not take ${attachment.isImage ? 'images' : 'files'}',

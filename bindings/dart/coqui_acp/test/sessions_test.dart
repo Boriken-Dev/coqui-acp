@@ -342,6 +342,32 @@ void main() {
     expect(() => client.prompt('s', ' '), throwsA(isA<ArgumentError>()));
   });
 
+  test('a link goes to any agent, as a resource_link', () async {
+    final agent = Agent({'protocolVersion': 1});
+    agent.answers['session/prompt'] = (_) => {'stopReason': 'end_turn'};
+    final client = await agent.connected();
+    final link = AcpAttachment.link(
+      'big.log',
+      'file:///work/big.log',
+      mimeType: 'text/plain',
+      size: 5000000,
+    );
+    expect((link.isImage, link.isLink), (false, true));
+    expect(AcpAttachment.text('a', 'b').isLink, isFalse);
+    await client.prompt('s', 'look', attachments: [link]);
+    expect(agent.last('session/prompt')['params']['prompt'], [
+      {'type': 'text', 'text': 'look'},
+      {
+        'type': 'resource_link',
+        'name': 'big.log',
+        'uri': 'file:///work/big.log',
+        'mimeType': 'text/plain',
+        'size': 5000000,
+      },
+    ]);
+    expect(() => AcpAttachment.link('x', ''), throwsA(isA<ArgumentError>()));
+  });
+
   test('a v2 choice names its value type, which v1 leaves out', () async {
     final v2agent = Agent(v2);
     v2agent.answers['session/set_config_option'] = (_) => {
