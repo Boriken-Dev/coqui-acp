@@ -138,8 +138,9 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             STATE["seq"] += 1
             seq = STATE["seq"]
-            step = SCRIPT[STATE["step"]] if STATE["step"] < len(SCRIPT) else {"text": "done"}
-            STATE["step"] += 1
+            at = STATE["step"]
+            STATE["step"] = at + 1
+        step = SCRIPT[at] if at < len(SCRIPT) else {"text": "done"}
         log({"method": "POST", "path": self.path, "seq": seq, "model": body.get("model"),
              "instructions": (body.get("instructions") or "")[:200],
              "tools": [tool.get("name") for tool in body.get("tools", []) if isinstance(tool, dict)]})
