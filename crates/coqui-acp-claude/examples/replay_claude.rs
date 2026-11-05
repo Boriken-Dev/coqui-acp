@@ -14,7 +14,12 @@
 //! does, unless `COQUI_ACP_CLAUDE_KEEP_SESSION` is set. `COQUI_ACP_CLAUDE_LEAVE_CHILD` makes that exit leave a child
 //! holding its output open. `--version` prints the recorded version.
 
-#![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
+#![allow(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::zombie_processes,
+    reason = "a stand-in for tests, whose child is left to hold its output open"
+)]
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};

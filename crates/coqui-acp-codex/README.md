@@ -124,7 +124,7 @@ cargo test -p coqui-acp-codex
 The tests run against `examples/replay_codex.rs`, which replays app-server traffic recorded from Codex 0.164.0 on Windows in
 `tests/fixtures/codex-0.164.0/`: each `<name>.stdout` is the app server's standard output byte for byte but for its
 remote-control status line, which names the machine and is left out; `<name>.steps.json` is what was written to it and when, and
-`<name>.argv.json` its arguments. They were recorded against a loopback stand-in for the model, so no model was reached.
+`<name>.argv.json` its arguments, which `tests/argv.rs` compares with what the launch builds. `tools/record_harnesses/record.py` makes them. They were recorded against a loopback stand-in for the model, so no model was reached.
 `codex_app_server_protocol.schemas.json` is what `codex app-server generate-json-schema` printed for 0.164.0.
 
 ## License

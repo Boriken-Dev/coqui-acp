@@ -13,7 +13,7 @@ use coqui_acp_harness::lines::{self, Line};
 
 use crate::Error;
 use crate::launch::valid_session_id;
-use crate::parse::{Parser, Writer};
+use crate::parse::{Parser, ParserLimits, Writer};
 
 /// Claude Code's configuration directory for an environment: `CLAUDE_CONFIG_DIR`, else `.claude` in the home
 /// directory (`USERPROFILE` on Windows, `HOME` elsewhere). `env` is what the launch sets, over this process's
@@ -93,13 +93,14 @@ pub fn replay(
     transcript: &Path,
     max_bytes: u64,
     max_tools: usize,
+    limits: ParserLimits,
     sink: &dyn Fn(Event) -> bool,
 ) -> Result<(), Error> {
     let file = File::open(transcript)
         .map_err(|_| Error::Refused("the session's transcript could not be read".into()))?;
     let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let writer: Writer = Arc::new(|_| Err(io::Error::other("a replayed session asks nothing")));
-    let mut parser = Parser::new(writer, max_tools);
+    let mut parser = Parser::with_limits(writer, max_tools, limits);
     let mut events = Vec::new();
     let read = lines::read_lines(file.take(max_bytes), max_bytes, |line| {
         if let Line::Json(value) = line {

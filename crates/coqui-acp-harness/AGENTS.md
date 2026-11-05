@@ -26,13 +26,33 @@ pub fn Spawned::new(stdin, stdout, stderr, process) -> Spawned
 #[non_exhaustive] pub struct Exit { pub code: Option<i32>, pub signal: Option<i32> }   // Display: "exited with code 3"
 pub fn exit_text(process: &dyn Process, wait: Duration) -> String   // how it ended, or "closed its output"
 pub struct PlainSpawn;
+pub type LineWriter = Arc<dyn Fn(&Value) -> io::Result<()> + Send + Sync>;
+pub fn line_writer(stdin: Box<dyn Write + Send>, max_queued: usize, name: &str) -> io::Result<LineWriter>   // a thread of its own; a line past the bound fails
+pub fn watch_exit(process: Arc<dyn Process>, poll: Duration, drain: Duration, done: Arc<AtomicBool>, end: impl FnOnce() + Send + 'static) -> io::Result<()>
+pub fn ending_once() -> Arc<AtomicBool>
 ```
 
-Each argument reaches the program as one argument, with no shell. `Launch`'s `Debug` names the environment's variables and never shows their values.
+Each argument reaches the program as one argument, with no shell. `Launch`'s `Debug` names the environment's variables and counts the arguments, never showing their values.
 
 `PlainSpawn` pipes all three streams. Its `kill` ends the whole tree: on Windows the process is put in a job object of its own just after it starts, and closing the job ends everything in it; on Unix it leads a process group, which is sent `SIGKILL`, and it is not collected before that, so the group id stays its own. A process started in the instant before it joins its job, or one that leaves the group, escapes. `kill` then collects the process; killing one that has ended is no error, and once it is collected nothing is sent to its id or group again; `try_wait` then answers how it ended. On Unix `try_wait` leaves a running process uncollected. Dropping the process kills it as `kill` does.
 
 Implement `Spawn` to run a harness elsewhere: in a container, over SSH, under a terminal.
+
+## Stream (`coqui_acp_harness::stream`)
+
+```rust
+pub type LineHook = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
+pub type EventHook = Arc<dyn Fn(Event) -> bool + Send + Sync>;
+pub type Answer = (String, Result<Value, String>);
+pub type Waiting = Arc<Mutex<BTreeMap<String, mpsc::Sender<Result<Value, String>>>>>;
+#[non_exhaustive] #[derive(Default)] pub struct Step { pub events: Vec<Event>, pub answers: Vec<Answer>, pub stop: Option<String> }
+pub const fn Step::new(events, answers) -> Step;  pub const fn Step::stopping(events, answers, why: String) -> Step
+#[non_exhaustive] pub struct Stream { pub name, pub process, pub max_line, pub exit_poll, pub exit_wait, pub tail, pub closed, pub sink, pub waiting, pub ended, pub on_line }
+pub fn Stream::new(name: &'static str, process, tail, closed, sink) -> Stream
+pub fn read(self, stdout: Box<dyn Read + Send>, thread_name: &str, line: impl FnMut(&Value) -> Step + Send + 'static, last: impl Fn() -> Vec<Event> + Send + Sync + 'static) -> io::Result<()>
+```
+
+`read` gives each JSON line to `on_line`, then `line`, on a thread of its own, until the output ends or the process has exited with its output still open. Then every waiting request fails, `last` says what is left, and `Event::Exited` follows once, unless the session was closed. A refusal nobody waits for is told as a notice. `Usage::elsewhere` marks another thread's spending: no update, no part of the turn's usage. `TurnEnd::Stopped { stop, result }` carries the harness's result text when it gives one; `PermissionRequest::details` the harness's own fields, for a host; no client sees either.
 
 ## Lines (`coqui_acp_harness::lines`)
 
@@ -71,7 +91,7 @@ pub fn read_diagnostics(reader: impl Read, max_line: u64, tail: &Mutex<Tail>)   
 | `Notice { severity: Severity, title }` | something for the person outside the conversation |
 | `Compaction { id, summary: Option<String> }` | the conversation was compacted |
 | `Denied(Vec<String>)` | tools the harness refused by its own rules this turn |
-| `TurnEnd(TurnEnd)` | `Stopped(Stop)`, `Failed(String)` or `Limited(Limit)` (`resets_at`, `window`, `text`) |
+| `TurnEnd(TurnEnd)` | `Stopped { stop, result }`, `Failed(String)` or `Limited(Limit)` (`resets_at`, `window`, `text`) |
 | `Output(String)` | a line that was not protocol |
 | `Exited(String)` | the harness ended, how, and what it wrote last |
 
@@ -146,7 +166,7 @@ What each event becomes:
 | `Compaction` | nothing | `compaction_summary_chunk`, `compaction_update` |
 | `Exited` | the running turn fails | the same |
 
-`Settings` (`#[non_exhaustive]`, `new()` and `Default`; set its fields): `max_line` (64 MiB; a longer client line ends the connection), `max_sessions` (8), `max_requests` (64 at once), `max_prompt_bytes` (16 MiB), `max_version` (2), `cancel_grace` (10 s), `permission_timeout` (`None`: as long as the person takes), `max_tools` (4096 tool calls tracked per session for version 1; past it the oldest is forgotten, and a later report of it is a new `tool_call`), `max_queued_events` (4096 events queued for a client that has not read them; past it the harness's `EventSink::send` waits, so a client that does not read holds the harness back; the same many are kept of what a session says before its answer, and past it they are dropped and the client told how many), `max_open_questions` (64 open at once per session, each holding a thread; past it one is answered cancelled without being asked), `client_mcp_servers` (true), `working_roots` (empty: any; also on `OpenRequest`, for a harness that finds a session by its id alone), `network_paths` (false), `on_notice: Option<NoticeHook>` (called with each notice and each harness exit, for a host that logs them).
+`Settings` (`#[non_exhaustive]`, `new()` and `Default`; set its fields): `max_line` (64 MiB; a longer client line ends the connection), `max_sessions` (8), `max_requests` (64 at once), `max_prompt_bytes` (16 MiB), `max_version` (2), `cancel_grace` (10 s), `permission_timeout` (`None`: as long as the person takes), `max_tools` (4096 tool calls tracked per session for version 1; past it the oldest is forgotten, and a later report of it is a new `tool_call`), `max_queued_events` (4096 events queued for a client that has not read them; past it the harness's `EventSink::send` waits, so a client that does not read holds the harness back; the same many are kept of what a session says before its answer, and past it they are dropped and the client told how many), `max_open_questions` (64 open at once per session, each holding a thread; past it one is answered cancelled without being asked), `client_mcp_servers` (true), `working_roots` (empty: any; links followed; also on `OpenRequest`, whose `path_admitted` holds what a harness reads from the request's other parts to the same rule, and for a harness that finds a session by its id alone), `network_paths` (false, as written or where links lead), `max_tool_content_bytes` (1 MiB) and `max_tool_content_items` (256) (version 1 sends a tool call's content whole each time; past them the rest is left out and the client told), `on_notice: Option<NoticeHook>` (called with each notice and each harness exit, for a host that logs them).
 
 ## Versions (`coqui_acp_harness::version`)
 
@@ -163,5 +183,7 @@ The warning for a version a driver was not tested with, or `None`. Nothing is re
 ## Gotchas
 
 - Version 1 never gets a version 2 kind, and version 2 never gets `tool_call`.
-- A `Responder` that is dropped unanswered leaves the harness waiting: `serve` always answers.
+- `serve` always answers a `Responder`; one dropped unanswered answers `Outcome::Cancelled`.
+- A question that comes when no turn is running, or past `max_open_questions`, is answered cancelled and never asked.
+- A cancel before the prompt reached the harness has the same grace: the turn is answered cancelled, and the prompt is interrupted if it arrives after all.
 - Events sent before `open` returns are told after `session/new`'s answer, since a client drops updates of a session it does not know yet.

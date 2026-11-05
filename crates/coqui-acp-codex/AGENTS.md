@@ -26,6 +26,8 @@ pub struct CodexLaunch {
     pub sandbox: Option<String>,               // read-only, workspace-write, danger-full-access
     pub thread_config: Map<String, Value>,     // merged into the thread's config, as given
     pub config_overrides: Vec<(String, Value)>,
+    pub extra_args: Vec<OsString>,             // the caller's own, after the overrides, unchecked
+    pub client_info: ClientInfo,               // how it names itself in initialize; this crate by default
     pub env: BTreeMap<OsString, OsString>,
     pub clear_env: bool,
 }
@@ -36,6 +38,8 @@ pub fn skill_roots(&self) -> Vec<String>       // the Agent Skills directory of 
 pub fn has_server(&self, name: &str) -> bool   // in mcp_servers or thread_config
 pub fn thread_params(&self) -> Value           // thread/start's, or thread/resume's with threadId and excludeTurns
 #[non_exhaustive] pub enum ThreadStart { New, Resume(String), Load(String) }
+#[non_exhaustive] pub struct ClientInfo { pub name: String, pub title: String, pub version: String }
+pub fn ClientInfo::new(name, version) -> ClientInfo
 pub fn valid_config_key(key: &str) -> bool;  pub fn toml_value(value: &Value) -> String
 pub fn valid_thread_id(id: &str) -> bool       // letters, digits and dashes, 1 to 128
 ```
@@ -49,15 +53,17 @@ pub fn CodexSession::start(launch: &CodexLaunch, spawn: &dyn Spawn, settings: Co
     sink: impl Fn(Event) -> bool + Send + Sync + 'static) -> Result<CodexSession, Error>
 pub fn thread(&self) -> &str
 pub fn version(&self) -> Option<&str>
-pub fn models(&self) -> &[Model]
+pub fn models(&self) -> Option<&[Model]>                        // None: not listed or could not be
 pub fn choice(&self) -> (Option<String>, Option<String>)        // model and effort the next turn names
 pub fn set_model(&self, model: Option<&str>);  pub fn set_effort(&self, effort: Option<&str>)
 pub fn prompt(&self, content: &[Content]) -> Result<(), Error>
 pub fn interrupt(&self) -> Result<(), Error>
+pub fn steer(&self, turn: &str, content: &[Content]) -> Result<(), Error>   // turn/steer, its answer not awaited
+pub fn request(&self, method: &str, params: Value, limit: Duration) -> Result<Value, Error>
 pub fn close(&self)                                              // also on drop
 #[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>,
     pub efforts: Vec<String>, pub default_effort: Option<String>, pub is_default: bool }
-pub fn models_of(result: &Value) -> Vec<Model>                  // hidden models left out
+pub fn models_of(result: &Value) -> Option<Vec<Model>>          // hidden models left out; None: no list at all
 pub fn version_of(answer: &Value) -> Option<String>             // from initialize's userAgent
 pub fn user_input(content: &[Content]) -> Result<Vec<Value>, Error>
 ```
@@ -66,7 +72,7 @@ pub fn user_input(content: &[Content]) -> Result<Vec<Value>, Error>
 
 `prompt` sends `turn/start` with the input (text; an image as a data URL; a link as `[@name](uri)`; a text resource in `<context ref="uri">…</context>`; an image resource as an image; any other resource is `Error::Refused`) and the chosen model and effort, and returns once Codex has answered. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` sends `turn/interrupt` with the running turn's id and does not wait; with no turn running it does nothing.
 
-`CodexSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB), `tail_lines` (8), `tail_line_bytes` (512), `initialize_timeout` (20 s), `request_timeout` (30 s), `exit_wait` (1 s), `max_tools` (4096 items kept), `max_model_pages` (10), `max_history_turns` (1000).
+`CodexSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB), `tail_lines` (8), `tail_line_bytes` (512), `initialize_timeout` (20 s), `request_timeout` (30 s), `exit_wait` (1 s), `max_tools` (4096 items kept), `max_model_pages` (10), `max_history_turns` (1000). Also: `parser` (`ParserLimits`: `max_title_bytes` 256, `max_told_bytes` 16 KiB, `max_streamed` 64), `list_models` (true; Codex's models failing to list stops nothing), `exit_poll` (100 ms), `close_wait` (2 s), `max_queued_writes` (1024), `title_bytes` (80), `version_wait` (10 s; 0 does not ask), `version_bytes` (4096), `on_line: Option<LineHook>`, `check_config: Option<AnswerCheck>` (asks `config/read` before the thread; a refusal fails the start), `check_thread: Option<AnswerCheck>` (the answer that opened the thread; the same). A resumed or loaded thread whose own directory lies outside `working_roots`, links followed, is refused.
 
 ## Parser (`coqui_acp_codex::parse`)
 
@@ -77,6 +83,8 @@ pub const ALLOW_ONCE: &str = "accept";  pub const ALLOW_SESSION: &str = "accept_
 pub const ALLOW_RULE: &str = "accept_with_rule";  pub const ALLOW_ALWAYS: &str = "accept_always";  pub const REJECT: &str = "decline";
 pub const ALLOW_NETWORK_RULE: &str = "allow_network_rule";  pub const REJECT_NETWORK_RULE: &str = "reject_network_rule";
 pub fn Parser::new(writer: Writer, max_tools: usize) -> Parser
+pub fn Parser::with_limits(writer: Writer, max_tools: usize, limits: ParserLimits) -> Parser
+pub fn set_thread(&mut self, thread: &str);  pub fn kept_output(&self) -> usize
 pub fn line(&mut self, message: &Value) -> Vec<Event>
 pub fn history(&mut self, turn: &Value) -> Vec<Event>
 pub fn turn(&self) -> Option<&str>;  pub fn started(&mut self, turn: &str);  pub fn interrupting(&mut self)
@@ -147,7 +155,10 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 ## Gotchas
 
 - `turn/interrupt` needs the turn's id, which `turn/start`'s answer and `turn/started` give.
-- `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 takes it where it lists only `cancel` and goes on with the turn.
+- `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 takes it where it lists only `cancel` and goes on with the turn (recording `turn`). A later version is untested.
+- A tool call is named as ACP's clients expect, `web_search` and `mcp__<server>__<tool>`; the server and tool are in the name.
+- An `error` with `willRetry` is no limit: Codex may yet succeed. The turn's end decides, with the window an earlier report said was used up.
+- Another thread's usage comes as `Usage` with `elsewhere`, as spent and no part of this conversation's context; nothing else of it does.
 - `--config` keys are not TOML: Codex splits the argument at its first `=` and the key at each `.`, and a quote is part of a name. A key holding `=` cannot be written and is refused. A JSON `null` value is the empty string, which is not unset.
 - A login file needs `tokens.refresh_token` to be read, or Codex answers every turn `401`. Empty, a second client cannot rotate the person's login, and the access token goes on working until it expires.
 - With `additionalDirectories` from a client, `workspace-write` writes where the client says, `/` included, with no approval. A host that does not trust its client gives `--working-root`; `--no-client-mcp-servers` keeps a client from starting programs.

@@ -587,8 +587,8 @@ pub struct Settings {
     pub max_open_questions: usize,
     /// Whether a client may give a session MCP servers; when not, a request with any is refused. Default true.
     pub client_mcp_servers: bool,
-    /// The directories a session's `cwd` and more directories must lie in, compared as written; empty takes any.
-    /// Default empty.
+    /// The directories a session's `cwd`, more directories and what a harness reads from the request must lie in, links
+    /// followed as far as the path exists; empty takes any. Default empty.
     pub working_roots: Vec<PathBuf>,
     /// Whether a path may be a network or device path (`\\host\share`, `//host/share`, `\\?\…`, `\\.\…`); on
     /// Windows a process started in one authenticates to the host. Default false.

@@ -429,7 +429,8 @@ impl CodexSession {
             let skip = turns.len().saturating_sub(self.settings.max_history_turns);
             let writer: Writer =
                 Arc::new(|_| Err(io::Error::other("a replayed turn asks nothing")));
-            let mut history = Parser::new(writer, self.settings.max_tools);
+            let mut history =
+                Parser::with_limits(writer, self.settings.max_tools, self.settings.parser);
             if skip > 0 {
                 (self.sink)(Event::Notice {
                     severity: Severity::Warning,

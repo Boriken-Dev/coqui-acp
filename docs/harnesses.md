@@ -20,7 +20,7 @@ bounds, events in no protocol's terms, and the ACP agent itself. A version not t
 | `mcpServers` (stdio, HTTP; SSE in version 1 for Claude) | `--mcp-config` | the thread's `mcp_servers` configuration |
 | `systemPrompt`, appended | `--append-system-prompt` | developer instructions |
 | `additionalDirectories` | `--add-dir` | the Agent Skills directory of each one, and writable roots |
-| skills | `_meta.claudeCode.options.plugins` as `--plugin-dir`, skills named `<plugin>:<skill>` | `additionalDirectories`, as above |
+| skills | `_meta.claudeCode.options.plugins` as `--plugin-dir`, skills named `<plugin>:<skill>`, once the host allows client plugins | `additionalDirectories`, as above |
 | model and effort | config options `model` and `effort`, changed between turns | the same |
 | `session/load`, version 2 `replayFrom` | the transcript Claude Code keeps, then `--resume` | the thread's turns |
 | `session/cancel` | an `interrupt` control request | `turn/interrupt` |
@@ -42,9 +42,16 @@ elicitation is refused; only Codex's approval of a tool call running on that ser
 
 ## What a host can narrow
 
-`--working-root`, `--no-client-mcp-servers` and `--allow-network-paths` on each binary, or `Settings` in a library. With none given
+`--working-root`, `--no-client-mcp-servers` and `--allow-network-paths` on each binary, or `Settings` in a library. A working root is compared with links followed. Plugins from a client are off for Claude Code until the host allows them with `--allow-client-plugins` or `client_plugins(true)`, and are held to the same roots. With none given
 a client's `cwd` and `additionalDirectories` may be anywhere local, and under Codex's `workspace-write` an additional directory is
 writable with no approval.
+
+## Recordings
+
+`tools/record_harnesses/record.py` makes each crate's fixtures from the real tool against a stand-in model on loopback, spending
+nothing and seeing no one's login. `tests/argv.rs` in each crate compares every recording's arguments with what its launch builds,
+so a change of flags fails until the recordings are made again. A new version of a tool: record into a new directory, run the tests,
+and read what changed.
 
 ## Versions 1 and 2
 

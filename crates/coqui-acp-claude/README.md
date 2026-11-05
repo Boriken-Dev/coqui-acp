@@ -104,6 +104,8 @@ coqui-acp-claude --setting-sources "" --strict-mcp-config
 | `--working-root` | any | A directory a session's `cwd` and more directories must lie in, repeated for more |
 | `--no-client-mcp-servers` | off | Refuse a session that a client gives MCP servers |
 | `--allow-network-paths` | off | Take a network path as a session's `cwd` or more directories |
+| `--no-permission-prompts` | off | Ask nothing on standard output: what nothing granted is refused where it is made |
+| `--allow-client-plugins` | off | Let a client load plugins, whose hooks and servers run unasked |
 
 Exit status: 0 when the client closes the connection, 1 when reading it failed, 2 for a wrong invocation.
 
@@ -135,7 +137,7 @@ cargo test -p coqui-acp-claude
 
 The tests run against `examples/replay_claude.rs`, which replays transcripts recorded from Claude Code 2.1.318 on Windows in
 `tests/fixtures/2.1.318/`: each `<name>.stdout` is Claude Code's standard output byte for byte, `<name>.steps.json` what was
-written to it and when, and `<name>.argv.json` its arguments. They were recorded against a loopback stand-in for the model, so no
+written to it and when, and `<name>.argv.json` its arguments, which `tests/argv.rs` compares with what the launch builds. `tools/record_harnesses/record.py` makes them. They were recorded against a loopback stand-in for the model, so no
 model was reached: the turns' text and tool calls are scripted, and what Claude Code does with them is its own.
 `turn.transcript.jsonl` holds the message lines of the session transcript Claude Code wrote for `turn`, each unchanged.
 

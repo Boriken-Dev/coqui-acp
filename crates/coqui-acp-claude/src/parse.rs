@@ -162,7 +162,7 @@ impl Parser {
     /// say it.
     pub fn end_of_output(&mut self) -> Option<TurnEnd> {
         let limit = self.rejected.take()?;
-        core::mem::take(&mut self.running).then(|| TurnEnd::Limited(limit))
+        core::mem::take(&mut self.running).then_some(TurnEnd::Limited(limit))
     }
 
     /// The answers to our own control requests read since the last call, by request id.

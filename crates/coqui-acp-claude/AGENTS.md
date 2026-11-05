@@ -15,7 +15,7 @@ No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state.
 pub struct ClaudeLaunch {
     pub executable: OsString,              // "claude"
     pub cwd: PathBuf,
-    pub session: SessionStart,             // New(uuid) | Resume(id)
+    pub session: SessionStart,             // New(uuid) | Chosen | Resume(id)
     pub model: Option<String>,
     pub effort: Option<String>,            // low, medium, high, xhigh, max
     pub append_system_prompt: Option<String>,
@@ -24,6 +24,7 @@ pub struct ClaudeLaunch {
     pub strict_mcp_config: bool,           // false
     pub add_dirs: Vec<PathBuf>,
     pub plugin_dirs: Vec<PathBuf>,
+    pub permission_prompts: bool,          // true: --permission-prompts=host --permission-prompt-tool=stdio
     pub permission_mode: Option<String>,
     pub setting_sources: Option<Vec<String>>,   // None: Claude Code's default; Some(empty): none
     pub max_budget_micro_usd: Option<u64>,
@@ -33,9 +34,9 @@ pub struct ClaudeLaunch {
     pub extra_args: Vec<OsString>,         // the caller's own, after the rest, unchecked
 }
 pub fn ClaudeLaunch::new(cwd: impl Into<PathBuf>) -> ClaudeLaunch    // a new session, its id a new UUID
-pub fn session_id(&self) -> &str
+pub fn session_id(&self) -> Option<&str>               // None when Claude Code is to choose it
 pub fn launch(&self) -> Launch
-#[non_exhaustive] pub enum SessionStart { New(String), Resume(String) }
+#[non_exhaustive] pub enum SessionStart { New(String), Chosen, Resume(String) }
 pub fn mcp_config(servers: &[McpServer]) -> Value        // {"mcpServers": {name: {type, command, args, env} | {type, url, headers}}}
 pub fn valid_session_id(id: &str) -> bool                // letters, digits and dashes, 1 to 128
 ```
@@ -47,16 +48,16 @@ pub fn valid_session_id(id: &str) -> bool                // letters, digits and 
 ```rust
 pub fn ClaudeSession::start(launch: &ClaudeLaunch, spawn: &dyn Spawn, settings: ClaudeSettings,
     sink: impl Fn(Event) -> bool + Send + Sync + 'static) -> Result<ClaudeSession, Error>
-pub fn id(&self) -> &str
+pub fn id(&self) -> Option<String>                       // the one asked for, or the one it chose once said
 pub fn version(&self) -> Option<String>
-pub fn models(&self) -> Vec<Model>
+pub fn models(&self) -> Option<Vec<Model>>               // None: it listed none at all, not an empty list
 pub fn prompt(&self, content: &[Content]) -> Result<(), Error>
 pub fn interrupt(&self) -> Result<(), Error>
 pub fn set_model(&self, model: &str) -> Result<(), Error>
 pub fn set_effort(&self, effort: Option<&str>) -> Result<(), Error>      // None: Claude Code's own
 pub fn close(&self)                                                      // also on drop
 #[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>, pub efforts: Vec<String> }
-pub fn models_of(answer: &Value) -> Vec<Model>
+pub fn models_of(answer: &Value) -> Option<Vec<Model>>
 pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error>
 ```
 
@@ -64,7 +65,7 @@ pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error>
 
 `prompt` writes one `user` message: text; an image as a base64 source; a resource link as `[@name](uri)`; a text resource as `<context ref="uri">…</context>`, the address's `&"<>` escaped and every `</context` of the text written `&lt;/context`, so it cannot close the block; an image resource as an image. Any other resource is `Error::Refused`. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` writes an `interrupt` control request and does not wait; the turn's error result then ends it as `Stop::Cancelled`. `set_model` sends `set_model`, `set_effort` sends `apply_flag_settings` with `effortLevel`, each waiting up to `control_timeout`. Each line is one write.
 
-`ClaudeSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB; a longer output line ends the session), `tail_lines` (8) and `tail_line_bytes` (512) quoted by an exit, `initialize_timeout` (30 s), `control_timeout` (30 s), `exit_wait` (1 s for the exit status), `max_tools` (4096 tool calls kept for their results), `max_transcript_bytes` (64 MiB replayed).
+`ClaudeSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB; a longer output line ends the session), `tail_lines` (8) and `tail_line_bytes` (512) quoted by an exit, `initialize_timeout` (30 s), `control_timeout` (30 s), `exit_wait` (1 s for the exit status), `max_tools` (4096 tool calls kept for their results), `max_transcript_bytes` (64 MiB replayed). Also: `parser` (`ParserLimits`: `max_title_bytes` 256, `max_streamed` 64, `max_tasks` 1024), `exit_poll` (100 ms; an exit is noticed even with the output held open), `close_wait` (2 s), `max_queued_writes` (1024; past it a write fails rather than waits), `title_bytes` (80), `version_wait` (10 s; 0 does not ask), `version_bytes` (4096), `on_line: Option<LineHook>` (each line before anything reads it; `false` ends Claude Code).
 
 `models_of` reads `models[]` of an `initialize` answer: `value` as the id, `displayName`, `description` with `resolvedModel` when it differs, and `supportedEffortLevels` when `supportsEffort`. The answer's `account` is never read.
 
@@ -118,8 +119,8 @@ pub fn ClaudeAgent::new() -> ClaudeAgent                     // also Default; cl
 pub fn defaults(self, defaults: ClaudeLaunch) -> Self
 pub fn spawn(self, spawn: Arc<dyn Spawn>) -> Self
 pub fn settings(self, settings: ClaudeSettings) -> Self
-pub const fn client_plugins(self, allowed: bool) -> Self   // default true
-pub fn cli_version(&self) -> Option<String>                 // claude --version, once, 10 s
+pub const fn client_plugins(self, allowed: bool) -> Self   // default false; each path held to the working roots and network rule
+pub fn cli_version(&self) -> Option<String>                 // claude --version, once, within ClaudeSettings::version_wait
 impl Harness for ClaudeAgent
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub const DEFAULT: &str = "default";
@@ -135,7 +136,7 @@ Config options: `model` (category `model`): the models Claude Code lists, and th
 
 ## Command line
 
-`coqui-acp-claude` serves `ClaudeAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CLAUDE_EXECUTABLE`, default `claude`), `--model`, `--effort`, `--permission-mode`, `--setting-sources` (comma-separated, empty for none), `--strict-mcp-config`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--no-client-mcp-servers`, `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
+`coqui-acp-claude` serves `ClaudeAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CLAUDE_EXECUTABLE`, default `claude`), `--model`, `--effort`, `--permission-mode`, `--setting-sources` (comma-separated, empty for none), `--strict-mcp-config`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--no-permission-prompts`, `--allow-client-plugins`, `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--no-client-mcp-servers`, `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
 
 ## Environment variables
 
@@ -143,12 +144,18 @@ Config options: `model` (category `model`): the models Claude Code lists, and th
 
 ## Gotchas
 
-- `--permission-prompts host` alone does not route prompts to standard output on Claude Code 2.1.318: the call is refused as not granted. `--permission-prompt-tool=stdio` does, and the launch passes both.
+- `--permission-prompts host` alone does not route prompts to standard output on Claude Code 2.1.318: the call is refused as not granted. `--permission-prompt-tool=stdio` does, and the launch passes both unless `permission_prompts` is off.
+- `dontAsk` decides before those flags: a call nothing granted is refused where it is made, no question comes, and one allowed runs (recording `dont_ask`). With no prompt flags and no mode, the same refusal (recording `no_prompts`).
+- A `rate_limit_event` is the only place a limit's reset is a number; the `result` after it says a local clock time. A rejected one becomes the limit of a turn that then fails or whose output ends; one whose turn is answered anyway is no failure (recording `rate_limit`). Claude Code writes these only with a subscription's login.
+- No recording holds a `type: error` line: nothing a stand-in did drew one from 2.1.318. It is handled as a failed turn from what its shape is said to be.
+- Closing standard input does not end Claude Code while a background `Bash` runs: it exits when that does. Killing Claude Code alone left the background process running and ended its output at once (on Windows); `close` ends the tree.
+- A prompt's blocks keep the order the client gave them: a host that wants images first, as the model's guidance has it, puts them first.
+- `partial_messages` is on since ACP streams; a host that wants whole messages turns it off.
 - `--resume` finds a session only from the directory that recorded it.
 - With stream-json input Claude Code writes nothing, not even `init`, until it reads a line; `initialize` is answered at once.
 - Claude Code 2.1.318 in print mode offers neither `TodoWrite` nor the Task tools (`No such tool available`, `CLAUDE_CODE_ENABLE_TASKS` either way); a plan the model writes with them is still told.
 - A permission answered `reject` lets the turn go on; only `Outcome::Cancelled` interrupts it.
 - Everything Claude Code writes is the model's or the harness's: untrusted.
-- A plugin's hooks and MCP servers run with no permission asked, whatever `--strict-mcp-config` and `--setting-sources` say: `client_plugins(false)` is how a host keeps them out.
+- A plugin's hooks and MCP servers run with no permission asked, whatever `--strict-mcp-config` and `--setting-sources` say: they are off until a host says `client_plugins(true)`, or the binary is given `--allow-client-plugins`.
 - A diagnostic line on standard error longer than `max_line` is noted and the rest of standard error read and dropped, so Claude Code never writes to a closed pipe.
 - An appended system prompt goes on the command line: past the platform's limit (128 KiB for one argument on Linux, 32 767 characters for a command line on Windows) Claude Code does not start.

@@ -255,6 +255,7 @@ impl Harness for ClaudeAgent {
                 &transcript,
                 self.settings.max_transcript_bytes,
                 self.settings.max_tools,
+                self.settings.parser,
                 &move |event| replaying.send(event),
             )
             .map_err(HarnessError::from)?;
