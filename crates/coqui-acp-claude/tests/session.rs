@@ -346,3 +346,38 @@ fn an_overlong_diagnostic_line_does_not_end_the_session() {
         "{seen:?}"
     );
 }
+
+/// The real Claude Code lists its models with no login and no turn: `initialize` is answered before any message.
+#[test]
+#[ignore = "needs Claude Code installed; set COQUI_ACP_TEST_LIVE_HARNESSES=1 and run with --ignored"]
+fn live_claude_code_lists_models_with_no_login_and_no_turn() {
+    assert!(
+        std::env::var_os("COQUI_ACP_TEST_LIVE_HARNESSES").is_some(),
+        "set COQUI_ACP_TEST_LIVE_HARNESSES=1"
+    );
+    let scratch = Scratch::new("live");
+    let mut launch = coqui_acp_claude::ClaudeLaunch::new(&scratch.0);
+    launch.clear_env = true;
+    for name in ["PATH", "SYSTEMROOT", "PATHEXT", "TEMP", "TMP"] {
+        if let Some(value) = std::env::var_os(name) {
+            launch.env.insert(name.into(), value);
+        }
+    }
+    for name in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+        launch.env.insert(name.into(), scratch.0.clone().into());
+    }
+    launch
+        .env
+        .insert("CLAUDE_CONFIG_DIR".into(), scratch.0.join("config").into());
+    launch
+        .env
+        .insert("ANTHROPIC_API_KEY".into(), "dummy-not-a-key".into());
+    launch
+        .env
+        .insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:9".into());
+    let (session, _events) = start(&launch);
+    let session = session.unwrap();
+    assert!(!session.models().is_empty());
+    assert!(session.version().is_some());
+    session.close();
+}

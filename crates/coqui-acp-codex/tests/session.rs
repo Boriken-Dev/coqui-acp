@@ -274,3 +274,36 @@ fn a_load_replays_the_threads_turns_before_it_returns() {
     );
     session.close();
 }
+
+/// The real Codex lists its models with no login and no turn, and opens a thread on them.
+#[test]
+#[ignore = "needs Codex installed; set COQUI_ACP_TEST_LIVE_HARNESSES=1 and run with --ignored"]
+fn live_codex_lists_models_with_no_login_and_no_turn() {
+    assert!(
+        std::env::var_os("COQUI_ACP_TEST_LIVE_HARNESSES").is_some(),
+        "set COQUI_ACP_TEST_LIVE_HARNESSES=1"
+    );
+    let scratch = Scratch::new("live");
+    let home = scratch.0.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut launch = CodexLaunch::new(&scratch.0);
+    launch.clear_env = true;
+    for name in ["PATH", "SYSTEMROOT", "PATHEXT", "TEMP", "TMP"] {
+        if let Some(value) = std::env::var_os(name) {
+            launch.env.insert(name.into(), value);
+        }
+    }
+    for name in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+        launch.env.insert(name.into(), scratch.0.clone().into());
+    }
+    launch.env.insert("CODEX_HOME".into(), home.into());
+    launch
+        .env
+        .insert("HTTPS_PROXY".into(), "http://127.0.0.1:9".into());
+    let session =
+        CodexSession::start(&launch, &PlainSpawn, CodexSettings::new(), |_| true).unwrap();
+    assert!(!session.models().is_empty());
+    assert!(session.version().is_some());
+    assert!(!session.thread().is_empty());
+    session.close();
+}

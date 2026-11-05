@@ -732,7 +732,14 @@ impl Parser {
                     .rev()
                     .find(|known| self.items.get(*known).map(String::as_str) == Some("mcpToolCall"))
                     .cloned();
-                let mut tool = ToolCall::new(call.unwrap_or(item));
+                let mut tool = match call {
+                    Some(call) => ToolCall::new(call),
+                    None => {
+                        let mut tool = ToolCall::new(item);
+                        tool.title = Some(format!("A tool of {}", title(server)));
+                        tool
+                    }
+                };
                 tool.kind = Some(ToolKind::Other);
                 tool.input = params.pointer("/_meta/tool_params").cloned();
                 let mut options = vec![PermissionOption::new(
