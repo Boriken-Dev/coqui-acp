@@ -14,7 +14,9 @@ use serde_json::{Map, Value, json};
 use super::connection::{INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Shared};
 use super::shape::{self, Shapes};
 use super::{Conversation, HarnessError};
-use crate::event::{Content, Event, Outcome, PermissionRequest, Stop, ToolCall, TurnEnd, Usage};
+use crate::event::{
+    Content, Event, Outcome, PermissionRequest, Severity, Stop, ToolCall, TurnEnd, Usage,
+};
 
 /// What goes through a session's channel: the harness's events, an answer that has to follow them, and the word that
 /// the session's own answer has gone, before which nothing of it is told.
@@ -47,6 +49,8 @@ struct State {
     closed: bool,
     /// Permission requests put to the client and not yet answered, by the id of our request.
     asking: Vec<u64>,
+    /// Questions with a thread of their own.
+    questions: usize,
 }
 
 pub(crate) struct Session {
@@ -72,6 +76,7 @@ impl Session {
                 gone: None,
                 closed: false,
                 asking: Vec::new(),
+                questions: 0,
             }),
         }
     }
@@ -122,6 +127,7 @@ impl Session {
         released: bool,
     ) {
         let mut held: Option<Vec<Event>> = if released { None } else { Some(Vec::new()) };
+        let mut dropped = 0_usize;
         for item in items {
             match item {
                 Item::Reply { id, result } => shared.respond(&id, result),
@@ -129,8 +135,26 @@ impl Session {
                     for event in held.take().unwrap_or_default() {
                         self.event(shared, event);
                     }
+                    if dropped > 0 {
+                        self.event(
+                            shared,
+                            Event::Notice {
+                                severity: Severity::Warning,
+                                title: format!(
+                                    "{dropped} updates from before this session opened were dropped"
+                                ),
+                            },
+                        );
+                    }
                 }
                 Item::Event(event) => match held.as_mut() {
+                    // A question among them is answered cancelled when it is dropped; how the harness ended is kept.
+                    Some(held)
+                        if held.len() >= shared.settings.max_queued_events
+                            && !matches!(*event, Event::Exited(_)) =>
+                    {
+                        dropped += 1;
+                    }
                     Some(held) => held.push(*event),
                     None => self.event(shared, *event),
                 },
@@ -145,12 +169,25 @@ impl Session {
         }
         match event {
             Event::Permission(request) => {
+                {
+                    let mut state = self.state();
+                    if state.questions >= shared.settings.max_open_questions {
+                        drop(state);
+                        shared.note("a permission request past the limit was answered cancelled");
+                        return;
+                    }
+                    state.questions += 1;
+                }
                 let session = Arc::clone(self);
                 let asking = Arc::clone(shared);
                 let spawned = thread::Builder::new()
                     .name("coqui-acp-harness-permission".into())
-                    .spawn(move || session.ask(&asking, request));
+                    .spawn(move || {
+                        session.ask(&asking, request);
+                        session.state().questions -= 1;
+                    });
                 if let Err(error) = spawned {
+                    self.state().questions -= 1;
                     shared.note(&format!("a permission request could not be asked: {error}"));
                 }
             }
@@ -300,9 +337,16 @@ impl Session {
         conversation: &Arc<dyn Conversation>,
         number: u64,
     ) {
-        if let Err(error) = conversation.interrupt() {
-            shared.note(&format!("the turn could not be interrupted: {error}"));
-        }
+        // A harness that has stopped reading must not hold up the thread that reads the client.
+        let interrupting = Arc::clone(conversation);
+        let noting = Arc::clone(shared);
+        let _ = thread::Builder::new()
+            .name("coqui-acp-harness-interrupt".into())
+            .spawn(move || {
+                if let Err(error) = interrupting.interrupt() {
+                    noting.note(&format!("the turn could not be interrupted: {error}"));
+                }
+            });
         let session = Arc::clone(self);
         let shared = Arc::clone(shared);
         let grace = shared.settings.cancel_grace;
@@ -491,7 +535,7 @@ impl Session {
             }
             params
         } else {
-            json!({"sessionId": self.id(), "toolCall": call, "options": options})
+            json!({"sessionId": self.id(), "toolCall": version_1_question(call, &request), "options": options})
         };
         let (number, answered) = shared.begin_request("session/request_permission", params);
         {
@@ -546,6 +590,32 @@ impl Session {
             }
         }
     }
+}
+
+/// Version 1's request has only a tool call to say what is asked: the question is its title when it has none, and the
+/// question and its description come first in its content.
+fn version_1_question(mut call: Value, request: &PermissionRequest) -> Value {
+    let own = call
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut said = Vec::new();
+    if own.as_deref() != Some(request.title.as_str()) && own.is_some() {
+        said.push(request.title.clone());
+    }
+    said.extend(request.description.clone());
+    if own.is_none() {
+        call["title"] = json!(request.title);
+    }
+    if !said.is_empty() {
+        let mut content = alloc::vec![json!({"type": "content",
+            "content": {"type": "text", "text": said.join("\n\n")}})];
+        if let Some(Value::Array(rest)) = call.get("content") {
+            content.extend(rest.iter().cloned());
+        }
+        call["content"] = Value::Array(content);
+    }
+    call
 }
 
 /// The tool call a permission request is about, as the version's tool call fields.

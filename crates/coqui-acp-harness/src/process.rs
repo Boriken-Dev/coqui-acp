@@ -154,11 +154,13 @@ pub trait Process: Send + Sync {
 /// or `closed its output` when it does not.
 #[must_use]
 pub fn exit_text(process: &dyn Process, wait: Duration) -> String {
-    let until = Instant::now() + wait;
+    let until = Instant::now().checked_add(wait);
     loop {
         match process.try_wait() {
             Ok(Some(exit)) => return exit.to_string(),
-            Ok(None) if Instant::now() < until => thread::sleep(Duration::from_millis(20)),
+            Ok(None) if until.is_none_or(|until| Instant::now() < until) => {
+                thread::sleep(Duration::from_millis(20));
+            }
             _ => return "closed its output".into(),
         }
     }

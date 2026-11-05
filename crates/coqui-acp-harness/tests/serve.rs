@@ -31,6 +31,10 @@ enum Mode {
     Floods,
     /// A turn never ends.
     Hangs,
+    /// A turn asks one permission with a description and no tool title.
+    AsksInDetail,
+    /// A turn asks five permissions at once and ends once each is answered.
+    AsksFive,
 }
 
 #[derive(Clone)]
@@ -41,6 +45,10 @@ struct Fake {
     dropped: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<String>>>,
     sent: Arc<AtomicUsize>,
+    /// An interrupt does not return for this long.
+    stuck_interrupt: Duration,
+    /// Chunks the opening sends before the session's answer.
+    open_chunks: usize,
 }
 
 impl Fake {
@@ -52,6 +60,8 @@ impl Fake {
             dropped: Arc::new(AtomicBool::new(false)),
             log: Arc::new(Mutex::new(Vec::new())),
             sent: Arc::new(AtomicUsize::new(0)),
+            stuck_interrupt: Duration::ZERO,
+            open_chunks: 0,
         }
     }
 }
@@ -84,6 +94,12 @@ impl Harness for Fake {
         events: EventSink,
     ) -> Result<Box<dyn Conversation>, HarnessError> {
         std::thread::sleep(self.open_delay);
+        for _ in 0..self.open_chunks {
+            events.send(Event::MessageChunk {
+                message: "early".into(),
+                text: "x".into(),
+            });
+        }
         let number = self.opened.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(FakeConversation {
             fake: self.clone(),
@@ -154,6 +170,47 @@ impl Conversation for FakeConversation {
                 }
             }
             Mode::Hangs => {}
+            Mode::AsksInDetail => {
+                let (answered, outcome) = mpsc::channel();
+                let responder = Responder::new(move |chosen| {
+                    let _ = answered.send(chosen);
+                    Ok(())
+                });
+                sink.send(Event::Permission(PermissionRequest::new(
+                    ToolCall::new("t1"),
+                    "Write under /x",
+                    Some("Because of y".into()),
+                    vec![PermissionOption::new("yes", "Allow", OptionKind::AllowOnce)],
+                    responder,
+                )));
+                let _ = outcome.recv();
+                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+            }
+            Mode::AsksFive => {
+                let (answered, outcomes) = mpsc::channel();
+                for number in 0..5 {
+                    let answered = answered.clone();
+                    let responder = Responder::new(move |chosen| {
+                        let _ = answered.send(chosen);
+                        Ok(())
+                    });
+                    sink.send(Event::Permission(PermissionRequest::new(
+                        ToolCall::new(format!("t{number}")),
+                        "Edit",
+                        None,
+                        vec![PermissionOption::new("yes", "Allow", OptionKind::AllowOnce)],
+                        responder,
+                    )));
+                }
+                for _ in 0..5 {
+                    let chosen = outcomes.recv();
+                    fake.log
+                        .lock()
+                        .unwrap()
+                        .push(format!("answered {chosen:?}"));
+                }
+                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+            }
         });
         Ok(())
     }
@@ -161,6 +218,7 @@ impl Conversation for FakeConversation {
     fn interrupt(&self) -> Result<(), HarnessError> {
         self.fake.log.lock().unwrap().push("interrupt".into());
         self.interrupted.store(true, Ordering::SeqCst);
+        std::thread::sleep(self.fake.stuck_interrupt);
         Ok(())
     }
 
@@ -489,4 +547,136 @@ fn a_responder_dropped_unanswered_answers_cancelled() {
     });
     drop(responder);
     assert_eq!(outcome.try_recv(), Ok(Outcome::Cancelled));
+}
+
+#[test]
+fn a_version_1_question_keeps_its_title_and_description() {
+    let mut client = Client::serve(Fake::new(Mode::AsksInDetail), Settings::new());
+    let session = client.open(1);
+    client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    let asked = client.until(|message| message["method"] == "session/request_permission");
+    let said = asked["params"]["toolCall"].to_string();
+    assert!(said.contains("Write under /x"), "{said}");
+    assert!(said.contains("Because of y"), "{said}");
+    assert_eq!(asked["params"]["toolCall"]["title"], "Write under /x");
+}
+
+#[test]
+fn an_interrupt_that_does_not_return_holds_up_nothing_else() {
+    let mut fake = Fake::new(Mode::Hangs);
+    fake.stuck_interrupt = Duration::from_secs(30);
+    let mut client = Client::serve(fake, Settings::new());
+    let session = client.open(2);
+    let prompt = client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    client.answer(prompt);
+    client.notify("session/cancel", json!({"sessionId": session}));
+    let started = Instant::now();
+    let close = client.request("session/close", json!({"sessionId": session}));
+    client.answer(close);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the connection waited {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn questions_past_the_limit_are_answered_cancelled_without_being_asked() {
+    let fake = Fake::new(Mode::AsksFive);
+    let log = Arc::clone(&fake.log);
+    let mut settings = Settings::new();
+    settings.max_open_questions = 2;
+    let mut client = Client::serve(fake, settings);
+    let session = client.open(2);
+    client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry.contains("Cancelled"))
+        .count()
+        < 3
+    {
+        assert!(Instant::now() < until, "{:?}", log.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    while let Ok(message) = client.from_agent.try_recv() {
+        client.seen.push(message);
+    }
+    let asked = client
+        .seen
+        .iter()
+        .filter(|message| message["method"] == "session/request_permission")
+        .count();
+    assert_eq!(asked, 2);
+}
+
+#[test]
+fn what_comes_before_a_sessions_answer_is_bounded_and_says_so() {
+    let mut fake = Fake::new(Mode::Slow);
+    fake.open_chunks = 100;
+    let mut settings = Settings::new();
+    settings.max_queued_events = 8;
+    let mut client = Client::serve(fake, settings);
+    let session = client.open(2);
+    let prompt = client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    client.answer(prompt);
+    client.until(idle);
+    let chunks = client
+        .seen
+        .iter()
+        .filter(|message| message["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .count();
+    assert_eq!(chunks, 8);
+    assert!(
+        client
+            .seen
+            .iter()
+            .any(|message| message["params"]["update"]["sessionUpdate"] == "notice"),
+        "{:?}",
+        client.seen
+    );
+}
+
+#[test]
+fn a_servers_debug_shows_no_credential_of_its_address_or_arguments() {
+    let http = coqui_acp_harness::McpServer::new(
+        "docs",
+        coqui_acp_harness::McpTransport::Http {
+            url: "https://user:hunter2@docs.example/mcp?key=hunter2".into(),
+            headers: vec![],
+        },
+    );
+    let stdio = coqui_acp_harness::McpServer::new(
+        "files",
+        coqui_acp_harness::McpTransport::Stdio {
+            command: "/bin/files".into(),
+            args: vec!["--token=hunter2".into()],
+            env: vec![],
+        },
+    );
+    for shown in [
+        format!("{http:?}"),
+        format!("{:?}", http.transport),
+        format!("{stdio:?}"),
+        format!("{:?}", stdio.transport),
+    ] {
+        assert!(!shown.contains("hunter2"), "{shown}");
+    }
+    assert!(format!("{http:?}").contains("docs.example"));
+    assert!(format!("{stdio:?}").contains("/bin/files"));
 }

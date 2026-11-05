@@ -107,3 +107,20 @@ fn a_process_dropped_without_a_kill_ends_with_everything_it_started() {
         .expect("the process outlived its handle");
     assert!(!output.contains("done"), "{output}");
 }
+
+#[test]
+fn any_wait_for_an_exit_is_taken() {
+    struct Silent;
+    impl coqui_acp_harness::Process for Silent {
+        fn kill(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn try_wait(&self) -> std::io::Result<Option<coqui_acp_harness::Exit>> {
+            Err(std::io::Error::other("no status"))
+        }
+    }
+    assert_eq!(
+        coqui_acp_harness::exit_text(&Silent, std::time::Duration::MAX),
+        "closed its output"
+    );
+}

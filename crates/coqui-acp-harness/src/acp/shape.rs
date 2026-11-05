@@ -355,7 +355,7 @@ pub(crate) fn turn_usage(usage: &Usage) -> Value {
         "outputTokens": usage.output,
         "cachedReadTokens": usage.cache_read,
         "cachedWriteTokens": usage.cache_write,
-        "totalTokens": usage.input + usage.output + usage.cache_read + usage.cache_write,
+        "totalTokens": usage.input.saturating_add(usage.output).saturating_add(usage.cache_read).saturating_add(usage.cache_write),
     })
 }
 
@@ -414,6 +414,16 @@ pub(crate) fn config_options(options: &[ConfigOption], version: u8) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn counts_past_any_size_add_up_to_the_largest() {
+        let usage = crate::event::Usage {
+            input: u64::MAX,
+            output: 1,
+            ..Default::default()
+        };
+        assert_eq!(super::turn_usage(&usage)["totalTokens"], u64::MAX);
+    }
+
     use super::*;
     use crate::event::{Location, ToolKind};
 

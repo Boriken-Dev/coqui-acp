@@ -139,6 +139,15 @@ pub fn read_diagnostics(mut reader: impl Read, max_line: u64, tail: &Mutex<Tail>
     let _ = io::copy(&mut reader, &mut io::sink());
 }
 
+/// `text` for one line of a log or a label: each control character is a space, so it cannot forge another line or move
+/// the cursor.
+#[must_use]
+pub fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// `text` cut to at most `max` bytes on a character boundary.
 #[must_use]
 pub fn cut(text: &str, max: usize) -> &str {
@@ -197,6 +206,11 @@ mod tests {
             kept.starts_with("first\n") && kept.contains("past the limit"),
             "{kept}"
         );
+    }
+
+    #[test]
+    fn a_line_for_a_log_cannot_forge_another_or_move_the_cursor() {
+        assert_eq!(one_line("a\nb\r\x1b[2Jc"), "a b  [2Jc");
     }
 
     #[test]

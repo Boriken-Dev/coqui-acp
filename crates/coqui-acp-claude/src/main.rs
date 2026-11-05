@@ -7,6 +7,7 @@
 )]
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -49,10 +50,31 @@ struct Cli {
     /// Sessions at once.
     #[arg(long, default_value_t = 8)]
     max_sessions: usize,
+    /// A directory every session's `cwd` and more directories must lie in, repeated for more; none takes any.
+    #[arg(long = "working-root", value_name = "DIRECTORY")]
+    working_roots: Vec<PathBuf>,
+    /// Refuse a session that a client gives MCP servers.
+    #[arg(long)]
+    no_client_mcp_servers: bool,
+    /// Take a network path (`\\\\host\\share`) as a session's `cwd` or more directories.
+    #[arg(long)]
+    allow_network_paths: bool,
+}
+
+fn settings_of(cli: &Cli) -> Settings {
+    let mut settings = Settings::new();
+    settings.max_version = cli.max_acp_version;
+    settings.max_sessions = cli.max_sessions;
+    settings.working_roots.clone_from(&cli.working_roots);
+    settings.client_mcp_servers = !cli.no_client_mcp_servers;
+    settings.network_paths = cli.allow_network_paths;
+    settings.on_notice = Some(Arc::new(|text: &str| eprintln!("coqui-acp-claude: {text}")));
+    settings
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let settings = settings_of(&cli);
     let mut defaults = ClaudeLaunch::new(".");
     defaults.executable = cli.executable;
     defaults.model = cli.model;
@@ -67,10 +89,6 @@ fn main() -> ExitCode {
     });
     defaults.strict_mcp_config = cli.strict_mcp_config;
     let agent = ClaudeAgent::new().defaults(defaults);
-    let mut settings = Settings::new();
-    settings.max_version = cli.max_acp_version;
-    settings.max_sessions = cli.max_sessions;
-    settings.on_notice = Some(Arc::new(|text: &str| eprintln!("coqui-acp-claude: {text}")));
     match serve(
         Arc::new(agent),
         settings,
@@ -87,12 +105,27 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{Cli, settings_of};
 
     #[test]
     fn the_command_line_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn what_a_host_narrows_on_the_command_line_reaches_the_settings() {
+        let settings = settings_of(&Cli::parse_from([
+            "coqui-acp-claude",
+            "--working-root",
+            "/w",
+            "--working-root",
+            "/x",
+            "--no-client-mcp-servers",
+        ]));
+        assert_eq!(settings.working_roots.len(), 2);
+        assert!(!settings.client_mcp_servers);
+        assert!(!settings.network_paths);
     }
 }

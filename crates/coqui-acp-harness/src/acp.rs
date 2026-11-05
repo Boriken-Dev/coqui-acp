@@ -180,8 +180,25 @@ pub enum McpTransport {
     },
 }
 
+/// `url` without what may be a credential: the user and password before its host, its query and its fragment.
+fn address(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or_default()
+}
+
+/// [`address`], also without the user and password.
+fn shown_address(url: &str) -> String {
+    let url = address(url);
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    alloc::format!("{scheme}://{host}{path}")
+}
+
 impl fmt::Debug for McpTransport {
-    /// Names the environment and headers, never their values, which may be credentials.
+    /// Names the environment and headers and counts the arguments, never showing their values, which may be credentials,
+    /// and shows an address without its user, query or fragment.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names = |pairs: &[(String, String)]| {
             pairs
@@ -193,17 +210,17 @@ impl fmt::Debug for McpTransport {
             Self::Stdio { command, args, env } => f
                 .debug_struct("Stdio")
                 .field("command", command)
-                .field("args", args)
+                .field("args", &args.len())
                 .field("env", &names(env))
                 .finish(),
             Self::Http { url, headers } => f
                 .debug_struct("Http")
-                .field("url", url)
+                .field("url", &shown_address(url))
                 .field("headers", &names(headers))
                 .finish(),
             Self::Sse { url, headers } => f
                 .debug_struct("Sse")
-                .field("url", url)
+                .field("url", &shown_address(url))
                 .field("headers", &names(headers))
                 .finish(),
         }
@@ -232,17 +249,17 @@ impl McpServer {
 }
 
 impl fmt::Debug for McpServer {
-    /// Names the environment and headers, never their values, which may be credentials.
+    /// As [`McpTransport`]'s.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("McpServer");
         debug.field("name", &self.name);
         match &self.transport {
             McpTransport::Stdio { command, args, env } => debug
                 .field("command", command)
-                .field("args", args)
+                .field("args", &args.len())
                 .field("env", &env.iter().map(|(name, _)| name).collect::<Vec<_>>()),
             McpTransport::Http { url, headers } | McpTransport::Sse { url, headers } => {
-                debug.field("url", url).field(
+                debug.field("url", &shown_address(url)).field(
                     "headers",
                     &headers.iter().map(|(name, _)| name).collect::<Vec<_>>(),
                 )
@@ -278,6 +295,8 @@ pub struct OpenRequest {
     pub system_prompt: Option<String>,
     /// More directories it may work in, absolute.
     pub additional_directories: Vec<PathBuf>,
+    /// [`Settings::working_roots`]: what a harness that finds a session by its id alone checks that session against.
+    pub working_roots: Vec<PathBuf>,
     /// The request's `_meta`, for what ACP has no field for: the client's, untrusted.
     pub meta: Map<String, Value>,
 }
@@ -291,6 +310,7 @@ impl OpenRequest {
             open: Open::New,
             mcp_servers: Vec::new(),
             system_prompt: None,
+            working_roots: Vec::new(),
             additional_directories: Vec::new(),
             meta: Map::new(),
         }
@@ -490,8 +510,12 @@ pub struct Settings {
     /// forgotten, and a later report of it is a new `tool_call`. Default 4096.
     pub max_tools: usize,
     /// Events of a session queued for the client; past it the harness's reader waits, so a client that does not
-    /// read holds the harness back instead of filling memory. Default 4096.
+    /// read holds the harness back instead of filling memory. The same many are kept of what a session says before its
+    /// answer has gone; past it they are dropped, and the client is told how many. Default 4096.
     pub max_queued_events: usize,
+    /// A session's questions open at once; past it one is answered cancelled without being asked. Each open question
+    /// holds a thread. Default 64.
+    pub max_open_questions: usize,
     /// Whether a client may give a session MCP servers; when not, a request with any is refused. Default true.
     pub client_mcp_servers: bool,
     /// The directories a session's `cwd` and more directories must lie in, compared as written; empty takes any.
@@ -518,6 +542,7 @@ impl Settings {
             permission_timeout: None,
             max_tools: 4096,
             max_queued_events: 4096,
+            max_open_questions: 64,
             client_mcp_servers: true,
             working_roots: Vec::new(),
             network_paths: false,
@@ -544,6 +569,7 @@ impl fmt::Debug for Settings {
             .field("permission_timeout", &self.permission_timeout)
             .field("max_tools", &self.max_tools)
             .field("max_queued_events", &self.max_queued_events)
+            .field("max_open_questions", &self.max_open_questions)
             .field("client_mcp_servers", &self.client_mcp_servers)
             .field("working_roots", &self.working_roots)
             .field("network_paths", &self.network_paths)

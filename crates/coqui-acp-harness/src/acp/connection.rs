@@ -131,7 +131,7 @@ impl Shared {
     /// Tells the host something that is no message to the client.
     pub(crate) fn note(&self, text: &str) {
         if let Some(note) = &self.settings.on_notice {
-            note(text);
+            note(&crate::lines::one_line(text));
         }
     }
 
@@ -516,7 +516,12 @@ impl Shared {
         let replays = matches!(open, Open::Load(_));
         let new = matches!(open, Open::New);
         let request = match parse::open_request(params, open, takes, version) {
-            Ok(request) => request,
+            Ok(mut request) => {
+                request
+                    .working_roots
+                    .clone_from(&self.settings.working_roots);
+                request
+            }
             Err(why) => return self.respond_error(id, INVALID_PARAMS, &why),
         };
         if let Err(why) = self.admitted(&request) {
