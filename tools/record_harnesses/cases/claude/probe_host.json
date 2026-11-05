@@ -1,0 +1,63 @@
+{
+ "argv": [
+  "-p",
+  "--input-format=stream-json",
+  "--output-format=stream-json",
+  "--verbose",
+  "--replay-user-messages",
+  "--include-partial-messages",
+  "--session-id=6f2c1b0e-0000-4000-8000-000000000001",
+  "--model=claude-haiku-5-5",
+  "--setting-sources=",
+  "--strict-mcp-config",
+  "--permission-prompts=host"
+ ],
+ "files": {
+  "w/notes.txt": "one\ntwo\n"
+ },
+ "script": [
+  {
+   "tools": [
+    [
+     "Edit",
+     {
+      "file_path": "{ROOT}/w/notes.txt",
+      "old_string": "two",
+      "new_string": "three"
+     }
+    ]
+   ]
+  },
+  {
+   "text": "Edited."
+  }
+ ],
+ "policy": [
+  "allow"
+ ],
+ "steps": [
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Change two to three in notes.txt."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "close": true
+  }
+ ]
+}

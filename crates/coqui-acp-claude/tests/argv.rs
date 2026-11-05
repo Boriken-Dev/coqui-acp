@@ -122,3 +122,21 @@ fn the_recordings_are_of_a_tested_version() {
         "{version}"
     );
 }
+
+/// Every recording can be made again from a case in the repository.
+#[test]
+fn every_recording_has_its_case() {
+    let cases = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/record_harnesses/cases/claude");
+    for file in std::fs::read_dir(fixtures()).unwrap() {
+        let name = file.unwrap().file_name().to_string_lossy().into_owned();
+        let Some(case) = name.strip_suffix(".argv.json") else {
+            continue;
+        };
+        assert!(
+            cases.join(format!("{case}.json")).is_file(),
+            "the recording {case} has no case in {}",
+            cases.display()
+        );
+    }
+}

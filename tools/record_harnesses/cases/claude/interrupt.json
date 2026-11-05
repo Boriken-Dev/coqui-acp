@@ -1,0 +1,128 @@
+{
+ "argv": [
+  "-p",
+  "--input-format=stream-json",
+  "--output-format=stream-json",
+  "--verbose",
+  "--replay-user-messages",
+  "--permission-prompts=host",
+  "--permission-prompt-tool=stdio",
+  "--include-partial-messages",
+  "--session-id=6f2c1b0e-0000-4000-8000-00000000057a",
+  "--model=claude-haiku-5-5",
+  "--setting-sources=",
+  "--strict-mcp-config"
+ ],
+ "script": [
+  {
+   "hold": 6,
+   "text": "Too late."
+  },
+  {
+   "text": "After the interrupt."
+  },
+  {
+   "status": 429,
+   "message": "Number of request tokens has exceeded your per-minute rate limit"
+  },
+  {
+   "status": 500,
+   "message": "Internal server error"
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Take your time."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "sleep": 2
+  },
+  {
+   "send": {
+    "type": "control_request",
+    "request_id": "interrupt-1",
+    "request": {
+     "subtype": "interrupt"
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 60
+  },
+  {
+   "sleep": 5
+  },
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Go on."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 60
+  },
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Once more."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "send": {
+    "type": "control_request",
+    "request_id": "interrupt-2",
+    "request": {
+     "subtype": "interrupt"
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "control_response"
+   },
+   "timeout": 30
+  },
+  {
+   "close": true
+  }
+ ]
+}

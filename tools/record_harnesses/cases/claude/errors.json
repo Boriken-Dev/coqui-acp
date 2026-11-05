@@ -1,0 +1,90 @@
+{
+ "argv": [
+  "-p",
+  "--input-format=stream-json",
+  "--output-format=stream-json",
+  "--verbose",
+  "--replay-user-messages",
+  "--permission-prompts=host",
+  "--permission-prompt-tool=stdio",
+  "--include-partial-messages",
+  "--session-id=6f2c1b0e-0000-4000-8000-0000000e5505",
+  "--model=claude-haiku-5-5",
+  "--setting-sources=",
+  "--strict-mcp-config"
+ ],
+ "env": {
+  "CLAUDE_CODE_MAX_RETRIES": "0"
+ },
+ "script": [
+  {
+   "status": 429,
+   "message": "Number of request tokens has exceeded your per-minute rate limit"
+  },
+  {
+   "status": 429,
+   "message": "Number of request tokens has exceeded your per-minute rate limit"
+  },
+  {
+   "status": 429,
+   "message": "Number of request tokens has exceeded your per-minute rate limit"
+  },
+  {
+   "status": 500,
+   "message": "Internal server error"
+  },
+  {
+   "status": 500,
+   "message": "Internal server error"
+  },
+  {
+   "status": 500,
+   "message": "Internal server error"
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Hit the limit."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Fail."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "close": true
+  }
+ ]
+}

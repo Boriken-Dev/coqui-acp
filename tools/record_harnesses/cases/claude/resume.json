@@ -1,0 +1,92 @@
+{
+ "argv": [
+  "-p",
+  "--input-format=stream-json",
+  "--output-format=stream-json",
+  "--verbose",
+  "--replay-user-messages",
+  "--permission-prompts=host",
+  "--permission-prompt-tool=stdio",
+  "--include-partial-messages",
+  "--resume=6f2c1b0e-0000-4000-8000-00000000a5e5",
+  "--model=claude-haiku-5-5",
+  "--setting-sources=",
+  "--strict-mcp-config"
+ ],
+ "seed": {
+  "argv": [
+   "-p",
+   "--input-format=stream-json",
+   "--output-format=stream-json",
+   "--verbose",
+   "--replay-user-messages",
+   "--permission-prompts=host",
+   "--permission-prompt-tool=stdio",
+   "--include-partial-messages",
+   "--session-id=6f2c1b0e-0000-4000-8000-00000000a5e5",
+   "--model=claude-haiku-5-5",
+   "--setting-sources=",
+   "--strict-mcp-config"
+  ],
+  "script": [
+   {
+    "text": "The word is kayak."
+   }
+  ],
+  "steps": [
+   {
+    "send": {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Remember a word."
+       }
+      ]
+     }
+    }
+   },
+   {
+    "until": {
+     "type": "result"
+    },
+    "timeout": 200
+   },
+   {
+    "close": true
+   }
+  ]
+ },
+ "script": [
+  {
+   "text": "The word was kayak."
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Which word?"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "close": true
+  }
+ ]
+}

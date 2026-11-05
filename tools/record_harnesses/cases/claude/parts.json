@@ -1,0 +1,91 @@
+{
+ "argv": [
+  "-p",
+  "--input-format=stream-json",
+  "--output-format=stream-json",
+  "--verbose",
+  "--replay-user-messages",
+  "--permission-prompts=host",
+  "--permission-prompt-tool=stdio",
+  "--include-partial-messages",
+  "--session-id=6f2c1b0e-0000-4000-8000-00000000fa57",
+  "--model=claude-haiku-5-5",
+  "--setting-sources=",
+  "--mcp-config={ROOT}/mcp.json",
+  "--strict-mcp-config",
+  "--plugin-dir={ROOT}/canoa-profile"
+ ],
+ "mcp": true,
+ "files": {
+  "canoa-profile/.claude-plugin/plugin.json": "{\"name\": \"canoa-profile\", \"version\": \"0.0.0\"}\n",
+  "canoa-profile/skills/review/SKILL.md": "---\nname: review\ndescription: Reviews what was done.\n---\n\nSay that it was reviewed.\n"
+ },
+ "script": [
+  {
+   "tools": [
+    [
+     "mcp__echo__echo",
+     {
+      "text": "hi"
+     }
+    ]
+   ]
+  },
+  {
+   "tools": [
+    [
+     "Skill",
+     {
+      "skill": "canoa-profile:review"
+     }
+    ]
+   ]
+  },
+  {
+   "text": "Echoed."
+  }
+ ],
+ "policy": [
+  "allow"
+ ],
+ "steps": [
+  {
+   "send": {
+    "type": "control_request",
+    "request_id": "init-1",
+    "request": {
+     "subtype": "initialize"
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "control_response"
+   },
+   "timeout": 60
+  },
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Echo hi, then review."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "close": true
+  }
+ ]
+}

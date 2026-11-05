@@ -1,0 +1,61 @@
+{
+ "argv": [
+  "-p",
+  "--input-format=stream-json",
+  "--output-format=stream-json",
+  "--verbose",
+  "--replay-user-messages",
+  "--permission-prompts=host",
+  "--permission-prompt-tool=stdio",
+  "--include-partial-messages",
+  "--session-id=6f2c1b0e-0000-4000-8000-000000000006",
+  "--model=claude-haiku-5-5",
+  "--setting-sources=",
+  "--strict-mcp-config"
+ ],
+ "script": [
+  {
+   "text": "Still here."
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "type": "control_request",
+    "request_id": "bogus-1",
+    "request": {
+     "subtype": "no_such_request"
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "control_response"
+   },
+   "timeout": 30
+  },
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Still there?"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "close": true
+  }
+ ]
+}

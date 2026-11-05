@@ -8,6 +8,8 @@
 .agents
 CLAUDE*
 .claude
+# A case of the recorder, not agent config: `CLAUDE*` takes it where names are compared without case.
+!/tools/record_harnesses/cases/claude/
 *.local.*
 
 # Rust. A library does not commit its lockfile.

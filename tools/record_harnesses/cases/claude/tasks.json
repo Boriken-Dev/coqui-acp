@@ -1,0 +1,96 @@
+{
+ "argv": [
+  "-p",
+  "--input-format=stream-json",
+  "--output-format=stream-json",
+  "--verbose",
+  "--replay-user-messages",
+  "--permission-prompts=host",
+  "--permission-prompt-tool=stdio",
+  "--include-partial-messages",
+  "--session-id=6f2c1b0e-0000-4000-8000-0000000007a5",
+  "--model=claude-haiku-5-5",
+  "--setting-sources=",
+  "--strict-mcp-config"
+ ],
+ "script": [
+  {
+   "tools": [
+    [
+     "TaskCreate",
+     {
+      "subject": "Read notes.txt",
+      "description": "Read the notes",
+      "activeForm": "Reading notes.txt"
+     }
+    ],
+    [
+     "TaskCreate",
+     {
+      "subject": "Change two to three",
+      "description": "Edit the notes",
+      "activeForm": "Changing two to three"
+     }
+    ]
+   ]
+  },
+  {
+   "tools": [
+    [
+     "TaskUpdate",
+     {
+      "taskId": "1",
+      "status": "completed"
+     }
+    ],
+    [
+     "TaskUpdate",
+     {
+      "taskId": "2",
+      "status": "in_progress"
+     }
+    ]
+   ]
+  },
+  {
+   "tools": [
+    [
+     "EnterPlanMode",
+     {}
+    ]
+   ]
+  },
+  {
+   "text": "Planned."
+  }
+ ],
+ "policy": [
+  "allow",
+  "allow"
+ ],
+ "steps": [
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Plan the change."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "type": "result"
+   },
+   "timeout": 200
+  },
+  {
+   "close": true
+  }
+ ]
+}
