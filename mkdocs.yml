@@ -18,3 +18,4 @@ nav:
   - Remote profile: profile.md
   - ACP in the browser: browser.md
   - Agents as providers: provider.md
+  - Harnesses as agents: harnesses.md
