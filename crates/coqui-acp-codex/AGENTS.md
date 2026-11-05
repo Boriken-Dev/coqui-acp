@@ -73,10 +73,12 @@ pub type Writer = Arc<dyn Fn(&Value) -> io::Result<()> + Send + Sync>;
 pub type Answer = (String, Result<Value, String>);
 pub const ALLOW_ONCE: &str = "accept";  pub const ALLOW_SESSION: &str = "accept_for_session";
 pub const ALLOW_RULE: &str = "accept_with_rule";  pub const ALLOW_ALWAYS: &str = "accept_always";  pub const REJECT: &str = "decline";
+pub const ALLOW_NETWORK_RULE: &str = "allow_network_rule";  pub const REJECT_NETWORK_RULE: &str = "reject_network_rule";
 pub fn Parser::new(writer: Writer, max_tools: usize) -> Parser
 pub fn line(&mut self, message: &Value) -> Vec<Event>
 pub fn history(&mut self, turn: &Value) -> Vec<Event>
 pub fn turn(&self) -> Option<&str>;  pub fn started(&mut self, turn: &str);  pub fn interrupting(&mut self)
+pub fn set_thread(&mut self, thread: &str);  pub fn prompting(&mut self);  pub fn abandon(&mut self)
 pub fn answers(&mut self) -> Vec<Answer>
 pub fn id_text(id: &Value) -> String
 pub fn git_patch(path: &str, change: FileChange, hunks: &str) -> String
@@ -134,7 +136,7 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 
 ## Command line
 
-`coqui-acp-codex` serves `CodexAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CODEX_EXECUTABLE`, default `codex`), `--model`, `--effort`, `--approval-policy`, `--sandbox`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8). Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
+`coqui-acp-codex` serves `CodexAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CODEX_EXECUTABLE`, default `codex`), `--model`, `--effort`, `--approval-policy`, `--sandbox`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--no-client-mcp-servers`, `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
 
 ## Environment variables
 
@@ -143,6 +145,12 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 ## Gotchas
 
 - `turn/interrupt` needs the turn's id, which `turn/start`'s answer and `turn/started` give.
+- `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 takes it where it lists only `cancel` and goes on with the turn.
+- `--config` keys are not TOML: Codex splits the argument at its first `=` and the key at each `.`, and a quote is part of a name. A key holding `=` cannot be written and is refused. A JSON `null` value is the empty string, which is not unset.
+- A login file needs `tokens.refresh_token` to be read, or Codex answers every turn `401`. Empty, a second client cannot rotate the person's login, and the access token goes on working until it expires.
+- With `additionalDirectories` from a client, `workspace-write` writes where the client says, `/` included, with no approval. A host that does not trust its client gives `--working-root`; `--no-client-mcp-servers` keeps a client from starting programs.
+- Whether Codex sends another thread's messages on this connection is not recorded. A notification of another thread is dropped, and a question of another thread says so.
+- A question Codex settles itself (`serverRequest/resolved`) stays open at the client until the turn ends; a late answer is harmless.
 - An MCP tool call asks through `mcpServer/elicitation/request` with `_meta.codex_approval_kind` `mcp_tool_call`, not a tool approval.
 - Codex merges a thread's `config.mcp_servers` with the person's own configuration; a server of the same name in it wins.
 - A fresh `CODEX_HOME` makes Codex set the machine up again; give it the login, or use the person's own.

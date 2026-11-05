@@ -35,6 +35,17 @@ On Claude Code 2.1.318, `--permission-prompts host` alone does not route a promp
 granted. With `--permission-prompt-tool stdio`, the Claude Agent SDK's own route, it arrives as a `can_use_tool` control request,
 and the translator passes both flags.
 
+Each question says what it grants: the host a network approval opens, the paths and network of a permissions request, where a
+moved file goes, the root an edit asks to write under. Version 1 has only a tool call to say it with, so the question is its title,
+or comes first in its content. Codex's command approvals offer what it lists in `availableDecisions`. An MCP server's own
+elicitation is refused; only Codex's approval of a tool call running on that server is asked, under the server's name.
+
+## What a host can narrow
+
+`--working-root`, `--no-client-mcp-servers` and `--allow-network-paths` on each binary, or `Settings` in a library. With none given
+a client's `cwd` and `additionalDirectories` may be anywhere local, and under Codex's `workspace-write` an additional directory is
+writable with no approval.
+
 ## Versions 1 and 2
 
 Each answers the version the client asks for. Version 2's shapes differ: tool calls are upserts, chunks name their message and a
