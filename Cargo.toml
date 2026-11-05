@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/coqui-acp",
     "crates/coqui-acp-bridge",
+    "crates/coqui-acp-harness",
     "crates/coqui-acp-page",
     "crates/coqui-acp-provider",
     "examples/provider-python",
@@ -31,6 +32,14 @@ serde = { version = "1", default-features = false, features = ["derive", "std"] 
 serde_json = "1"
 # Session and tool call identifiers no client can guess.
 uuid = { version = "1", default-features = false, features = ["v4"] }
+# A harness's terminal output as ACP version 2 carries it.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# The command lines of the harness agents.
+clap = { version = "4", features = ["derive", "env"] }
+# A harness's process group, ended by a system call.
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+# A harness and everything it starts in one job object, ended together.
+win32job = "2.0.3"
 
 
 [workspace.lints.rust]

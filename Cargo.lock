@@ -446,6 +446,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-acp-claude"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "clap",
+ "coqui-acp",
+ "coqui-acp-harness",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "coqui-acp-codex"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "clap",
+ "coqui-acp",
+ "coqui-acp-harness",
+ "serde_json",
+]
+
+[[package]]
+name = "coqui-acp-harness"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "base64 0.22.1",
+ "coqui-acp",
+ "rustix",
+ "serde_json",
+ "uuid",
+ "win32job",
+]
+
+[[package]]
 name = "coqui-acp-page"
 version = "0.0.0-alpha.0"
 dependencies = [
