@@ -1,7 +1,5 @@
 [
  "app-server",
- "-c",
- "model_provider=\"standin\"",
- "-c",
- "model_providers.standin={name=\"standin\",base_url=\"http://127.0.0.1:{PORT}/v1\",wire_api=\"responses\",env_key=\"STANDIN_API_KEY\"}"
+ "--config=model_provider=\"standin\"",
+ "--config=model_providers.standin={\"base_url\"=\"http://127.0.0.1:{PORT}/v1\",\"env_key\"=\"STANDIN_API_KEY\",\"name\"=\"standin\",\"wire_api\"=\"responses\"}"
 ]

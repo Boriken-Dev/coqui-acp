@@ -21,7 +21,7 @@
   }
  },
  {
-  "after": 1,
+  "after": 2,
   "input": {
    "id": 2,
    "method": "thread/list",
@@ -29,23 +29,23 @@
   }
  },
  {
-  "after": 2,
+  "after": 3,
   "input": {
    "id": 3,
    "method": "thread/resume",
    "params": {
-    "threadId": "01a1a7cb-a273-75b0-8d9a-b9e012cce172",
-    "cwd": "C:/coqui-fx-codex/w"
+    "threadId": "01a1ab38-34d9-7590-b336-75dc39e9edd0",
+    "cwd": "C:/coqui-fx/w"
    }
   }
  },
  {
-  "after": 5,
+  "after": 6,
   "input": {
    "id": 4,
    "method": "turn/start",
    "params": {
-    "threadId": "01a1a7cb-a273-75b0-8d9a-b9e012cce172",
+    "threadId": "01a1ab38-34d9-7590-b336-75dc39e9edd0",
     "input": [
      {
       "type": "text",

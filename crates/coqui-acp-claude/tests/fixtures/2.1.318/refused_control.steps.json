@@ -1,0 +1,27 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "control_request",
+   "request_id": "bogus-1",
+   "request": {
+    "subtype": "no_such_request"
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Still there?"
+     }
+    ]
+   }
+  }
+ }
+]

@@ -23,22 +23,38 @@
  {
   "after": 1,
   "input": {
+   "id": 2,
+   "method": "model/list",
+   "params": {}
+  }
+ },
+ {
+  "after": 3,
+  "input": {
    "id": 3,
    "method": "thread/start",
    "params": {
-    "cwd": "C:/coqui-fx-codex/w",
+    "cwd": "C:/coqui-fx/w",
     "approvalPolicy": "untrusted",
-    "sandbox": "workspace-write"
+    "sandbox": "workspace-write",
+    "developerInstructions": "Answer briefly.",
+    "config": {
+     "mcp_servers": {
+      "echo": {
+       "url": "http://127.0.0.1:62443/mcp"
+      }
+     }
+    }
    }
   }
  },
  {
-  "after": 2,
+  "after": 4,
   "input": {
    "id": 4,
    "method": "turn/start",
    "params": {
-    "threadId": "01a1a7cb-9d39-77c1-9279-456e37cbcdea",
+    "threadId": "01a1ab19-27cb-7993-afee-c1f936a46c1e",
     "input": [
      {
       "type": "text",
@@ -49,12 +65,12 @@
   }
  },
  {
-  "after": 11,
+  "after": 15,
   "input": {
    "id": 5,
    "method": "turn/start",
    "params": {
-    "threadId": "01a1a7cb-9d39-77c1-9279-456e37cbcdea",
+    "threadId": "01a1ab19-27cb-7993-afee-c1f936a46c1e",
     "input": [
      {
       "type": "text",

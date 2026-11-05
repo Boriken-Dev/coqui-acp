@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::io::{self, Read, Write};
-use std::path::{Component, Path};
+use std::path::Path;
 use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;

@@ -1,0 +1,126 @@
+{
+ "script": [
+  {
+   "hold": 4,
+   "text": "First part."
+  },
+  {
+   "text": "Steered."
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "coqui-acp-codex",
+      "version": "0.0.0"
+     },
+     "capabilities": {}
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 1
+   }
+  },
+  {
+   "send": {
+    "method": "initialized",
+    "params": {}
+   }
+  },
+  {
+   "send": {
+    "id": 2,
+    "method": "model/list",
+    "params": {}
+   }
+  },
+  {
+   "until": {
+    "id": 2
+   }
+  },
+  {
+   "send": {
+    "id": 3,
+    "method": "thread/start",
+    "params": {
+     "cwd": "{ROOT}/w",
+     "approvalPolicy": "untrusted",
+     "sandbox": "workspace-write",
+     "developerInstructions": "Answer briefly.",
+     "config": {
+      "mcp_servers": {
+       "echo": {
+        "url": "http://127.0.0.1:{PORT}/mcp"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 3
+   }
+  },
+  {
+   "send": {
+    "id": 4,
+    "method": "turn/start",
+    "params": {
+     "threadId": "{THREAD}",
+     "input": [
+      {
+       "type": "text",
+       "text": "Take your time."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/started"
+   }
+  },
+  {
+   "sleep": 1
+  },
+  {
+   "send": {
+    "id": 5,
+    "method": "turn/steer",
+    "params": {
+     "threadId": "{THREAD}",
+     "expectedTurnId": "{TURN}",
+     "input": [
+      {
+       "type": "text",
+       "text": "Not that way."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 5
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 60
+  },
+  {
+   "close": true
+  }
+ ]
+}

@@ -1,0 +1,85 @@
+{
+ "seed": "turn",
+ "script": [
+  {
+   "text": "The word was kayak."
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "coqui-acp-codex",
+      "version": "0.0.0"
+     },
+     "capabilities": {}
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 1
+   }
+  },
+  {
+   "send": {
+    "method": "initialized",
+    "params": {}
+   }
+  },
+  {
+   "send": {
+    "id": 2,
+    "method": "thread/list",
+    "params": {}
+   }
+  },
+  {
+   "until": {
+    "id": 2
+   }
+  },
+  {
+   "send": {
+    "id": 3,
+    "method": "thread/resume",
+    "params": {
+     "threadId": "{THREAD}",
+     "cwd": "{ROOT}/w"
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 3
+   }
+  },
+  {
+   "send": {
+    "id": 4,
+    "method": "turn/start",
+    "params": {
+     "threadId": "{THREAD}",
+     "input": [
+      {
+       "type": "text",
+       "text": "Which word?"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 60
+  },
+  {
+   "close": true
+  }
+ ]
+}

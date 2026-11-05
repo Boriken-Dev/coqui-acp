@@ -1,0 +1,84 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "coqui-acp-codex",
+     "version": "0.0.0"
+    },
+    "capabilities": {}
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "method": "initialized",
+   "params": {}
+  }
+ },
+ {
+  "after": 2,
+  "input": {
+   "id": 2,
+   "method": "model/list",
+   "params": {}
+  }
+ },
+ {
+  "after": 3,
+  "input": {
+   "id": 3,
+   "method": "thread/start",
+   "params": {
+    "cwd": "C:/coqui-fx/w",
+    "approvalPolicy": "untrusted",
+    "sandbox": "workspace-write",
+    "developerInstructions": "Answer briefly.",
+    "config": {
+     "mcp_servers": {
+      "echo": {
+       "url": "http://127.0.0.1:62478/mcp"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "after": 4,
+  "input": {
+   "id": 4,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1ab19-4ada-7911-8c87-26d6b8dd5825",
+    "input": [
+     {
+      "type": "text",
+      "text": "Take your time."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 12,
+  "input": {
+   "id": 5,
+   "method": "turn/steer",
+   "params": {
+    "threadId": "01a1ab19-4ada-7911-8c87-26d6b8dd5825",
+    "expectedTurnId": "01a1ab19-4ae9-75d2-8931-c67f5f9946de",
+    "input": [
+     {
+      "type": "text",
+      "text": "Not that way."
+     }
+    ]
+   }
+  }
+ }
+]

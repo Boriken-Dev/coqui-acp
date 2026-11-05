@@ -1,0 +1,45 @@
+{
+ "steps": [
+  {
+   "send": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "coqui-acp-codex",
+      "version": "0.0.0"
+     },
+     "capabilities": {}
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 1
+   }
+  },
+  {
+   "send": {
+    "method": "initialized",
+    "params": {}
+   }
+  },
+  {
+   "send": {
+    "id": 2,
+    "method": "config/read",
+    "params": {
+     "cwd": "{ROOT}/w"
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 2
+   }
+  },
+  {
+   "close": true
+  }
+ ]
+}

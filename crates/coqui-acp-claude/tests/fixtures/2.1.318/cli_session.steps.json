@@ -1,0 +1,27 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "control_request",
+   "request_id": "init-1",
+   "request": {
+    "subtype": "initialize"
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Who named this session?"
+     }
+    ]
+   }
+  }
+ }
+]

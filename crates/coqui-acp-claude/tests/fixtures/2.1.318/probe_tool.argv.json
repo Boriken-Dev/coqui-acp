@@ -1,14 +1,13 @@
 [
  "-p",
- "--input-format",
- "stream-json",
- "--output-format",
- "stream-json",
+ "--input-format=stream-json",
+ "--output-format=stream-json",
  "--verbose",
- "--permission-prompt-tool",
- "stdio",
+ "--replay-user-messages",
+ "--include-partial-messages",
+ "--session-id=6f2c1b0e-0000-4000-8000-000000000002",
  "--model=claude-haiku-5-5",
- "--setting-sources",
- "user",
- "--strict-mcp-config"
+ "--setting-sources=",
+ "--strict-mcp-config",
+ "--permission-prompt-tool=stdio"
 ]

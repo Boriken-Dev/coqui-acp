@@ -15,12 +15,12 @@
   }
  },
  {
-  "after": 3,
+  "after": 11,
   "input": {
    "type": "control_response",
    "response": {
     "subtype": "success",
-    "request_id": "ecbacf21-dc17-4e93-b69a-3e44fa7785d8",
+    "request_id": "e39d3264-1fb1-4165-a454-b9f2d508f526",
     "response": {
      "behavior": "allow",
      "updatedInput": {

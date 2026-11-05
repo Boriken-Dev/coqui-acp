@@ -1,0 +1,33 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "coqui-acp-codex",
+     "version": "0.0.0"
+    },
+    "capabilities": {}
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "method": "initialized",
+   "params": {}
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "id": 2,
+   "method": "config/read",
+   "params": {
+    "cwd": "C:/coqui-fx/w"
+   }
+  }
+ }
+]

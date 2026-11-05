@@ -16,7 +16,9 @@ use serde_json::Value;
 use support::{Scratch, replaying};
 
 /// The thread of the `resume` recording.
-const RESUMED: &str = "01a1a7cb-a273-75b0-8d9a-b9e012cce172";
+fn resume_thread() -> String {
+    support::recorded_thread("resume")
+}
 
 fn start(
     launch: &CodexLaunch,
@@ -80,7 +82,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
         .insert("COQUI_ACP_CODEX_INPUTS".into(), written.clone().into());
     let (session, events) = start(&first);
     let session = session.unwrap();
-    assert_eq!(session.thread(), "01a1a7cb-a273-75b0-8d9a-b9e012cce172");
+    assert_eq!(session.thread(), support::recorded_thread("turn"));
     session
         .prompt(&[Content::Text("Change two to three.".into())])
         .unwrap();
@@ -104,7 +106,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
     );
 
     let mut resumed = replaying(Some("resume"), &scratch.0);
-    resumed.thread = ThreadStart::Resume(RESUMED.into());
+    resumed.thread = ThreadStart::Resume(resume_thread());
     resumed.model = Some("gpt-5".into());
     resumed.effort = Some("high".into());
     let written = scratch.0.join("resumed.jsonl");
@@ -113,7 +115,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
         .insert("COQUI_ACP_CODEX_INPUTS".into(), written.clone().into());
     let (session, events) = start(&resumed);
     let session = session.unwrap();
-    assert_eq!(session.thread(), RESUMED);
+    assert_eq!(session.thread(), resume_thread());
     session
         .prompt(&[Content::Text("Which word?".into())])
         .unwrap();
@@ -147,7 +149,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
             resume["excludeTurns"].as_bool(),
             resume["model"].as_str()
         ),
-        (Some(RESUMED), Some(true), Some("gpt-5"))
+        (Some(resume_thread().as_str()), Some(true), Some("gpt-5"))
     );
     assert_eq!(resume["cwd"], scratch.0.to_string_lossy().as_ref());
     let turn = &sent[4]["params"];
@@ -157,7 +159,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
             turn["effort"].as_str(),
             turn["input"][0]["text"].as_str()
         ),
-        (Some(RESUMED), Some("high"), Some("Which word?"))
+        (Some(resume_thread().as_str()), Some("high"), Some("Which word?"))
     );
 }
 
@@ -240,7 +242,7 @@ fn an_interrupt_names_the_running_turn_and_the_turn_ends_cancelled() {
 fn a_load_replays_the_threads_turns_before_it_returns() {
     let scratch = Scratch::new("load");
     let mut launch = replaying(None, &scratch.0);
-    launch.thread = ThreadStart::Load(RESUMED.into());
+    launch.thread = ThreadStart::Load(resume_thread());
     let resumed = std::fs::read_to_string(support::fixtures().join("resume.stdout")).unwrap();
     let answer: Value = resumed
         .lines()

@@ -1,0 +1,143 @@
+{
+ "script": [
+  {
+   "hold": 8,
+   "text": "Too late."
+  },
+  {
+   "call": {
+    "type": "function_call",
+    "name": "update_plan",
+    "arguments": "{\"explanation\": \"Two steps\", \"plan\": [{\"step\": \"Read notes.txt\", \"status\": \"completed\"}, {\"step\": \"Change two to three\", \"status\": \"in_progress\"}]}"
+   }
+  },
+  {
+   "text": "After the interrupt."
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "coqui-acp-codex",
+      "version": "0.0.0"
+     },
+     "capabilities": {}
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 1
+   }
+  },
+  {
+   "send": {
+    "method": "initialized",
+    "params": {}
+   }
+  },
+  {
+   "send": {
+    "id": 2,
+    "method": "model/list",
+    "params": {}
+   }
+  },
+  {
+   "until": {
+    "id": 2
+   }
+  },
+  {
+   "send": {
+    "id": 3,
+    "method": "thread/start",
+    "params": {
+     "cwd": "{ROOT}/w",
+     "approvalPolicy": "untrusted",
+     "sandbox": "workspace-write",
+     "developerInstructions": "Answer briefly.",
+     "config": {
+      "mcp_servers": {
+       "echo": {
+        "url": "http://127.0.0.1:{PORT}/mcp"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 3
+   }
+  },
+  {
+   "send": {
+    "id": 4,
+    "method": "turn/start",
+    "params": {
+     "threadId": "{THREAD}",
+     "input": [
+      {
+       "type": "text",
+       "text": "Take your time."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/started"
+   }
+  },
+  {
+   "sleep": 2
+  },
+  {
+   "send": {
+    "id": 5,
+    "method": "turn/interrupt",
+    "params": {
+     "threadId": "{THREAD}",
+     "turnId": "{TURN}"
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 60
+  },
+  {
+   "send": {
+    "id": 6,
+    "method": "turn/start",
+    "params": {
+     "threadId": "{THREAD}",
+     "input": [
+      {
+       "type": "text",
+       "text": "Go on."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 60
+  },
+  {
+   "close": true
+  }
+ ]
+}

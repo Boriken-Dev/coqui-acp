@@ -136,7 +136,7 @@ fn version_2_runs_a_turn_with_its_own_shapes_and_every_part_applied() {
         .as_str()
         .expect("a session")
         .to_string();
-    assert_eq!(session, "01a1a7cb-a273-75b0-8d9a-b9e012cce172");
+    assert_eq!(session, support::recorded_thread("turn"));
     let options = opened["result"]["configOptions"].as_array().unwrap();
     assert_eq!(options[0]["configId"], "model");
     let changed = peer.request(

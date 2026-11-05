@@ -28,6 +28,14 @@ pub fn recorded(name: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The thread recording `name` opened.
+pub fn recorded_thread(name: &str) -> String {
+    recorded(name)
+        .iter()
+        .find_map(|line| line.pointer("/result/thread/id")?.as_str().map(str::to_string))
+        .unwrap()
+}
+
 /// A parser whose answers are kept.
 pub fn parser() -> (Parser, Arc<Mutex<Vec<Value>>>) {
     let written = Arc::new(Mutex::new(Vec::new()));

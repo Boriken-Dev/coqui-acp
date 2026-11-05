@@ -1,0 +1,47 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "First."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 14,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Second."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 20,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Third."
+     }
+    ]
+   }
+  }
+ }
+]

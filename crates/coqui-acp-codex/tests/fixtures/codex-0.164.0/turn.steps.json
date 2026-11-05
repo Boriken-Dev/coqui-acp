@@ -21,7 +21,7 @@
   }
  },
  {
-  "after": 1,
+  "after": 2,
   "input": {
    "id": 2,
    "method": "model/list",
@@ -29,19 +29,19 @@
   }
  },
  {
-  "after": 2,
+  "after": 3,
   "input": {
    "id": 3,
    "method": "thread/start",
    "params": {
-    "cwd": "C:/coqui-fx-codex/w",
+    "cwd": "C:/coqui-fx/w",
     "approvalPolicy": "untrusted",
     "sandbox": "workspace-write",
     "developerInstructions": "Answer briefly.",
     "config": {
      "mcp_servers": {
       "echo": {
-       "url": "http://127.0.0.1:64302/mcp"
+       "url": "http://127.0.0.1:56902/mcp"
       }
      }
     }
@@ -49,12 +49,12 @@
   }
  },
  {
-  "after": 3,
+  "after": 4,
   "input": {
    "id": 4,
    "method": "turn/start",
    "params": {
-    "threadId": "01a1a7cb-a273-75b0-8d9a-b9e012cce172",
+    "threadId": "01a1ab2d-dcba-74b1-9b64-7520decd3a6b",
     "input": [
      {
       "type": "text",
@@ -70,7 +70,7 @@
   }
  },
  {
-  "after": 20,
+  "after": 21,
   "input": {
    "id": 0,
    "result": {
@@ -79,7 +79,7 @@
   }
  },
  {
-  "after": 28,
+  "after": 29,
   "input": {
    "id": 1,
    "result": {
@@ -88,7 +88,7 @@
   }
  },
  {
-  "after": 36,
+  "after": 37,
   "input": {
    "id": 2,
    "result": {
@@ -97,7 +97,7 @@
   }
  },
  {
-  "after": 46,
+  "after": 47,
   "input": {
    "id": 3,
    "error": {
@@ -107,12 +107,12 @@
   }
  },
  {
-  "after": 63,
+  "after": 64,
   "input": {
    "id": 5,
    "method": "turn/start",
    "params": {
-    "threadId": "01a1a7cb-a273-75b0-8d9a-b9e012cce172",
+    "threadId": "01a1ab2d-dcba-74b1-9b64-7520decd3a6b",
     "input": [
      {
       "type": "text",

@@ -192,7 +192,7 @@ fn recorded_commands_file_changes_and_mcp_calls_are_tools_with_terminals_and_dif
         diff.patch
             .as_deref()
             .unwrap()
-            .starts_with("diff --git C:/coqui-fx-codex/w/notes.txt")
+            .starts_with("diff --git C:/coqui-fx/w/notes.txt")
     );
     let mcp = events.iter().any(
         |event| matches!(event, Event::Tool(call) if call.title.as_deref() == Some("echo: echo")),
@@ -299,7 +299,11 @@ fn a_recorded_resume_replays_its_turns_as_history() {
 fn recorded_initialize_and_model_list_give_the_version_and_models() {
     let lines = recorded("turn");
     assert_eq!(version_of(&lines[0]["result"]).as_deref(), Some("0.164.0"));
-    let models = models_of(&lines[1]["result"]);
+    let list = lines
+        .iter()
+        .find(|line| line["id"] == 2)
+        .expect("the answer to model/list");
+    let models = models_of(&list["result"]);
     assert!(
         models
             .iter()
