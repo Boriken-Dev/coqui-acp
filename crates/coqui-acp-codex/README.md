@@ -90,6 +90,9 @@ coqui-acp-codex --effort low --approval-policy untrusted --sandbox workspace-wri
 | `--sandbox` | Codex's | `read-only`, `workspace-write` or `danger-full-access` |
 | `--max-acp-version` | 2 | The highest ACP version answered |
 | `--max-sessions` | 8 | Sessions at once |
+| `--working-root` | any | A directory a session's `cwd` and more directories must lie in, repeated for more |
+| `--no-client-mcp-servers` | off | Refuse a session that a client gives MCP servers |
+| `--allow-network-paths` | off | Take a network path as a session's `cwd` or more directories |
 
 Exit status: 0 when the client closes the connection, 1 when reading it failed, 2 for a wrong invocation.
 

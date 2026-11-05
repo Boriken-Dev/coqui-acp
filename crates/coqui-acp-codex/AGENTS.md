@@ -21,6 +21,7 @@ pub struct CodexLaunch {
     pub developer_instructions: Option<String>,
     pub mcp_servers: Vec<McpServer>,
     pub additional_directories: Vec<PathBuf>,
+    pub working_roots: Vec<PathBuf>,           // a resumed thread's own directory must lie in one; empty takes any
     pub approval_policy: Option<String>,       // untrusted, on-failure, on-request, never
     pub sandbox: Option<String>,               // read-only, workspace-write, danger-full-access
     pub thread_config: Map<String, Value>,     // merged into the thread's config, as given
@@ -32,6 +33,7 @@ pub fn CodexLaunch::new(cwd: impl Into<PathBuf>) -> CodexLaunch
 pub fn launch(&self) -> Launch                 // app-server and one --config=key=value per override
 pub fn config(&self) -> Map<String, Value>     // mcp_servers, sandbox_workspace_write.writable_roots, thread_config
 pub fn skill_roots(&self) -> Vec<String>       // the Agent Skills directory of each
+pub fn has_server(&self, name: &str) -> bool   // in mcp_servers or thread_config
 pub fn thread_params(&self) -> Value           // thread/start's, or thread/resume's with threadId and excludeTurns
 #[non_exhaustive] pub enum ThreadStart { New, Resume(String), Load(String) }
 pub fn valid_config_key(key: &str) -> bool;  pub fn toml_value(value: &Value) -> String

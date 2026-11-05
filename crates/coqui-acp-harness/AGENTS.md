@@ -24,6 +24,7 @@ pub trait Process: Send + Sync { fn kill(&self) -> io::Result<()>; fn try_wait(&
     pub stderr: Option<Box<dyn Read + Send>>, pub process: Box<dyn Process> }
 pub fn Spawned::new(stdin, stdout, stderr, process) -> Spawned
 #[non_exhaustive] pub struct Exit { pub code: Option<i32>, pub signal: Option<i32> }   // Display: "exited with code 3"
+pub fn exit_text(process: &dyn Process, wait: Duration) -> String   // how it ended, or "closed its output"
 pub struct PlainSpawn;
 ```
 
@@ -42,6 +43,8 @@ pub fn parse(bytes: &[u8]) -> Option<Line>        // None for a blank line
 pub struct Tail;  pub const fn Tail::new(max_lines: usize, max_line_bytes: usize) -> Tail
 pub fn push(&mut self, line: &str);  pub fn text(&self) -> String;  pub fn is_empty(&self) -> bool
 pub fn cut(text: &str, max: usize) -> &str       // on a character boundary
+pub fn one_line(text: &str) -> String            // each control character a space, for a log or a label
+pub fn read_diagnostics(reader: impl Read, max_line: u64, tail: &Mutex<Tail>)   // standard error into `tail`, read to its end
 ```
 
 `read_lines` reads until the end or until `each` answers `false`. A line over `max_line` bytes is handed over as `TooLong` with how much was read, and reading stops. A line ending is dropped, `\r\n` included. `Tail` keeps the last lines that were not protocol, for the message shown when a harness ends.
@@ -71,6 +74,8 @@ pub fn cut(text: &str, max: usize) -> &str       // on a character boundary
 | `TurnEnd(TurnEnd)` | `Stopped(Stop)`, `Failed(String)` or `Limited(Limit)` (`resets_at`, `window`, `text`) |
 | `Output(String)` | a line that was not protocol |
 | `Exited(String)` | the harness ended, how, and what it wrote last |
+
+`context_block(uri, text) -> String` writes a text resource as prompt text that it cannot close.
 
 `Content`: `Text`, `Image { mime_type, data }` (base64), `ResourceLink { uri, name }`, `Resource { uri, mime_type, text, blob }`. `ToolCall` (`Default`): `id`, `name`, `title`, `kind: Option<ToolKind>`, `status: Option<ToolStatus>`, `input`, `output`, `locations: Option<Vec<Location>>`, `content: Option<Vec<ToolContent>>`; `ToolCall::new(id)`. `ToolContent`: `Text`, `Diff(Diff)`, `Terminal(id)`. `Diff`: `path`, `change: FileChange` (`Add`, `Modify`, `Delete`), `old_text`, `new_text`, `patch` (a git patch); `Diff::new(path, change)`. `ToolKind`, `ToolStatus`, `PlanStatus`, `Severity`, `Stop` and `OptionKind` have `as_str`, their names on the wire. Each `#[non_exhaustive]` struct has a `new` or `Default`.
 
