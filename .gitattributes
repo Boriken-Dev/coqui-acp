@@ -1,1 +1,3 @@
 * text=auto eol=lf
+# Recorded bytes stay as the harness wrote them.
+/crates/coqui-acp-claude/tests/fixtures/** -text

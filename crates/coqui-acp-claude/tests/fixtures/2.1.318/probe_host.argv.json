@@ -1,0 +1,14 @@
+[
+ "-p",
+ "--input-format",
+ "stream-json",
+ "--output-format",
+ "stream-json",
+ "--verbose",
+ "--permission-prompts",
+ "host",
+ "--model=claude-haiku-5-5",
+ "--setting-sources",
+ "user",
+ "--strict-mcp-config"
+]

@@ -1,0 +1,17 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Which word?"
+     }
+    ]
+   }
+  }
+ }
+]

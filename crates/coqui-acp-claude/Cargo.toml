@@ -1,0 +1,35 @@
+[package]
+name = "coqui-acp-claude"
+description = "Claude Code as an Agent Client Protocol agent, in Rust: a driver for its stream-json protocol and an ACP agent on it, with no Node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["acp", "agent", "claude", "stream-json"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[[bin]]
+name = "coqui-acp-claude"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+coqui-acp-harness = { path = "../coqui-acp-harness" }
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+coqui-acp = { path = "../coqui-acp" }
+
+[lints]
+workspace = true

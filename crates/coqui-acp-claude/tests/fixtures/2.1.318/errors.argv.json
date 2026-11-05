@@ -1,0 +1,19 @@
+[
+ "-p",
+ "--input-format",
+ "stream-json",
+ "--output-format",
+ "stream-json",
+ "--verbose",
+ "--include-partial-messages",
+ "--replay-user-messages",
+ "--permission-prompts",
+ "host",
+ "--permission-prompt-tool",
+ "stdio",
+ "--setting-sources=",
+ "--strict-mcp-config",
+ "--session-id",
+ "6f2c1b0e-0000-4000-8000-0000000e5505",
+ "--model=claude-haiku-5-5"
+]

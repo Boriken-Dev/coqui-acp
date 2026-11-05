@@ -1,0 +1,67 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Take your time."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 2,
+  "input": {
+   "type": "control_request",
+   "request_id": "interrupt-1",
+   "request": {
+    "subtype": "interrupt"
+   }
+  }
+ },
+ {
+  "after": 6,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Go on."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 19,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Once more."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 32,
+  "input": {
+   "type": "control_request",
+   "request_id": "interrupt-2",
+   "request": {
+    "subtype": "interrupt"
+   }
+  }
+ }
+]

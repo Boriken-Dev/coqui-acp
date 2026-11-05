@@ -1,0 +1,98 @@
+//! `coqui-acp-claude`: Claude Code as an Agent Client Protocol agent on standard input and output.
+
+#![allow(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::alloc_instead_of_core
+)]
+
+use std::ffi::OsString;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use clap::Parser;
+use coqui_acp_claude::harness::{Settings, serve};
+use coqui_acp_claude::{ClaudeAgent, ClaudeLaunch};
+
+/// Serves Claude Code as an Agent Client Protocol agent on standard input and output, in ACP version 1 or 2,
+/// whichever the client asks for. Each session runs `claude` in stream-json mode; permission prompts are asked
+/// through ACP. Diagnostics go to standard error.
+#[derive(Debug, Parser)]
+#[command(
+    name = "coqui-acp-claude",
+    version,
+    after_help = "Claude Code reads its own variables (CLAUDE_CONFIG_DIR, \
+    ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN and others) from the environment it is given."
+)]
+struct Cli {
+    /// The Claude Code program.
+    #[arg(long, env = "COQUI_ACP_CLAUDE_EXECUTABLE", default_value = "claude")]
+    executable: OsString,
+    /// The model every session starts with, until the client chooses another.
+    #[arg(long)]
+    model: Option<String>,
+    /// The effort every session starts with: low, medium, high, xhigh or max.
+    #[arg(long)]
+    effort: Option<String>,
+    /// The permission mode: default, acceptEdits, plan, dontAsk, bypassPermissions, auto or manual.
+    #[arg(long)]
+    permission_mode: Option<String>,
+    /// The setting sources Claude Code loads, comma-separated, of user, project and local; empty loads none.
+    #[arg(long)]
+    setting_sources: Option<String>,
+    /// Only the MCP servers a session is given, none from the person's or the project's configuration.
+    #[arg(long)]
+    strict_mcp_config: bool,
+    /// The highest ACP version answered.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=2))]
+    max_acp_version: u8,
+    /// Sessions at once.
+    #[arg(long, default_value_t = 8)]
+    max_sessions: usize,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let mut defaults = ClaudeLaunch::new(".");
+    defaults.executable = cli.executable;
+    defaults.model = cli.model;
+    defaults.effort = cli.effort;
+    defaults.permission_mode = cli.permission_mode;
+    defaults.setting_sources = cli.setting_sources.map(|sources| {
+        sources
+            .split(',')
+            .filter(|source| !source.is_empty())
+            .map(str::to_string)
+            .collect()
+    });
+    defaults.strict_mcp_config = cli.strict_mcp_config;
+    let agent = ClaudeAgent::new().defaults(defaults);
+    let mut settings = Settings::new();
+    settings.max_version = cli.max_acp_version;
+    settings.max_sessions = cli.max_sessions;
+    settings.on_notice = Some(Arc::new(|text: &str| eprintln!("coqui-acp-claude: {text}")));
+    match serve(
+        Arc::new(agent),
+        settings,
+        std::io::stdin(),
+        std::io::stdout(),
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("coqui-acp-claude: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn the_command_line_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+}

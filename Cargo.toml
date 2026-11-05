@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/coqui-acp",
     "crates/coqui-acp-bridge",
+    "crates/coqui-acp-claude",
     "crates/coqui-acp-harness",
     "crates/coqui-acp-page",
     "crates/coqui-acp-provider",

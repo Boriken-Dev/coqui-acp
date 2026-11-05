@@ -1,0 +1,859 @@
+//! Claude Code's stream-json output as events.
+
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use std::io;
+
+use coqui_acp_harness::event::{
+    Command, Content, Event, OptionKind, Outcome, PermissionOption, PermissionRequest, PlanEntry,
+    PlanStatus, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolStatus, TurnEnd,
+};
+use serde_json::{Value, json};
+
+use crate::{limits, tools};
+
+/// Writes one JSON line to Claude Code's standard input.
+pub type Writer = Arc<dyn Fn(&Value) -> io::Result<()> + Send + Sync>;
+
+/// The id of the option that allows one call.
+pub const ALLOW_ONCE: &str = "allow";
+/// The id of the option that allows the call and applies the rule Claude Code suggested.
+pub const ALLOW_ALWAYS: &str = "allow_always";
+/// The id of the option that refuses the call.
+pub const REJECT: &str = "reject";
+
+/// The answer to one of our control requests: its `response`, or Claude Code's error.
+pub type ControlAnswer = (String, Result<Value, String>);
+
+#[derive(Debug)]
+struct Tool {
+    name: String,
+    input: Value,
+}
+
+/// Reads Claude Code's stream-json lines into [`Event`]s. A permission request becomes an
+/// [`Event::Permission`] whose responder writes the answer through the [`Writer`].
+pub struct Parser {
+    writer: Writer,
+    max_tools: usize,
+    /// Tool calls by id, oldest first, for their results.
+    tools: BTreeMap<String, Tool>,
+    order: VecDeque<String>,
+    /// The message being streamed, and its text and thinking blocks by index.
+    streaming: Option<String>,
+    blocks: BTreeMap<u64, &'static str>,
+    /// Messages whose text arrived as stream events, so their whole copy is not told again.
+    streamed: VecDeque<String>,
+    /// The tokens of the model's context the last request used.
+    context_used: Option<u64>,
+    /// Set by an interrupt, so the turn's error result reads as cancelled.
+    interrupted: bool,
+    /// The Task tools' list, by task id, for the plan they make.
+    tasks: Vec<(String, PlanEntry)>,
+    answers: Vec<ControlAnswer>,
+    version: Option<String>,
+    session: Option<String>,
+    /// A compaction whose summary is still to come.
+    compaction: Option<String>,
+}
+
+impl core::fmt::Debug for Parser {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Parser")
+            .field("tools", &self.tools.len())
+            .field("interrupted", &self.interrupted)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Parser {
+    /// A parser that answers permission requests through `writer`, keeping the last `max_tools` tool calls for their
+    /// results (any value is taken; 0 keeps none, and a result then shows no diff or terminal).
+    #[must_use]
+    pub fn new(writer: Writer, max_tools: usize) -> Self {
+        Self {
+            writer,
+            max_tools,
+            tools: BTreeMap::new(),
+            order: VecDeque::new(),
+            streaming: None,
+            blocks: BTreeMap::new(),
+            streamed: VecDeque::new(),
+            context_used: None,
+            interrupted: false,
+            tasks: Vec::new(),
+            answers: Vec::new(),
+            version: None,
+            session: None,
+            compaction: None,
+        }
+    }
+
+    /// Marks the running turn as interrupted: its error result reads as cancelled.
+    pub fn interrupting(&mut self) {
+        self.interrupted = true;
+    }
+
+    /// The answers to our own control requests read since the last call, by request id.
+    pub fn answers(&mut self) -> Vec<ControlAnswer> {
+        core::mem::take(&mut self.answers)
+    }
+
+    /// Claude Code's version, once it has said it.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
+    /// Claude Code's session id, once it has said it.
+    #[must_use]
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    fn keep(&mut self, id: &str, name: &str, input: &Value) {
+        if self.max_tools == 0 {
+            return;
+        }
+        if !self.tools.contains_key(id) {
+            if self.order.len() >= self.max_tools
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.tools.remove(&oldest);
+            }
+            self.order.push_back(id.to_string());
+        }
+        self.tools.insert(
+            id.to_string(),
+            Tool {
+                name: name.to_string(),
+                input: input.clone(),
+            },
+        );
+    }
+
+    /// The events of one line.
+    pub fn line(&mut self, value: &Value) -> Vec<Event> {
+        let mut events = Vec::new();
+        if let Some(session) = value.get("session_id").and_then(Value::as_str)
+            && self.session.as_deref() != Some(session)
+        {
+            self.session = Some(session.to_string());
+            events.push(Event::SessionId(session.to_string()));
+        }
+        match value.get("type").and_then(Value::as_str).unwrap_or("") {
+            "control_response" => self.control_response(value),
+            "control_request" => events.extend(self.control_request(value)),
+            "system" => events.extend(self.system(value)),
+            "stream_event" => events.extend(self.stream_event(value)),
+            "assistant" => events.extend(self.assistant(value, false)),
+            "user" => events.extend(self.user(value, false)),
+            "result" => events.extend(self.result(value)),
+            "rate_limit_event" => {
+                let quota = limits::quota(value);
+                if !quota.is_empty() {
+                    events.push(Event::Quota(quota));
+                }
+            }
+            _ => {}
+        }
+        events
+    }
+
+    /// The events of one line of a session's transcript, as history: the person's messages are told too.
+    pub fn history(&mut self, value: &Value) -> Vec<Event> {
+        match value.get("type").and_then(Value::as_str).unwrap_or("") {
+            "assistant" => self.assistant(value, true),
+            "user" => self.user(value, true),
+            _ => Vec::new(),
+        }
+    }
+
+    fn control_response(&mut self, value: &Value) {
+        let Some(response) = value.get("response") else {
+            return;
+        };
+        let Some(id) = response.get("request_id").and_then(Value::as_str) else {
+            return;
+        };
+        let answer = if response.get("subtype").and_then(Value::as_str) == Some("error") {
+            Err(format!(
+                "Claude Code refused the request: {}",
+                response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason given")
+            ))
+        } else {
+            if let Some(version) = response
+                .pointer("/response/claude_code_version")
+                .and_then(Value::as_str)
+            {
+                self.version = Some(version.to_string());
+            }
+            Ok(response.get("response").cloned().unwrap_or(Value::Null))
+        };
+        self.answers.push((id.to_string(), answer));
+    }
+
+    fn control_request(&mut self, value: &Value) -> Option<Event> {
+        let id = value.get("request_id").and_then(Value::as_str)?.to_string();
+        let request = value.get("request")?;
+        if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
+            let refusal = json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
+                "error": "this client does not take that request"}});
+            let _ = (self.writer)(&refusal);
+            return None;
+        }
+        let name = request
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or("a tool")
+            .to_string();
+        let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
+        let tool_id = request
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut tool = tools::describe(tool_id.as_deref().unwrap_or(&id), &name, &input);
+        tool.status = None;
+        let display = request
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or(&name);
+        let title = request
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                tool.title
+                    .clone()
+                    .map(|title| format!("{display}: {title}"))
+            })
+            .unwrap_or_else(|| display.to_string());
+        let description = request
+            .get("decision_reason")
+            .or_else(|| request.get("description"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let suggestions = request
+            .get("permission_suggestions")
+            .and_then(Value::as_array)
+            .filter(|suggestions| !suggestions.is_empty())
+            .cloned();
+        let mut options = vec![PermissionOption::new(
+            ALLOW_ONCE,
+            "Allow",
+            OptionKind::AllowOnce,
+        )];
+        if let Some(label) = suggestions.as_deref().and_then(always_label) {
+            options.push(PermissionOption::new(
+                ALLOW_ALWAYS,
+                label,
+                OptionKind::AllowAlways,
+            ));
+        }
+        options.push(PermissionOption::new(
+            REJECT,
+            "Reject",
+            OptionKind::RejectOnce,
+        ));
+        let writer = Arc::clone(&self.writer);
+        let responder = Responder::new(move |outcome| {
+            let answer = match outcome {
+                Outcome::Selected(chosen) if chosen == ALLOW_ONCE => {
+                    json!({"behavior": "allow", "updatedInput": input})
+                }
+                Outcome::Selected(chosen) if chosen == ALLOW_ALWAYS => {
+                    let mut answer = json!({"behavior": "allow", "updatedInput": input});
+                    if let Some(suggestions) = suggestions {
+                        answer["updatedPermissions"] = Value::Array(suggestions);
+                    }
+                    answer
+                }
+                Outcome::Cancelled => {
+                    json!({"behavior": "deny", "message": "The person did not answer; the turn is stopping.", "interrupt": true})
+                }
+                _ => json!({"behavior": "deny", "message": "The person refused this."}),
+            };
+            writer(
+                &json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": answer}}),
+            )
+        });
+        Some(Event::Permission(PermissionRequest::new(
+            tool,
+            title,
+            description,
+            options,
+            responder,
+        )))
+    }
+
+    fn system(&mut self, value: &Value) -> Vec<Event> {
+        let uuid = value
+            .get("uuid")
+            .and_then(Value::as_str)
+            .unwrap_or("compaction")
+            .to_string();
+        match value.get("subtype").and_then(Value::as_str).unwrap_or("") {
+            "init" => {
+                if let Some(version) = value.get("claude_code_version").and_then(Value::as_str) {
+                    self.version = Some(version.to_string());
+                }
+                Vec::new()
+            }
+            "compact_boundary" => {
+                // The summary follows as a synthetic message of the person's; the compaction is told with it.
+                let earlier = self.compaction.replace(uuid);
+                earlier
+                    .map(|id| vec![Event::Compaction { id, summary: None }])
+                    .unwrap_or_default()
+            }
+            "informational" | "notification" => value
+                .get("content")
+                .or_else(|| value.get("message"))
+                .and_then(Value::as_str)
+                .map(|text| {
+                    vec![Event::Notice {
+                        severity: Severity::Info,
+                        title: text.to_string(),
+                    }]
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn stream_event(&mut self, value: &Value) -> Vec<Event> {
+        let Some(event) = value.get("event") else {
+            return Vec::new();
+        };
+        let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+        match event.get("type").and_then(Value::as_str).unwrap_or("") {
+            "message_start" => {
+                self.streaming = event
+                    .pointer("/message/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.blocks.clear();
+                if let Some(usage) = event.pointer("/message/usage") {
+                    self.context_used = limits::context_used(usage).or(self.context_used);
+                }
+                Vec::new()
+            }
+            "content_block_start" => {
+                let Some(block) = event.get("content_block") else {
+                    return Vec::new();
+                };
+                match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "text" => {
+                        self.blocks.insert(index, "text");
+                        Vec::new()
+                    }
+                    "thinking" => {
+                        self.blocks.insert(index, "thinking");
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            "content_block_delta" => {
+                let Some(message) = self.block_message(index) else {
+                    return Vec::new();
+                };
+                let delta = event.get("delta");
+                let text = |key: &str| {
+                    delta
+                        .and_then(|delta| delta.get(key))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                };
+                match delta
+                    .and_then(|delta| delta.get("type"))
+                    .and_then(Value::as_str)
+                {
+                    Some("text_delta") => text("text")
+                        .map(|text| vec![Event::MessageChunk { message, text }])
+                        .unwrap_or_default(),
+                    Some("thinking_delta") => text("thinking")
+                        .map(|text| vec![Event::ThoughtChunk { message, text }])
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                }
+            }
+            "content_block_stop" => {
+                let kind = self.blocks.get(&index).copied();
+                let Some(message) = self.block_message(index) else {
+                    return Vec::new();
+                };
+                match kind {
+                    Some("text") => vec![Event::MessageEnd { message }],
+                    Some("thinking") => vec![Event::ThoughtEnd { message }],
+                    _ => Vec::new(),
+                }
+            }
+            "message_stop" => {
+                if let Some(message) = self.streaming.take() {
+                    if self.streamed.len() >= 64 {
+                        self.streamed.pop_front();
+                    }
+                    self.streamed.push_back(message);
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The id of the message a streamed text or thinking block belongs to: the message's, with the block's index.
+    fn block_message(&self, index: u64) -> Option<String> {
+        self.blocks.get(&index)?;
+        let message = self.streaming.as_ref()?;
+        Some(format!("{message}:{index}"))
+    }
+
+    fn assistant(&mut self, value: &Value, history: bool) -> Vec<Event> {
+        let mut events = Vec::new();
+        let message = value.get("message");
+        let message_id = message
+            .and_then(|message| message.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| value.get("uuid").and_then(Value::as_str))
+            .unwrap_or("message")
+            .to_string();
+        if let Some(usage) = message.and_then(|message| message.get("usage")) {
+            self.context_used = limits::context_used(usage).or(self.context_used);
+        }
+        let streamed = !history
+            && (self.streamed.iter().any(|known| *known == message_id)
+                || self.streaming.as_deref() == Some(&message_id));
+        // An API error Claude Code writes as a message of its own: the turn's result says it again.
+        let failed = value.get("error").is_some_and(|error| !error.is_null());
+        let line = value
+            .get("uuid")
+            .and_then(Value::as_str)
+            .unwrap_or(&message_id)
+            .to_string();
+        let blocks = message
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for (index, block) in blocks.iter().enumerate() {
+            let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+            let id = format!("{line}:{index}");
+            match kind {
+                "text" if !streamed && !failed => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        events.push(Event::MessageChunk {
+                            message: id.clone(),
+                            text: text.to_string(),
+                        });
+                        events.push(Event::MessageEnd { message: id });
+                    }
+                }
+                "thinking" if !streamed => {
+                    if let Some(text) = block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                    {
+                        events.push(Event::ThoughtChunk {
+                            message: id.clone(),
+                            text: text.to_string(),
+                        });
+                        events.push(Event::ThoughtEnd { message: id });
+                    }
+                }
+                "tool_use" => events.extend(self.tool_use(block)),
+                kind if kind.ends_with("_tool_use") => {
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or(kind);
+                    if let Some(tool_id) = block.get("id").and_then(Value::as_str) {
+                        let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                        let mut call = tools::describe(tool_id, &format!("{kind}:{name}"), &input);
+                        call.status = Some(ToolStatus::InProgress);
+                        events.push(Event::Tool(call));
+                    }
+                }
+                _ => {}
+            }
+        }
+        events
+    }
+
+    fn tool_use(&mut self, block: &Value) -> Vec<Event> {
+        let (Some(id), Some(name)) = (
+            block.get("id").and_then(Value::as_str),
+            block.get("name").and_then(Value::as_str),
+        ) else {
+            return Vec::new();
+        };
+        let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+        self.keep(id, name, &input);
+        if name == "TodoWrite" {
+            return tools::todo_plan(&input)
+                .map(|plan| vec![Event::Plan(plan)])
+                .unwrap_or_default();
+        }
+        if name.starts_with("Task") && name != "Task" {
+            return Vec::new();
+        }
+        let call = tools::describe(id, name, &input);
+        let mut events = vec![Event::Tool(call)];
+        if tools::TERMINAL_TOOLS.contains(&name) {
+            let mut terminal = Terminal::new(id);
+            terminal.command = input
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            events.push(Event::Terminal(terminal));
+        }
+        events
+    }
+
+    fn user(&mut self, value: &Value, history: bool) -> Vec<Event> {
+        let mut events = Vec::new();
+        let content = value.pointer("/message/content");
+        let id = value
+            .get("uuid")
+            .and_then(Value::as_str)
+            .unwrap_or("user")
+            .to_string();
+        let flag = |key: &str| value.get(key).and_then(Value::as_bool) == Some(true);
+        if flag("isCompactSummary") || (flag("isSynthetic") && self.compaction.is_some()) {
+            let summary = tools::result_text(content);
+            let id = self.compaction.take().unwrap_or(id);
+            return vec![Event::Compaction {
+                id,
+                summary: Some(summary),
+            }];
+        }
+        let replayed = value.get("isReplay").and_then(Value::as_bool) == Some(true);
+        let meta = value.get("isMeta").and_then(Value::as_bool) == Some(true);
+        let mut told = false;
+        let blocks: Vec<Value> = match content {
+            Some(Value::String(text)) => vec![json!({"type": "text", "text": text})],
+            Some(Value::Array(blocks)) => blocks.clone(),
+            _ => Vec::new(),
+        };
+        for block in &blocks {
+            match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                "tool_result" => {
+                    // The stream calls it `tool_use_result`, a transcript `toolUseResult`.
+                    let result = value
+                        .get("tool_use_result")
+                        .or_else(|| value.get("toolUseResult"));
+                    events.extend(self.tool_result(block, result));
+                }
+                "text" if history && !meta && !replayed => {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    if !text.starts_with("<local-command-")
+                        && !text.starts_with("<command-")
+                        && !text.starts_with("[Request interrupted")
+                    {
+                        events.push(Event::UserChunk {
+                            message: id.clone(),
+                            content: Content::Text(text.to_string()),
+                        });
+                        told = true;
+                    }
+                }
+                "image" if history && !meta => {
+                    if let (Some(mime_type), Some(data)) = (
+                        block.pointer("/source/media_type").and_then(Value::as_str),
+                        block.pointer("/source/data").and_then(Value::as_str),
+                    ) {
+                        events.push(Event::UserChunk {
+                            message: id.clone(),
+                            content: Content::Image {
+                                mime_type: mime_type.to_string(),
+                                data: data.to_string(),
+                            },
+                        });
+                        told = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if told {
+            events.push(Event::UserEnd { message: id });
+        }
+        events
+    }
+
+    fn tool_result(&mut self, block: &Value, result: Option<&Value>) -> Vec<Event> {
+        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+        let text = tools::result_text(block.get("content"));
+        let Some(tool) = self.tools.get(id) else {
+            let mut call = ToolCall::new(id);
+            call.status = Some(if failed {
+                ToolStatus::Failed
+            } else {
+                ToolStatus::Completed
+            });
+            return vec![Event::Tool(call)];
+        };
+        let name = tool.name.clone();
+        let input = tool.input.clone();
+        if name.starts_with("Task") && name != "Task" {
+            return if failed {
+                Vec::new()
+            } else {
+                self.task_plan(&name, &input, result, &text)
+            };
+        }
+        if name == "TodoWrite" {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        let mut call = ToolCall::new(id);
+        call.status = Some(if failed {
+            ToolStatus::Failed
+        } else {
+            ToolStatus::Completed
+        });
+        if tools::TERMINAL_TOOLS.contains(&name.as_str()) {
+            let mut terminal = Terminal::new(id);
+            let output = match result.filter(|result| result.is_object()) {
+                Some(result) => {
+                    let stdout = result.get("stdout").and_then(Value::as_str).unwrap_or("");
+                    let stderr = result.get("stderr").and_then(Value::as_str).unwrap_or("");
+                    if stderr.is_empty() {
+                        stdout.to_string()
+                    } else {
+                        format!("{stdout}{stderr}")
+                    }
+                }
+                None => text.clone(),
+            };
+            terminal.output = Some(output);
+            terminal.exit = Some(if failed {
+                tools::exit_code(&text)
+            } else {
+                Some(0)
+            });
+            events.push(Event::Terminal(terminal));
+            if failed {
+                call.content = Some(vec![
+                    ToolContent::Terminal(id.to_string()),
+                    ToolContent::Text(text),
+                ]);
+            }
+        } else if let Some((diff, locations)) = result
+            .filter(|_| !failed)
+            .and_then(|result| tools::finished_diff(&name, result))
+        {
+            call.content = Some(vec![ToolContent::Diff(diff)]);
+            call.locations = Some(locations);
+        } else if failed {
+            call.content = Some(vec![ToolContent::Text(text)]);
+        } else if name != "Read" && !text.is_empty() {
+            events.push(Event::ToolChunk {
+                id: id.to_string(),
+                content: ToolContent::Text(text),
+            });
+        }
+        events.push(Event::Tool(call));
+        events
+    }
+
+    /// The plan the Task tools keep, after one of them finished.
+    fn task_plan(
+        &mut self,
+        name: &str,
+        input: &Value,
+        result: Option<&Value>,
+        text: &str,
+    ) -> Vec<Event> {
+        match name {
+            "TaskCreate" => {
+                let id = result
+                    .and_then(|result| result.pointer("/task/id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let digits: String = text
+                            .chars()
+                            .skip_while(|c| !c.is_ascii_digit())
+                            .take_while(char::is_ascii_digit)
+                            .collect();
+                        (!digits.is_empty()).then_some(digits)
+                    })
+                    .unwrap_or_else(|| (self.tasks.len() + 1).to_string());
+                let subject = input
+                    .get("subject")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Task")
+                    .to_string();
+                self.tasks
+                    .push((id, PlanEntry::new(subject, PlanStatus::Pending)));
+            }
+            "TaskUpdate" => {
+                let Some(task) = input.get("taskId").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+                match input.get("status").and_then(Value::as_str) {
+                    Some("deleted") => self.tasks.retain(|(id, _)| id != task),
+                    status => {
+                        if let Some((_, entry)) = self.tasks.iter_mut().find(|(id, _)| id == task) {
+                            if let Some(status) = status.and_then(tools::plan_status) {
+                                entry.status = status;
+                            }
+                            if let Some(subject) = input.get("subject").and_then(Value::as_str) {
+                                entry.content = subject.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+            _ => return Vec::new(),
+        }
+        vec![Event::Plan(
+            self.tasks.iter().map(|(_, entry)| entry.clone()).collect(),
+        )]
+    }
+
+    fn result(&mut self, value: &Value) -> Vec<Event> {
+        let mut events = Vec::new();
+        if let Some(id) = self.compaction.take() {
+            events.push(Event::Compaction { id, summary: None });
+        }
+        if let Some(mut usage) = limits::usage(value) {
+            usage.context_used = self.context_used;
+            events.push(Event::Usage(usage));
+        }
+        let denied = limits::denials(value);
+        if !denied.is_empty() {
+            events.push(Event::Denied(denied));
+        }
+        let interrupted = core::mem::take(&mut self.interrupted);
+        let end = if let Some(limit) = limits::limit(value) {
+            TurnEnd::Limited(limit)
+        } else if limits::is_error(value) {
+            let aborted = value
+                .get("terminal_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason.starts_with("aborted"));
+            match value.get("subtype").and_then(Value::as_str) {
+                _ if interrupted || aborted => TurnEnd::Stopped(Stop::Cancelled),
+                Some("error_max_turns") => TurnEnd::Stopped(Stop::MaxTurnRequests),
+                _ => TurnEnd::Failed(limits::error_text(value)),
+            }
+        } else if interrupted && value.get("stop_reason").is_none_or(Value::is_null) {
+            TurnEnd::Stopped(Stop::Cancelled)
+        } else {
+            TurnEnd::Stopped(match value.get("stop_reason").and_then(Value::as_str) {
+                Some("max_tokens") => Stop::MaxTokens,
+                Some("refusal") => Stop::Refusal,
+                _ => Stop::EndTurn,
+            })
+        };
+        events.push(Event::TurnEnd(end));
+        events
+    }
+}
+
+/// What applying `suggestions` does, every one of them and where it is kept, as the always-allow option's name;
+/// `None` when none of them grants anything, so there is nothing to allow always.
+fn always_label(suggestions: &[Value]) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut grants = false;
+    for suggestion in suggestions {
+        let kept = match suggestion.get("destination").and_then(Value::as_str) {
+            Some("session") => "for this session",
+            Some("userSettings") => "in user settings",
+            Some("projectSettings") => "in project settings",
+            Some("localSettings") => "in local settings",
+            Some("cliArg") => "for this run",
+            _ => "where Claude Code keeps it",
+        };
+        let what = match suggestion.get("type").and_then(Value::as_str) {
+            Some("setMode") => {
+                let mode = suggestion
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("another");
+                if mode != "default" {
+                    grants = true;
+                }
+                match mode {
+                    "acceptEdits" => "accept edits (acceptEdits)".to_string(),
+                    other => format!("switch to {other} mode"),
+                }
+            }
+            Some(kind @ ("addRules" | "replaceRules" | "removeRules")) => {
+                let behavior = suggestion
+                    .get("behavior")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ask");
+                if behavior == "allow" && kind != "removeRules" {
+                    grants = true;
+                }
+                let rules: Vec<String> = suggestion
+                    .get("rules")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|rule| {
+                        let tool = rule.get("toolName").and_then(Value::as_str)?;
+                        Some(match rule.get("ruleContent").and_then(Value::as_str) {
+                            Some(content) => format!("{tool}({content})"),
+                            None => tool.to_string(),
+                        })
+                    })
+                    .collect();
+                let verb = match kind {
+                    "removeRules" => "stop applying",
+                    _ => behavior,
+                };
+                format!("{verb} {}", rules.join(", "))
+            }
+            Some("addDirectories") => {
+                grants = true;
+                let directories: Vec<&str> = suggestion
+                    .get("directories")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                format!("allow the directories {}", directories.join(", "))
+            }
+            Some(other) => format!("apply {other}"),
+            None => "apply a change".to_string(),
+        };
+        parts.push(format!("{what} {kept}"));
+    }
+    grants.then(|| format!("Allow, and from now on: {}", parts.join("; ")))
+}
+
+/// The commands an `initialize` answer lists.
+pub(crate) fn commands(answer: &Value) -> Vec<Command> {
+    answer
+        .get("commands")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|command| {
+            let name = command.get("name").and_then(Value::as_str)?;
+            let description = command
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let hint = command
+                .get("argumentHint")
+                .and_then(Value::as_str)
+                .filter(|hint| !hint.is_empty())
+                .map(str::to_string);
+            Some(Command::new(name, description, hint))
+        })
+        .collect()
+}

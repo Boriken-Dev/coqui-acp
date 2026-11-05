@@ -1,0 +1,344 @@
+//! What Claude Code is started with, as its arguments and environment.
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use coqui_acp_harness::{Launch, McpServer, McpTransport};
+use serde_json::{Map, Value, json};
+
+/// Which session Claude Code opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionStart {
+    /// A new session with this id, a UUID.
+    New(String),
+    /// An earlier session by its id, found only from the directory that recorded it.
+    Resume(String),
+}
+
+/// Everything Claude Code is started with. Every value is passed as one `--flag=value` argument, so a value that
+/// starts with `-` is never read as another option; the MCP servers go as one JSON value.
+///
+/// `Debug` names the environment's variables and never shows their values.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ClaudeLaunch {
+    /// The program, `claude` by default, found on `PATH` when it names no directory.
+    pub executable: OsString,
+    /// The working directory.
+    pub cwd: PathBuf,
+    /// Which session.
+    pub session: SessionStart,
+    /// The model, an alias such as `sonnet` or a full name.
+    pub model: Option<String>,
+    /// The effort: `low`, `medium`, `high`, `xhigh` or `max` in Claude Code 2.1.318.
+    pub effort: Option<String>,
+    /// Text appended to Claude Code's system prompt (`--append-system-prompt`).
+    pub append_system_prompt: Option<String>,
+    /// MCP servers. Their configuration holds their environment and headers, which may be credentials, so it never
+    /// goes on the command line: [`ClaudeSession::start`](crate::ClaudeSession::start) writes it to a file only this
+    /// user can read and names that file as `mcp_config_file`.
+    pub mcp_servers: Vec<McpServer>,
+    /// The file `--mcp-config` names, holding [`mcp_config`] of `mcp_servers`; `launch` passes MCP servers only
+    /// through it.
+    pub mcp_config_file: Option<PathBuf>,
+    /// Only the servers above, none from the person's or the project's configuration (`--strict-mcp-config`).
+    pub strict_mcp_config: bool,
+    /// More directories Claude Code may work in (`--add-dir`).
+    pub add_dirs: Vec<PathBuf>,
+    /// Plugins to load from a directory, whose skills are named `<plugin>:<skill>` (`--plugin-dir`).
+    pub plugin_dirs: Vec<PathBuf>,
+    /// The permission mode: `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`, `auto` or `manual`.
+    pub permission_mode: Option<String>,
+    /// The setting sources Claude Code loads, of `user`, `project` and `local`; `Some` of an empty list loads none.
+    /// `None` leaves Claude Code's own default, every source.
+    pub setting_sources: Option<Vec<String>>,
+    /// A spending ceiling, in millionths of a US dollar (`--max-budget-usd`).
+    pub max_budget_micro_usd: Option<u64>,
+    /// Stream text and thinking as they arrive (`--include-partial-messages`). Default on.
+    pub partial_messages: bool,
+    /// Variables set for Claude Code over the inherited environment.
+    pub env: BTreeMap<OsString, OsString>,
+    /// Start Claude Code from an empty environment and `env` alone.
+    pub clear_env: bool,
+    /// More arguments, after all the others, each as given: the caller's own, unchecked.
+    pub extra_args: Vec<OsString>,
+}
+
+impl core::fmt::Debug for ClaudeLaunch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ClaudeLaunch")
+            .field("executable", &self.executable)
+            .field("cwd", &self.cwd)
+            .field("session", &self.session)
+            .field("model", &self.model)
+            .field("effort", &self.effort)
+            .field("mcp_servers", &self.mcp_servers)
+            .field("mcp_config_file", &self.mcp_config_file)
+            .field("add_dirs", &self.add_dirs)
+            .field("plugin_dirs", &self.plugin_dirs)
+            .field("permission_mode", &self.permission_mode)
+            .field("setting_sources", &self.setting_sources)
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("clear_env", &self.clear_env)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClaudeLaunch {
+    /// A new session in `cwd` with Claude Code's defaults, its id a new UUID.
+    #[must_use]
+    pub fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            executable: OsString::from("claude"),
+            cwd: cwd.into(),
+            session: SessionStart::New(uuid::Uuid::new_v4().to_string()),
+            model: None,
+            effort: None,
+            append_system_prompt: None,
+            mcp_servers: Vec::new(),
+            mcp_config_file: None,
+            strict_mcp_config: false,
+            add_dirs: Vec::new(),
+            plugin_dirs: Vec::new(),
+            permission_mode: None,
+            setting_sources: None,
+            max_budget_micro_usd: None,
+            partial_messages: true,
+            env: BTreeMap::new(),
+            clear_env: false,
+            extra_args: Vec::new(),
+        }
+    }
+
+    /// The session's id: the new one's or the resumed one's.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        match &self.session {
+            SessionStart::New(id) | SessionStart::Resume(id) => id,
+        }
+    }
+
+    /// The command line and environment: stream-json both ways on standard input and output, the person's messages
+    /// echoed back, and permission prompts asked on standard output as control requests.
+    #[must_use]
+    pub fn launch(&self) -> Launch {
+        let mut args: Vec<OsString> = [
+            "-p",
+            "--input-format=stream-json",
+            "--output-format=stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--permission-prompts=host",
+            "--permission-prompt-tool=stdio",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        if self.partial_messages {
+            args.push("--include-partial-messages".into());
+        }
+        match &self.session {
+            SessionStart::New(id) => args.push(format!("--session-id={id}").into()),
+            SessionStart::Resume(id) => args.push(format!("--resume={id}").into()),
+        }
+        let mut flag = |name: &str, value: &str| args.push(format!("--{name}={value}").into());
+        if let Some(model) = &self.model {
+            flag("model", model);
+        }
+        if let Some(effort) = &self.effort {
+            flag("effort", effort);
+        }
+        if let Some(prompt) = &self.append_system_prompt {
+            flag("append-system-prompt", prompt);
+        }
+        if let Some(mode) = &self.permission_mode {
+            flag("permission-mode", mode);
+        }
+        if let Some(sources) = &self.setting_sources {
+            flag("setting-sources", &sources.join(","));
+        }
+        if let Some(micro) = self.max_budget_micro_usd {
+            flag(
+                "max-budget-usd",
+                &format!("{}.{:06}", micro / 1_000_000, micro % 1_000_000),
+            );
+        }
+        if let Some(file) = &self.mcp_config_file {
+            let mut arg = OsString::from("--mcp-config=");
+            arg.push(file);
+            args.push(arg);
+        }
+        if self.strict_mcp_config {
+            args.push("--strict-mcp-config".into());
+        }
+        for directory in &self.add_dirs {
+            let mut arg = OsString::from("--add-dir=");
+            arg.push(directory);
+            args.push(arg);
+        }
+        for directory in &self.plugin_dirs {
+            let mut arg = OsString::from("--plugin-dir=");
+            arg.push(directory);
+            args.push(arg);
+        }
+        args.extend(self.extra_args.iter().cloned());
+        let mut launch = Launch::new(self.executable.clone())
+            .args(args)
+            .cwd(self.cwd.clone())
+            .clear_env(self.clear_env);
+        launch.env.clone_from(&self.env);
+        launch
+    }
+}
+
+/// The servers as Claude Code's MCP configuration: `{"mcpServers": {name: server}}`.
+#[must_use]
+pub fn mcp_config(servers: &[McpServer]) -> Value {
+    let mut config = Map::new();
+    let pairs = |pairs: &[(String, String)]| {
+        Value::Object(
+            pairs
+                .iter()
+                .map(|(name, value)| (name.clone(), json!(value)))
+                .collect(),
+        )
+    };
+    for server in servers {
+        let value = match &server.transport {
+            McpTransport::Stdio { command, args, env } => {
+                json!({"type": "stdio", "command": command, "args": args, "env": pairs(env)})
+            }
+            McpTransport::Http { url, headers } => {
+                json!({"type": "http", "url": url, "headers": pairs(headers)})
+            }
+            McpTransport::Sse { url, headers } => {
+                json!({"type": "sse", "url": url, "headers": pairs(headers)})
+            }
+            _ => continue,
+        };
+        config.insert(server.name.clone(), value);
+    }
+    json!({ "mcpServers": config })
+}
+
+/// Whether `id` can name a Claude Code session: letters, digits and dashes, 1 to 128 of them. A session id reaches a
+/// command line and a file name, so nothing else is taken.
+#[must_use]
+pub fn valid_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(launch: &ClaudeLaunch) -> Vec<String> {
+        launch
+            .launch()
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// A model, effort or context starting with `-` stays the value of its own option.
+    #[test]
+    fn launch_option_values_are_never_read_as_options() {
+        let mut launch = ClaudeLaunch::new("/w");
+        launch.append_system_prompt = Some("- a bullet".into());
+        launch.model = Some("--dangerously-skip-permissions".into());
+        launch.effort = Some("-p".into());
+        launch.add_dirs = vec![PathBuf::from("--x")];
+        let args = args(&launch);
+        for expected in [
+            "--append-system-prompt=- a bullet",
+            "--model=--dangerously-skip-permissions",
+            "--effort=-p",
+            "--add-dir=--x",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == expected),
+                "{expected} in {args:?}"
+            );
+        }
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
+    }
+
+    #[test]
+    fn every_part_reaches_its_flag() {
+        let mut launch = ClaudeLaunch::new("/w");
+        launch.session = SessionStart::Resume("claude-session-42".into());
+        launch.setting_sources = Some(Vec::new());
+        launch.plugin_dirs = vec![PathBuf::from("/tmp/p/canoa-profile")];
+        launch.strict_mcp_config = true;
+        launch.permission_mode = Some("acceptEdits".into());
+        launch.mcp_servers = vec![McpServer::new(
+            "files",
+            McpTransport::Stdio {
+                command: "/bin/files".into(),
+                args: vec!["-v".into()],
+                env: vec![("TOKEN".into(), "t".into())],
+            },
+        )];
+        let args = args(&launch);
+        for expected in [
+            "--resume=claude-session-42",
+            "--setting-sources=",
+            "--plugin-dir=/tmp/p/canoa-profile",
+            "--strict-mcp-config",
+            "--permission-mode=acceptEdits",
+            "--permission-prompt-tool=stdio",
+            "--include-partial-messages",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == expected),
+                "{expected} in {args:?}"
+            );
+        }
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--mcp-config")),
+            "servers go only through a file"
+        );
+        launch.mcp_config_file = Some(PathBuf::from("/tmp/mcp.json"));
+        let args = super::tests::args(&launch);
+        assert!(args.iter().any(|arg| arg == "--mcp-config=/tmp/mcp.json"));
+        assert!(!args.iter().any(|arg| arg.contains("TOKEN")));
+        let config = mcp_config(&launch.mcp_servers);
+        assert_eq!(config["mcpServers"]["files"]["env"]["TOKEN"], "t");
+        assert!(!format!("{launch:?}").contains("\"t\""));
+    }
+
+    /// A spending ceiling in millionths of a dollar, as dollars with six decimals.
+    #[test]
+    fn a_spend_ceiling_is_passed_as_max_budget_usd() {
+        let mut launch = ClaudeLaunch::new("/w");
+        launch.max_budget_micro_usd = Some(2_500_007);
+        assert!(
+            args(&launch)
+                .iter()
+                .any(|arg| arg == "--max-budget-usd=2.500007")
+        );
+        assert!(
+            !args(&ClaudeLaunch::new("/w"))
+                .iter()
+                .any(|arg| arg.starts_with("--max-budget-usd"))
+        );
+    }
+
+    #[test]
+    fn a_session_id_is_letters_digits_and_dashes() {
+        assert!(valid_session_id("6f2c1b0e-0000-4000-8000-00000000c0de"));
+        for bad in ["", "../x", "a b", "a/b", "a\\b", "x\0"] {
+            assert!(!valid_session_id(bad), "{bad:?}");
+        }
+    }
+}

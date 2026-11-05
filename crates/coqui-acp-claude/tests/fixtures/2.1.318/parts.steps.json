@@ -1,0 +1,43 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "control_request",
+   "request_id": "init-1",
+   "request": {
+    "subtype": "initialize"
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Echo hi, then review."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 10,
+  "input": {
+   "type": "control_response",
+   "response": {
+    "subtype": "success",
+    "request_id": "d1c9ae88-da6b-4d30-810b-cce29c70aeac",
+    "response": {
+     "behavior": "allow",
+     "updatedInput": {
+      "text": "hi"
+     }
+    }
+   }
+  }
+ }
+]

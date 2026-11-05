@@ -1,0 +1,135 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "control_request",
+   "request_id": "init-1",
+   "request": {
+    "subtype": "initialize"
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Change two to three in notes.txt, then write new.txt."
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/kpmmpQAAAABJRU5ErkJggg=="
+      }
+     },
+     {
+      "type": "text",
+      "text": "<context ref=\"file:///C:/coqui-fx/w/notes.txt\">\none\ntwo\n</context>"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 42,
+  "input": {
+   "type": "control_response",
+   "response": {
+    "subtype": "success",
+    "request_id": "fe1643b2-4553-4a44-8b8b-a22a03a03f64",
+    "response": {
+     "behavior": "allow",
+     "updatedInput": {
+      "file_path": "C:\\coqui-fx\\w\\notes.txt",
+      "old_string": "two",
+      "new_string": "three",
+      "replace_all": false
+     }
+    }
+   }
+  }
+ },
+ {
+  "after": 52,
+  "input": {
+   "type": "control_response",
+   "response": {
+    "subtype": "success",
+    "request_id": "cc56e903-d1bd-410b-875e-09e9277cc496",
+    "response": {
+     "behavior": "deny",
+     "message": "The person refused this."
+    }
+   }
+  }
+ },
+ {
+  "after": 64,
+  "input": {
+   "type": "control_response",
+   "response": {
+    "subtype": "success",
+    "request_id": "fbe2a1b9-34ac-4b8b-be0e-3de25852e5b3",
+    "response": {
+     "behavior": "allow",
+     "updatedInput": {
+      "file_path": "C:\\coqui-fx\\w\\new.txt",
+      "content": "fresh\n"
+     },
+     "updatedPermissions": [
+      {
+       "type": "setMode",
+       "mode": "acceptEdits",
+       "destination": "session"
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "after": 91,
+  "input": {
+   "type": "control_request",
+   "request_id": "model-1",
+   "request": {
+    "subtype": "set_model",
+    "model": "claude-sonnet-5-5"
+   }
+  }
+ },
+ {
+  "after": 93,
+  "input": {
+   "type": "control_request",
+   "request_id": "effort-1",
+   "request": {
+    "subtype": "apply_flag_settings",
+    "settings": {
+     "effortLevel": "medium"
+    }
+   }
+  }
+ },
+ {
+  "after": 94,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "And now?"
+     }
+    ]
+   }
+  }
+ }
+]

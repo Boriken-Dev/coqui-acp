@@ -1,0 +1,32 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Say something."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 12,
+  "input": {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "/compact"
+     }
+    ]
+   }
+  }
+ }
+]
