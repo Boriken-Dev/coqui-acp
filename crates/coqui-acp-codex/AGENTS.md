@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp-codex` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-There are no Cargo features. MSRV Rust 1.89. A default build depends on `coqui-acp-harness`, `serde_json` and, for the command, `clap`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0. Tested with Codex 0.164.0 (`TESTED_VERSIONS`).
+There are no Cargo features. MSRV Rust 1.89. A default build depends on `coqui-acp-harness`, `serde_json` and, for the command, `clap`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0. Tested with Codex 0.164.0 and 0.166.0 (`TESTED_VERSIONS`).
 
 Imports: everything is at the crate root, and `parse` is public. `coqui_acp_codex::harness` is `coqui-acp-harness`, for its events, processes and ACP server; `Launch`, `PlainSpawn`, `Spawn` and `Spawned` are re-exported from it.
 
@@ -70,7 +70,7 @@ pub fn user_input(content: &[Content]) -> Result<Vec<Value>, Error>
 
 `start` spawns the app server, sends `initialize` (as `coqui-acp-codex`) and `initialized`, lists `model/list` page by page, sends `skills/extraRoots/set` when there are directories, and `thread/start` or `thread/resume` with `thread_params`. A resumed thread other than the one asked for is `Error::Harness`, and the app server is ended. For `Load` the earlier turns of `thread/resume`'s answer go to `sink` as history, the person's messages included, the latest `max_history_turns` of them. A version not in `TESTED_VERSIONS` is an `Event::Notice`. Events reach `sink` from a thread of the session's own until it answers `false`; the output's end is one `Event::Exited`, saying how Codex ended and the last lines it wrote that were not protocol, standard error's included; none after `close`.
 
-`prompt` sends `turn/start` with the input (text; an image as a data URL; a link as `[@name](uri)`; a text resource in `<context ref="uri">…</context>`; an image resource as an image; any other resource is `Error::Refused`) and the chosen model and effort, and returns once Codex has answered. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` sends `turn/interrupt` with the running turn's id and does not wait; with no turn running it does nothing.
+A `turn/start` that goes unanswered within `request_timeout` fails the prompt, and that turn is interrupted whenever it shows itself: its answer, its start and its end touch no later turn. `prompt` sends `turn/start` with the input (text; an image as a data URL; a link as `[@name](uri)`; a text resource in `<context ref="uri">…</context>`; an image resource as an image; any other resource is `Error::Refused`) and the chosen model and effort, and returns once Codex has answered. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` sends `turn/interrupt` with the running turn's id and does not wait; with no turn running it does nothing.
 
 `CodexSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB), `tail_lines` (8), `tail_line_bytes` (512), `initialize_timeout` (20 s), `request_timeout` (30 s), `exit_wait` (1 s), `max_tools` (4096 items kept), `max_model_pages` (10), `max_history_turns` (1000). Also: `parser` (`ParserLimits`: `max_title_bytes` 256, `max_told_bytes` 16 KiB, `max_streamed` 64), `list_models` (true; Codex's models failing to list stops nothing), `exit_poll` (100 ms), `close_wait` (2 s), `max_queued_writes` (1024), `title_bytes` (80), `version_wait` (10 s; 0 does not ask), `version_bytes` (4096), `on_line: Option<LineHook>`, `check_config: Option<AnswerCheck>` (asks `config/read` before the thread; a refusal fails the start), `check_thread: Option<AnswerCheck>` (the answer that opened the thread; the same). A resumed or loaded thread whose own directory lies outside `working_roots`, links followed, is refused.
 
@@ -84,11 +84,11 @@ pub const ALLOW_RULE: &str = "accept_with_rule";  pub const ALLOW_ALWAYS: &str =
 pub const ALLOW_NETWORK_RULE: &str = "allow_network_rule";  pub const REJECT_NETWORK_RULE: &str = "reject_network_rule";
 pub fn Parser::new(writer: Writer, max_tools: usize) -> Parser
 pub fn Parser::with_limits(writer: Writer, max_tools: usize, limits: ParserLimits) -> Parser
-pub fn set_thread(&mut self, thread: &str);  pub fn kept_output(&self) -> usize
+pub fn kept_output(&self) -> usize
 pub fn line(&mut self, message: &Value) -> Vec<Event>
 pub fn history(&mut self, turn: &Value) -> Vec<Event>
 pub fn turn(&self) -> Option<&str>;  pub fn started(&mut self, turn: &str);  pub fn interrupting(&mut self)
-pub fn set_thread(&mut self, thread: &str);  pub fn prompting(&mut self);  pub fn abandon(&mut self)
+pub fn set_thread(&mut self, thread: &str);  pub fn prompting(&mut self);  pub fn abandon(&mut self, request: &str)
 pub fn answers(&mut self) -> Vec<Answer>
 pub fn id_text(id: &Value) -> String
 pub fn git_patch(path: &str, change: FileChange, hunks: &str) -> String
@@ -106,7 +106,7 @@ pub fn git_patch(path: &str, change: FileChange, hunks: &str) -> String
 | `thread/tokenUsage/updated` | `Usage` of `last`: cached input split out, not cumulative, no cost, context used and `modelContextWindow` |
 | `account/rateLimits/updated` | `Quota` per window (`five_hour`, `weekly`, else its position; `usedPercent` as thousandths), and the exhausted window kept |
 | `turn/completed`, `turn/failed` | `TurnEnd`: a limit (`codexErrorInfo` naming a usage or rate limit, or a failed connection with HTTP 429; reset from `resetsAt` else the exhausted window) is `Limited`; `interrupted`, or `failed` after `interrupting`, is `Stopped(Cancelled)`; `failed` is `Failed` with the error's message; else `Stopped(EndTurn)` |
-| `error` | kept for the turn's end unless Codex will retry |
+| `error` | kept for the running turn's end, unless Codex will retry or it names another turn |
 | `thread/compacted`, `contextCompaction` items | `Compaction` |
 | `warning`, `configWarning`, `deprecationNotice`, `guardianWarning`, an MCP server that failed to start | `Notice` |
 | `thread/name/updated` | `Title` |
@@ -131,7 +131,7 @@ pub fn CodexAgent::new() -> CodexAgent                    // also Default; codex
 pub fn defaults(self, defaults: CodexLaunch) -> Self
 pub fn spawn(self, spawn: Arc<dyn Spawn>) -> Self
 pub fn settings(self, settings: CodexSettings) -> Self
-pub fn cli_version(&self) -> Option<String>               // codex --version, once, 10 s
+pub fn cli_version(&self) -> Option<String>               // codex --version, once, within CodexSettings::version_wait
 impl Harness for CodexAgent
 pub const DEFAULT: &str = "default";
 ```
@@ -155,7 +155,7 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 ## Gotchas
 
 - `turn/interrupt` needs the turn's id, which `turn/start`'s answer and `turn/started` give.
-- `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 and 0.166.0 take it where they list only `cancel` and go on with the turn (each one's recording `turn`). A later version is untested.
+- `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 and 0.166.0 take it where they list only `cancel`, mark the command `declined` and go on with the turn (each one's recording `turn`). A version after those is untested.
 - A tool call is named as ACP's clients expect, `web_search` and `mcp__<server>__<tool>`; the server and tool are in the name.
 - An `error` with `willRetry` is no limit: Codex may yet succeed. The turn's end decides, with the window an earlier report said was used up.
 - Another thread's usage comes as `Usage` with `elsewhere`, as spent and no part of this conversation's context; nothing else of it does.

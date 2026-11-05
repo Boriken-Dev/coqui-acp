@@ -33,7 +33,8 @@ override the other's refusal: the harness's permission mode and rules still appl
 
 On Claude Code 2.1.318, `--permission-prompts host` alone does not route a prompt to standard output: the call is refused as not
 granted. With `--permission-prompt-tool stdio`, the Claude Agent SDK's own route, it arrives as a `can_use_tool` control request,
-and the translator passes both flags.
+and the translator passes both flags, unless told not to with `--no-permission-prompts` or `permission_prompts`. `dontAsk` decides
+before either: a call nothing granted is refused where it is made, and no question comes. Both were tried on Windows and on Linux.
 
 Each question says what it grants: the host a network approval opens, the paths and network of a permissions request, where a
 moved file goes, the root an edit asks to write under. Version 1 has only a tool call to say it with, so the question is its title,

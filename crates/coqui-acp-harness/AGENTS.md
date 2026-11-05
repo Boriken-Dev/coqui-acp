@@ -4,7 +4,7 @@ Header-file-style reference for the `coqui-acp-harness` crate: every public item
 
 There are no Cargo features. MSRV Rust 1.89. A default build depends on `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
-Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; and `process`'s `Exit`, `Launch`, `PlainSpawn`, `Process`, `Spawn` and `Spawned`. The modules `acp`, `event`, `lines`, `process` and `version` are public.
+Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `ending_once`, `exit_text`, `line_writer` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The modules `acp`, `event`, `lines`, `process`, `stream` and `version` are public.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state.
 
@@ -34,7 +34,7 @@ pub fn ending_once() -> Arc<AtomicBool>
 
 Each argument reaches the program as one argument, with no shell. `Launch`'s `Debug` names the environment's variables and counts the arguments, never showing their values.
 
-`PlainSpawn` pipes all three streams. Its `kill` ends the whole tree: on Windows the process is put in a job object of its own just after it starts, and closing the job ends everything in it; on Unix it leads a process group, which is sent `SIGKILL`, and it is not collected before that, so the group id stays its own. A process started in the instant before it joins its job, or one that leaves the group, escapes. `kill` then collects the process; killing one that has ended is no error, and once it is collected nothing is sent to its id or group again; `try_wait` then answers how it ended. On Unix `try_wait` leaves a running process uncollected. Dropping the process kills it as `kill` does.
+`PlainSpawn` pipes all three streams. Its `kill` ends the tree: on Windows the process is put in a job object of its own just after it starts, and closing the job ends everything in it; on Unix it leads a process group, which is sent `SIGKILL`, and it is not collected before that, so the group id stays its own. A process started in the instant before it joins its job, or one that leaves the group, as anything in a session of its own has, escapes. `kill` then collects the process; killing one that has ended is no error, and once it is collected nothing is sent to its id or group again; `try_wait` then answers how it ended. On Unix `try_wait` leaves a running process uncollected. Dropping the process kills it as `kill` does.
 
 Implement `Spawn` to run a harness elsewhere: in a container, over SSH, under a terminal.
 
@@ -84,7 +84,7 @@ pub fn read_diagnostics(reader: impl Read, max_line: u64, tail: &Mutex<Tail>)   
 | `Terminal(Terminal)` | a terminal of the agent's own: `id`, `command`, `output` to add, `exit: Option<Option<i32>>` once it ended |
 | `Plan(Vec<PlanEntry>)` | the plan, whole |
 | `Permission(PermissionRequest)` | a call that needs leave |
-| `Usage(Usage)` | tokens (`input`, `output`, `cache_read`, `cache_write`, `cumulative`), `cost_usd`, `context_used`, `context_size` |
+| `Usage(Usage)` | tokens (`input`, `output`, `cache_read`, `cache_write`, `cumulative`), `cost_usd`, `context_used`, `context_size`, `elsewhere` |
 | `Quota(Vec<Quota>)` | quota windows: `window`, `used_permille`, `resets_at`, `status` |
 | `Commands(Vec<Command>)` | commands by name: `name`, `description`, `hint` |
 | `Title(String)` | the session's title |
@@ -101,8 +101,9 @@ pub fn read_diagnostics(reader: impl Read, max_line: u64, tail: &Mutex<Tail>)   
 
 ```rust
 pub struct PermissionRequest { pub tool: ToolCall, pub title: String, pub description: Option<String>,
-    pub options: Vec<PermissionOption>, pub responder: Responder }
+    pub options: Vec<PermissionOption>, pub responder: Responder, pub details: Map<String, Value> }
 pub fn PermissionRequest::new(tool, title, description, options, responder) -> PermissionRequest
+pub fn details(self, details: Map<String, Value>) -> Self
 pub struct PermissionOption { pub id: String, pub name: String, pub kind: OptionKind }
 pub enum Outcome { Selected(String), Cancelled }
 pub fn Responder::new(answer: impl FnOnce(Outcome) -> io::Result<()> + Send + 'static) -> Responder
@@ -129,6 +130,8 @@ pub trait Conversation: Send + Sync {
 }
 pub fn serve(harness: Arc<dyn Harness>, settings: Settings, input: impl Read, output: impl Write + Send + 'static) -> io::Result<()>
 pub fn absolute_path(path: &str, what: &str) -> Result<PathBuf, String>
+pub fn within_roots(path: &Path, roots: &[PathBuf]) -> bool                                 // links followed
+pub fn path_admitted(path: &Path, roots: &[PathBuf], network_paths: bool) -> Result<(), String>   // the same rule as a session's directories
 pub struct EventSink;  pub fn send(&self, event: Event) -> bool     // Clone; waits while the queue is full; false once the session is gone
 pub type NoticeHook = Arc<dyn Fn(&str) + Send + Sync>;
 pub const LIMIT_META_KEY: &str = "dev.boriken.coqui.acp/limit";
@@ -141,7 +144,7 @@ pub const PLAN_ID: &str = "plan";
 
 `serve` runs on the calling thread until the input ends, then closes every session it opened. Requests that take time run on threads of their own.
 
-- `initialize` answers version 2 to a client that asks for 2 or more, else version 1, up to `Settings::max_version`. Version 1: `agentCapabilities` with `loadSession`, `promptCapabilities`, `mcpCapabilities`, `sessionCapabilities` (`resume`, `close`, and `additionalDirectories` and `systemPrompt` when taken), `agentInfo`, `authMethods: []`. Version 2: `info` and `capabilities.session` (`prompt.image`, `prompt.embeddedContext`, `mcp.stdio`, `mcp.http`, `close`, `additionalDirectories`, `systemPrompt`). Any other request first is refused.
+- `initialize` is answered on a thread of its own, as asking a harness for `info` may take long. It answers version 2 to a client that asks for 2 or more, else version 1, up to `Settings::max_version`. Version 1: `agentCapabilities` with `loadSession`, `promptCapabilities`, `mcpCapabilities`, `sessionCapabilities` (`resume`, `close`, and `additionalDirectories` and `systemPrompt` when taken), `agentInfo`, `authMethods: []`. Version 2: `info` and `capabilities.session` (`prompt.image`, `prompt.embeddedContext`, `mcp.stdio`, `mcp.http`, `close`, `additionalDirectories`, `systemPrompt`). Any other request first is refused.
 - `authenticate` answers `{}`. `session/new`, `session/load`, `session/resume` (version 2's `replayFrom: {"type": "start"}` replays, as `load`) check every part against `Takes` and `Settings` before the harness is asked: a `cwd`, MCP command or directory that is not absolute by this platform's rules (a drive or UNC path on Windows, `/…` elsewhere), a network or device path (`\\host\share`, `//host/share`, `\\?\…`, `\\.\…`) unless `network_paths`, a directory outside `working_roots` or holding `.` or `..` when roots are set, MCP servers when `client_mcp_servers` is off, two servers of one name, a transport not taken (version 2 has no SSE), a system prompt in a mode other than `append`, or a part not taken is invalid params. `new` answers `{sessionId, configOptions}` before the session's first events; `load` answers `{configOptions}` after its history; `resume` answers at once.
 - A session being opened counts against `max_sessions` as an open one. `session/prompt` takes its turn on the thread that reads the client, so a `session/cancel` on the next line finds it; it takes text, images, resource links and resources as taken; any other block is invalid params, as is one larger than `max_prompt_bytes`. One turn at a time: a prompt while one runs is invalid request. Version 1 answers `{stopReason, usage}` at the turn's end; version 2 answers `{messageId}` at once, after a `user_message` and a `running` state update, and ends the turn with an `idle` state update carrying `stopReason` and `usage`. A failed turn is error `-32603` `Internal error` with the harness's words in `data.message` (version 1), or `idle` with `stopReason: "error"` and `error` (version 2). A limit is stop reason `refusal` with `_meta[LIMIT_META_KEY]`, and in version 2 a notice first.
 - `session/cancel` calls `interrupt` once per turn, after the turn's prompt has reached the harness; the turn's end is answered `cancelled`. If it has not ended within `cancel_grace` it is answered `cancelled` anyway, its later end is dropped, and a prompt is refused until it comes.

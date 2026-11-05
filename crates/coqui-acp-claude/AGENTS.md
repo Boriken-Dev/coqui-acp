@@ -61,7 +61,7 @@ pub fn models_of(answer: &Value) -> Option<Vec<Model>>
 pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error>
 ```
 
-`start` writes `mcp_config` of the launch's MCP servers to a new file in the system's temporary directory, readable only by this user on Unix, names it as `mcp_config_file` unless the launch names one, and removes it on `close` and drop; it then spawns Claude Code, writes an `initialize` control request, which Claude Code answers with no model turn and before any message, and waits for it up to `initialize_timeout`; it then sends `Event::Commands` with the commands of that answer, and an `Event::Notice` when the version is not one of `TESTED_VERSIONS`. Events reach `sink` from a thread of the session's own; one that answers `false` is not called again. The output's end is one `Event::Exited`, saying how Claude Code ended (`exited with code N`, `was ended by signal N`) and the last lines it wrote that were not protocol, standard error's included; none after `close`. A session that reports an id other than its own is killed and ends with `Event::Exited` saying so; nothing of the other session is told.
+`start` writes `mcp_config` of the launch's MCP servers to a new file in the system's temporary directory, readable only by this user on Unix and on Windows taking that directory's access, names it as `mcp_config_file` unless the launch names one, and removes it on `close` and drop; it then spawns Claude Code, writes an `initialize` control request, which Claude Code answers with no model turn and before any message, and waits for it up to `initialize_timeout`; it then sends `Event::Commands` with the commands of that answer, and an `Event::Notice` when the version is not one of `TESTED_VERSIONS`. Events reach `sink` from a thread of the session's own; one that answers `false` is not called again. The output's end is one `Event::Exited`, saying how Claude Code ended (`exited with code N`, `was ended by signal N`) and the last lines it wrote that were not protocol, standard error's included; none after `close`. A session that reports an id other than its own is killed and ends with `Event::Exited` saying so; nothing of the other session is told.
 
 `prompt` writes one `user` message: text; an image as a base64 source; a resource link as `[@name](uri)`; a text resource as `<context ref="uri">…</context>`, the address's `&"<>` escaped and every `</context` of the text written `&lt;/context`, so it cannot close the block; an image resource as an image. Any other resource is `Error::Refused`. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` writes an `interrupt` control request and does not wait; the turn's error result then ends it as `Stop::Cancelled`. `set_model` sends `set_model`, `set_effort` sends `apply_flag_settings` with `effortLevel`, each waiting up to `control_timeout`. Each line is one write.
 
@@ -76,9 +76,10 @@ pub type Writer = Arc<dyn Fn(&Value) -> io::Result<()> + Send + Sync>;
 pub type ControlAnswer = (String, Result<Value, String>);
 pub const ALLOW_ONCE: &str = "allow";  pub const ALLOW_ALWAYS: &str = "allow_always";  pub const REJECT: &str = "reject";
 pub fn Parser::new(writer: Writer, max_tools: usize) -> Parser
+pub fn Parser::with_limits(writer: Writer, max_tools: usize, limits: ParserLimits) -> Parser
 pub fn line(&mut self, value: &Value) -> Vec<Event>
 pub fn history(&mut self, value: &Value) -> Vec<Event>     // a transcript line: the person's messages told too
-pub fn interrupting(&mut self)
+pub fn prompting(&mut self);  pub fn interrupting(&mut self);  pub fn end_of_output(&mut self) -> Option<TurnEnd>
 pub fn answers(&mut self) -> Vec<ControlAnswer>            // our control requests' answers since the last call
 pub fn version(&self) -> Option<&str>;  pub fn session(&self) -> Option<&str>
 ```
@@ -93,7 +94,8 @@ pub fn version(&self) -> Option<&str>;  pub fn session(&self) -> Option<&str>
 | `assistant` | text and thinking not already streamed (an API error message's text is left to the result); each `tool_use` as `Tool` with title, kind, input, locations, and a diff for `Edit` and `Write`; `Bash` and `PowerShell` also `Terminal` with the command; `TodoWrite` as `Plan` instead; another `*_tool_use` block as `Tool` named `TYPE:NAME` |
 | `user` tool results | `Tool` completed or failed: `Edit` and `Write` with a diff whose `patch` is made from `structuredPatch`, located at each hunk; a command's output as `Terminal` with exit 0, or the code its failure names; other output as `ToolChunk` text (not `Read`'s); the Task tools' results update the `Plan` |
 | `result` | `Usage` (running totals, `total_cost_usd`, `contextWindow` of `modelUsage` as the size, the last request's tokens as context used), `Denied` with `permission_denials` named once each, then `TurnEnd` |
-| `rate_limit_event` | `Quota`; `utilization` taken only as a fraction |
+| `rate_limit_event` | `Quota`; `utilization` taken only as a fraction; a rejected one kept for the turn it came in |
+| `error` | `TurnEnd`: `Limited` when its words or a rejected event say so, else `Failed`; a `result` after it is no second end |
 | `control_request` `can_use_tool` | `Permission`; any other subtype is answered with an error at once |
 | `control_response` | kept for `answers`, never an event |
 
@@ -145,10 +147,11 @@ Config options: `model` (category `model`): the models Claude Code lists, and th
 ## Gotchas
 
 - `--permission-prompts host` alone does not route prompts to standard output on Claude Code 2.1.318: the call is refused as not granted. `--permission-prompt-tool=stdio` does, and the launch passes both unless `permission_prompts` is off.
-- `dontAsk` decides before those flags: a call nothing granted is refused where it is made, no question comes, and one allowed runs (recording `dont_ask`). With no prompt flags and no mode, the same refusal (recording `no_prompts`).
+- `dontAsk` decides before those flags, on Windows and on Linux: a call nothing granted is refused where it is made, no question comes, and one allowed runs (recording `dont_ask`). With no prompt flags and no mode, the same refusal (recording `no_prompts`).
 - A `rate_limit_event` is the only place a limit's reset is a number; the `result` after it says a local clock time. A rejected one becomes the limit of a turn that then fails or whose output ends; one whose turn is answered anyway is no failure (recording `rate_limit`). Claude Code writes these only with a subscription's login.
-- No recording holds a `type: error` line: nothing a stand-in did drew one from 2.1.318. It is handled as a failed turn from what its shape is said to be.
-- Closing standard input does not end Claude Code while a background `Bash` runs: it exits when that does. Killing Claude Code alone left the background process running and ended its output at once (on Windows); `close` ends the tree.
+- No recording holds a `type: error` line: nothing a stand-in did drew one from 2.1.318. It is handled as a failed turn, its words read from `result`, `error.message`, the first block of `message`, `message` or `error`.
+- Claude Code's output does not outlive it: on Windows and on Linux, with a background `Bash` still running, killing Claude Code alone ended its output at once, and closing standard input made it wait for that `Bash`, then exit and end its output together. What can hold the output open past an exit is a `Spawn` or a wrapper; the watcher is for that.
+- `close` ends what Claude Code started on Windows, its job object taking a background `Bash` with it. On Linux that `Bash` runs in a session of its own, outside Claude Code's process group, and outlives `close` until it ends by itself.
 - A prompt's blocks keep the order the client gave them: a host that wants images first, as the model's guidance has it, puts them first.
 - `partial_messages` is on since ACP streams; a host that wants whole messages turns it off.
 - `--resume` finds a session only from the directory that recorded it.
