@@ -1074,3 +1074,44 @@ fn every_bound_of_the_parser_is_a_setting() {
     };
     assert_eq!(plan.len(), 1);
 }
+
+/// A rejection told between turns says nothing of the next one, which asked again.
+#[test]
+fn a_rejection_before_a_prompt_says_nothing_of_its_turn() {
+    let (mut parser, _) = support::parser_of();
+    parser.line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1}}));
+    parser.prompting();
+    assert_eq!(parser.end_of_output(), None);
+    parser.line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1}}));
+    parser.line(
+        &json!({"type": "result", "subtype": "success", "is_error": false, "result": "Done."}),
+    );
+    parser.line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1}}));
+    parser.prompting();
+    let events = parser.line(
+        &json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+        "errors": ["It broke."]}),
+    );
+    assert_eq!(ends_of(&events), [&TurnEnd::Failed("It broke.".into())]);
+}
+
+/// Each place a line of this type could say what went wrong.
+#[test]
+fn an_error_line_says_what_any_of_its_shapes_say() {
+    for line in [
+        json!({"type": "error", "result": "Said so."}),
+        json!({"type": "error", "message": {"content": [{"type": "text", "text": "Said so."}]}}),
+        json!({"type": "error", "error": {"message": "Said so."}}),
+        json!({"type": "error", "message": "Said so."}),
+        json!({"type": "error", "error": "Said so."}),
+    ] {
+        let (mut parser, _) = support::parser_of();
+        parser.prompting();
+        let events = parser.line(&line);
+        assert_eq!(
+            ends_of(&events),
+            [&TurnEnd::Failed("Said so.".into())],
+            "{line}"
+        );
+    }
+}

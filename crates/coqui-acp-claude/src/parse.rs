@@ -147,6 +147,10 @@ impl Parser {
 
     /// A prompt is being written: what was left of the turn before it says nothing of this one.
     pub fn prompting(&mut self) {
+        // A prompt written while one runs waits its turn: what the running one was told is still its own.
+        if !self.running {
+            self.rejected = None;
+        }
         self.running = true;
         self.interrupted = false;
         self.ended_by_error = false;
@@ -235,13 +239,17 @@ impl Parser {
 
     /// A line of `type: error`: the turn has failed, or a quota refused it.
     fn error_line(&mut self, value: &Value) -> Vec<Event> {
-        let text = value
-            .pointer("/error/message")
-            .or_else(|| value.get("message"))
-            .or_else(|| value.get("error"))
-            .and_then(Value::as_str)
-            .unwrap_or("Claude Code reported an error")
-            .to_string();
+        let text = [
+            "/result",
+            "/error/message",
+            "/message/content/0/text",
+            "/message",
+            "/error",
+        ]
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .unwrap_or("Claude Code reported an error")
+        .to_string();
         let rejected = self.rejected.take();
         let end = match limits::limit_of_text(&text) {
             Some(limit) => TurnEnd::Limited(limits::with_hint(limit, rejected)),
