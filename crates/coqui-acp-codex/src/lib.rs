@@ -26,7 +26,7 @@ pub use session::{
 };
 
 /// The Codex versions this crate was tested with. Another one runs, with a warning.
-pub const TESTED_VERSIONS: &[&str] = &["0.164.0"];
+pub const TESTED_VERSIONS: &[&str] = &["0.164.0", "0.166.0"];
 
 /// What went wrong with Codex.
 #[derive(Debug)]

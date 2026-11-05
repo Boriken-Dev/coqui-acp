@@ -1,0 +1,127 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "coqui-acp-codex",
+     "version": "0.0.0"
+    },
+    "capabilities": {}
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "method": "initialized",
+   "params": {}
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "id": 2,
+   "method": "model/list",
+   "params": {}
+  }
+ },
+ {
+  "after": 3,
+  "input": {
+   "id": 3,
+   "method": "thread/start",
+   "params": {
+    "cwd": "C:/coqui-fx/w",
+    "approvalPolicy": "untrusted",
+    "sandbox": "workspace-write",
+    "developerInstructions": "Answer briefly.",
+    "config": {
+     "mcp_servers": {
+      "echo": {
+       "url": "http://127.0.0.1:53327/mcp"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "after": 4,
+  "input": {
+   "id": 4,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1ac10-c5ca-7a91-adf9-6ddfcebceab1",
+    "input": [
+     {
+      "type": "text",
+      "text": "Change two to three in notes.txt."
+     },
+     {
+      "type": "image",
+      "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/kpmmpQAAAABJRU5ErkJggg=="
+     }
+    ],
+    "effort": "low"
+   }
+  }
+ },
+ {
+  "after": 21,
+  "input": {
+   "id": 0,
+   "result": {
+    "decision": "accept"
+   }
+  }
+ },
+ {
+  "after": 29,
+  "input": {
+   "id": 1,
+   "result": {
+    "decision": "decline"
+   }
+  }
+ },
+ {
+  "after": 37,
+  "input": {
+   "id": 2,
+   "result": {
+    "decision": "acceptForSession"
+   }
+  }
+ },
+ {
+  "after": 47,
+  "input": {
+   "id": 3,
+   "error": {
+    "code": -32601,
+    "message": "not handled"
+   }
+  }
+ },
+ {
+  "after": 64,
+  "input": {
+   "id": 5,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1ac10-c5ca-7a91-adf9-6ddfcebceab1",
+    "input": [
+     {
+      "type": "text",
+      "text": "And now?"
+     }
+    ],
+    "model": "gpt-6-luna",
+    "effort": "medium"
+   }
+  }
+ }
+]

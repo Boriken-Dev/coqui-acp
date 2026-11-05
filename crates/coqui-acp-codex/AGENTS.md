@@ -155,7 +155,7 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 ## Gotchas
 
 - `turn/interrupt` needs the turn's id, which `turn/start`'s answer and `turn/started` give.
-- `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 takes it where it lists only `cancel` and goes on with the turn (recording `turn`). A later version is untested.
+- `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 and 0.166.0 take it where they list only `cancel` and go on with the turn (each one's recording `turn`). A later version is untested.
 - A tool call is named as ACP's clients expect, `web_search` and `mcp__<server>__<tool>`; the server and tool are in the name.
 - An `error` with `willRetry` is no limit: Codex may yet succeed. The turn's end decides, with the window an earlier report said was used up.
 - Another thread's usage comes as `Usage` with `elsewhere`, as spent and no part of this conversation's context; nothing else of it does.

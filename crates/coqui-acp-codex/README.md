@@ -125,7 +125,8 @@ The tests run against `examples/replay_codex.rs`, which replays app-server traff
 `tests/fixtures/codex-0.164.0/`: each `<name>.stdout` is the app server's standard output byte for byte but for its
 remote-control status line, which names the machine and is left out; `<name>.steps.json` is what was written to it and when, and
 `<name>.argv.json` its arguments, which `tests/argv.rs` compares with what the launch builds. `tools/record_harnesses/record.py` makes them. They were recorded against a loopback stand-in for the model, so no model was reached.
-`codex_app_server_protocol.schemas.json` is what `codex app-server generate-json-schema` printed for 0.164.0.
+`codex_app_server_protocol.schemas.json` is what `codex app-server generate-json-schema` printed for 0.164.0. The tests also passed
+against every case recorded from 0.166.0, of which `tests/fixtures/codex-0.166.0/` keeps `turn`.
 
 ## License
 

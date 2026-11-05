@@ -923,7 +923,7 @@ impl Parser {
                 _ => {}
             }
         }
-        // Refusing one call never needs Codex's leave: 0.164.0 takes `decline` where it lists only `cancel`, and goes on.
+        // Refusing one call never needs Codex's leave: 0.164.0 and 0.166.0 take `decline` where they list only `cancel`, and go on.
         let rejected = decided(&json!("decline"));
         choices.push(Choice::new(
             REJECT,

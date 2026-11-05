@@ -556,3 +556,59 @@ fn every_bound_of_the_parser_is_a_setting() {
             .contains("[cut at 16 bytes of 100]")
     );
 }
+
+/// Refusing one call where Codex lists only `cancel`: each version recorded takes `decline`, and goes on.
+#[test]
+fn every_recorded_version_takes_a_decline_it_did_not_list() {
+    let fixtures = support::fixtures();
+    let versions = fixtures.parent().unwrap();
+    let mut seen = Vec::new();
+    for directory in std::fs::read_dir(versions).unwrap() {
+        let directory = directory.unwrap().path();
+        let version = directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        seen.push(version.clone());
+        let lines: Vec<Value> = std::fs::read_to_string(directory.join("turn.stdout"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let steps: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(directory.join("turn.steps.json")).unwrap())
+                .unwrap();
+        let asked = lines
+            .iter()
+            .find(|line| {
+                line["method"] == "item/commandExecution/requestApproval"
+                    && steps.iter().any(|step| {
+                        step["input"]["id"] == line["id"]
+                            && step["input"]["result"]["decision"] == "decline"
+                    })
+            })
+            .expect("a command declined");
+        let listed = asked["params"]["availableDecisions"].as_array().unwrap();
+        assert!(!listed.contains(&json!("decline")), "{version}: {listed:?}");
+        let item = &asked["params"]["itemId"];
+        let done = lines
+            .iter()
+            .find(|line| {
+                line["method"] == "item/completed" && line["params"]["item"]["id"] == *item
+            })
+            .expect("its end");
+        assert_eq!(done["params"]["item"]["status"], "declined", "{version}");
+        assert!(
+            lines.iter().any(|line| line["method"] == "turn/completed"
+                && line["params"]["turn"]["status"] == "completed"),
+            "{version}: the turn goes on"
+        );
+        let number = version.strip_prefix("codex-").unwrap();
+        assert!(
+            coqui_acp_codex::TESTED_VERSIONS.contains(&number),
+            "{version} is recorded and not said to be tested"
+        );
+    }
+    assert!(seen.len() >= 2, "{seen:?}");
+}

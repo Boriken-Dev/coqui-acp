@@ -6,7 +6,7 @@ Each runs the installed command line over the protocol it already speaks on stan
 | Crate and command | Runs | Protocol it drives | Tested with |
 | --- | --- | --- | --- |
 | `coqui-acp-claude` | `claude` | stream-json: `-p --input-format stream-json --output-format stream-json` | Claude Code 2.1.318 |
-| `coqui-acp-codex` | `codex app-server` | the app server's JSON-RPC | Codex 0.164.0 |
+| `coqui-acp-codex` | `codex app-server` | the app server's JSON-RPC | Codex 0.164.0 and 0.166.0 |
 
 `coqui-acp-harness` holds what they share: starting the process and ending it with everything it started, reading its lines within
 bounds, events in no protocol's terms, and the ACP agent itself. A version not tested runs, with a warning: a notice in ACP version

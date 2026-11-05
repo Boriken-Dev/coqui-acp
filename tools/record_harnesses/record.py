@@ -49,13 +49,13 @@ def scrubbed(line):
 
 
 def clear(root):
-    """Empties the root, waiting for what the last case's tool still holds there to let go."""
+    """Empties the root, waiting for what the last case's tool still holds there to let go: on Windows, up to some tens of seconds."""
     def writable(remove, path, _error):
         # Codex keeps read-only files in its home.
         os.chmod(path, stat.S_IWRITE)
         remove(path)
 
-    for _ in range(100):
+    for _ in range(600):
         try:
             shutil.rmtree(root, onerror=writable)
         except OSError:
