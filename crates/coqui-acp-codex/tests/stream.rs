@@ -651,3 +651,16 @@ fn a_resource_cannot_close_its_context_block() {
         "{text}"
     );
 }
+
+/// `turn/start`'s answer can be handled after the turn it names has ended; an interrupt then has nothing to name.
+#[test]
+fn a_turn_that_has_ended_is_not_taken_as_running_from_a_late_answer() {
+    let writer: coqui_acp_codex::parse::Writer = std::sync::Arc::new(|_| Ok(()));
+    let mut parser = coqui_acp_codex::Parser::new(writer, 16);
+    parser.line(&json!({"method": "turn/started", "params": {"turn": {"id": "a"}}}));
+    parser.line(&json!({"method": "turn/completed", "params": {"turn": {"id": "a", "status": "completed"}}}));
+    parser.started("a");
+    assert_eq!(parser.turn(), None);
+    parser.started("b");
+    assert_eq!(parser.turn(), Some("b"));
+}

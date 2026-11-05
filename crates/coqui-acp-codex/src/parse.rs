@@ -64,6 +64,8 @@ pub struct Parser {
     /// Commands whose output arrived in pieces.
     output_streamed: BTreeSet<String>,
     turn: Option<String>,
+    /// The turn that ended last: `turn/start`'s answer can be handled after that turn's end.
+    ended: Option<String>,
     interrupted: bool,
     /// The latest window the account reported as used up.
     exhausted: Option<Limit>,
@@ -94,6 +96,7 @@ impl Parser {
             order: VecDeque::new(),
             output_streamed: BTreeSet::new(),
             turn: None,
+            ended: None,
             interrupted: false,
             exhausted: None,
             error: None,
@@ -107,9 +110,11 @@ impl Parser {
         self.turn.as_deref()
     }
 
-    /// Takes `turn` as the running turn, as `turn/start`'s answer names it.
+    /// Takes `turn` as the running turn, as `turn/start`'s answer names it, unless it has already ended.
     pub fn started(&mut self, turn: &str) {
-        self.turn = Some(turn.to_string());
+        if self.ended.as_deref() != Some(turn) {
+            self.turn = Some(turn.to_string());
+        }
     }
 
     /// Marks the running turn as interrupted: its end reads as cancelled.
@@ -271,7 +276,10 @@ impl Parser {
             }
             "turn/completed" | "turn/failed" => {
                 let end = self.end(method, message);
-                self.turn = None;
+                self.ended = self
+                    .turn
+                    .take()
+                    .or_else(|| text(params, "/turn/id").map(str::to_string));
                 vec![Event::TurnEnd(end)]
             }
             "thread/compacted" => vec![Event::Compaction {
