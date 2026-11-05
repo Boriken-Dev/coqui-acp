@@ -228,8 +228,8 @@ fn a_recorded_interrupt_ends_the_turn_cancelled() {
     assert_eq!(
         ends,
         [
-            TurnEnd::Stopped(Stop::Cancelled),
-            TurnEnd::Stopped(Stop::EndTurn)
+            TurnEnd::stopped(Stop::Cancelled),
+            TurnEnd::stopped(Stop::EndTurn)
         ]
     );
 }
@@ -303,7 +303,7 @@ fn recorded_initialize_and_model_list_give_the_version_and_models() {
         .iter()
         .find(|line| line["id"] == 2)
         .expect("the answer to model/list");
-    let models = models_of(&list["result"]);
+    let models = models_of(&list["result"]).expect("listed");
     assert!(
         models
             .iter()
@@ -350,7 +350,7 @@ fn the_models_codex_lists_are_read_from_model_list_and_hidden_ones_are_left_out(
         {"id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1-Sol", "description": "Latest workhorse model", "hidden": false, "isDefault": true},
         {"id": "internal", "model": "internal", "hidden": true},
         {"id": "gpt-6-astra", "displayName": "Astra"}
-    ]}));
+    ]})).expect("listed");
     let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(ids, ["gpt-6.1-sol", "gpt-6-astra"]);
     assert_eq!(models[0].name, "GPT-6.1-Sol");
@@ -358,7 +358,12 @@ fn the_models_codex_lists_are_read_from_model_list_and_hidden_ones_are_left_out(
 
 #[test]
 fn an_answer_without_data_lists_none() {
-    assert!(models_of(&json!({"code": -32601, "message": "no such method"})).is_empty());
+    assert_eq!(
+        models_of(&json!({"code": -32601, "message": "no such method"})),
+        None,
+        "unknown is not empty"
+    );
+    assert_eq!(models_of(&json!({"data": []})), Some(Vec::new()));
 }
 
 #[test]
@@ -459,7 +464,7 @@ fn turn_completed_fixture_maps_to_completed() {
     let events = events_of(&[
         json!({"method": "turn/completed", "params": {"turn": {"id": "t", "status": "completed"}}}),
     ]);
-    assert_eq!(end_of(&events), &TurnEnd::Stopped(Stop::EndTurn));
+    assert_eq!(end_of(&events), &TurnEnd::stopped(Stop::EndTurn));
 }
 
 #[test]

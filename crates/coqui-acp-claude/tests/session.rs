@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use coqui_acp_claude::harness::event::{Content, Event, Outcome, Stop, TurnEnd};
-use coqui_acp_claude::{ClaudeSession, ClaudeSettings, PlainSpawn, SessionStart, Spawn};
+use coqui_acp_claude::{ClaudeSession, ClaudeSettings, PlainSpawn, SessionStart};
 use support::{Scratch, replaying};
 
 fn start(
@@ -556,7 +556,7 @@ fn a_close_waits_for_a_process_that_takes_its_time_to_end() {
             &self,
             launch: &coqui_acp_claude::Launch,
         ) -> std::io::Result<coqui_acp_claude::Spawned> {
-            let mut spawned = PlainSpawn.spawn(launch)?;
+            let mut spawned = coqui_acp_claude::Spawn::spawn(&PlainSpawn, launch)?;
             let process = core::mem::replace(&mut spawned.process, Box::new(PlainGone));
             spawned.process = Box::new(Slow(std::sync::Arc::clone(&self.0), process));
             Ok(spawned)

@@ -420,7 +420,7 @@ fn a_turn_given_up_on_is_interrupted_when_it_starts_and_its_end_is_nobodys() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, Event::TurnEnd(TurnEnd::Stopped(_)))),
+            .any(|event| matches!(event, Event::TurnEnd(TurnEnd::Stopped { .. }))),
         "{events:?}"
     );
 }
@@ -434,5 +434,125 @@ fn counts_past_any_size_do_not_panic() {
         "cachedInputTokens": 0, "totalTokens": 1, "reasoningOutputTokens": 0},
         "total": {"inputTokens": 1, "outputTokens": 1, "cachedInputTokens": 0, "totalTokens": 1,
         "reasoningOutputTokens": 0}}}}),
+    );
+}
+
+#[test]
+fn the_end_of_a_turn_given_up_on_does_not_end_the_one_running() {
+    let (mut parser, written) = parser();
+    parser
+        .line(&json!({"method": "turn/started", "params": {"threadId": "t", "turn": {"id": "a"}}}));
+    parser.abandon();
+    let sent = written.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(sent["params"]["turnId"], "a");
+    parser.started("b");
+    let events = parser.line(
+        &json!({"method": "turn/completed", "params": {"threadId": "t",
+        "turn": {"id": "a", "status": "interrupted"}}}),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TurnEnd(_))),
+        "{events:?}"
+    );
+    assert_eq!(parser.turn(), Some("b"));
+    let events = parser.line(
+        &json!({"method": "turn/completed", "params": {"threadId": "t",
+        "turn": {"id": "b", "status": "completed"}}}),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::TurnEnd(_))),
+        "{events:?}"
+    );
+    assert_eq!(parser.turn(), None);
+}
+
+#[test]
+fn the_end_of_a_turn_that_is_not_the_running_one_ends_nothing() {
+    let (mut parser, _) = parser();
+    parser
+        .line(&json!({"method": "turn/started", "params": {"threadId": "t", "turn": {"id": "b"}}}));
+    let events = parser.line(
+        &json!({"method": "turn/completed", "params": {"threadId": "t",
+        "turn": {"id": "old", "status": "completed"}}}),
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(parser.turn(), Some("b"));
+}
+
+#[test]
+fn the_usage_of_another_thread_is_told_as_spent_elsewhere() {
+    let (mut parser, _) = parser();
+    parser.set_thread("t1");
+    let events = parser.line(&json!({"method": "thread/tokenUsage/updated", "params": {"threadId": "t2",
+        "turnId": "u", "tokenUsage": {"last": {"inputTokens": 7, "outputTokens": 2, "cachedInputTokens": 0,
+        "totalTokens": 9, "reasoningOutputTokens": 0}, "total": {"inputTokens": 7, "outputTokens": 2,
+        "cachedInputTokens": 0, "totalTokens": 9, "reasoningOutputTokens": 0}}}}));
+    let [Event::Usage(usage)] = &events[..] else {
+        panic!("{events:?}")
+    };
+    assert!(usage.elsewhere);
+    assert_eq!(usage.input, 7);
+    assert_eq!(usage.context_used, None);
+}
+
+#[test]
+fn a_command_cut_for_its_description_says_so() {
+    let (mut parser, _) = parser();
+    let long = "x".repeat(20 * 1024);
+    let request = question(&mut parser, &command(&json!({"command": long})));
+    let description = request.description.clone().unwrap();
+    assert!(description.contains("cut"), "{}", &description[..40]);
+    assert!(description.len() < 17 * 1024);
+}
+
+#[test]
+fn the_output_of_commands_long_gone_is_not_kept() {
+    let (mut parser, _) = parser();
+    for number in 0..5000 {
+        parser.line(
+            &json!({"method": "item/commandExecution/outputDelta", "params": {"threadId": "t",
+            "itemId": format!("c{number}"), "delta": "x"}}),
+        );
+    }
+    assert!(parser.kept_output() <= 4096, "{}", parser.kept_output());
+}
+
+#[test]
+fn a_question_carries_the_fields_a_host_decides_by() {
+    let (mut parser, _) = parser();
+    let request = question(
+        &mut parser,
+        &command(&json!({"kind": "writeStdin", "threadId": "t", "turnId": "u"})),
+    );
+    assert_eq!(
+        request.details["method"],
+        "item/commandExecution/requestApproval"
+    );
+    assert_eq!(request.details["kind"], "writeStdin");
+    assert_eq!(request.details["threadId"], "t");
+    assert_eq!(request.details["turnId"], "u");
+    let request = question(&mut parser, &file_approval("f", Some("/x")));
+    assert_eq!(request.details["grantRoot"], "/x");
+    assert_eq!(request.details["itemId"], "f");
+}
+
+#[test]
+fn every_bound_of_the_parser_is_a_setting() {
+    let mut limits = coqui_acp_codex::ParserLimits::new();
+    limits.max_title_bytes = 8;
+    limits.max_told_bytes = 16;
+    let (_, _unused) = parser();
+    let mut parser = Parser::with_limits(std::sync::Arc::new(|_| Ok(())), 16, limits);
+    let request = question(&mut parser, &command(&json!({"command": "x".repeat(100)})));
+    assert!(request.title.len() < 24, "{}", request.title);
+    assert!(
+        request
+            .description
+            .unwrap()
+            .contains("[cut at 16 bytes of 100]")
     );
 }

@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 use std::io::{self, Write};
 use std::sync::mpsc;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
 use coqui_acp_harness::event::{Content, Event, Severity, context_block};
@@ -192,6 +192,7 @@ pub struct ClaudeSession {
     process: Arc<dyn Process>,
     parser: Arc<Mutex<Parser>>,
     waiting: Waiting,
+    ended: Arc<OnceLock<String>>,
     requests: AtomicU64,
     answer: Value,
     settings: ClaudeSettings,
@@ -275,6 +276,7 @@ impl ClaudeSession {
         stream.exit_wait = settings.exit_wait;
         stream.on_line.clone_from(&settings.on_line);
         let waiting = Arc::clone(&stream.waiting);
+        let ended = Arc::clone(&stream.ended);
         {
             let reading = Arc::clone(&parser);
             let ending = Arc::clone(&parser);
@@ -324,6 +326,7 @@ impl ClaudeSession {
             process,
             parser,
             waiting,
+            ended,
             requests: AtomicU64::new(0),
             answer: Value::Null,
             settings,
@@ -386,6 +389,10 @@ impl ClaudeSession {
         let id = format!("coqui-acp-{number}");
         let (answer, answered) = mpsc::channel();
         locked(&self.waiting).insert(id.clone(), answer);
+        if let Some(reason) = self.ended.get() {
+            locked(&self.waiting).remove(&id);
+            return Err(Error::Harness(reason.clone()));
+        }
         if let Err(error) =
             (self.writer)(&json!({"type": "control_request", "request_id": id, "request": request}))
         {

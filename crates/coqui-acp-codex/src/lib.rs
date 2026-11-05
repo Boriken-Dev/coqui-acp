@@ -17,9 +17,13 @@ use std::io;
 
 pub use agent::{CodexAgent, DEFAULT};
 pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned};
-pub use launch::{CodexLaunch, ThreadStart, toml_value, valid_config_key, valid_thread_id};
-pub use parse::Parser;
-pub use session::{CodexSession, CodexSettings, Model, models_of, user_input, version_of};
+pub use launch::{
+    ClientInfo, CodexLaunch, ThreadStart, toml_value, valid_config_key, valid_thread_id,
+};
+pub use parse::{Parser, ParserLimits};
+pub use session::{
+    AnswerCheck, CodexSession, CodexSettings, Model, models_of, user_input, version_of,
+};
 
 /// The Codex versions this crate was tested with. Another one runs, with a warning.
 pub const TESTED_VERSIONS: &[&str] = &["0.164.0"];

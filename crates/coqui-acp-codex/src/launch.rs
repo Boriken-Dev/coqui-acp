@@ -22,6 +22,31 @@ pub enum ThreadStart {
     Load(String),
 }
 
+/// How this client names itself to Codex in `initialize`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ClientInfo {
+    /// Its name, which Codex puts in its user agent.
+    pub name: String,
+    /// Its name for people.
+    pub title: String,
+    /// Its version.
+    pub version: String,
+}
+
+impl ClientInfo {
+    /// A client of this name and version, its title the same as its name.
+    #[must_use]
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            title: name.clone(),
+            name,
+            version: version.into(),
+        }
+    }
+}
+
 /// Everything Codex is started with. The app server's own arguments are `app-server` and one `--config=key=value`
 /// per entry of `config_overrides`, each value written as TOML by this crate; everything a thread is given (MCP
 /// servers, directories, instructions, policies) goes in `thread/start` or `thread/resume` as JSON, never on the
@@ -60,6 +85,10 @@ pub struct CodexLaunch {
     /// `--config` overrides of the app server, each a dotted key ([`valid_config_key`]; another is refused when the
     /// session starts) and a JSON value written as TOML.
     pub config_overrides: Vec<(String, Value)>,
+    /// More arguments of the app server, after the overrides, each as given: the caller's own, unchecked.
+    pub extra_args: Vec<OsString>,
+    /// How this client names itself to Codex; this crate by default.
+    pub client_info: ClientInfo,
     /// Variables set for Codex over the inherited environment.
     pub env: BTreeMap<OsString, OsString>,
     /// Start Codex from an empty environment and `env` alone.
@@ -102,6 +131,8 @@ impl CodexLaunch {
             sandbox: None,
             thread_config: Map::new(),
             config_overrides: Vec::new(),
+            extra_args: Vec::new(),
+            client_info: ClientInfo::new("coqui-acp-codex", env!("CARGO_PKG_VERSION")),
             env: BTreeMap::new(),
             clear_env: false,
         }
@@ -114,6 +145,7 @@ impl CodexLaunch {
         for (key, value) in &self.config_overrides {
             args.push(format!("--config={key}={}", toml_value(value)).into());
         }
+        args.extend(self.extra_args.iter().cloned());
         let mut launch = Launch::new(self.executable.clone())
             .args(args)
             .cwd(self.cwd.clone())
@@ -168,6 +200,7 @@ impl CodexLaunch {
             .iter()
             .map(|directory| {
                 directory
+                    // In two parts, as this repository's check for private paths takes the whole name for one.
                     .join(concat!(".", "agents"))
                     .join("skills")
                     .to_string_lossy()

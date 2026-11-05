@@ -39,14 +39,39 @@ pub const ALLOW_NETWORK_RULE: &str = "allow_network_rule";
 /// The id of the option that keeps a rule refusing a host.
 pub const REJECT_NETWORK_RULE: &str = "reject_network_rule";
 
-/// The longest title made from a command or a query, in bytes.
-const TITLE_BYTES: usize = 256;
-/// The most of a command a question's description tells, in bytes.
-const WHOLE_BYTES: usize = 16 * 1024;
+/// What a [`Parser`] keeps and cuts. Every one is a setting with a default, and any value is taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ParserLimits {
+    /// The longest title made from a command or a query, in bytes. Default 256.
+    pub max_title_bytes: usize,
+    /// The most of a command a question's description tells, in bytes, marked when cut. Default 16 KiB.
+    pub max_told_bytes: usize,
+    /// The messages remembered as streamed, so their whole copy is not told again. Default 64.
+    pub max_streamed: usize,
+}
 
-fn title(text: &str) -> String {
+impl ParserLimits {
+    /// The defaults.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_title_bytes: 256,
+            max_told_bytes: 16 * 1024,
+            max_streamed: 64,
+        }
+    }
+}
+
+impl Default for ParserLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn title_within(max: usize, text: &str) -> String {
     let first = text.lines().next().unwrap_or_default();
-    let cut = one_line(coqui_acp_harness::lines::cut(first, TITLE_BYTES));
+    let cut = one_line(coqui_acp_harness::lines::cut(first, max));
     if cut.len() < text.len() {
         format!("{cut}…")
     } else {
@@ -70,6 +95,7 @@ pub struct Parser {
     order: VecDeque<String>,
     /// Commands whose output arrived in pieces.
     output_streamed: BTreeSet<String>,
+    limits: ParserLimits,
     /// This session's thread, once known: what another thread says is not this session's.
     thread: Option<String>,
     /// Calls of MCP tools started and not finished, oldest first.
@@ -112,6 +138,7 @@ impl Parser {
             items: BTreeMap::new(),
             order: VecDeque::new(),
             output_streamed: BTreeSet::new(),
+            limits: ParserLimits::new(),
             thread: None,
             mcp_running: VecDeque::new(),
             edits: BTreeMap::new(),
@@ -168,6 +195,35 @@ impl Parser {
         self.abandoned = Some(turn);
     }
 
+    /// The same with these bounds.
+    #[must_use]
+    pub fn with_limits(writer: Writer, max_tools: usize, limits: ParserLimits) -> Self {
+        Self {
+            limits,
+            ..Self::new(writer, max_tools)
+        }
+    }
+
+    fn title(&self, text: &str) -> String {
+        title_within(self.limits.max_title_bytes, text)
+    }
+
+    /// `text` within the bound of what a question's description tells, saying when it was cut.
+    fn told(&self, text: &str) -> String {
+        let cut = coqui_acp_harness::lines::cut(text, self.limits.max_told_bytes);
+        if cut.len() < text.len() {
+            format!("{cut}\n[cut at {} bytes of {}]", cut.len(), text.len())
+        } else {
+            cut.to_string()
+        }
+    }
+
+    /// How many commands' output is remembered as having come in pieces.
+    #[must_use]
+    pub fn kept_output(&self) -> usize {
+        self.output_streamed.len()
+    }
+
     /// Marks the running turn as interrupted: its end reads as cancelled.
     pub fn interrupting(&mut self) {
         self.interrupted = true;
@@ -197,10 +253,10 @@ impl Parser {
 
     fn streamed(&mut self, id: &str) {
         if !self.streamed.iter().any(|known| known == id) {
-            if self.streamed.len() >= 64 {
+            self.streamed.push_back(id.to_string());
+            while self.streamed.len() > self.limits.max_streamed {
                 self.streamed.pop_front();
             }
-            self.streamed.push_back(id.to_string());
         }
     }
 
@@ -223,8 +279,22 @@ impl Parser {
             (Some(method), Some(id)) => {
                 self.request(method, id, message.get("params").unwrap_or(&Value::Null))
             }
-            (Some(_), None) if self.other_thread(message.get("params").unwrap_or(&Value::Null)) => {
-                Vec::new()
+            (Some(method), None)
+                if self.other_thread(message.get("params").unwrap_or(&Value::Null)) =>
+            {
+                // Another thread's, such as a sub-agent's: nothing of it is this conversation's, but what it spent is spent.
+                if method == "thread/tokenUsage/updated" {
+                    limits::usage(message)
+                        .map(|mut usage| {
+                            usage.elsewhere = true;
+                            usage.context_used = None;
+                            usage.context_size = None;
+                            vec![Event::Usage(usage)]
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
             }
             (Some(method), None) => self.notification(method, message),
             (None, None) => Vec::new(),
@@ -291,7 +361,10 @@ impl Parser {
                 else {
                     return Vec::new();
                 };
-                self.output_streamed.insert(id.to_string());
+                // Before the item is known, or after it was forgotten, it is not to be kept for good.
+                if self.items.contains_key(id) {
+                    self.output_streamed.insert(id.to_string());
+                }
                 let mut terminal = Terminal::new(id);
                 terminal.output = Some(delta.to_string());
                 vec![Event::Terminal(terminal)]
@@ -345,15 +418,22 @@ impl Parser {
                 Vec::new()
             }
             "turn/completed" | "turn/failed" => {
-                let end = self.end(method, message);
-                self.ended = self
-                    .turn
-                    .take()
-                    .or_else(|| text(params, "/turn/id").map(str::to_string));
-                if self.abandoned.is_some() && self.abandoned == self.ended {
+                let done = text(params, "/turn/id").map(str::to_string);
+                if done.is_some() && self.abandoned == done {
                     self.abandoned = None;
+                    if self.turn == done {
+                        self.turn = None;
+                    }
+                    self.ended = done;
                     return Vec::new();
                 }
+                if self.turn.is_some() && done.is_some() && self.turn != done {
+                    // A turn that is not the one running: its end is not this one's.
+                    self.ended = done;
+                    return Vec::new();
+                }
+                let end = self.end(method, message);
+                self.ended = self.turn.take().or(done);
                 vec![Event::TurnEnd(end)]
             }
             "thread/compacted" => vec![Event::Compaction {
@@ -411,8 +491,8 @@ impl Parser {
             "completed"
         });
         match status {
-            "interrupted" => TurnEnd::Stopped(Stop::Cancelled),
-            "failed" if interrupted => TurnEnd::Stopped(Stop::Cancelled),
+            "interrupted" => TurnEnd::stopped(Stop::Cancelled),
+            "failed" if interrupted => TurnEnd::stopped(Stop::Cancelled),
             "failed" => TurnEnd::Failed(
                 error
                     .as_ref()
@@ -420,7 +500,7 @@ impl Parser {
                     .unwrap_or("the turn failed")
                     .to_string(),
             ),
-            _ => TurnEnd::Stopped(Stop::EndTurn),
+            _ => TurnEnd::stopped(Stop::EndTurn),
         }
     }
 
@@ -574,7 +654,7 @@ impl Parser {
                 call.kind = Some(ToolKind::Fetch);
                 call.title = Some(
                     match text(item, "/query").filter(|query| !query.is_empty()) {
-                        Some(query) => format!("Search the web for {}", title(query)),
+                        Some(query) => format!("Search the web for {}", self.title(query)),
                         None => "Search the web".to_string(),
                     },
                 );
@@ -609,7 +689,7 @@ impl Parser {
         let mut call = ToolCall::new(id);
         call.name = Some("exec_command".into());
         call.kind = Some(ToolKind::Execute);
-        call.title = Some(title(command));
+        call.title = Some(self.title(command));
         call.input = Some(json!({"command": command, "cwd": item.get("cwd")}));
         call.status = Some(status(item, done));
         call.content = Some(vec![ToolContent::Terminal(id.to_string())]);
@@ -644,14 +724,14 @@ impl Parser {
 
     fn request(&mut self, method: &str, id: &Value, params: &Value) -> Vec<Event> {
         match method {
-            "item/commandExecution/requestApproval" => self.command_approval(id, params),
-            "execCommandApproval" => self.legacy_command_approval(id, params),
+            "item/commandExecution/requestApproval" => self.command_approval(method, id, params),
+            "execCommandApproval" => self.legacy_command_approval(method, id, params),
             "item/fileChange/requestApproval" | "applyPatchApproval" => {
-                self.file_approval(method == "applyPatchApproval", id, params)
+                self.file_approval(method, id, params)
             }
-            "item/permissions/requestApproval" => self.permissions_approval(id, params),
+            "item/permissions/requestApproval" => self.permissions_approval(method, id, params),
             "mcpServer/elicitation/request" => match self.mcp_call_asked_about(params) {
-                Some(call) => self.mcp_approval(&call, id, params),
+                Some(call) => self.mcp_approval(method, &call, id, params),
                 None => self.not_taken(id),
             },
             _ => self.not_taken(id),
@@ -679,6 +759,7 @@ impl Parser {
     )]
     fn ask(
         &self,
+        method: &str,
         id: &Value,
         params: &Value,
         tool: ToolCall,
@@ -693,6 +774,22 @@ impl Parser {
         } else {
             question
         };
+        let mut details = serde_json::Map::new();
+        details.insert("method".into(), json!(method));
+        for key in [
+            "kind",
+            "grantRoot",
+            "threadId",
+            "conversationId",
+            "turnId",
+            "itemId",
+            "approvalId",
+            "serverName",
+        ] {
+            if let Some(value) = params.get(key).filter(|value| !value.is_null()) {
+                details.insert(key.into(), value.clone());
+            }
+        }
         let options = choices.iter().map(|choice| choice.option.clone()).collect();
         let writer = Arc::clone(&self.writer);
         let id = id.clone();
@@ -706,18 +803,15 @@ impl Parser {
             };
             writer(&json!({"id": id, "result": result}))
         });
-        vec![Event::Permission(PermissionRequest::new(
-            tool,
-            question,
-            description,
-            options,
-            responder,
-        ))]
+        vec![Event::Permission(
+            PermissionRequest::new(tool, question, description, options, responder)
+                .details(details),
+        )]
     }
 
-    fn command_approval(&self, id: &Value, params: &Value) -> Vec<Event> {
+    fn command_approval(&self, method: &str, id: &Value, params: &Value) -> Vec<Event> {
         let command = text(params, "/command").unwrap_or_default();
-        let shown = title(command);
+        let shown = self.title(command);
         let network = text(params, "/networkApprovalContext/host").map(one_line);
         let question = match &network {
             Some(host) => format!(
@@ -750,10 +844,7 @@ impl Parser {
             .into_iter()
             .collect();
         if shown != command || (network.is_some() && !command.is_empty()) {
-            told.push(format!(
-                "The whole command:\n{}",
-                coqui_acp_harness::lines::cut(command, WHOLE_BYTES)
-            ));
+            told.push(format!("The whole command:\n{}", self.told(command)));
         }
         let description = (!told.is_empty()).then(|| told.join("\n\n"));
 
@@ -802,7 +893,7 @@ impl Parser {
                             ALLOW_RULE,
                             format!(
                                 "Allow, and from now on every command starting with `{}`",
-                                title(&one_line(&words.join(" ")))
+                                self.title(&one_line(&words.join(" ")))
                             ),
                             OptionKind::AllowAlways,
                             decided(decision),
@@ -842,6 +933,7 @@ impl Parser {
         ));
         let cancelled = decided(&json!(if cancel { "cancel" } else { "decline" }));
         self.ask(
+            method,
             id,
             params,
             tool,
@@ -853,7 +945,7 @@ impl Parser {
         )
     }
 
-    fn legacy_command_approval(&self, id: &Value, params: &Value) -> Vec<Event> {
+    fn legacy_command_approval(&self, method: &str, id: &Value, params: &Value) -> Vec<Event> {
         let command = match params.get("command") {
             Some(Value::Array(words)) => words
                 .iter()
@@ -870,7 +962,7 @@ impl Parser {
             Some(Value::String(command)) => command.clone(),
             _ => String::new(),
         };
-        let shown = title(&command);
+        let shown = self.title(&command);
         let mut tool = ToolCall::new(item_of(params));
         tool.name = Some("exec_command".into());
         tool.kind = Some(ToolKind::Execute);
@@ -881,13 +973,11 @@ impl Parser {
             .into_iter()
             .collect();
         if shown != command {
-            told.push(format!(
-                "The whole command:\n{}",
-                coqui_acp_harness::lines::cut(&command, WHOLE_BYTES)
-            ));
+            told.push(format!("The whole command:\n{}", self.told(&command)));
         }
         let description = (!told.is_empty()).then(|| told.join("\n\n"));
         self.ask(
+            method,
             id,
             params,
             tool,
@@ -899,7 +989,8 @@ impl Parser {
         )
     }
 
-    fn file_approval(&self, legacy: bool, id: &Value, params: &Value) -> Vec<Event> {
+    fn file_approval(&self, method: &str, id: &Value, params: &Value) -> Vec<Event> {
+        let legacy = method == "applyPatchApproval";
         let item = item_of(params);
         let mut tool = if legacy {
             legacy_file_change(&item, params)
@@ -923,6 +1014,7 @@ impl Parser {
         let reason = text(params, "/reason").map(str::to_string);
         if legacy {
             return self.ask(
+                method,
                 id,
                 params,
                 tool,
@@ -954,6 +1046,7 @@ impl Parser {
             ),
         ];
         self.ask(
+            method,
             id,
             params,
             tool,
@@ -965,12 +1058,12 @@ impl Parser {
         )
     }
 
-    fn permissions_approval(&self, id: &Value, params: &Value) -> Vec<Event> {
+    fn permissions_approval(&self, method: &str, id: &Value, params: &Value) -> Vec<Event> {
         let requested = params
             .get("permissions")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let what = granted(&requested);
+        let what = granted(&requested, self.limits.max_title_bytes);
         let mut tool = ToolCall::new(item_of(params));
         tool.name = Some("permissions".into());
         tool.kind = Some(ToolKind::Other);
@@ -995,6 +1088,7 @@ impl Parser {
         ];
         let reason = text(params, "/reason").map(str::to_string);
         self.ask(
+            method,
             id,
             params,
             tool,
@@ -1032,7 +1126,7 @@ impl Parser {
             .map(|call| call.id.clone())
     }
 
-    fn mcp_approval(&self, call: &str, id: &Value, params: &Value) -> Vec<Event> {
+    fn mcp_approval(&self, method: &str, call: &str, id: &Value, params: &Value) -> Vec<Event> {
         let persist: Vec<&str> = match params.pointer("/_meta/persist") {
             Some(Value::String(one)) => vec![one.as_str()],
             Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
@@ -1075,10 +1169,11 @@ impl Parser {
         // The server's name comes first: the message after it is the server's own words.
         let question = format!(
             "MCP server {server}: {}",
-            title(text(params, "/message").unwrap_or("run one of its tools"))
+            self.title(text(params, "/message").unwrap_or("run one of its tools"))
         );
         let reason = text(params, "/reason").map(str::to_string);
         self.ask(
+            method,
             id,
             params,
             tool,
@@ -1163,7 +1258,7 @@ fn legacy_denied() -> Value {
 }
 
 /// What a permissions request grants, in words: its paths, each with its access, and the network.
-fn granted(requested: &Value) -> String {
+fn granted(requested: &Value, max_title: usize) -> String {
     let mut what = Vec::new();
     for (access, pointer) in [("read", "/fileSystem/read"), ("write", "/fileSystem/write")] {
         for path in requested
@@ -1197,7 +1292,7 @@ fn granted(requested: &Value) -> String {
     if what.is_empty() {
         return "none named".to_string();
     }
-    title(&what.join(", "))
+    title_within(max_title, &what.join(", "))
 }
 
 /// A request or answer id as text, for matching.

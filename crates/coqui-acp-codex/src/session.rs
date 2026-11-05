@@ -1,6 +1,5 @@
 //! A running Codex app server: its process, its JSON-RPC stream, and one thread on it.
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -8,23 +7,24 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 use std::sync::mpsc;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
 use coqui_acp_harness::event::{Content, Event, Severity, context_block};
-use coqui_acp_harness::lines::{self, Line, Tail};
-use coqui_acp_harness::{Process, Spawn, exit_text, version};
+use coqui_acp_harness::lines::{self, Tail};
+use coqui_acp_harness::stream::Waiting;
+use coqui_acp_harness::{LineHook, Process, Spawn, Step, Stream, exit_text, line_writer, version};
 use serde_json::{Value, json};
 
 use crate::launch::{CodexLaunch, ThreadStart};
-use crate::parse::{Parser, Writer, id_text};
+use crate::parse::{Parser, ParserLimits, Writer, id_text};
 use crate::{Error, TESTED_VERSIONS};
 
 /// The bounds and waits of a session. Every one is a setting with a default, and any value is taken.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct CodexSettings {
     /// The longest line of the app server's output read; past it the session ends. Default 64 MiB.
@@ -46,6 +46,60 @@ pub struct CodexSettings {
     pub max_model_pages: usize,
     /// The earlier turns a load replays, the latest kept. Default 1000.
     pub max_history_turns: usize,
+    /// What the parser keeps and cuts.
+    pub parser: ParserLimits,
+    /// Whether to ask for the models when starting. Off, or when Codex does not answer, they are unknown. Default on.
+    pub list_models: bool,
+    /// How often Codex is asked whether it has exited while its output stays open. Default 100 ms.
+    pub exit_poll: Duration,
+    /// How long a close waits for it to have ended, as the caller may remove its directory next. Default 2 s.
+    pub close_wait: Duration,
+    /// The lines waiting to be written to it; past it a write fails, rather than wait for a process that has stopped
+    /// reading. Default 1024.
+    pub max_queued_writes: usize,
+    /// The bytes of a session's title, from its first prompt. Default 80.
+    pub title_bytes: usize,
+    /// How long `codex --version` may take; 0 does not ask. Default 10 s.
+    pub version_wait: Duration,
+    /// How much of its answer is read. Default 4096.
+    pub version_bytes: u64,
+    /// The host's check of each line Codex writes, before anything reads it; `false` ends Codex.
+    pub on_line: Option<LineHook>,
+    /// When set, `config/read` is asked for before the thread opens and its answer given to this; a refusal ends
+    /// Codex and the start fails.
+    pub check_config: Option<AnswerCheck>,
+    /// When set, the answer that opened the thread is given to this; a refusal ends Codex and the start fails.
+    pub check_thread: Option<AnswerCheck>,
+}
+
+/// A host's check of one of Codex's answers: its refusal says why.
+pub type AnswerCheck = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
+
+impl fmt::Debug for CodexSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodexSettings")
+            .field("max_line", &self.max_line)
+            .field("tail_lines", &self.tail_lines)
+            .field("tail_line_bytes", &self.tail_line_bytes)
+            .field("initialize_timeout", &self.initialize_timeout)
+            .field("request_timeout", &self.request_timeout)
+            .field("exit_wait", &self.exit_wait)
+            .field("max_tools", &self.max_tools)
+            .field("max_model_pages", &self.max_model_pages)
+            .field("max_history_turns", &self.max_history_turns)
+            .field("parser", &self.parser)
+            .field("list_models", &self.list_models)
+            .field("exit_poll", &self.exit_poll)
+            .field("close_wait", &self.close_wait)
+            .field("max_queued_writes", &self.max_queued_writes)
+            .field("title_bytes", &self.title_bytes)
+            .field("version_wait", &self.version_wait)
+            .field("version_bytes", &self.version_bytes)
+            .field("on_line", &self.on_line.is_some())
+            .field("check_config", &self.check_config.is_some())
+            .field("check_thread", &self.check_thread.is_some())
+            .finish()
+    }
 }
 
 impl CodexSettings {
@@ -62,6 +116,17 @@ impl CodexSettings {
             max_tools: 4096,
             max_model_pages: 10,
             max_history_turns: 1000,
+            parser: ParserLimits::new(),
+            list_models: true,
+            exit_poll: Duration::from_millis(100),
+            close_wait: Duration::from_secs(2),
+            max_queued_writes: 1024,
+            title_bytes: 80,
+            version_wait: Duration::from_secs(10),
+            version_bytes: 4096,
+            on_line: None,
+            check_config: None,
+            check_thread: None,
         }
     }
 }
@@ -90,51 +155,52 @@ pub struct Model {
     pub is_default: bool,
 }
 
-/// The models of a `model/list` result, those Codex hides left out.
+/// The models of a `model/list` result, those Codex hides left out; `None` when it lists none at all, as distinct from an
+/// empty list.
 #[must_use]
-pub fn models_of(result: &Value) -> Vec<Model> {
-    result
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|model| model.get("hidden") != Some(&Value::Bool(true)))
-        .filter_map(|model| {
-            let id = model
-                .get("model")
-                .and_then(Value::as_str)
-                .or_else(|| model.get("id").and_then(Value::as_str))?;
-            Some(Model {
-                id: id.to_string(),
-                name: model
-                    .get("displayName")
+pub fn models_of(result: &Value) -> Option<Vec<Model>> {
+    let listed = result.get("data")?.as_array()?;
+    Some(
+        listed
+            .iter()
+            .filter(|model| model.get("hidden") != Some(&Value::Bool(true)))
+            .filter_map(|model| {
+                let id = model
+                    .get("model")
                     .and_then(Value::as_str)
-                    .unwrap_or(id)
-                    .to_string(),
-                description: model
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                efforts: model
-                    .get("supportedReasoningEfforts")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|effort| {
-                        effort
-                            .get("reasoningEffort")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .collect(),
-                default_effort: model
-                    .get("defaultReasoningEffort")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                is_default: model.get("isDefault").and_then(Value::as_bool) == Some(true),
+                    .or_else(|| model.get("id").and_then(Value::as_str))?;
+                Some(Model {
+                    id: id.to_string(),
+                    name: model
+                        .get("displayName")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_string(),
+                    description: model
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    efforts: model
+                        .get("supportedReasoningEfforts")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|effort| {
+                            effort
+                                .get("reasoningEffort")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect(),
+                    default_effort: model
+                        .get("defaultReasoningEffort")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    is_default: model.get("isDefault").and_then(Value::as_bool) == Some(true),
+                })
             })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
 /// Codex's version in its `initialize` answer's `userAgent` (`<client>/<version> (…)`).
@@ -144,8 +210,6 @@ pub fn version_of(answer: &Value) -> Option<String> {
     let (_, rest) = agent.split_once('/')?;
     Some(rest.split_whitespace().next()?.to_string())
 }
-
-type Waiting = Arc<Mutex<BTreeMap<String, mpsc::Sender<Result<Value, String>>>>>;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -159,11 +223,12 @@ pub struct CodexSession {
     process: Arc<dyn Process>,
     parser: Arc<Mutex<Parser>>,
     waiting: Waiting,
+    ended: Arc<OnceLock<String>>,
     requests: AtomicU64,
     settings: CodexSettings,
     closed: Arc<AtomicBool>,
     version: Option<String>,
-    models: Vec<Model>,
+    models: Option<Vec<Model>>,
     choice: Mutex<(Option<String>, Option<String>)>,
     titled: AtomicBool,
     sink: Arc<dyn Fn(Event) -> bool + Send + Sync>,
@@ -205,21 +270,18 @@ impl CodexSession {
         }
         let sink: Arc<dyn Fn(Event) -> bool + Send + Sync> = Arc::new(sink);
         let spawned = spawn.spawn(&launch.launch()).map_err(Error::Spawn)?;
-        let stdin = Arc::new(Mutex::new(spawned.stdin));
-        let writer: Writer = Arc::new(move |value: &Value| {
-            let mut line = serde_json::to_vec(value).map_err(io::Error::other)?;
-            line.push(b'\n');
-            let mut stdin = locked(&stdin);
-            // One write per line, so a line written from another thread cannot land inside it.
-            stdin.write_all(&line)?;
-            stdin.flush()
-        });
+        let writer: Writer = line_writer(
+            spawned.stdin,
+            settings.max_queued_writes,
+            "coqui-acp-codex-stdin",
+        )
+        .map_err(Error::Spawn)?;
         let process: Arc<dyn Process> = Arc::from(spawned.process);
-        let parser = Arc::new(Mutex::new(Parser::new(
+        let parser = Arc::new(Mutex::new(Parser::with_limits(
             Arc::clone(&writer),
             settings.max_tools,
+            settings.parser,
         )));
-        let waiting: Waiting = Arc::new(Mutex::new(BTreeMap::new()));
         let tail = Arc::new(Mutex::new(Tail::new(
             settings.tail_lines,
             settings.tail_line_bytes,
@@ -233,68 +295,32 @@ impl CodexSession {
                 .spawn(move || lines::read_diagnostics(stderr, max_line, &tail))
                 .map_err(Error::Spawn)?;
         }
+        let mut stream = Stream::new(
+            "Codex app-server",
+            Arc::clone(&process),
+            tail,
+            Arc::clone(&closed),
+            Arc::clone(&sink),
+        );
+        stream.max_line = settings.max_line;
+        stream.exit_poll = settings.exit_poll;
+        stream.exit_wait = settings.exit_wait;
+        stream.on_line.clone_from(&settings.on_line);
+        let waiting = Arc::clone(&stream.waiting);
+        let ended = Arc::clone(&stream.ended);
         {
             let parser = Arc::clone(&parser);
-            let waiting = Arc::clone(&waiting);
-            let process = Arc::clone(&process);
-            let closed = Arc::clone(&closed);
-            let sink = Arc::clone(&sink);
-            let stdout = spawned.stdout;
-            let max_line = settings.max_line;
-            let exit_wait = settings.exit_wait;
-            thread::Builder::new()
-                .name("coqui-acp-codex-stdout".into())
-                .spawn(move || {
-                    let mut open = true;
-                    let read = lines::read_lines(stdout, max_line, |line| {
-                        match line {
-                            Line::Json(value) => {
-                                let (events, answers) = {
-                                    let mut parser = locked(&parser);
-                                    (parser.line(&value), parser.answers())
-                                };
-                                for (id, answer) in answers {
-                                    if let Some(waiter) = locked(&waiting).remove(&id) {
-                                        let _ = waiter.send(answer);
-                                    }
-                                }
-                                for event in events {
-                                    open = open && sink(event);
-                                }
-                            }
-                            Line::Text(text) => {
-                                locked(&tail).push(&text);
-                                open = open && sink(Event::Output(text));
-                            }
-                            Line::TooLong(bytes) => {
-                                locked(&tail).push(&format!(
-                                    "a line of {bytes} bytes or more, past the limit"
-                                ));
-                                let _ = process.kill();
-                            }
-                        }
-                        open
-                    });
-                    let how = exit_text(process.as_ref(), exit_wait);
-                    let mut reason =
-                        format!("Codex app-server {how} before completing the session");
-                    if let Err(error) = read {
-                        reason.push_str(&format!(" (its output could not be read: {error})"));
-                    }
-                    let tail = locked(&tail);
-                    if !tail.is_empty() {
-                        reason.push_str("; its last output:\n");
-                        reason.push_str(&tail.text());
-                    }
-                    drop(tail);
-                    for (_, waiter) in core::mem::take(&mut *locked(&waiting)) {
-                        let _ = waiter.send(Err(reason.clone()));
-                    }
-                    if closed.load(Ordering::SeqCst) || !open {
-                        return;
-                    }
-                    sink(Event::Exited(reason));
-                })
+            stream
+                .read(
+                    spawned.stdout,
+                    "coqui-acp-codex-stdout",
+                    move |value| {
+                        let mut parser = locked(&parser);
+                        let events = parser.line(value);
+                        Step::new(events, parser.answers())
+                    },
+                    Vec::new,
+                )
                 .map_err(Error::Spawn)?;
         }
         let mut session = Self {
@@ -303,11 +329,12 @@ impl CodexSession {
             process,
             parser,
             waiting,
+            ended,
             requests: AtomicU64::new(0),
             settings,
             closed,
             version: None,
-            models: Vec::new(),
+            models: None,
             choice: Mutex::new((launch.model.clone(), launch.effort.clone())),
             titled: AtomicBool::new(false),
             sink,
@@ -322,7 +349,8 @@ impl CodexSession {
     fn open(&mut self, launch: &CodexLaunch) -> Result<(), Error> {
         let initialized = self.request(
             "initialize",
-            json!({"clientInfo": {"name": "coqui-acp-codex", "title": "coqui-acp-codex", "version": env!("CARGO_PKG_VERSION")},
+            json!({"clientInfo": {"name": launch.client_info.name, "title": launch.client_info.title,
+                                  "version": launch.client_info.version},
                    "capabilities": {}}),
             self.settings.initialize_timeout,
         )?;
@@ -335,22 +363,16 @@ impl CodexSession {
                 title: warning,
             });
         }
-        let mut cursor: Option<String> = None;
-        for _ in 0..self.settings.max_model_pages {
-            let mut params = json!({});
-            if let Some(cursor) = &cursor {
-                params["cursor"] = json!(cursor);
-            }
-            let page = self.request("model/list", params, self.settings.request_timeout)?;
-            self.models.extend(models_of(&page));
-            cursor = page
-                .get("nextCursor")
-                .and_then(Value::as_str)
-                .filter(|next| !next.is_empty())
-                .map(str::to_string);
-            if cursor.is_none() {
-                break;
-            }
+        if self.settings.list_models {
+            self.list_models();
+        }
+        if let Some(check) = self.settings.check_config.clone() {
+            let config = self.request(
+                "config/read",
+                json!({"cwd": launch.cwd.to_string_lossy()}),
+                self.settings.request_timeout,
+            )?;
+            check(&config).map_err(Error::Refused)?;
         }
         let roots = launch.skill_roots();
         if !roots.is_empty() {
@@ -384,10 +406,7 @@ impl CodexSession {
                     .pointer("/thread/cwd")
                     .and_then(Value::as_str)
                     .is_some_and(|cwd| {
-                        launch
-                            .working_roots
-                            .iter()
-                            .any(|root| Path::new(cwd).starts_with(root))
+                        coqui_acp_harness::acp::within_roots(Path::new(cwd), &launch.working_roots)
                     })
             {
                 return Err(Error::Refused(
@@ -395,6 +414,9 @@ impl CodexSession {
                         .into(),
                 ));
             }
+        }
+        if let Some(check) = self.settings.check_thread.clone() {
+            check(&opened).map_err(Error::Refused)?;
         }
         self.thread = thread.to_string();
         locked(&self.parser).set_thread(thread);
@@ -426,6 +448,41 @@ impl CodexSession {
         Ok(())
     }
 
+    /// Asks for the models. Their being unknown stops nothing: a notice says so.
+    fn list_models(&mut self) {
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..self.settings.max_model_pages {
+            let mut params = json!({});
+            if let Some(cursor) = &cursor {
+                params["cursor"] = json!(cursor);
+            }
+            let page = match self.request("model/list", params, self.settings.request_timeout) {
+                Ok(page) => page,
+                Err(error) => {
+                    (self.sink)(Event::Notice {
+                        severity: Severity::Warning,
+                        title: format!("Codex's models are not known: {error}"),
+                    });
+                    return;
+                }
+            };
+            let Some(listed) = models_of(&page) else {
+                return;
+            };
+            models.extend(listed);
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .filter(|next| !next.is_empty())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        self.models = Some(models);
+    }
+
     fn write(&self, message: &Value) -> Result<(), Error> {
         (self.writer)(message)
             .map_err(|error| Error::Harness(format!("Codex could not be written to: {error}")))
@@ -435,12 +492,20 @@ impl CodexSession {
         self.write(&json!({"method": method, "params": params}))
     }
 
-    /// Sends one request and waits up to `limit` for its answer.
-    fn request(&self, method: &str, params: Value, limit: Duration) -> Result<Value, Error> {
+    /// Sends one request of the app server's protocol and waits up to `limit` for its answer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Harness`] when Codex refused or could not be written to, [`Error::Timeout`] when it did not answer.
+    pub fn request(&self, method: &str, params: Value, limit: Duration) -> Result<Value, Error> {
         let number = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
         let id = id_text(&json!(number));
         let (answer, answered) = mpsc::channel();
         locked(&self.waiting).insert(id.clone(), answer);
+        if let Some(reason) = self.ended.get() {
+            locked(&self.waiting).remove(&id);
+            return Err(Error::Harness(reason.clone()));
+        }
         if let Err(error) = self.write(&json!({"id": number, "method": method, "params": params})) {
             locked(&self.waiting).remove(&id);
             return Err(error);
@@ -472,10 +537,10 @@ impl CodexSession {
         self.version.as_deref()
     }
 
-    /// The models Codex offers.
+    /// The models Codex offers; `None` when they are not known.
     #[must_use]
-    pub fn models(&self) -> &[Model] {
-        &self.models
+    pub fn models(&self) -> Option<&[Model]> {
+        self.models.as_deref()
     }
 
     /// The model and effort the next turn names, when chosen.
@@ -533,7 +598,7 @@ impl CodexSession {
             })
         {
             (self.sink)(Event::Title(
-                coqui_acp_harness::lines::cut(title.trim(), 80).to_string(),
+                coqui_acp_harness::lines::cut(title.trim(), self.settings.title_bytes).to_string(),
             ));
         }
         Ok(())
@@ -558,10 +623,25 @@ impl CodexSession {
         self.write(&json!({"id": number, "method": "turn/interrupt", "params": {"threadId": self.thread, "turnId": turn}}))
     }
 
-    /// Ends the app server and everything it started.
+    /// Adds to a running turn (`turn/steer`), as after a refusal that should not end it: `turn` is the turn it is meant
+    /// for, as a question's `turnId` names it, and Codex refuses it for any other. Its answer is not awaited.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Refused`] for a resource Codex cannot read; [`Error::Harness`] when it could not be written.
+    pub fn steer(&self, turn: &str, content: &[Content]) -> Result<(), Error> {
+        let input = user_input(content)?;
+        let number = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+        self.write(&json!({"id": number, "method": "turn/steer", "params": {
+            "threadId": self.thread, "expectedTurnId": turn, "input": input}}))
+    }
+
+    /// Ends the app server and everything it started, and waits up to `close_wait` for it to have gone.
     pub fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        let _ = self.process.kill();
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            let _ = self.process.kill();
+            let _ = exit_text(self.process.as_ref(), self.settings.close_wait);
+        }
     }
 }
 

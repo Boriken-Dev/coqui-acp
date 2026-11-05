@@ -7,6 +7,9 @@
 //! not have is answered here: `model/list` with no models, anything else with `{}`. A recorded `thread/list`, which
 //! a client of this crate never sends, is not waited for, and its answer is left out.
 //!
+//! `COQUI_ACP_CODEX_REFUSE` names a method such a request of is refused, and `COQUI_ACP_CODEX_THREAD` the thread an
+//! unrecorded `thread/start` opens.
+//!
 //! `COQUI_ACP_CODEX_ARGS` names a file its arguments are written to, as JSON, and `COQUI_ACP_CODEX_INPUTS` one each
 //! line it reads is added to. `COQUI_ACP_CODEX_EXIT` makes it write
 //! one line of diagnostics after its first input line and exit with that code, and `COQUI_ACP_CODEX_END` exit once
@@ -84,27 +87,44 @@ fn main() {
     let mut skipped: HashSet<String> = HashSet::new();
     let mut step = 0;
     // The next input of the kind `expected` names; a request of another kind is answered here.
-    let next_input =
-        |out: &mut std::io::StdoutLock<'_>, expected: Option<&Value>| -> Option<Value> {
-            loop {
-                let input = inputs.recv().ok()?;
-                if expected.is_some_and(|expected| kind(expected) == kind(&input)) {
+    let next_input = |out: &mut std::io::StdoutLock<'_>,
+                      expected: Option<&Value>|
+     -> Option<Value> {
+        loop {
+            let input = inputs.recv().ok()?;
+            if expected.is_some_and(|expected| kind(expected) == kind(&input)) {
+                return Some(input);
+            }
+            let Some(id) = input.get("id").filter(|_| input.get("method").is_some()) else {
+                if expected.is_none() {
                     return Some(input);
                 }
-                let Some(id) = input.get("id").filter(|_| input.get("method").is_some()) else {
-                    if expected.is_none() {
-                        return Some(input);
-                    }
-                    continue;
-                };
-                let result = match input.get("method").and_then(Value::as_str) {
-                    Some("model/list") => json!({"data": [], "nextCursor": null}),
-                    _ => json!({}),
-                };
-                writeln!(out, "{}", json!({"id": id, "result": result})).unwrap();
+                continue;
+            };
+            let method = input.get("method").and_then(Value::as_str);
+            if method.is_some() && std::env::var("COQUI_ACP_CODEX_REFUSE").ok().as_deref() == method
+            {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({"id": id, "error": {"code": -32601, "message": "not here"}})
+                )
+                .unwrap();
                 out.flush().unwrap();
+                continue;
             }
-        };
+            let result = match method {
+                Some("model/list") => json!({"data": [], "nextCursor": null}),
+                Some("config/read") => json!({"config": {"model": "from-config"}, "origins": {}}),
+                Some("thread/start") if std::env::var_os("COQUI_ACP_CODEX_THREAD").is_some() => {
+                    json!({"thread": {"id": std::env::var("COQUI_ACP_CODEX_THREAD").unwrap()}})
+                }
+                _ => json!({}),
+            };
+            writeln!(out, "{}", json!({"id": id, "result": result})).unwrap();
+            out.flush().unwrap();
+        }
+    };
     for (index, line) in lines.iter().enumerate() {
         while step < steps.len() && steps[step]["after"].as_u64() == Some(index as u64) {
             let expected = &steps[step]["input"];

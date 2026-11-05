@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::io::{self, Read};
 use std::sync::mpsc;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
 use serde_json::Value;
@@ -92,6 +92,8 @@ pub struct Stream {
     pub sink: EventHook,
     /// The requests waiting for an answer.
     pub waiting: Waiting,
+    /// How it ended, once it has: a request made after that fails at once.
+    pub ended: Arc<OnceLock<String>>,
     /// The host's check of each line, before anything reads it.
     pub on_line: Option<LineHook>,
 }
@@ -124,6 +126,7 @@ impl Stream {
             closed,
             sink,
             waiting: Arc::new(Mutex::new(BTreeMap::new())),
+            ended: Arc::new(OnceLock::new()),
             on_line: None,
         }
     }
@@ -156,6 +159,7 @@ impl Stream {
                 let reason = locked(&stopped)
                     .take()
                     .unwrap_or_else(|| stream.reason(locked(&failed_read).take(), left_open));
+                let _ = stream.ended.set(reason.clone());
                 for (_, waiter) in core::mem::take(&mut *locked(&stream.waiting)) {
                     let _ = waiter.send(Err(reason.clone()));
                 }

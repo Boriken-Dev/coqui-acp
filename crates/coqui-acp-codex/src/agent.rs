@@ -5,7 +5,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::time::Duration;
 use std::io::Read;
 use std::sync::OnceLock;
 
@@ -81,11 +80,15 @@ impl CodexAgent {
         self
     }
 
-    /// Codex's version, from `codex --version`, asked once; `None` when it does not answer in 10 seconds.
+    /// Codex's version, from `codex --version`, asked once; `None` when it does not answer within
+    /// [`CodexSettings::version_wait`].
     #[must_use]
     pub fn cli_version(&self) -> Option<String> {
         self.version
             .get_or_init(|| {
+                if self.settings.version_wait.is_zero() {
+                    return None;
+                }
                 let mut launch = Launch::new(self.defaults.executable.clone())
                     .arg("--version")
                     .clear_env(self.defaults.clear_env);
@@ -93,14 +96,15 @@ impl CodexAgent {
                 let spawned = self.spawn.spawn(&launch).ok()?;
                 let (sender, received) = std::sync::mpsc::channel();
                 let mut stdout = spawned.stdout;
+                let limit = self.settings.version_bytes;
                 let _ = std::thread::Builder::new()
                     .name("coqui-acp-codex-version".into())
                     .spawn(move || {
                         let mut text = String::new();
-                        let _ = stdout.by_ref().take(4096).read_to_string(&mut text);
+                        let _ = stdout.by_ref().take(limit).read_to_string(&mut text);
                         let _ = sender.send(text);
                     });
-                let text = received.recv_timeout(Duration::from_secs(10)).ok();
+                let text = received.recv_timeout(self.settings.version_wait).ok();
                 let _ = spawned.process.kill();
                 // `codex-cli 0.164.0`
                 text?.split_whitespace().nth(1).map(str::to_string)
@@ -211,6 +215,7 @@ impl CodexConversation {
         self.session.choice().0.or_else(|| {
             self.session
                 .models()
+                .unwrap_or_default()
                 .iter()
                 .find(|model| model.is_default)
                 .map(|model| model.id.clone())
@@ -232,13 +237,19 @@ impl Conversation for CodexConversation {
             "Default",
             Some("Codex's own choice".to_string())
         )];
-        models.extend(self.session.models().iter().map(|known| {
-            OptionValue::new(
-                known.id.clone(),
-                known.name.clone(),
-                known.description.clone(),
-            )
-        }));
+        models.extend(
+            self.session
+                .models()
+                .unwrap_or_default()
+                .iter()
+                .map(|known| {
+                    OptionValue::new(
+                        known.id.clone(),
+                        known.name.clone(),
+                        known.description.clone(),
+                    )
+                }),
+        );
         if !models.iter().any(|value| value.id == model) {
             models.push(OptionValue::new(model.clone(), model.clone(), None));
         }
@@ -247,6 +258,7 @@ impl Conversation for CodexConversation {
             .and_then(|current| {
                 self.session
                     .models()
+                    .unwrap_or_default()
                     .iter()
                     .find(|known| known.id == current)
                     .map(|known| known.efforts.clone())

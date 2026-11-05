@@ -92,7 +92,10 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
     );
     assert!(matches!(
         seen.last(),
-        Some(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)))
+        Some(Event::TurnEnd(TurnEnd::Stopped {
+            stop: Stop::EndTurn,
+            ..
+        }))
     ));
     session.close();
     let sent = inputs(&written);
@@ -232,12 +235,18 @@ fn an_interrupt_names_the_running_turn_and_the_turn_ends_cancelled() {
     session.interrupt().unwrap();
     assert!(matches!(
         until_end(&events, &mut std::iter::empty()).last(),
-        Some(Event::TurnEnd(TurnEnd::Stopped(Stop::Cancelled)))
+        Some(Event::TurnEnd(TurnEnd::Stopped {
+            stop: Stop::Cancelled,
+            ..
+        }))
     ));
     session.prompt(&[Content::Text("Go on.".into())]).unwrap();
     assert!(matches!(
         until_end(&events, &mut std::iter::empty()).last(),
-        Some(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)))
+        Some(Event::TurnEnd(TurnEnd::Stopped {
+            stop: Stop::EndTurn,
+            ..
+        }))
     ));
     session.interrupt().unwrap();
 }
@@ -308,7 +317,7 @@ fn live_codex_lists_models_with_no_login_and_no_turn() {
         .insert("HTTPS_PROXY".into(), "http://127.0.0.1:9".into());
     let session =
         CodexSession::start(&launch, &PlainSpawn, CodexSettings::new(), |_| true).unwrap();
-    assert!(!session.models().is_empty());
+    assert!(!session.models().expect("listed").is_empty());
     assert!(session.version().is_some());
     assert!(!session.thread().is_empty());
     session.close();
@@ -417,4 +426,141 @@ fn live_a_killed_app_server_leaves_none_of_its_commands_running() {
         assert_eq!(then, now, "still running: tty {tty}, sandbox {sandbox}");
         drop(scratch);
     }
+}
+
+fn thread_launch(scratch: &Scratch) -> CodexLaunch {
+    let mut launch = replaying(None, &scratch.0);
+    launch
+        .env
+        .insert("COQUI_ACP_CODEX_THREAD".into(), "replay-thread".into());
+    launch
+}
+
+#[test]
+fn models_that_cannot_be_listed_are_unknown_and_stop_nothing() {
+    let scratch = Scratch::new("no-models");
+    let mut launch = thread_launch(&scratch);
+    launch
+        .env
+        .insert("COQUI_ACP_CODEX_REFUSE".into(), "model/list".into());
+    let (session, events) = start(&launch);
+    let session = session.unwrap();
+    assert_eq!(session.thread(), "replay-thread");
+    assert_eq!(session.models(), None);
+    assert!(
+        events
+            .try_iter()
+            .any(|event| matches!(event, Event::Notice { title, .. } if title.contains("models"))),
+    );
+    let mut settings = CodexSettings::new();
+    settings.list_models = false;
+    let session =
+        CodexSession::start(&thread_launch(&scratch), &PlainSpawn, settings, |_| true).unwrap();
+    assert_eq!(session.models(), None, "not asked");
+}
+
+#[test]
+fn a_host_checks_the_configuration_and_the_thread_before_anything_runs() {
+    let scratch = Scratch::new("checks");
+    let mut settings = CodexSettings::new();
+    settings.check_config = Some(std::sync::Arc::new(|answer| {
+        if answer.pointer("/config/model").and_then(Value::as_str) == Some("from-config") {
+            Ok(())
+        } else {
+            Err(format!("no configuration in {answer}"))
+        }
+    }));
+    settings.check_thread = Some(std::sync::Arc::new(|answer| {
+        if answer.pointer("/thread/id").and_then(Value::as_str) == Some("replay-thread") {
+            Ok(())
+        } else {
+            Err(format!("no thread in {answer}"))
+        }
+    }));
+    let opened = CodexSession::start(
+        &thread_launch(&scratch),
+        &PlainSpawn,
+        settings.clone(),
+        |_| true,
+    );
+    assert_eq!(opened.unwrap().thread(), "replay-thread");
+    settings.check_config = Some(std::sync::Arc::new(
+        |_| Err("not this configuration".into()),
+    ));
+    let refused = CodexSession::start(
+        &thread_launch(&scratch),
+        &PlainSpawn,
+        settings.clone(),
+        |_| true,
+    );
+    assert!(
+        matches!(refused, Err(coqui_acp_codex::Error::Refused(why)) if why.contains("configuration"))
+    );
+    settings.check_config = None;
+    settings.check_thread = Some(std::sync::Arc::new(|_| Err("not this thread".into())));
+    let refused = CodexSession::start(&thread_launch(&scratch), &PlainSpawn, settings, |_| true);
+    assert!(matches!(refused, Err(coqui_acp_codex::Error::Refused(why)) if why.contains("thread")));
+}
+
+#[test]
+fn a_turn_can_be_steered_the_client_named_and_arguments_added() {
+    let scratch = Scratch::new("steer");
+    let written = scratch.0.join("inputs.jsonl");
+    let args = scratch.0.join("args.json");
+    let mut launch = thread_launch(&scratch);
+    launch
+        .env
+        .insert("COQUI_ACP_CODEX_INPUTS".into(), written.clone().into());
+    launch
+        .env
+        .insert("COQUI_ACP_CODEX_ARGS".into(), args.clone().into());
+    launch.client_info = coqui_acp_codex::ClientInfo::new("a-host", "9.9");
+    launch.extra_args = vec!["--listen=stdio://".into()];
+    let (session, _events) = start(&launch);
+    let session = session.unwrap();
+    session
+        .steer("turn-1", &[Content::Text("Not that way.".into())])
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    let lines = loop {
+        let lines: Vec<Value> = std::fs::read_to_string(&written)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        if lines.iter().any(|line| line["method"] == "turn/steer") {
+            break lines;
+        }
+        assert!(std::time::Instant::now() < until, "{lines:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let steer = lines
+        .iter()
+        .find(|line| line["method"] == "turn/steer")
+        .unwrap();
+    assert_eq!(steer["params"]["threadId"], "replay-thread");
+    assert_eq!(steer["params"]["expectedTurnId"], "turn-1");
+    assert_eq!(steer["params"]["input"][0]["text"], "Not that way.");
+    let initialize = lines
+        .iter()
+        .find(|line| line["method"] == "initialize")
+        .unwrap();
+    assert_eq!(initialize["params"]["clientInfo"]["name"], "a-host");
+    let given: Vec<String> = serde_json::from_slice(&std::fs::read(&args).unwrap()).unwrap();
+    assert_eq!(given.last().map(String::as_str), Some("--listen=stdio://"));
+}
+
+#[test]
+fn a_line_the_host_refuses_ends_codex() {
+    let scratch = Scratch::new("hook");
+    let mut settings = CodexSettings::new();
+    settings.on_line = Some(std::sync::Arc::new(|line| line["id"] != 2));
+    let refused = CodexSession::start(
+        &replaying(Some("turn"), &scratch.0),
+        &PlainSpawn,
+        settings,
+        |_| true,
+    );
+    let error = refused.unwrap_err().to_string();
+    assert!(error.contains("refused"), "{error}");
 }
