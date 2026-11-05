@@ -1,0 +1,58 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "coqui-acp-codex",
+     "version": "0.0.0"
+    },
+    "capabilities": {}
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "method": "initialized",
+   "params": {}
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "id": 2,
+   "method": "thread/list",
+   "params": {}
+  }
+ },
+ {
+  "after": 2,
+  "input": {
+   "id": 3,
+   "method": "thread/resume",
+   "params": {
+    "threadId": "01a1a7cb-a273-75b0-8d9a-b9e012cce172",
+    "cwd": "C:/coqui-fx-codex/w"
+   }
+  }
+ },
+ {
+  "after": 5,
+  "input": {
+   "id": 4,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1a7cb-a273-75b0-8d9a-b9e012cce172",
+    "input": [
+     {
+      "type": "text",
+      "text": "Which word?"
+     }
+    ]
+   }
+  }
+ }
+]

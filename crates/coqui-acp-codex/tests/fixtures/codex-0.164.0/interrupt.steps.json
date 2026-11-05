@@ -1,0 +1,78 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "coqui-acp-codex",
+     "version": "0.0.0"
+    },
+    "capabilities": {}
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "method": "initialized",
+   "params": {}
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "id": 3,
+   "method": "thread/start",
+   "params": {
+    "cwd": "C:/coqui-fx-codex/w",
+    "approvalPolicy": "untrusted",
+    "sandbox": "workspace-write"
+   }
+  }
+ },
+ {
+  "after": 2,
+  "input": {
+   "id": 4,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1a7cb-8a6b-7163-8866-fe95ab0caaf4",
+    "input": [
+     {
+      "type": "text",
+      "text": "Take your time."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 8,
+  "input": {
+   "id": 5,
+   "method": "turn/interrupt",
+   "params": {
+    "threadId": "01a1a7cb-8a6b-7163-8866-fe95ab0caaf4",
+    "turnId": "01a1a7cb-8a7f-7bb1-8db2-1ed8c6da6510"
+   }
+  }
+ },
+ {
+  "after": 11,
+  "input": {
+   "id": 6,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1a7cb-8a6b-7163-8866-fe95ab0caaf4",
+    "input": [
+     {
+      "type": "text",
+      "text": "Go on."
+     }
+    ]
+   }
+  }
+ }
+]

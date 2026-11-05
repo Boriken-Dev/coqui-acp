@@ -1,0 +1,67 @@
+[
+ {
+  "after": 0,
+  "input": {
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "coqui-acp-codex",
+     "version": "0.0.0"
+    },
+    "capabilities": {}
+   }
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "method": "initialized",
+   "params": {}
+  }
+ },
+ {
+  "after": 1,
+  "input": {
+   "id": 3,
+   "method": "thread/start",
+   "params": {
+    "cwd": "C:/coqui-fx-codex/w",
+    "approvalPolicy": "untrusted",
+    "sandbox": "workspace-write"
+   }
+  }
+ },
+ {
+  "after": 2,
+  "input": {
+   "id": 4,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1a7cb-9d39-77c1-9279-456e37cbcdea",
+    "input": [
+     {
+      "type": "text",
+      "text": "Hit the limit."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "after": 11,
+  "input": {
+   "id": 5,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a1a7cb-9d39-77c1-9279-456e37cbcdea",
+    "input": [
+     {
+      "type": "text",
+      "text": "Fail."
+     }
+    ]
+   }
+  }
+ }
+]
