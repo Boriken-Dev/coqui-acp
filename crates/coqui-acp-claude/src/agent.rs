@@ -5,7 +5,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::time::Duration;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -31,7 +30,7 @@ pub const DEFAULT: &str = "default";
 ///
 /// A session's `_meta.claudeCode.options.plugins` (`[{"type": "local", "path": "<absolute directory>"}]`) loads those
 /// plugins with `--plugin-dir`, as the Claude Agent SDK's `plugins` option does, so their skills are named
-/// `<plugin>:<skill>`.
+/// `<plugin>:<skill>`, once a host has allowed that with [`ClaudeAgent::client_plugins`].
 #[derive(Clone)]
 pub struct ClaudeAgent {
     defaults: ClaudeLaunch,
@@ -65,7 +64,7 @@ impl ClaudeAgent {
             spawn: Arc::new(PlainSpawn),
             settings: ClaudeSettings::new(),
             version: Arc::new(OnceLock::new()),
-            client_plugins: true,
+            client_plugins: false,
         }
     }
 
@@ -84,8 +83,9 @@ impl ClaudeAgent {
         self
     }
 
-    /// Whether a client may load plugins through `_meta.claudeCode.options.plugins`; a plugin's hooks and MCP servers
-    /// run with no permission asked, so a host that serves people it trusts less turns this off. Default true.
+    /// Whether a client may load plugins through `_meta.claudeCode.options.plugins`. A plugin's hooks and MCP servers run
+    /// with no permission asked, so this is the host's to allow, and each path is held to the same working roots and
+    /// network rule as a session's directories. Default false.
     #[must_use]
     pub const fn client_plugins(mut self, allowed: bool) -> Self {
         self.client_plugins = allowed;
@@ -99,11 +99,15 @@ impl ClaudeAgent {
         self
     }
 
-    /// Claude Code's version, from `claude --version`, asked once; `None` when it does not answer in 10 seconds.
+    /// Claude Code's version, from `claude --version`, asked once; `None` when it does not answer within
+    /// [`ClaudeSettings::version_wait`].
     #[must_use]
     pub fn cli_version(&self) -> Option<String> {
         self.version
             .get_or_init(|| {
+                if self.settings.version_wait.is_zero() {
+                    return None;
+                }
                 let mut launch = Launch::new(self.defaults.executable.clone())
                     .arg("--version")
                     .clear_env(self.defaults.clear_env);
@@ -111,14 +115,15 @@ impl ClaudeAgent {
                 let spawned = self.spawn.spawn(&launch).ok()?;
                 let (sender, received) = std::sync::mpsc::channel();
                 let mut stdout = spawned.stdout;
+                let limit = self.settings.version_bytes;
                 let _ = std::thread::Builder::new()
                     .name("coqui-acp-claude-version".into())
                     .spawn(move || {
                         let mut text = String::new();
-                        let _ = stdout.by_ref().take(4096).read_to_string(&mut text);
+                        let _ = stdout.by_ref().take(limit).read_to_string(&mut text);
                         let _ = sender.send(text);
                     });
-                let text = received.recv_timeout(Duration::from_secs(10)).ok();
+                let text = received.recv_timeout(self.settings.version_wait).ok();
                 let _ = spawned.process.kill();
                 text?.split_whitespace().next().map(str::to_string)
             })
@@ -150,6 +155,11 @@ impl ClaudeAgent {
                 None => prompt.clone(),
             });
         }
+        if launch.mcp_config_file.is_some() && !request.mcp_servers.is_empty() {
+            return Err(HarnessError::Refused(
+                "this agent's MCP configuration is the host's own file: it takes no servers from a client".into(),
+            ));
+        }
         if let Some(taken) = request
             .mcp_servers
             .iter()
@@ -171,6 +181,11 @@ impl ClaudeAgent {
             return Err(HarnessError::Refused(
                 "this agent takes no plugins from a client".into(),
             ));
+        }
+        for plugin in &plugins {
+            request
+                .path_admitted(plugin)
+                .map_err(HarnessError::Refused)?;
         }
         launch.plugin_dirs.extend(plugins);
         Ok(launch)
@@ -252,7 +267,7 @@ impl Harness for ClaudeAgent {
             move |event| sink.send(event),
         )
         .map_err(HarnessError::from)?;
-        let models = session.models();
+        let models = session.models().unwrap_or_default();
         let model = launch.model.clone().unwrap_or_else(|| DEFAULT.to_string());
         let effort = launch.effort.clone().unwrap_or_else(|| DEFAULT.to_string());
         Ok(Box::new(ClaudeConversation {
@@ -297,7 +312,7 @@ impl ClaudeConversation {
 
 impl Conversation for ClaudeConversation {
     fn session_id(&self) -> String {
-        self.session.id().to_string()
+        self.session.id().unwrap_or_default()
     }
 
     fn options(&self) -> Vec<ConfigOption> {

@@ -468,11 +468,33 @@ impl Stop {
 #[non_exhaustive]
 pub enum TurnEnd {
     /// It stopped, for this reason.
-    Stopped(Stop),
+    Stopped {
+        /// Why.
+        stop: Stop,
+        /// The text the harness gives as the turn's result, when it gives one.
+        result: Option<String>,
+    },
     /// It failed, and why, in the harness's words.
     Failed(String),
     /// A quota refused it.
     Limited(Limit),
+}
+
+impl TurnEnd {
+    /// A turn that stopped for this reason, with no result text.
+    #[must_use]
+    pub const fn stopped(stop: Stop) -> Self {
+        Self::Stopped { stop, result: None }
+    }
+
+    /// Why it stopped, when it did.
+    #[must_use]
+    pub const fn stop(&self) -> Option<Stop> {
+        match self {
+            Self::Stopped { stop, .. } => Some(*stop),
+            _ => None,
+        }
+    }
 }
 
 /// What the person may answer a permission request with.
@@ -588,9 +610,18 @@ pub struct PermissionRequest {
     pub options: Vec<PermissionOption>,
     /// Where the answer goes.
     pub responder: Responder,
+    /// The harness's own fields of the request, for a host that decides by them; no client sees them.
+    pub details: serde_json::Map<String, Value>,
 }
 
 impl PermissionRequest {
+    /// The same with the harness's own fields.
+    #[must_use]
+    pub fn details(mut self, details: serde_json::Map<String, Value>) -> Self {
+        self.details = details;
+        self
+    }
+
     /// A request.
     #[must_use]
     pub fn new(
@@ -606,6 +637,7 @@ impl PermissionRequest {
             description,
             options,
             responder,
+            details: serde_json::Map::new(),
         }
     }
 }

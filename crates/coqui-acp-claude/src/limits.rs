@@ -69,8 +69,8 @@ pub(crate) fn limit(value: &Value) -> Option<Limit> {
     }
 }
 
-/// The quota window a `rate_limit_event` reports, whatever its status: `utilization` as thousandths only when it is a
-/// fraction between 0 and 1, since its scale is not documented.
+/// The quota windows a `rate_limit_event` reports, whatever its status: each of `unifiedWindows`, or else the one it
+/// names. `utilization` is thousandths only when it is a fraction between 0 and 1, since its scale is not documented.
 pub(crate) fn quota(value: &Value) -> Vec<Quota> {
     if value.get("type").and_then(Value::as_str) != Some("rate_limit_event") {
         return Vec::new();
@@ -78,25 +78,53 @@ pub(crate) fn quota(value: &Value) -> Vec<Quota> {
     let Some(info) = value.get("rate_limit_info") else {
         return Vec::new();
     };
-    let mut quota = Quota::new(
+    let window = |name: &str, fields: &Value| {
+        let mut quota = Quota::new(name);
+        quota.used_permille = fields
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .filter(|fraction| (0.0..=1.0).contains(fraction))
+            .map(|fraction| permille(fraction * 1000.0));
+        quota.resets_at = fields
+            .get("resetsAt")
+            .and_then(Value::as_i64)
+            .map(unix_seconds);
+        quota.status = fields
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        quota
+    };
+    if let Some(windows) = info
+        .get("unifiedWindows")
+        .and_then(Value::as_object)
+        .filter(|windows| !windows.is_empty())
+    {
+        return windows
+            .iter()
+            .map(|(name, fields)| window(name, fields))
+            .collect();
+    }
+    vec![window(
         info.get("rateLimitType")
             .and_then(Value::as_str)
             .unwrap_or("unknown"),
-    );
-    quota.used_permille = info
-        .get("utilization")
-        .and_then(Value::as_f64)
-        .filter(|fraction| (0.0..=1.0).contains(fraction))
-        .map(|fraction| permille(fraction * 1000.0));
-    quota.resets_at = info
-        .get("resetsAt")
-        .and_then(Value::as_i64)
-        .map(unix_seconds);
-    quota.status = info
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    vec![quota]
+        info,
+    )]
+}
+
+/// The limit an `error` line says, by the same words as a result's; a reset time follows a trailing `|`.
+pub(crate) fn limit_of_text(text: &str) -> Option<Limit> {
+    limit(&serde_json::json!({"type": "result", "is_error": true, "result": text}))
+}
+
+/// `limit`, with what `hint`, the rejected event before it, knows and it does not.
+pub(crate) fn with_hint(mut limit: Limit, hint: Option<Limit>) -> Limit {
+    if let Some(hint) = hint {
+        limit.resets_at = limit.resets_at.or(hint.resets_at);
+        limit.window = limit.window.or(hint.window);
+    }
+    limit
 }
 
 #[expect(
@@ -151,9 +179,9 @@ pub(crate) fn context_used(message_usage: &Value) -> Option<u64> {
     let input = count("input_tokens")?;
     Some(
         input
-            + count("cache_read_input_tokens").unwrap_or(0)
-            + count("cache_creation_input_tokens").unwrap_or(0)
-            + count("output_tokens").unwrap_or(0),
+            .saturating_add(count("cache_read_input_tokens").unwrap_or(0))
+            .saturating_add(count("cache_creation_input_tokens").unwrap_or(0))
+            .saturating_add(count("output_tokens").unwrap_or(0)),
     )
 }
 

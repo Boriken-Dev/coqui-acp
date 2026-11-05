@@ -11,8 +11,8 @@
 //! one line first, then a line of them per line told, failing if standard error is closed. `COQUI_ACP_CLAUDE_EXIT` makes it write
 //! one line of diagnostics after its first input line and exit with that code, and `COQUI_ACP_CLAUDE_END` exit once the
 //! recording is told. The recorded session id is written as the one `--session-id=` or `--resume=` names, as Claude Code
-//! does, unless `COQUI_ACP_CLAUDE_KEEP_SESSION` is set. `--version` prints the recorded
-//! version.
+//! does, unless `COQUI_ACP_CLAUDE_KEEP_SESSION` is set. `COQUI_ACP_CLAUDE_LEAVE_CHILD` makes that exit leave a child
+//! holding its output open. `--version` prints the recorded version.
 
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
@@ -28,6 +28,10 @@ fn answer(id: &str, response: &Value) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--hold") {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        return;
+    }
     if args.iter().any(|arg| arg == "--version") {
         println!("2.1.318 (Claude Code)");
         return;
@@ -58,6 +62,13 @@ fn main() {
     let mut out = stdout.lock();
     if let Ok(code) = std::env::var("COQUI_ACP_CLAUDE_EXIT") {
         let _ = inputs.recv();
+        if std::env::var_os("COQUI_ACP_CLAUDE_LEAVE_CHILD").is_some() {
+            let exe = std::env::current_exe().unwrap();
+            std::process::Command::new(exe)
+                .arg("--hold")
+                .spawn()
+                .unwrap();
+        }
         writeln!(out, "replay-claude: Error: the stored login has expired").unwrap();
         out.flush().unwrap();
         std::process::exit(code.parse().unwrap());

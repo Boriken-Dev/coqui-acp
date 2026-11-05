@@ -404,7 +404,7 @@ impl Session {
                             &shared,
                             version,
                             turn,
-                            &TurnEnd::Stopped(Stop::Cancelled),
+                            &TurnEnd::stopped(Stop::Cancelled),
                             None,
                         );
                     }
@@ -427,7 +427,7 @@ impl Session {
                 shared,
                 version,
                 turn,
-                &TurnEnd::Stopped(Stop::Cancelled),
+                &TurnEnd::stopped(Stop::Cancelled),
                 None,
             );
         }
@@ -457,7 +457,7 @@ impl Session {
             shared.withdraw(&asking);
             // A turn the harness ran by itself, or an exit between turns.
             if version >= 2
-                && let TurnEnd::Stopped(stop) = end
+                && let TurnEnd::Stopped { stop, .. } = end
             {
                 self.update(shared, json!({"sessionUpdate": "state_update", "state": "idle", "stopReason": stop.as_str()}));
             }
@@ -467,7 +467,7 @@ impl Session {
         shared.withdraw(&asking);
         let end = match end {
             TurnEnd::Limited(limit) => TurnEnd::Limited(limit),
-            _ if turn.cancelling => TurnEnd::Stopped(Stop::Cancelled),
+            _ if turn.cancelling => TurnEnd::stopped(Stop::Cancelled),
             other => other,
         };
         self.answer(shared, version, turn, &end, usage.as_ref());
@@ -486,7 +486,7 @@ impl Session {
             idle.insert("sessionUpdate".into(), json!("state_update"));
             idle.insert("state".into(), json!("idle"));
             match end {
-                TurnEnd::Stopped(stop) => {
+                TurnEnd::Stopped { stop, .. } => {
                     idle.insert("stopReason".into(), json!(stop.as_str()));
                 }
                 TurnEnd::Limited(limit) => {
@@ -519,7 +519,7 @@ impl Session {
             return;
         };
         match end {
-            TurnEnd::Stopped(stop) => {
+            TurnEnd::Stopped { stop, .. } => {
                 let mut result = json!({"stopReason": stop.as_str()});
                 if let Some(usage) = usage {
                     result["usage"] = shape::turn_usage(usage);

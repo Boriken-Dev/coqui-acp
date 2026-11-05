@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use coqui_acp_claude::harness::event::{Content, Event, Outcome, Stop, TurnEnd};
-use coqui_acp_claude::{ClaudeSession, ClaudeSettings, PlainSpawn, SessionStart};
+use coqui_acp_claude::{ClaudeSession, ClaudeSettings, PlainSpawn, SessionStart, Spawn};
 use support::{Scratch, replaying};
 
 fn start(
@@ -58,7 +58,10 @@ fn process_session_restarts_and_resumes_with_the_same_provider_id() {
         .insert("COQUI_ACP_CLAUDE_ARGS".into(), args.clone().into());
     let (session, events) = start(&first);
     let session = session.unwrap();
-    assert_eq!(session.id(), "6f2c1b0e-0000-4000-8000-00000000a5e5");
+    assert_eq!(
+        session.id().as_deref(),
+        Some("6f2c1b0e-0000-4000-8000-00000000a5e5")
+    );
     session
         .prompt(&[Content::Text("Which word?".into())])
         .unwrap();
@@ -95,7 +98,10 @@ fn process_session_restarts_and_resumes_with_the_same_provider_id() {
         .unwrap();
     assert!(matches!(
         until_end(&events).last(),
-        Some(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)))
+        Some(Event::TurnEnd(TurnEnd::Stopped {
+            stop: Stop::EndTurn,
+            ..
+        }))
     ));
     session.close();
     let args = recorded_args(&args);
@@ -223,7 +229,7 @@ fn a_permission_answered_through_the_responder_reaches_claude_code_and_the_turn_
                 .answer(Outcome::Selected(answers.next().unwrap().into()))
                 .unwrap(),
             Event::TurnEnd(end) => {
-                assert_eq!(end, TurnEnd::Stopped(Stop::EndTurn));
+                assert_eq!(end.stop(), Some(Stop::EndTurn));
                 break;
             }
             _ => {}
@@ -239,7 +245,7 @@ fn a_permission_answered_through_the_responder_reaches_claude_code_and_the_turn_
         )
     );
     assert_eq!(session.version().as_deref(), Some("2.1.318"));
-    assert_eq!(session.models().len(), 5);
+    assert_eq!(session.models().expect("listed").len(), 5);
 }
 
 /// An interrupt is a control request, and the turn it stops ends as cancelled.
@@ -256,12 +262,18 @@ fn interrupt_writes_a_control_request_and_the_turn_ends_cancelled() {
     session.interrupt().unwrap();
     assert!(matches!(
         until_end(&events).last(),
-        Some(Event::TurnEnd(TurnEnd::Stopped(Stop::Cancelled)))
+        Some(Event::TurnEnd(TurnEnd::Stopped {
+            stop: Stop::Cancelled,
+            ..
+        }))
     ));
     session.prompt(&[Content::Text("Go on.".into())]).unwrap();
     assert!(matches!(
         until_end(&events).last(),
-        Some(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)))
+        Some(Event::TurnEnd(TurnEnd::Stopped {
+            stop: Stop::EndTurn,
+            ..
+        }))
     ));
 }
 
@@ -341,7 +353,10 @@ fn an_overlong_diagnostic_line_does_not_end_the_session() {
     assert!(
         matches!(
             seen.last(),
-            Some(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)))
+            Some(Event::TurnEnd(TurnEnd::Stopped {
+                stop: Stop::EndTurn,
+                ..
+            }))
         ),
         "{seen:?}"
     );
@@ -377,7 +392,187 @@ fn live_claude_code_lists_models_with_no_login_and_no_turn() {
         .insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:9".into());
     let (session, _events) = start(&launch);
     let session = session.unwrap();
-    assert!(!session.models().is_empty());
+    assert!(!session.models().expect("listed").is_empty());
     assert!(session.version().is_some());
     session.close();
+}
+
+/// What is told of a session that came back as another keeps that other session's id, for whoever has to find it.
+#[test]
+fn a_different_session_is_named_to_the_sink_before_the_end() {
+    let scratch = Scratch::new("different");
+    let mut launch = replaying(Some("resume"), &scratch.0);
+    launch.session = SessionStart::Resume("6f2c1b0e-0000-4000-8000-00000000bbbb".into());
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_KEEP_SESSION".into(), "1".into());
+    let (session, events) = start(&launch);
+    let session = session.unwrap();
+    let _ = session.prompt(&[Content::Text("Which word?".into())]);
+    let mut told = Vec::new();
+    while let Ok(event) = events.recv_timeout(Duration::from_secs(20)) {
+        let over = matches!(event, Event::Exited(_));
+        told.push(event);
+        if over {
+            break;
+        }
+    }
+    assert!(
+        told.iter().any(|event| matches!(
+            event,
+            Event::SessionId(id) if id == "6f2c1b0e-0000-4000-8000-00000000a5e5"
+        )),
+        "{told:?}"
+    );
+}
+
+/// Something it started holds its output open: its exit is still noticed, and what it left behind is ended.
+#[test]
+fn an_exit_with_its_output_held_open_ends_the_session() {
+    let scratch = Scratch::new("held");
+    let mut launch = replaying(None, &scratch.0);
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_EXIT".into(), "3".into());
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_LEAVE_CHILD".into(), "1".into());
+    let mut settings = ClaudeSettings::new();
+    settings.exit_poll = Duration::from_millis(10);
+    settings.exit_wait = Duration::from_millis(200);
+    settings.initialize_timeout = Duration::from_secs(20);
+    let (sender, events) = mpsc::channel();
+    let failed = ClaudeSession::start(&launch, &PlainSpawn, settings, move |event| {
+        sender.send(event).is_ok()
+    });
+    let started = std::time::Instant::now();
+    let error = failed.unwrap_err().to_string();
+    assert!(error.contains("code 3"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(events);
+}
+
+#[test]
+fn a_line_the_host_refuses_ends_claude_code() {
+    let scratch = Scratch::new("hook");
+    let mut settings = ClaudeSettings::new();
+    settings.on_line = Some(std::sync::Arc::new(|line| line["type"] != "assistant"));
+    let (sender, events) = mpsc::channel();
+    let session = ClaudeSession::start(
+        &replaying(Some("resume"), &scratch.0),
+        &PlainSpawn,
+        settings,
+        move |event| sender.send(event).is_ok(),
+    )
+    .unwrap();
+    session
+        .prompt(&[Content::Text("Which word?".into())])
+        .unwrap();
+    let mut told = Vec::new();
+    while let Ok(event) = events.recv_timeout(Duration::from_secs(20)) {
+        let over = matches!(event, Event::Exited(_));
+        told.push(event);
+        if over {
+            break;
+        }
+    }
+    assert!(
+        matches!(told.last(), Some(Event::Exited(why)) if why.contains("refused")),
+        "{told:?}"
+    );
+    assert!(
+        !told.iter().any(|event| matches!(event, Event::TurnEnd(_))),
+        "{told:?}"
+    );
+}
+
+#[test]
+fn claude_code_can_choose_the_session_id() {
+    let scratch = Scratch::new("chosen");
+    let mut launch = replaying(Some("cli_session"), &scratch.0);
+    launch.session = SessionStart::Chosen;
+    let recorded = support::recorded("cli_session")
+        .iter()
+        .find_map(|line| line.get("session_id")?.as_str().map(str::to_string))
+        .unwrap();
+    let (session, events) = start(&launch);
+    let session = session.unwrap();
+    assert_eq!(session.id(), None);
+    session
+        .prompt(&[Content::Text("Who named this session?".into())])
+        .unwrap();
+    let told = until_end(&events);
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, Event::SessionId(id) if *id == recorded)),
+        "{told:?}"
+    );
+    assert_eq!(session.id(), Some(recorded));
+}
+
+/// A close waits for the process to have gone, as the caller may remove its directory next.
+#[test]
+fn a_close_waits_for_a_process_that_takes_its_time_to_end() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Slow(
+        std::sync::Arc<AtomicBool>,
+        Box<dyn coqui_acp_claude::harness::Process>,
+    );
+    impl coqui_acp_claude::harness::Process for Slow {
+        fn kill(&self) -> std::io::Result<()> {
+            let _ = self.1.kill();
+            let gone = std::sync::Arc::clone(&self.0);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                gone.store(true, Ordering::SeqCst);
+            });
+            Ok(())
+        }
+        fn try_wait(&self) -> std::io::Result<Option<coqui_acp_claude::harness::Exit>> {
+            if self.0.load(Ordering::SeqCst) {
+                Err(std::io::Error::other("its status is not told"))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+    struct PlainGone;
+    impl coqui_acp_claude::harness::Process for PlainGone {
+        fn kill(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn try_wait(&self) -> std::io::Result<Option<coqui_acp_claude::harness::Exit>> {
+            Ok(None)
+        }
+    }
+    struct OverPipes(std::sync::Arc<AtomicBool>);
+    impl coqui_acp_claude::Spawn for OverPipes {
+        fn spawn(
+            &self,
+            launch: &coqui_acp_claude::Launch,
+        ) -> std::io::Result<coqui_acp_claude::Spawned> {
+            let mut spawned = PlainSpawn.spawn(launch)?;
+            let process = core::mem::replace(&mut spawned.process, Box::new(PlainGone));
+            spawned.process = Box::new(Slow(std::sync::Arc::clone(&self.0), process));
+            Ok(spawned)
+        }
+    }
+    let scratch = Scratch::new("slow");
+    let gone = std::sync::Arc::new(AtomicBool::new(false));
+    let mut settings = ClaudeSettings::new();
+    settings.close_wait = Duration::from_secs(10);
+    let session = ClaudeSession::start(
+        &replaying(None, &scratch.0),
+        &OverPipes(std::sync::Arc::clone(&gone)),
+        settings,
+        |_| true,
+    )
+    .unwrap();
+    session.close();
+    assert!(gone.load(Ordering::SeqCst), "the close did not wait");
 }

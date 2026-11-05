@@ -32,7 +32,11 @@ pub fn recorded(name: &str) -> Vec<Value> {
 pub fn recorded_thread(name: &str) -> String {
     recorded(name)
         .iter()
-        .find_map(|line| line.pointer("/result/thread/id")?.as_str().map(str::to_string))
+        .find_map(|line| {
+            line.pointer("/result/thread/id")?
+                .as_str()
+                .map(str::to_string)
+        })
         .unwrap()
 }
 

@@ -17,12 +17,9 @@ fn text<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(Value::as_str)
 }
 
-/// The longest title made from a tool's input, in bytes; a longer input is cut, on a character boundary.
-const TITLE_BYTES: usize = 256;
-
-fn cut(text: &str) -> String {
+fn cut(text: &str, max_title: usize) -> String {
     let first = text.lines().next().unwrap_or_default();
-    let cut = coqui_acp_harness::lines::cut(first, TITLE_BYTES);
+    let cut = coqui_acp_harness::lines::cut(first, max_title);
     if cut.len() < text.len() {
         format!("{cut}…")
     } else {
@@ -32,7 +29,7 @@ fn cut(text: &str) -> String {
 
 /// What a tool call of `name` with `input` is: its kind, title, locations and content. `input` is the model's,
 /// untrusted, and only read.
-pub(crate) fn describe(id: &str, name: &str, input: &Value) -> ToolCall {
+pub(crate) fn describe(id: &str, name: &str, input: &Value, max_title: usize) -> ToolCall {
     let mut call = ToolCall::new(id);
     call.name = Some(name.to_string());
     call.input = Some(input.clone());
@@ -52,37 +49,40 @@ pub(crate) fn describe(id: &str, name: &str, input: &Value) -> ToolCall {
         ),
         "Bash" | "PowerShell" => (
             ToolKind::Execute,
-            text(input, "command").map_or_else(|| name.to_string(), cut),
+            text(input, "command").map_or_else(|| name.to_string(), |text| cut(text, max_title)),
         ),
         "Glob" => (
             ToolKind::Search,
             text(input, "pattern").map_or_else(
                 || "Find files".to_string(),
-                |pattern| format!("Find {}", cut(pattern)),
+                |pattern| format!("Find {}", cut(pattern, max_title)),
             ),
         ),
         "Grep" => (
             ToolKind::Search,
             text(input, "pattern").map_or_else(
                 || "Search".to_string(),
-                |pattern| format!("Search {}", cut(pattern)),
+                |pattern| format!("Search {}", cut(pattern, max_title)),
             ),
         ),
         "WebFetch" => (
             ToolKind::Fetch,
-            text(input, "url")
-                .map_or_else(|| "Fetch".to_string(), |url| format!("Fetch {}", cut(url))),
+            text(input, "url").map_or_else(
+                || "Fetch".to_string(),
+                |url| format!("Fetch {}", cut(url, max_title)),
+            ),
         ),
         "WebSearch" => (
             ToolKind::Fetch,
             text(input, "query").map_or_else(
                 || "Search the web".to_string(),
-                |query| format!("Search the web for {}", cut(query)),
+                |query| format!("Search the web for {}", cut(query, max_title)),
             ),
         ),
         "Task" | "Agent" => (
             ToolKind::Think,
-            text(input, "description").map_or_else(|| "Run a subagent".to_string(), cut),
+            text(input, "description")
+                .map_or_else(|| "Run a subagent".to_string(), |text| cut(text, max_title)),
         ),
         "EnterPlanMode" => (ToolKind::SwitchMode, "Plan".to_string()),
         "ExitPlanMode" => (ToolKind::SwitchMode, "Ready to code?".to_string()),
@@ -90,7 +90,7 @@ pub(crate) fn describe(id: &str, name: &str, input: &Value) -> ToolCall {
             ToolKind::Other,
             text(input, "skill").map_or_else(
                 || "Skill".to_string(),
-                |skill| format!("Skill {}", cut(skill)),
+                |skill| format!("Skill {}", cut(skill, max_title)),
             ),
         ),
         other => match other
@@ -297,6 +297,7 @@ mod tests {
             "t",
             "Edit",
             &json!({"file_path": "C:/w/a.txt", "old_string": "two", "new_string": "three"}),
+            256,
         );
         assert_eq!(edit.kind, Some(ToolKind::Edit));
         assert_eq!(edit.title.as_deref(), Some("Edit C:/w/a.txt"));
@@ -313,12 +314,12 @@ mod tests {
             (diff.old_text.as_deref(), diff.new_text.as_deref()),
             (Some("two"), Some("three"))
         );
-        let read = describe("r", "Read", &json!({"file_path": "/a", "offset": 7}));
+        let read = describe("r", "Read", &json!({"file_path": "/a", "offset": 7}), 256);
         assert_eq!(read.locations, Some(vec![Location::new("/a", Some(7))]));
-        let bash = describe("b", "Bash", &json!({"command": "echo one\necho two"}));
+        let bash = describe("b", "Bash", &json!({"command": "echo one\necho two"}), 256);
         assert_eq!(bash.title.as_deref(), Some("echo one…"));
         assert_eq!(bash.content, Some(vec![ToolContent::Terminal("b".into())]));
-        let mcp = describe("m", "mcp__echo__echo", &json!({"text": "hi"}));
+        let mcp = describe("m", "mcp__echo__echo", &json!({"text": "hi"}), 256);
         assert_eq!(
             (mcp.kind, mcp.title.as_deref()),
             (Some(ToolKind::Other), Some("echo: echo"))

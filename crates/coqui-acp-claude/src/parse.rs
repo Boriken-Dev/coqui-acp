@@ -9,10 +9,11 @@ use alloc::vec::Vec;
 use std::io;
 
 use coqui_acp_harness::event::{
-    Command, Content, Event, OptionKind, Outcome, PermissionOption, PermissionRequest, PlanEntry,
-    PlanStatus, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolStatus, TurnEnd,
+    Command, Content, Event, Limit, OptionKind, Outcome, PermissionOption, PermissionRequest,
+    PlanEntry, PlanStatus, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolStatus,
+    TurnEnd,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{limits, tools};
 
@@ -25,6 +26,37 @@ pub const ALLOW_ONCE: &str = "allow";
 pub const ALLOW_ALWAYS: &str = "allow_always";
 /// The id of the option that refuses the call.
 pub const REJECT: &str = "reject";
+
+/// What a [`Parser`] keeps and cuts. Every one is a setting with a default, and any value is taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ParserLimits {
+    /// The longest title made from a tool's input, in bytes; a longer input is cut, on a character boundary. Default
+    /// 256.
+    pub max_title_bytes: usize,
+    /// The messages remembered as streamed, so their whole copy is not told again. Default 64.
+    pub max_streamed: usize,
+    /// The entries of the plan the Task tools keep, the oldest dropped past it. Default 1024.
+    pub max_tasks: usize,
+}
+
+impl ParserLimits {
+    /// The defaults.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_title_bytes: 256,
+            max_streamed: 64,
+            max_tasks: 1024,
+        }
+    }
+}
+
+impl Default for ParserLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The answer to one of our control requests: its `response`, or Claude Code's error.
 pub type ControlAnswer = (String, Result<Value, String>);
@@ -50,8 +82,15 @@ pub struct Parser {
     streamed: VecDeque<String>,
     /// The tokens of the model's context the last request used.
     context_used: Option<u64>,
-    /// Set by an interrupt, so the turn's error result reads as cancelled.
+    /// Set by an interrupt of a running turn, so its error result reads as cancelled.
     interrupted: bool,
+    /// Whether a prompt has been written whose result has not come.
+    running: bool,
+    /// The last rejected `rate_limit_event`: the only place that says when the limit resets.
+    rejected: Option<Limit>,
+    /// A turn an `error` line has ended: the `result` that may follow it is not a second end.
+    ended_by_error: bool,
+    limits: ParserLimits,
     /// The Task tools' list, by task id, for the plan they make.
     tasks: Vec<(String, PlanEntry)>,
     answers: Vec<ControlAnswer>,
@@ -85,6 +124,10 @@ impl Parser {
             streamed: VecDeque::new(),
             context_used: None,
             interrupted: false,
+            running: false,
+            rejected: None,
+            ended_by_error: false,
+            limits: ParserLimits::new(),
             tasks: Vec::new(),
             answers: Vec::new(),
             version: None,
@@ -93,9 +136,33 @@ impl Parser {
         }
     }
 
-    /// Marks the running turn as interrupted: its error result reads as cancelled.
+    /// The same with these bounds.
+    #[must_use]
+    pub fn with_limits(writer: Writer, max_tools: usize, limits: ParserLimits) -> Self {
+        Self {
+            limits,
+            ..Self::new(writer, max_tools)
+        }
+    }
+
+    /// A prompt is being written: what was left of the turn before it says nothing of this one.
+    pub fn prompting(&mut self) {
+        self.running = true;
+        self.interrupted = false;
+        self.ended_by_error = false;
+    }
+
+    /// Marks the running turn as interrupted: its error result reads as cancelled. With no turn running this does
+    /// nothing, so an interrupt that raced a turn's end cannot touch the next.
     pub fn interrupting(&mut self) {
-        self.interrupted = true;
+        self.interrupted = self.running;
+    }
+
+    /// The limit a rejected `rate_limit_event` named, for a turn still running when its output ended: no `result` will
+    /// say it.
+    pub fn end_of_output(&mut self) -> Option<TurnEnd> {
+        let limit = self.rejected.take()?;
+        core::mem::take(&mut self.running).then(|| TurnEnd::Limited(limit))
     }
 
     /// The answers to our own control requests read since the last call, by request id.
@@ -153,7 +220,9 @@ impl Parser {
             "assistant" => events.extend(self.assistant(value, false)),
             "user" => events.extend(self.user(value, false)),
             "result" => events.extend(self.result(value)),
+            "error" => events.extend(self.error_line(value)),
             "rate_limit_event" => {
+                self.rejected = limits::limit(value);
                 let quota = limits::quota(value);
                 if !quota.is_empty() {
                     events.push(Event::Quota(quota));
@@ -162,6 +231,32 @@ impl Parser {
             _ => {}
         }
         events
+    }
+
+    /// A line of `type: error`: the turn has failed, or a quota refused it.
+    fn error_line(&mut self, value: &Value) -> Vec<Event> {
+        let text = value
+            .pointer("/error/message")
+            .or_else(|| value.get("message"))
+            .or_else(|| value.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("Claude Code reported an error")
+            .to_string();
+        let rejected = self.rejected.take();
+        let end = match limits::limit_of_text(&text) {
+            Some(limit) => TurnEnd::Limited(limits::with_hint(limit, rejected)),
+            None => match rejected {
+                Some(mut limit) => {
+                    limit.text = Some(text);
+                    TurnEnd::Limited(limit)
+                }
+                None => TurnEnd::Failed(text),
+            },
+        };
+        self.ended_by_error = true;
+        self.running = false;
+        self.interrupted = false;
+        vec![Event::TurnEnd(end)]
     }
 
     /// The events of one line of a session's transcript, as history: the person's messages are told too.
@@ -219,7 +314,12 @@ impl Parser {
             .get("tool_use_id")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let mut tool = tools::describe(tool_id.as_deref().unwrap_or(&id), &name, &input);
+        let mut tool = tools::describe(
+            tool_id.as_deref().unwrap_or(&id),
+            &name,
+            &input,
+            self.limits.max_title_bytes,
+        );
         tool.status = None;
         let display = request
             .get("display_name")
@@ -262,6 +362,10 @@ impl Parser {
             "Reject",
             OptionKind::RejectOnce,
         ));
+        let mut details = Map::new();
+        details.insert("toolName".into(), json!(name));
+        details.insert("toolUseId".into(), json!(tool_id));
+        details.insert("input".into(), input.clone());
         let writer = Arc::clone(&self.writer);
         let responder = Responder::new(move |outcome| {
             let answer = match outcome {
@@ -284,13 +388,9 @@ impl Parser {
                 &json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": answer}}),
             )
         });
-        Some(Event::Permission(PermissionRequest::new(
-            tool,
-            title,
-            description,
-            options,
-            responder,
-        )))
+        Some(Event::Permission(
+            PermissionRequest::new(tool, title, description, options, responder).details(details),
+        ))
     }
 
     fn system(&mut self, value: &Value) -> Vec<Event> {
@@ -398,10 +498,10 @@ impl Parser {
             }
             "message_stop" => {
                 if let Some(message) = self.streaming.take() {
-                    if self.streamed.len() >= 64 {
+                    self.streamed.push_back(message);
+                    while self.streamed.len() > self.limits.max_streamed {
                         self.streamed.pop_front();
                     }
-                    self.streamed.push_back(message);
                 }
                 Vec::new()
             }
@@ -474,7 +574,12 @@ impl Parser {
                     let name = block.get("name").and_then(Value::as_str).unwrap_or(kind);
                     if let Some(tool_id) = block.get("id").and_then(Value::as_str) {
                         let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
-                        let mut call = tools::describe(tool_id, &format!("{kind}:{name}"), &input);
+                        let mut call = tools::describe(
+                            tool_id,
+                            &format!("{kind}:{name}"),
+                            &input,
+                            self.limits.max_title_bytes,
+                        );
                         call.status = Some(ToolStatus::InProgress);
                         events.push(Event::Tool(call));
                     }
@@ -502,7 +607,7 @@ impl Parser {
         if name.starts_with("Task") && name != "Task" {
             return Vec::new();
         }
-        let call = tools::describe(id, name, &input);
+        let call = tools::describe(id, name, &input, self.limits.max_title_bytes);
         let mut events = vec![Event::Tool(call)];
         if tools::TERMINAL_TOOLS.contains(&name) {
             let mut terminal = Terminal::new(id);
@@ -695,6 +800,10 @@ impl Parser {
                     .to_string();
                 self.tasks
                     .push((id, PlanEntry::new(subject, PlanStatus::Pending)));
+                if self.tasks.len() > self.limits.max_tasks {
+                    let over = self.tasks.len() - self.limits.max_tasks;
+                    self.tasks.drain(..over);
+                }
             }
             "TaskUpdate" => {
                 let Some(task) = input.get("taskId").and_then(Value::as_str) else {
@@ -735,26 +844,43 @@ impl Parser {
             events.push(Event::Denied(denied));
         }
         let interrupted = core::mem::take(&mut self.interrupted);
+        let rejected = self.rejected.take();
+        self.running = false;
+        if core::mem::take(&mut self.ended_by_error) {
+            return events;
+        }
         let end = if let Some(limit) = limits::limit(value) {
-            TurnEnd::Limited(limit)
+            TurnEnd::Limited(limits::with_hint(limit, rejected))
         } else if limits::is_error(value) {
             let aborted = value
                 .get("terminal_reason")
                 .and_then(Value::as_str)
                 .is_some_and(|reason| reason.starts_with("aborted"));
             match value.get("subtype").and_then(Value::as_str) {
-                _ if interrupted || aborted => TurnEnd::Stopped(Stop::Cancelled),
-                Some("error_max_turns") => TurnEnd::Stopped(Stop::MaxTurnRequests),
-                _ => TurnEnd::Failed(limits::error_text(value)),
+                _ if interrupted || aborted => TurnEnd::stopped(Stop::Cancelled),
+                Some("error_max_turns") => TurnEnd::stopped(Stop::MaxTurnRequests),
+                _ => match rejected {
+                    Some(mut limit) => {
+                        limit.text = Some(limits::error_text(value));
+                        TurnEnd::Limited(limit)
+                    }
+                    None => TurnEnd::Failed(limits::error_text(value)),
+                },
             }
         } else if interrupted && value.get("stop_reason").is_none_or(Value::is_null) {
-            TurnEnd::Stopped(Stop::Cancelled)
+            TurnEnd::stopped(Stop::Cancelled)
         } else {
-            TurnEnd::Stopped(match value.get("stop_reason").and_then(Value::as_str) {
-                Some("max_tokens") => Stop::MaxTokens,
-                Some("refusal") => Stop::Refusal,
-                _ => Stop::EndTurn,
-            })
+            TurnEnd::Stopped {
+                stop: match value.get("stop_reason").and_then(Value::as_str) {
+                    Some("max_tokens") => Stop::MaxTokens,
+                    Some("refusal") => Stop::Refusal,
+                    _ => Stop::EndTurn,
+                },
+                result: value
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }
         };
         events.push(Event::TurnEnd(end));
         events

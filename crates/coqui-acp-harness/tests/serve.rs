@@ -140,7 +140,7 @@ impl Conversation for FakeConversation {
                 } else {
                     Stop::EndTurn
                 };
-                sink.send(Event::TurnEnd(TurnEnd::Stopped(stop)));
+                sink.send(Event::TurnEnd(TurnEnd::stopped(stop)));
             }
             Mode::Asks => {
                 let (answered, outcome) = mpsc::channel();
@@ -163,7 +163,7 @@ impl Conversation for FakeConversation {
                     .recv()
                     .map_or_else(|_| "dropped".to_string(), |chosen| format!("{chosen:?}"));
                 fake.log.lock().unwrap().push(format!("answered {chosen}"));
-                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+                sink.send(Event::TurnEnd(TurnEnd::stopped(Stop::EndTurn)));
             }
             Mode::Floods => {
                 for number in 0..200_000 {
@@ -179,7 +179,7 @@ impl Conversation for FakeConversation {
             }
             Mode::Hangs => {}
             Mode::AsksAfterItsEnd => {
-                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+                sink.send(Event::TurnEnd(TurnEnd::stopped(Stop::EndTurn)));
                 let log = Arc::clone(&fake.log);
                 let responder = Responder::new(move |chosen| {
                     log.lock().unwrap().push(format!("late {chosen:?}"));
@@ -200,7 +200,7 @@ impl Conversation for FakeConversation {
                         content: coqui_acp_harness::event::ToolContent::Text("x".repeat(100)),
                     });
                 }
-                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+                sink.send(Event::TurnEnd(TurnEnd::stopped(Stop::EndTurn)));
             }
             Mode::AsksInDetail => {
                 let (answered, outcome) = mpsc::channel();
@@ -216,7 +216,7 @@ impl Conversation for FakeConversation {
                     responder,
                 )));
                 let _ = outcome.recv();
-                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+                sink.send(Event::TurnEnd(TurnEnd::stopped(Stop::EndTurn)));
             }
             Mode::AsksFive => {
                 let (answered, outcomes) = mpsc::channel();
@@ -241,7 +241,7 @@ impl Conversation for FakeConversation {
                         .unwrap()
                         .push(format!("answered {chosen:?}"));
                 }
-                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+                sink.send(Event::TurnEnd(TurnEnd::stopped(Stop::EndTurn)));
             }
         });
         Ok(())

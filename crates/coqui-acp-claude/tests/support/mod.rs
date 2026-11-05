@@ -239,3 +239,17 @@ impl Peer {
             .collect()
     }
 }
+
+/// A parser whose answers are kept, with nothing read yet.
+pub fn parser_of() -> (Parser, Arc<Mutex<Vec<Value>>>) {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&written);
+    let parser = Parser::new(
+        Arc::new(move |value: &Value| {
+            sink.lock().unwrap().push(value.clone());
+            Ok(())
+        }),
+        4096,
+    );
+    (parser, written)
+}

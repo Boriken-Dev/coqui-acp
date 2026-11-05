@@ -16,6 +16,8 @@ use serde_json::{Map, Value, json};
 pub enum SessionStart {
     /// A new session with this id, a UUID.
     New(String),
+    /// A new session whose id Claude Code chooses and says with its first line of a turn.
+    Chosen,
     /// An earlier session by its id, found only from the directory that recorded it.
     Resume(String),
 }
@@ -44,7 +46,8 @@ pub struct ClaudeLaunch {
     /// user can read and names that file as `mcp_config_file`.
     pub mcp_servers: Vec<McpServer>,
     /// The file `--mcp-config` names, holding [`mcp_config`] of `mcp_servers`; `launch` passes MCP servers only
-    /// through it.
+    /// through it. Set it when the process does not run on this machine, as a [`ClaudeSession`](crate::ClaudeSession)
+    /// writes its own file here otherwise; it then writes none, whatever `mcp_servers` holds.
     pub mcp_config_file: Option<PathBuf>,
     /// Only the servers above, none from the person's or the project's configuration (`--strict-mcp-config`).
     pub strict_mcp_config: bool,
@@ -52,6 +55,10 @@ pub struct ClaudeLaunch {
     pub add_dirs: Vec<PathBuf>,
     /// Plugins to load from a directory, whose skills are named `<plugin>:<skill>` (`--plugin-dir`).
     pub plugin_dirs: Vec<PathBuf>,
+    /// Ask for permission on standard output, as control requests (`--permission-prompts=host
+    /// --permission-prompt-tool=stdio`). Off, a call nothing has granted is refused where it is made, and no question
+    /// comes. `dontAsk` decides before these either way. Default on.
+    pub permission_prompts: bool,
     /// The permission mode: `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`, `auto` or `manual`.
     pub permission_mode: Option<String>,
     /// The setting sources Claude Code loads, of `user`, `project` and `local`; `Some` of an empty list loads none.
@@ -81,6 +88,7 @@ impl core::fmt::Debug for ClaudeLaunch {
             .field("mcp_config_file", &self.mcp_config_file)
             .field("add_dirs", &self.add_dirs)
             .field("plugin_dirs", &self.plugin_dirs)
+            .field("permission_prompts", &self.permission_prompts)
             .field("permission_mode", &self.permission_mode)
             .field("setting_sources", &self.setting_sources)
             .field("env", &self.env.keys().collect::<Vec<_>>())
@@ -105,6 +113,7 @@ impl ClaudeLaunch {
             strict_mcp_config: false,
             add_dirs: Vec::new(),
             plugin_dirs: Vec::new(),
+            permission_prompts: true,
             permission_mode: None,
             setting_sources: None,
             max_budget_micro_usd: None,
@@ -115,11 +124,12 @@ impl ClaudeLaunch {
         }
     }
 
-    /// The session's id: the new one's or the resumed one's.
+    /// The session's id, the new one's or the resumed one's, unless Claude Code is to choose it.
     #[must_use]
-    pub fn session_id(&self) -> &str {
+    pub fn session_id(&self) -> Option<&str> {
         match &self.session {
-            SessionStart::New(id) | SessionStart::Resume(id) => id,
+            SessionStart::New(id) | SessionStart::Resume(id) => Some(id),
+            SessionStart::Chosen => None,
         }
     }
 
@@ -133,18 +143,21 @@ impl ClaudeLaunch {
             "--output-format=stream-json",
             "--verbose",
             "--replay-user-messages",
-            "--permission-prompts=host",
-            "--permission-prompt-tool=stdio",
         ]
         .into_iter()
         .map(OsString::from)
         .collect();
+        if self.permission_prompts {
+            args.push("--permission-prompts=host".into());
+            args.push("--permission-prompt-tool=stdio".into());
+        }
         if self.partial_messages {
             args.push("--include-partial-messages".into());
         }
         match &self.session {
             SessionStart::New(id) => args.push(format!("--session-id={id}").into()),
             SessionStart::Resume(id) => args.push(format!("--resume={id}").into()),
+            SessionStart::Chosen => {}
         }
         let mut flag = |name: &str, value: &str| args.push(format!("--{name}={value}").into());
         if let Some(model) = &self.model {
@@ -332,6 +345,35 @@ mod tests {
                 .iter()
                 .any(|arg| arg.starts_with("--max-budget-usd"))
         );
+    }
+
+    #[test]
+    fn permission_prompts_and_the_session_id_can_be_left_to_claude_code() {
+        let mut launch = ClaudeLaunch::new("/w");
+        assert!(
+            args(&launch)
+                .iter()
+                .any(|arg| arg == "--permission-prompt-tool=stdio")
+        );
+        assert!(
+            args(&launch)
+                .iter()
+                .any(|arg| arg.starts_with("--session-id="))
+        );
+        launch.permission_prompts = false;
+        launch.session = SessionStart::Chosen;
+        let args = args(&launch);
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("--permission-prompt")),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--session-id")),
+            "{args:?}"
+        );
+        assert_eq!(launch.session_id(), None);
     }
 
     #[test]

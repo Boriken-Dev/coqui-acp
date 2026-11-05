@@ -50,6 +50,12 @@ struct Cli {
     /// Sessions at once.
     #[arg(long, default_value_t = 8)]
     max_sessions: usize,
+    /// Do not ask for permission on standard output: what nothing has granted is refused where it is made.
+    #[arg(long)]
+    no_permission_prompts: bool,
+    /// Let a client load plugins through `_meta.claudeCode.options.plugins`; their hooks and servers run unasked.
+    #[arg(long)]
+    allow_client_plugins: bool,
     /// A directory every session's `cwd` and more directories must lie in, repeated for more; none takes any.
     #[arg(long = "working-root", value_name = "DIRECTORY")]
     working_roots: Vec<PathBuf>,
@@ -88,7 +94,10 @@ fn main() -> ExitCode {
             .collect()
     });
     defaults.strict_mcp_config = cli.strict_mcp_config;
-    let agent = ClaudeAgent::new().defaults(defaults);
+    defaults.permission_prompts = !cli.no_permission_prompts;
+    let agent = ClaudeAgent::new()
+        .defaults(defaults)
+        .client_plugins(cli.allow_client_plugins);
     match serve(
         Arc::new(agent),
         settings,
@@ -127,5 +136,19 @@ mod tests {
         assert_eq!(settings.working_roots.len(), 2);
         assert!(!settings.client_mcp_servers);
         assert!(!settings.network_paths);
+    }
+
+    #[test]
+    fn plugins_from_a_client_and_the_prompt_flags_are_a_hosts_to_set() {
+        let cli = Cli::parse_from(["coqui-acp-claude"]);
+        assert!(!cli.allow_client_plugins);
+        assert!(!cli.no_permission_prompts);
+        let cli = Cli::parse_from([
+            "coqui-acp-claude",
+            "--allow-client-plugins",
+            "--no-permission-prompts",
+        ]);
+        assert!(cli.allow_client_plugins);
+        assert!(cli.no_permission_prompts);
     }
 }

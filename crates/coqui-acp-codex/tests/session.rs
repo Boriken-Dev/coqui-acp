@@ -159,7 +159,11 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
             turn["effort"].as_str(),
             turn["input"][0]["text"].as_str()
         ),
-        (Some(resume_thread().as_str()), Some("high"), Some("Which word?"))
+        (
+            Some(resume_thread().as_str()),
+            Some("high"),
+            Some("Which word?")
+        )
     );
 }
 

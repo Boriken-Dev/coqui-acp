@@ -52,7 +52,7 @@ fn agent(recording: Option<&str>, config: Option<&std::path::Path>) -> ClaudeAge
             .env
             .insert("CLAUDE_CONFIG_DIR".into(), config.into());
     }
-    ClaudeAgent::new().defaults(defaults)
+    ClaudeAgent::new().defaults(defaults).client_plugins(true)
 }
 
 struct Answers(std::sync::Mutex<Vec<Decision>>);
@@ -378,7 +378,10 @@ fn what_the_client_gives_a_session_reaches_claude_codes_command_line() {
     defaults
         .env
         .insert("COQUI_ACP_CLAUDE_COPY".into(), copy.clone().into());
-    let mut peer = Peer::serve(ClaudeAgent::new().defaults(defaults), Settings::new());
+    let mut peer = Peer::serve(
+        ClaudeAgent::new().defaults(defaults).client_plugins(true),
+        Settings::new(),
+    );
     peer.request(
         "initialize",
         json!({"protocolVersion": 2, "capabilities": {}, "info": {"name": "test", "version": "0"}}),
@@ -479,14 +482,11 @@ fn a_load_finds_only_the_transcript_of_its_own_directory() {
 }
 
 #[test]
-fn a_host_can_refuse_plugins_from_a_client() {
+fn plugins_from_a_client_are_refused_unless_the_host_allows_them() {
     let scratch = Scratch::new("no-plugins");
     let mut defaults = ClaudeLaunch::new(".");
     defaults.executable = replay_program().into();
-    let mut peer = Peer::serve(
-        ClaudeAgent::new().defaults(defaults).client_plugins(false),
-        Settings::new(),
-    );
+    let mut peer = Peer::serve(ClaudeAgent::new().defaults(defaults), Settings::new());
     peer.request(
         "initialize",
         json!({"protocolVersion": 2, "capabilities": {}, "info": {"name": "test", "version": "0"}}),
@@ -497,4 +497,64 @@ fn a_host_can_refuse_plugins_from_a_client() {
         json!({"cwd": scratch.0.to_string_lossy(), "_meta": {"claudeCode": {"options": {"plugins": [{"type": "local", "path": plugin.to_string_lossy()}]}}}}),
     );
     assert_eq!(opened["error"]["code"], -32602, "{opened}");
+}
+
+fn plugin_refused(settings: Settings, cwd: &std::path::Path, plugin: &str) -> Value {
+    let mut peer = Peer::serve(agent(None, None), settings);
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 2, "capabilities": {}, "info": {"name": "test", "version": "0"}}),
+    );
+    peer.request(
+        "session/new",
+        json!({"cwd": cwd.to_string_lossy(), "_meta": {"claudeCode": {"options": {"plugins": [
+            {"type": "local", "path": plugin}]}}}}),
+    )
+}
+
+/// What the host narrowed holds for a plugin as for a session's directories.
+#[test]
+fn a_plugin_is_held_to_the_working_roots_and_the_network_rule() {
+    let scratch = Scratch::new("plugin-roots");
+    let inside = scratch.0.join("inside");
+    let outside = scratch.0.join("outside");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let mut settings = Settings::new();
+    settings.working_roots = vec![inside.clone()];
+    let refused = plugin_refused(settings.clone(), &inside, &outside.to_string_lossy());
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let taken = plugin_refused(settings, &inside, &inside.join("plugin").to_string_lossy());
+    assert!(taken.get("result").is_some(), "{taken}");
+    let share = if cfg!(windows) {
+        r"\\host\share\plugin"
+    } else {
+        "//host/share/plugin"
+    };
+    let refused = plugin_refused(Settings::new(), &inside, share);
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let mut open = Settings::new();
+    open.network_paths = true;
+    let taken = plugin_refused(open, &inside, share);
+    assert!(taken.get("result").is_some(), "{taken}");
+}
+
+/// A host's own configuration file would silently drop a client's servers.
+#[test]
+fn a_clients_servers_are_refused_when_the_host_names_its_own_configuration_file() {
+    let scratch = Scratch::new("host-file");
+    let mut defaults = ClaudeLaunch::new(".");
+    defaults.executable = replay_program().into();
+    defaults.mcp_config_file = Some(scratch.0.join("mcp.json"));
+    let mut peer = Peer::serve(ClaudeAgent::new().defaults(defaults), Settings::new());
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 2, "capabilities": {}, "info": {"name": "test", "version": "0"}}),
+    );
+    let refused = peer.request(
+        "session/new",
+        json!({"cwd": scratch.0.to_string_lossy(), "mcpServers": [{"type": "stdio", "name": "echo",
+            "command": scratch.0.join("echo").to_string_lossy(), "args": [], "env": []}]}),
+    );
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
 }

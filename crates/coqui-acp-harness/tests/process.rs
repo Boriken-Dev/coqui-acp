@@ -319,3 +319,90 @@ fn a_launchs_debug_shows_no_argument_value() {
     assert!(!shown.contains("hunter2"), "{shown}");
     assert!(shown.contains("codex"), "{shown}");
 }
+
+/// A stream over pipes, for what it does with what a line comes to.
+fn stream_of(
+    process: std::sync::Arc<dyn coqui_acp_harness::Process>,
+) -> (
+    coqui_acp_harness::Stream,
+    std::sync::mpsc::Receiver<coqui_acp_harness::Event>,
+) {
+    let (sender, events) = std::sync::mpsc::channel();
+    let sink: coqui_acp_harness::stream::EventHook =
+        std::sync::Arc::new(move |event| sender.send(event).is_ok());
+    let stream = coqui_acp_harness::Stream::new(
+        "Test",
+        process,
+        std::sync::Arc::new(std::sync::Mutex::new(coqui_acp_harness::lines::Tail::new(
+            4, 64,
+        ))),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        sink,
+    );
+    (stream, events)
+}
+
+struct Running;
+
+impl coqui_acp_harness::Process for Running {
+    fn kill(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn try_wait(&self) -> std::io::Result<Option<coqui_acp_harness::Exit>> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_refusal_nobody_waits_for_is_told() {
+    let (stream, events) = stream_of(std::sync::Arc::new(Running));
+    let input: &[u8] = b"{\"a\":1}\n";
+    stream
+        .read(
+            Box::new(input),
+            "test-stdout",
+            |_| {
+                coqui_acp_harness::Step::new(
+                    Vec::new(),
+                    vec![("nobody".to_string(), Err("Refused it".to_string()))],
+                )
+            },
+            Vec::new,
+        )
+        .unwrap();
+    let told: Vec<_> = events.iter().collect();
+    assert!(
+        told.iter().any(|event| matches!(
+            event,
+            coqui_acp_harness::Event::Notice { title, .. } if title == "Refused it"
+        )),
+        "{told:?}"
+    );
+}
+
+#[test]
+fn a_line_the_host_refuses_ends_the_harness_before_anything_reads_it() {
+    let (mut stream, events) = stream_of(std::sync::Arc::new(Running));
+    stream.on_line = Some(std::sync::Arc::new(|line| line["a"] != 2));
+    let input: &[u8] = b"{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n";
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seeing = std::sync::Arc::clone(&seen);
+    stream
+        .read(
+            Box::new(input),
+            "test-stdout",
+            move |line| {
+                seeing.lock().unwrap().push(line["a"].clone());
+                coqui_acp_harness::Step::default()
+            },
+            Vec::new,
+        )
+        .unwrap();
+    let told: Vec<_> = events.iter().collect();
+    assert_eq!(*seen.lock().unwrap(), [serde_json::json!(1)]);
+    assert!(
+        matches!(told.last(), Some(coqui_acp_harness::Event::Exited(why)) if why.contains("refused")),
+        "{told:?}"
+    );
+}

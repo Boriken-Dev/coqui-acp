@@ -207,7 +207,7 @@ fn a_recorded_turn_ends_with_its_usage_and_context() {
     assert_eq!(usage.context_size, Some(1_000_000));
     assert!(usage.context_used.is_some_and(|used| used > 0));
     assert!(usage.cost_usd.is_some());
-    assert_eq!(end_of(&events), &TurnEnd::Stopped(Stop::EndTurn));
+    assert_eq!(end_of(&events).stop(), Some(Stop::EndTurn));
     let ends = events
         .iter()
         .filter(|event| matches!(event, Event::TurnEnd(_)))
@@ -218,7 +218,7 @@ fn a_recorded_turn_ends_with_its_usage_and_context() {
 #[test]
 fn a_recorded_initialize_lists_models_with_their_efforts_and_never_the_account() {
     let answer = &recorded("turn")[0]["response"]["response"];
-    let models = models_of(answer);
+    let models = models_of(answer).expect("listed");
     let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(ids, ["default", "opus", "fable", "sonnet", "haiku"]);
     assert_eq!(models[4].efforts, ["low", "medium", "high", "xhigh", "max"]);
@@ -249,8 +249,8 @@ fn a_recorded_interrupt_ends_the_turn_cancelled_and_the_next_turn_runs() {
             _ => None,
         })
         .collect();
-    assert_eq!(ends[0], TurnEnd::Stopped(Stop::Cancelled));
-    assert_eq!(ends[1], TurnEnd::Stopped(Stop::EndTurn));
+    assert_eq!(ends[0].stop(), Some(Stop::Cancelled));
+    assert_eq!(ends[1].stop(), Some(Stop::EndTurn));
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn the_models_claude_code_lists_are_read_from_its_initialize_answer() {
             {"displayName": "no value: not a model"}
         ]
     });
-    let models = models_of(&answer);
+    let models = models_of(&answer).expect("listed");
     let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(ids, ["default", "claude-haiku-5-5"]);
     assert_eq!(models[0].name, "Default (recommended)");
@@ -399,7 +399,12 @@ fn the_models_claude_code_lists_are_read_from_its_initialize_answer() {
 
 #[test]
 fn an_answer_without_models_lists_none() {
-    assert!(models_of(&json!({"commands": []})).is_empty());
+    assert_eq!(
+        models_of(&json!({"commands": []})),
+        None,
+        "unknown is not empty"
+    );
+    assert_eq!(models_of(&json!({"models": []})), Some(Vec::new()));
 }
 
 #[test]
@@ -415,7 +420,7 @@ fn result_fixture_maps_to_a_completed_event() {
     let events = events_of(&[
         json!({"type": "result", "session_id": "claude-session-7", "result": "Mission work finished"}),
     ]);
-    assert_eq!(end_of(&events), &TurnEnd::Stopped(Stop::EndTurn));
+    assert_eq!(end_of(&events).stop(), Some(Stop::EndTurn));
     assert!(matches!(&events[0], Event::SessionId(id) if id == "claude-session-7"));
 }
 
@@ -477,7 +482,7 @@ fn an_allowed_rate_limit_event_is_not_a_limit() {
         json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1_790_000_000}}),
         json!({"type": "result", "result": "done"}),
     ]);
-    assert_eq!(end_of(&events), &TurnEnd::Stopped(Stop::EndTurn));
+    assert_eq!(end_of(&events).stop(), Some(Stop::EndTurn));
 }
 
 #[test]
@@ -558,7 +563,7 @@ fn a_result_reporting_an_error_does_not_complete_the_turn() {
         json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": null,
         "errors": ["[ede_diagnostic] result_type=user"], "terminal_reason": "aborted_streaming", "stop_reason": null}),
     ]);
-    assert_eq!(end_of(&aborted), &TurnEnd::Stopped(Stop::Cancelled));
+    assert_eq!(end_of(&aborted).stop(), Some(Stop::Cancelled));
     let failed = events_of(&[
         json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": null,
         "errors": ["[ede_diagnostic] result_type=user"], "terminal_reason": "tool_error"}),
@@ -567,7 +572,7 @@ fn a_result_reporting_an_error_does_not_complete_the_turn() {
     let done = events_of(&[
         json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"}),
     ]);
-    assert_eq!(end_of(&done), &TurnEnd::Stopped(Stop::EndTurn));
+    assert_eq!(end_of(&done).stop(), Some(Stop::EndTurn));
 }
 
 /// The shape Claude Code 2.1.316 writes after a turn whose calls were refused: a success.
@@ -820,4 +825,252 @@ fn a_resource_cannot_close_its_context_block() {
     assert_eq!(text.matches("</context>").count(), 1, "{text}");
     assert!(text.ends_with("</context>"), "{text}");
     assert!(!text.contains("\">evil"), "{text}");
+}
+
+fn ends_of(events: &[Event]) -> Vec<&TurnEnd> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TurnEnd(end) => Some(end),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A limit's reset time is in the rejected event; the result after it says it only as a local clock time.
+#[test]
+fn a_recorded_rejection_gives_the_refused_turn_its_reset_and_window() {
+    let reset = recorded("rate_limit")
+        .iter()
+        .find(|line| line.pointer("/rate_limit_info/status") == Some(&json!("rejected")))
+        .and_then(|line| line.pointer("/rate_limit_info/resetsAt").cloned())
+        .and_then(|reset| reset.as_i64())
+        .expect("a recording with a rejected rate_limit_event");
+    let (events, _) = parsed("rate_limit");
+    let ends = ends_of(&events);
+    assert_eq!(ends.len(), 3, "{ends:?}");
+    let TurnEnd::Limited(limit) = ends[1] else {
+        panic!("{:?}", ends[1])
+    };
+    assert_eq!(limit.resets_at, Some(reset));
+    assert_eq!(limit.window.as_deref(), Some("five_hour"));
+    assert!(
+        limit.text.as_deref().unwrap().contains("limit"),
+        "{limit:?}"
+    );
+    assert!(
+        matches!(ends[2], TurnEnd::Limited(_)) || !matches!(ends[2], TurnEnd::Failed(_)),
+        "a rejection whose turn was answered anyway is no failure: {:?}",
+        ends[2]
+    );
+    assert!(!matches!(ends[2], TurnEnd::Limited(_)), "{:?}", ends[2]);
+}
+
+#[test]
+fn recorded_windows_report_how_much_is_used() {
+    let (events, _) = parsed("rate_limit");
+    let quotas: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Quota(windows) => Some(windows),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(quotas[0][0].window, "five_hour");
+    assert_eq!(quotas[0][0].used_permille, Some(500));
+    assert_eq!(quotas[0][0].status.as_deref(), Some("allowed"));
+    assert_eq!(quotas[1][0].used_permille, Some(1000));
+    assert_eq!(quotas[1][0].status.as_deref(), Some("rejected"));
+}
+
+/// No recording holds one: Claude Code 2.1.318 said nothing of the kind to any stand-in.
+#[test]
+fn an_error_line_fails_the_turn_once() {
+    let (mut parser, _) = support::parser_of();
+    parser.prompting();
+    let events = parser
+        .line(&json!({"type": "error", "error": {"type": "api_error", "message": "It broke."}}));
+    assert_eq!(ends_of(&events), [&TurnEnd::Failed("It broke.".into())]);
+    let events = parser.line(
+        &json!({"type": "result", "subtype": "success", "is_error": true, "result": "It broke."}),
+    );
+    assert!(ends_of(&events).is_empty(), "{events:?}");
+    parser.prompting();
+    let events =
+        parser.line(&json!({"type": "error", "message": "You've hit your usage limit|1893456000"}));
+    let [TurnEnd::Limited(limit)] = ends_of(&events)[..] else {
+        panic!("{events:?}")
+    };
+    assert_eq!(limit.resets_at, Some(1_893_456_000));
+}
+
+/// An interrupt that raced the turn's end says nothing of the next turn.
+#[test]
+fn an_interrupt_after_the_turn_ended_does_not_touch_the_next() {
+    let (mut parser, _) = support::parser_of();
+    parser.prompting();
+    parser.line(
+        &json!({"type": "result", "subtype": "success", "is_error": false, "result": "Done."}),
+    );
+    parser.interrupting();
+    parser.prompting();
+    let events = parser.line(
+        &json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+        "errors": ["It broke."]}),
+    );
+    assert_eq!(ends_of(&events), [&TurnEnd::Failed("It broke.".into())]);
+}
+
+/// The refusal of a control request nobody waits for comes back as an answer, to be told.
+#[test]
+fn a_recorded_refusal_of_a_control_request_is_an_answer() {
+    let (mut parser, _) = support::parser_of();
+    for line in recorded("refused_control") {
+        parser.line(&line);
+    }
+    let answers = parser.answers();
+    let (id, answer) = answers.first().expect("the refusal");
+    assert_eq!(id, "bogus-1");
+    assert!(
+        answer.as_ref().unwrap_err().contains("no_such_request"),
+        "{answer:?}"
+    );
+}
+
+/// The prompt's images keep the order the client gave them.
+#[test]
+fn images_stay_where_the_client_put_them() {
+    let blocks = user_blocks(&[
+        Content::Text("first".into()),
+        Content::Image {
+            mime_type: "image/png".into(),
+            data: "aGk=".into(),
+        },
+        Content::Text("last".into()),
+    ])
+    .unwrap();
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[2]["text"], "last");
+}
+
+#[test]
+fn a_turn_keeps_its_result_text() {
+    let (events, _) = parsed("resume");
+    let TurnEnd::Stopped { stop, result } = end_of(&events) else {
+        panic!("{:?}", end_of(&events))
+    };
+    assert_eq!(*stop, Stop::EndTurn);
+    assert_eq!(result.as_deref(), Some("The word was kayak."));
+}
+
+#[test]
+fn a_question_carries_the_fields_a_host_decides_by() {
+    let (events, _) = parsed("turn");
+    let asked = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Permission(request) => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(asked.details["toolName"], "Edit");
+    assert!(asked.details["toolUseId"].is_string());
+    assert_eq!(asked.details["input"]["old_string"], "two");
+}
+
+/// With `dontAsk`, Claude Code decides without asking, whatever the prompt flags say.
+#[test]
+fn recorded_dont_ask_refuses_before_any_question() {
+    let (events, written) = parsed("dont_ask");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Permission(_)))
+    );
+    assert!(events.iter().any(|event| matches!(event, Event::Denied(_))));
+    assert!(written.lock().unwrap().is_empty());
+}
+
+/// Without the prompt flags a call nothing granted is refused the same way.
+#[test]
+fn recorded_without_prompts_a_call_is_refused_where_it_is_made() {
+    let (events, _) = parsed("no_prompts");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Permission(_)))
+    );
+    assert!(events.iter().any(|event| matches!(event, Event::Denied(_))));
+}
+
+/// A rejection with no `result` after it: the output ended.
+#[test]
+fn a_rejection_the_output_ended_after_is_the_limit() {
+    let (mut parser, _) = support::parser_of();
+    parser.prompting();
+    parser.line(
+        &json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected",
+        "resetsAt": 1_893_456_000, "rateLimitType": "five_hour"}}),
+    );
+    let Some(TurnEnd::Limited(limit)) = parser.end_of_output() else {
+        panic!()
+    };
+    assert_eq!(limit.resets_at, Some(1_893_456_000));
+    assert_eq!(parser.end_of_output(), None);
+}
+
+/// Allowed again: an earlier rejection says nothing of this turn's failure.
+#[test]
+fn an_allowed_event_clears_an_earlier_rejection() {
+    let (mut parser, _) = support::parser_of();
+    parser.prompting();
+    parser.line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1}}));
+    parser.line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1}}));
+    let events = parser.line(
+        &json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+        "errors": ["It broke."]}),
+    );
+    assert_eq!(ends_of(&events), [&TurnEnd::Failed("It broke.".into())]);
+}
+
+#[test]
+fn every_bound_of_the_parser_is_a_setting() {
+    let mut limits = coqui_acp_claude::ParserLimits::new();
+    limits.max_title_bytes = 8;
+    limits.max_tasks = 1;
+    let written = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&written);
+    let mut parser = Parser::with_limits(
+        Arc::new(move |value: &Value| {
+            sink.lock().unwrap().push(value.clone());
+            Ok(())
+        }),
+        16,
+        limits,
+    );
+    let events = parser.line(&json!({"type": "assistant", "message": {"id": "m", "content": [
+        {"type": "tool_use", "id": "t", "name": "Glob", "input": {"pattern": "a-very-long-pattern"}}]}}));
+    let Event::Tool(call) = &events[0] else {
+        panic!("{events:?}")
+    };
+    assert!(
+        call.title.as_deref().unwrap().len() < 24,
+        "{:?}",
+        call.title
+    );
+    for (id, subject) in [("t1", "one"), ("t2", "two")] {
+        parser.line(
+            &json!({"type": "assistant", "message": {"id": "m", "content": [
+            {"type": "tool_use", "id": id, "name": "TaskCreate", "input": {"subject": subject}}]}}),
+        );
+    }
+    let events = parser.line(&json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t2", "content": "Task #2 created"}]}}));
+    let events2 = parser.line(&json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "Task #1 created"}]}}));
+    let Event::Plan(plan) = &events2[0] else {
+        panic!("{events:?} {events2:?}")
+    };
+    assert_eq!(plan.len(), 1);
 }
