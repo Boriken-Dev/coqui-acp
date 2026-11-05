@@ -22,6 +22,10 @@ pub(crate) struct Shapes {
     /// Tool calls announced, oldest first, with the content version 1 sends whole each time.
     tools: VecDeque<String>,
     content: BTreeMap<String, Vec<Value>>,
+    /// The bytes of each tool call's content in `content`, and how much is kept of any.
+    content_bytes: BTreeMap<String, usize>,
+    max_content_bytes: usize,
+    max_content_items: usize,
     /// The tool call that shows each terminal, for version 1, which has no terminals of the agent's.
     terminals: BTreeMap<String, String>,
     /// The last usage of the running turn, which version 2 gives with its `idle`.
@@ -33,7 +37,23 @@ impl Shapes {
         Self {
             version,
             max_tools,
+            max_content_bytes: usize::MAX,
+            max_content_items: usize::MAX,
             ..Self::default()
+        }
+    }
+
+    /// With bounds on the content version 1 sends whole each time.
+    pub(crate) fn bounded(
+        version: u8,
+        max_tools: usize,
+        max_content_bytes: usize,
+        max_content_items: usize,
+    ) -> Self {
+        Self {
+            max_content_bytes,
+            max_content_items,
+            ..Self::new(version, max_tools)
         }
     }
 
@@ -60,6 +80,7 @@ impl Shapes {
             Event::ToolChunk { id, content } => self.tool_chunk(id, content),
             Event::Terminal(terminal) => self.terminal(terminal),
             Event::Plan(entries) => vec![plan(entries, v2)],
+            Event::Usage(usage) if usage.elsewhere => Vec::new(),
             Event::Usage(usage) => {
                 self.usage = Some(usage.clone());
                 usage_update(usage).into_iter().collect()
@@ -174,6 +195,7 @@ impl Shapes {
             Some(ToolStatus::Completed | ToolStatus::Failed | ToolStatus::Cancelled)
         ) {
             self.content.remove(&call.id);
+            self.content_bytes.remove(&call.id);
         }
         vec![Value::Object(update)]
     }
@@ -188,8 +210,22 @@ impl Shapes {
                 json!({"sessionUpdate": "tool_call_content_chunk", "toolCallId": id, "content": item}),
             ];
         }
+        let bytes = self.content_bytes.entry(id.to_string()).or_default();
+        if *bytes == usize::MAX {
+            return Vec::new();
+        }
         let content = self.content.entry(id.to_string()).or_default();
-        content.push(item);
+        let size = item.to_string().len();
+        if bytes.saturating_add(size) > self.max_content_bytes
+            || content.len() >= self.max_content_items
+        {
+            *bytes = usize::MAX;
+            content.push(json!({"type": "content",
+                "content": {"type": "text", "text": "[the rest of this output was left out]"}}));
+        } else {
+            *bytes += size;
+            content.push(item);
+        }
         vec![
             json!({"sessionUpdate": "tool_call_update", "toolCallId": id, "content": content.clone()}),
         ]
@@ -414,6 +450,36 @@ pub(crate) fn config_options(options: &[ConfigOption], version: u8) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_of_another_thread_changes_neither_the_context_nor_the_turns_usage() {
+        let mut shapes = super::Shapes::new(2, 8);
+        let own = crate::event::Usage {
+            input: 1,
+            context_used: Some(5),
+            context_size: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(
+            shapes
+                .updates(&crate::event::Event::Usage(own.clone()))
+                .len(),
+            1
+        );
+        let other = crate::event::Usage {
+            input: 100,
+            elsewhere: true,
+            context_used: Some(99),
+            context_size: Some(100),
+            ..Default::default()
+        };
+        assert!(
+            shapes
+                .updates(&crate::event::Event::Usage(other))
+                .is_empty()
+        );
+        assert_eq!(shapes.usage, Some(own));
+    }
+
     #[test]
     fn counts_past_any_size_add_up_to_the_largest() {
         let usage = crate::event::Usage {

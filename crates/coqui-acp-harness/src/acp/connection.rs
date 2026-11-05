@@ -346,6 +346,7 @@ impl Shared {
         let shared = Arc::clone(self);
         let busy = Arc::clone(&self.busy);
         let aborted = turn.clone();
+        let answer_to = id.clone();
         let spawned = thread::Builder::new()
             .name("coqui-acp-harness-request".into())
             .spawn(move || {
@@ -355,11 +356,16 @@ impl Shared {
                 }
                 busy.fetch_sub(1, Ordering::SeqCst);
             });
-        if spawned.is_err() {
+        if let Err(error) = spawned {
             self.busy.fetch_sub(1, Ordering::SeqCst);
             if let Some((session, number)) = aborted {
                 session.abort(number);
             }
+            self.respond_error(
+                &answer_to,
+                INTERNAL_ERROR,
+                &format!("the request could not start: {error}"),
+            );
         }
     }
 
@@ -478,18 +484,11 @@ impl Shared {
                 .map(std::path::PathBuf::as_path),
         );
         for path in &paths {
-            if !self.settings.network_paths && parse::network(path) {
-                return Err("a network or device path is not taken".into());
-            }
-            let roots = &self.settings.working_roots;
-            if !roots.is_empty() {
-                let plain = path
-                    .components()
-                    .all(|part| !matches!(part, Component::ParentDir | Component::CurDir));
-                if !plain || !roots.iter().any(|root| path.starts_with(root)) {
-                    return Err("the directory is outside the working roots".into());
-                }
-            }
+            super::path_admitted(
+                path,
+                &self.settings.working_roots,
+                self.settings.network_paths,
+            )?;
         }
         for server in &request.mcp_servers {
             if let super::McpTransport::Stdio { command, .. } = &server.transport
@@ -520,6 +519,7 @@ impl Shared {
                 request
                     .working_roots
                     .clone_from(&self.settings.working_roots);
+                request.network_paths = self.settings.network_paths;
                 request
             }
             Err(why) => return self.respond_error(id, INVALID_PARAMS, &why),
@@ -553,7 +553,7 @@ impl Shared {
         // The pump runs from the start, so a harness that tells much while it opens (a history) is never held up;
         // only a load's history is told before its answer.
         let (sender, items) = mpsc::sync_channel(self.settings.max_queued_events);
-        let session = Arc::new(Session::new(named, version, self.settings.max_tools));
+        let session = Arc::new(Session::new(named, version, &self.settings));
         {
             let pumped = Arc::clone(&session);
             let shared = Arc::clone(self);

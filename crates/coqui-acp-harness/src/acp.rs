@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 
 use serde_json::{Map, Value};
@@ -21,14 +21,65 @@ mod shape;
 
 pub use connection::serve;
 
-/// `path` when it is absolute: `/…`, a drive (`C:\…`, `C:/…`) or a UNC path, on any platform. `what` names it in the
-/// refusal.
+/// `path` when it is absolute by this platform's rules: a drive or UNC path on Windows, `/…` elsewhere. `what` names it
+/// in the refusal.
 ///
 /// # Errors
 ///
 /// The refusal, for a relative path or one with a NUL character.
 pub fn absolute_path(path: &str, what: &str) -> Result<PathBuf, String> {
     parse::absolute(path, what)
+}
+
+/// `path` with every link in the part of it that exists resolved, and the rest as written: what a check of where a path
+/// leads has to compare.
+#[must_use]
+pub fn resolved_path(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(found) = std::fs::canonicalize(existing) {
+            let mut resolved = found;
+            for part in rest.iter().rev() {
+                resolved.push(part);
+            }
+            return resolved;
+        }
+        let (Some(parent), Some(part)) = (existing.parent(), existing.file_name()) else {
+            return path.to_path_buf();
+        };
+        rest.push(part);
+        existing = parent;
+    }
+}
+
+/// Whether `path`, followed through its links, lies in one of `roots`, followed through theirs.
+#[must_use]
+pub fn within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let plain = path
+        .components()
+        .all(|part| !matches!(part, Component::ParentDir | Component::CurDir));
+    let resolved = resolved_path(path);
+    plain
+        && roots
+            .iter()
+            .any(|root| resolved.starts_with(resolved_path(root)))
+}
+
+/// Whether a host's narrowing takes `path`: inside `roots` unless there are none, and not on the network, as written or
+/// where its links lead, unless `network_paths`.
+///
+/// # Errors
+///
+/// The refusal.
+pub fn path_admitted(path: &Path, roots: &[PathBuf], network_paths: bool) -> Result<(), String> {
+    if !network_paths && (parse::network(path) || parse::network_resolved(&resolved_path(path))) {
+        return Err("a network or device path is not taken".into());
+    }
+    if !roots.is_empty() && !within_roots(path, roots) {
+        return Err("the directory is outside the working roots".into());
+    }
+    Ok(())
 }
 
 /// The `_meta` key of a turn's answer, or of a version 2 `idle`, that says a quota refused the turn:
@@ -297,11 +348,23 @@ pub struct OpenRequest {
     pub additional_directories: Vec<PathBuf>,
     /// [`Settings::working_roots`]: what a harness that finds a session by its id alone checks that session against.
     pub working_roots: Vec<PathBuf>,
+    /// [`Settings::network_paths`]: for what a harness takes outside this request's fields.
+    pub network_paths: bool,
     /// The request's `_meta`, for what ACP has no field for: the client's, untrusted.
     pub meta: Map<String, Value>,
 }
 
 impl OpenRequest {
+    /// Whether the host's narrowing takes a path the harness read from this request's other parts, as `cwd` and
+    /// `additionalDirectories` are checked.
+    ///
+    /// # Errors
+    ///
+    /// The refusal.
+    pub fn path_admitted(&self, path: &Path) -> Result<(), String> {
+        path_admitted(path, &self.working_roots, self.network_paths)
+    }
+
     /// A new session in `cwd`, with nothing else.
     #[must_use]
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
@@ -311,6 +374,7 @@ impl OpenRequest {
             mcp_servers: Vec::new(),
             system_prompt: None,
             working_roots: Vec::new(),
+            network_paths: false,
             additional_directories: Vec::new(),
             meta: Map::new(),
         }
@@ -513,6 +577,11 @@ pub struct Settings {
     /// read holds the harness back instead of filling memory. The same many are kept of what a session says before its
     /// answer has gone; past it they are dropped, and the client is told how many. Default 4096.
     pub max_queued_events: usize,
+    /// Version 1 sends a tool call's content whole with each piece: the bytes kept of each, past which more is left out
+    /// and the client told so. Default 1 MiB.
+    pub max_tool_content_bytes: usize,
+    /// The same for how many pieces. Default 256.
+    pub max_tool_content_items: usize,
     /// A session's questions open at once; past it one is answered cancelled without being asked. Each open question
     /// holds a thread. Default 64.
     pub max_open_questions: usize,
@@ -543,6 +612,8 @@ impl Settings {
             max_tools: 4096,
             max_queued_events: 4096,
             max_open_questions: 64,
+            max_tool_content_bytes: 1024 * 1024,
+            max_tool_content_items: 256,
             client_mcp_servers: true,
             working_roots: Vec::new(),
             network_paths: false,
@@ -570,6 +641,8 @@ impl fmt::Debug for Settings {
             .field("max_tools", &self.max_tools)
             .field("max_queued_events", &self.max_queued_events)
             .field("max_open_questions", &self.max_open_questions)
+            .field("max_tool_content_bytes", &self.max_tool_content_bytes)
+            .field("max_tool_content_items", &self.max_tool_content_items)
             .field("client_mcp_servers", &self.client_mcp_servers)
             .field("working_roots", &self.working_roots)
             .field("network_paths", &self.network_paths)

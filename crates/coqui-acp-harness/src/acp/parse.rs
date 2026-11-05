@@ -41,6 +41,16 @@ pub(crate) fn network(path: &Path) -> bool {
     bytes.len() >= 2 && matches!(bytes[0], b'\\' | b'/') && matches!(bytes[1], b'\\' | b'/')
 }
 
+/// Whether a path a link led to is on the network. A resolved path on Windows is written `\\?\C:\…` for a local disk and
+/// `\\?\UNC\…` for a share.
+pub(crate) fn network_resolved(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => rest.starts_with("UNC\\"),
+        None => network(path),
+    }
+}
+
 fn pairs(value: Option<&Value>, what: &str) -> Result<Vec<(String, String)>, Invalid> {
     let Some(value) = value else {
         return Ok(Vec::new());

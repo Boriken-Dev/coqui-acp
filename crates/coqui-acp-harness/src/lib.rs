@@ -8,6 +8,7 @@ pub mod acp;
 pub mod event;
 pub mod lines;
 pub mod process;
+pub mod stream;
 pub mod version;
 
 pub use acp::{
@@ -15,4 +16,8 @@ pub use acp::{
     McpTransport, Open, OpenRequest, OptionValue, Settings, Takes, serve,
 };
 pub use event::{Event, Outcome, PermissionRequest, Responder};
-pub use process::{Exit, Launch, PlainSpawn, Process, Spawn, Spawned, exit_text};
+pub use process::{
+    Exit, Launch, LineWriter, PlainSpawn, Process, Spawn, Spawned, ending_once, exit_text,
+    line_writer, watch_exit,
+};
+pub use stream::{Answer, LineHook, Step, Stream, Waiting};

@@ -332,6 +332,8 @@ pub struct Usage {
     pub cache_write: u64,
     /// Whether the counts are running totals rather than this report's own.
     pub cumulative: bool,
+    /// Whether it is another thread's, such as a sub-agent's: spent, and no part of this conversation's context.
+    pub elsewhere: bool,
     /// What the session has cost so far, in US dollars.
     pub cost_usd: Option<f64>,
     /// Tokens of the model's context in use.

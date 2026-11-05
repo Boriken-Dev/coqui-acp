@@ -35,6 +35,10 @@ enum Mode {
     AsksInDetail,
     /// A turn asks five permissions at once and ends once each is answered.
     AsksFive,
+    /// A turn ends, and a permission is asked just after.
+    AsksAfterItsEnd,
+    /// A turn sends many chunks of one tool call and ends.
+    ToolChunks,
 }
 
 #[derive(Clone)]
@@ -49,6 +53,8 @@ struct Fake {
     stuck_interrupt: Duration,
     /// Chunks the opening sends before the session's answer.
     open_chunks: usize,
+    /// A prompt does not return for this long.
+    stuck_prompt: Duration,
 }
 
 impl Fake {
@@ -62,6 +68,7 @@ impl Fake {
             sent: Arc::new(AtomicUsize::new(0)),
             stuck_interrupt: Duration::ZERO,
             open_chunks: 0,
+            stuck_prompt: Duration::ZERO,
         }
     }
 }
@@ -120,6 +127,7 @@ impl Conversation for FakeConversation {
     }
 
     fn prompt(&self, _content: Vec<coqui_acp_harness::event::Content>) -> Result<(), HarnessError> {
+        std::thread::sleep(self.fake.stuck_prompt);
         self.fake.log.lock().unwrap().push("prompt".into());
         let sink = self.sink.clone();
         let interrupted = Arc::clone(&self.interrupted);
@@ -170,6 +178,30 @@ impl Conversation for FakeConversation {
                 }
             }
             Mode::Hangs => {}
+            Mode::AsksAfterItsEnd => {
+                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+                let log = Arc::clone(&fake.log);
+                let responder = Responder::new(move |chosen| {
+                    log.lock().unwrap().push(format!("late {chosen:?}"));
+                    Ok(())
+                });
+                sink.send(Event::Permission(PermissionRequest::new(
+                    ToolCall::new("t1"),
+                    "Edit",
+                    None,
+                    vec![PermissionOption::new("yes", "Allow", OptionKind::AllowOnce)],
+                    responder,
+                )));
+            }
+            Mode::ToolChunks => {
+                for _ in 0..200 {
+                    sink.send(Event::ToolChunk {
+                        id: "t1".into(),
+                        content: coqui_acp_harness::event::ToolContent::Text("x".repeat(100)),
+                    });
+                }
+                sink.send(Event::TurnEnd(TurnEnd::Stopped(Stop::EndTurn)));
+            }
             Mode::AsksInDetail => {
                 let (answered, outcome) = mpsc::channel();
                 let responder = Responder::new(move |chosen| {
@@ -679,4 +711,116 @@ fn a_servers_debug_shows_no_credential_of_its_address_or_arguments() {
     }
     assert!(format!("{http:?}").contains("docs.example"));
     assert!(format!("{stdio:?}").contains("/bin/files"));
+}
+
+#[test]
+fn a_cancel_of_a_prompt_that_never_reaches_the_harness_still_ends_within_the_grace() {
+    let mut fake = Fake::new(Mode::Hangs);
+    fake.stuck_prompt = Duration::from_secs(30);
+    let mut settings = Settings::new();
+    settings.cancel_grace = Duration::from_millis(100);
+    let mut client = Client::serve(fake, settings);
+    let session = client.open(2);
+    client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    client.notify("session/cancel", json!({"sessionId": session}));
+    let started = Instant::now();
+    let ended = client.until(idle);
+    assert_eq!(ended["params"]["update"]["stopReason"], "cancelled");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_question_started_after_its_turn_ended_is_withdrawn() {
+    let fake = Fake::new(Mode::AsksAfterItsEnd);
+    let log = Arc::clone(&fake.log);
+    let mut client = Client::serve(fake, Settings::new());
+    let session = client.open(2);
+    client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    while !log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == "late Cancelled")
+    {
+        assert!(Instant::now() < until, "{:?}", log.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn version_1_tool_content_stays_within_its_bounds_and_says_so() {
+    let mut settings = Settings::new();
+    settings.max_tool_content_bytes = 1000;
+    let mut client = Client::serve(Fake::new(Mode::ToolChunks), settings);
+    let session = client.open(1);
+    let prompt = client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    client.answer(prompt);
+    let updates: Vec<&Value> = client
+        .seen
+        .iter()
+        .filter(|message| message["params"]["update"]["sessionUpdate"] == "tool_call_update")
+        .collect();
+    let largest = updates
+        .iter()
+        .map(|message| message["params"]["update"]["content"].to_string().len())
+        .max()
+        .unwrap();
+    assert!(largest < 3000, "{largest}");
+    assert!(updates.len() < 40, "{}", updates.len());
+    assert!(
+        updates.last().unwrap().to_string().contains("left out"),
+        "the bound is told"
+    );
+}
+
+/// A link inside a root to a directory outside it is outside.
+#[test]
+fn a_link_out_of_a_working_root_is_outside_it() {
+    let scratch = std::env::temp_dir().join(format!("coqui-acp-roots-{}", std::process::id()));
+    let root = scratch.join("root");
+    let outside = scratch.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = root.join("link");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&outside, &link);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(&outside, &link);
+    if linked.is_err() {
+        // Creating a link on Windows takes a privilege this account may not hold.
+        std::fs::remove_dir_all(&scratch).unwrap();
+        return;
+    }
+    let mut settings = Settings::new();
+    settings.working_roots = vec![root.clone()];
+    let mut client = Client::serve(Fake::new(Mode::Slow), settings);
+    let initialize = client.request("initialize", json!({"protocolVersion": 2}));
+    client.answer(initialize);
+    let escaped = client.request("session/new", json!({"cwd": link.to_string_lossy()}));
+    let escaped = client.answer(escaped);
+    assert!(escaped.get("error").is_some(), "{escaped}");
+    let unborn = client.request(
+        "session/new",
+        json!({"cwd": link.join("not-yet").to_string_lossy()}),
+    );
+    let unborn = client.answer(unborn);
+    assert!(unborn.get("error").is_some(), "{unborn}");
+    let inside = client.request("session/new", json!({"cwd": root.to_string_lossy()}));
+    let inside = client.answer(inside);
+    assert!(inside.get("result").is_some(), "{inside}");
+    std::fs::remove_dir_all(&scratch).unwrap();
 }

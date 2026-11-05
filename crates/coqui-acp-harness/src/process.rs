@@ -3,16 +3,21 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, PoisonError};
+use std::sync::mpsc::{self, TrySendError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Instant;
+
+use serde_json::Value;
 
 /// What to start: a program, its arguments, its working directory and its environment.
 ///
@@ -104,7 +109,7 @@ impl fmt::Debug for Launch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Launch")
             .field("program", &self.program)
-            .field("args", &self.args)
+            .field("args", &self.args.len())
             .field("cwd", &self.cwd)
             .field("env", &self.env.keys().collect::<Vec<_>>())
             .field("remove_env", &self.remove_env)
@@ -164,6 +169,99 @@ pub fn exit_text(process: &dyn Process, wait: Duration) -> String {
             _ => return "closed its output".into(),
         }
     }
+}
+
+/// Writes one JSON value as one line to a harness's standard input, without waiting for it.
+pub type LineWriter = Arc<dyn Fn(&Value) -> io::Result<()> + Send + Sync>;
+
+/// A [`LineWriter`] over `stdin`: a thread of its own writes the lines in order, so a harness that has stopped reading
+/// holds up nobody. Past `max_queued` lines waiting, or once a write has failed, a line is refused with an error.
+///
+/// # Errors
+///
+/// When the thread could not start.
+pub fn line_writer(
+    mut stdin: Box<dyn Write + Send>,
+    max_queued: usize,
+    name: &str,
+) -> io::Result<LineWriter> {
+    let (sender, lines) = mpsc::sync_channel::<Vec<u8>>(max_queued);
+    let broken: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    let breaking = Arc::clone(&broken);
+    thread::Builder::new().name(name.into()).spawn(move || {
+        for line in lines {
+            if let Err(error) = stdin.write_all(&line).and_then(|()| stdin.flush()) {
+                let _ = breaking.set(error.to_string());
+                return;
+            }
+        }
+    })?;
+    Ok(Arc::new(move |value: &Value| {
+        if let Some(why) = broken.get() {
+            return Err(io::Error::other(why.clone()));
+        }
+        let mut line = serde_json::to_vec(value).map_err(io::Error::other)?;
+        line.push(b'\n');
+        sender.try_send(line).map_err(|error| match error {
+            TrySendError::Full(_) => {
+                io::Error::other(alloc::format!("{max_queued} lines are already waiting"))
+            }
+            TrySendError::Disconnected(_) => io::Error::other("its input has closed"),
+        })
+    }))
+}
+
+/// A flag for [`watch_exit`]: whoever sets it first ends the session.
+#[must_use]
+pub fn ending_once() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
+/// Watches `process` on a thread of its own until `done` is set, asking every `poll` whether it has exited. An exit with
+/// `done` still unset is a process whose output something else holds open: what it wrote last gets `drain` to be read,
+/// what it left behind is ended and gets `drain` too, and then `end` runs, if `done` still was not set. A process that
+/// cannot say whether it has exited is not watched.
+///
+/// # Errors
+///
+/// When the thread could not start.
+pub fn watch_exit(
+    process: Arc<dyn Process>,
+    poll: Duration,
+    drain: Duration,
+    done: Arc<AtomicBool>,
+    end: impl FnOnce() + Send + 'static,
+) -> io::Result<()> {
+    let wait = move |done: &AtomicBool, wait: Duration| {
+        let until = Instant::now().checked_add(wait);
+        while !done.load(Ordering::SeqCst) && until.is_none_or(|until| Instant::now() < until) {
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    thread::Builder::new()
+        .name("coqui-acp-harness-exit".into())
+        .spawn(move || {
+            loop {
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+                match process.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => thread::sleep(poll.max(Duration::from_millis(1))),
+                    Err(_) => return,
+                }
+            }
+            wait(&done, drain);
+            if done.load(Ordering::SeqCst) {
+                return;
+            }
+            let _ = process.kill();
+            wait(&done, drain);
+            if !done.swap(true, Ordering::SeqCst) {
+                end();
+            }
+        })?;
+    Ok(())
 }
 
 /// A started process and its pipes. Standard error is `None` when the spawner keeps it.

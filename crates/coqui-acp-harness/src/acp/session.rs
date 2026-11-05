@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use super::connection::{INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Shared};
 use super::shape::{self, Shapes};
-use super::{Conversation, HarnessError};
+use super::{Conversation, HarnessError, Settings};
 use crate::event::{
     Content, Event, Outcome, PermissionRequest, Severity, Stop, ToolCall, TurnEnd, Usage,
 };
@@ -44,6 +44,8 @@ struct State {
     turns: u64,
     /// Endings still to come of turns already answered as cancelled: each is dropped when it comes.
     stale_ends: usize,
+    /// A turn answered as cancelled before its prompt reached the harness.
+    answered_unsent: Option<u64>,
     /// Why the harness is gone, once it is.
     gone: Option<String>,
     closed: bool,
@@ -60,7 +62,7 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(id: Option<String>, version: u8, max_tools: usize) -> Self {
+    pub(crate) fn new(id: Option<String>, version: u8, settings: &Settings) -> Self {
         let known = OnceLock::new();
         if let Some(id) = id {
             let _ = known.set(id);
@@ -69,10 +71,16 @@ impl Session {
             id: known,
             conversation: Mutex::new(None),
             state: Mutex::new(State {
-                shapes: Shapes::new(version, max_tools),
+                shapes: Shapes::bounded(
+                    version,
+                    settings.max_tools,
+                    settings.max_tool_content_bytes,
+                    settings.max_tool_content_items,
+                ),
                 turn: None,
                 turns: 0,
                 stale_ends: 0,
+                answered_unsent: None,
                 gone: None,
                 closed: false,
                 asking: Vec::new(),
@@ -169,21 +177,26 @@ impl Session {
         }
         match event {
             Event::Permission(request) => {
-                {
+                let turn = {
                     let mut state = self.state();
+                    let Some(turn) = state.turn.as_ref().map(|turn| turn.number) else {
+                        // Its turn has ended: nobody is there to ask, and dropping it answers cancelled.
+                        return;
+                    };
                     if state.questions >= shared.settings.max_open_questions {
                         drop(state);
                         shared.note("a permission request past the limit was answered cancelled");
                         return;
                     }
                     state.questions += 1;
-                }
+                    turn
+                };
                 let session = Arc::clone(self);
                 let asking = Arc::clone(shared);
                 let spawned = thread::Builder::new()
                     .name("coqui-acp-harness-permission".into())
                     .spawn(move || {
-                        session.ask(&asking, request);
+                        session.ask(&asking, request, turn);
                         session.state().questions -= 1;
                     });
                 if let Err(error) = spawned {
@@ -239,7 +252,7 @@ impl Session {
         Ok(number)
     }
 
-    /// Gives up turn `number` before its prompt was sent.
+    /// Gives up turn `number` before its prompt was sent. One answered as cancelled meanwhile has no ending to come.
     pub(crate) fn abort(&self, number: u64) {
         let mut state = self.state();
         if state
@@ -248,7 +261,14 @@ impl Session {
             .is_some_and(|turn| turn.number == number)
         {
             state.turn = None;
+        } else if state.answered_unsent == Some(number) {
+            state.answered_unsent = None;
+            state.stale_ends = state.stale_ends.saturating_sub(1);
         }
+    }
+
+    fn answered_early(&self, number: u64) -> bool {
+        self.state().answered_unsent == Some(number)
     }
 
     /// Sends turn `number`'s prompt, answering `id`: at once with the user message's id in version 2, at the turn's
@@ -279,7 +299,15 @@ impl Session {
             );
         }
         if let Err(error) = conversation.prompt(content) {
+            let answered = self.answered_early(number);
             self.abort(number);
+            if answered {
+                // The turn has been answered as cancelled; version 2's prompt still has its own answer.
+                if version >= 2 {
+                    shared.respond(id, json!({"messageId": message}));
+                }
+                return;
+            }
             if version >= 2 {
                 self.update(
                     shared,
@@ -304,39 +332,38 @@ impl Session {
                     turn.sent = true;
                     turn.cancelling
                 }
-                None => false,
+                None => {
+                    let answered = state.answered_unsent == Some(number);
+                    if answered {
+                        state.answered_unsent = None;
+                    }
+                    answered
+                }
             }
         };
         if deferred {
-            self.interrupt(shared, &conversation, number);
+            Self::interrupt(shared, &conversation);
         }
     }
 
     /// Interrupts the running turn, and answers it as cancelled if it has not ended within the grace. A turn whose
     /// prompt has not reached the harness yet is interrupted once it has.
     pub(crate) fn cancel(self: &Arc<Self>, shared: &Arc<Shared>) {
-        let number = {
+        let (number, sent) = {
             let mut state = self.state();
             let Some(turn) = state.turn.as_mut().filter(|turn| !turn.cancelling) else {
                 return;
             };
             turn.cancelling = true;
-            if !turn.sent {
-                return;
-            }
-            turn.number
+            (turn.number, turn.sent)
         };
-        if let Some(conversation) = self.conversation() {
-            self.interrupt(shared, &conversation, number);
+        if sent && let Some(conversation) = self.conversation() {
+            Self::interrupt(shared, &conversation);
         }
+        self.grace(shared, number);
     }
 
-    fn interrupt(
-        self: &Arc<Self>,
-        shared: &Arc<Shared>,
-        conversation: &Arc<dyn Conversation>,
-        number: u64,
-    ) {
+    fn interrupt(shared: &Arc<Shared>, conversation: &Arc<dyn Conversation>) {
         // A harness that has stopped reading must not hold up the thread that reads the client.
         let interrupting = Arc::clone(conversation);
         let noting = Arc::clone(shared);
@@ -347,6 +374,9 @@ impl Session {
                     noting.note(&format!("the turn could not be interrupted: {error}"));
                 }
             });
+    }
+
+    fn grace(self: &Arc<Self>, shared: &Arc<Shared>, number: u64) {
         let session = Arc::clone(self);
         let shared = Arc::clone(shared);
         let grace = shared.settings.cancel_grace;
@@ -362,6 +392,9 @@ impl Session {
                 {
                     let turn = state.turn.take();
                     state.stale_ends += 1;
+                    if turn.as_ref().is_some_and(|turn| !turn.sent) {
+                        state.answered_unsent = Some(number);
+                    }
                     let version = state.shapes.version;
                     let asking = core::mem::take(&mut state.asking);
                     drop(state);
@@ -513,7 +546,7 @@ impl Session {
     /// Puts a permission request to the client and sends its answer to the harness. A question still open when its
     /// turn ends, is cancelled or its session closes is answered cancelled, and a later answer from the client is
     /// dropped.
-    fn ask(&self, shared: &Shared, request: PermissionRequest) {
+    fn ask(&self, shared: &Shared, request: PermissionRequest, turn: u64) {
         let version = self.version();
         if version >= 2 {
             self.update(
@@ -540,7 +573,11 @@ impl Session {
         let (number, answered) = shared.begin_request("session/request_permission", params);
         {
             let mut state = self.state();
-            if state.closed {
+            let same_turn = state
+                .turn
+                .as_ref()
+                .is_some_and(|running| running.number == turn);
+            if state.closed || !same_turn {
                 drop(state);
                 shared.withdraw(&[number]);
             } else {
