@@ -8,7 +8,9 @@
 mod support;
 
 use coqui_acp_codex::Parser;
-use coqui_acp_codex::harness::event::{Event, OptionKind, Outcome, PermissionRequest, TurnEnd};
+use coqui_acp_codex::harness::event::{
+    Event, OptionKind, Outcome, PermissionRequest, Stop, TurnEnd,
+};
 use coqui_acp_codex::parse::{ALLOW_ONCE, ALLOW_RULE, ALLOW_SESSION, REJECT};
 use serde_json::{Value, json};
 use support::{parser, recorded};
@@ -402,7 +404,7 @@ fn the_option_that_grants_a_root_names_it() {
 #[test]
 fn a_turn_given_up_on_is_interrupted_when_it_starts_and_its_end_is_nobodys() {
     let (mut parser, written) = parser();
-    parser.abandon();
+    parser.abandon("1");
     parser
         .line(&json!({"method": "turn/started", "params": {"threadId": "t", "turn": {"id": "u"}}}));
     let sent = written
@@ -442,7 +444,7 @@ fn the_end_of_a_turn_given_up_on_does_not_end_the_one_running() {
     let (mut parser, written) = parser();
     parser
         .line(&json!({"method": "turn/started", "params": {"threadId": "t", "turn": {"id": "a"}}}));
-    parser.abandon();
+    parser.abandon("1");
     let sent = written.lock().unwrap().last().cloned().unwrap();
     assert_eq!(sent["params"]["turnId"], "a");
     parser.started("b");
@@ -611,4 +613,129 @@ fn every_recorded_version_takes_a_decline_it_did_not_list() {
         );
     }
     assert!(seen.len() >= 2, "{seen:?}");
+}
+
+fn started(parser: &mut coqui_acp_codex::Parser, turn: &str) {
+    parser.line(
+        &json!({"method": "turn/started", "params": {"threadId": "t", "turn": {"id": turn}}}),
+    );
+}
+
+fn ended(parser: &mut coqui_acp_codex::Parser, turn: &str, status: &str) -> Vec<Event> {
+    parser.line(
+        &json!({"method": "turn/completed", "params": {"threadId": "t",
+        "turn": {"id": turn, "status": status}}}),
+    )
+}
+
+fn turn_ends(events: &[Event]) -> Vec<&TurnEnd> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TurnEnd(end) => Some(end),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An interrupt of a turn given up on says nothing of the prompt after it.
+#[test]
+fn an_interrupt_of_a_turn_given_up_on_does_not_touch_the_next() {
+    let (mut parser, _) = parser();
+    started(&mut parser, "a");
+    parser.interrupting();
+    parser.abandon("1");
+    assert!(turn_ends(&ended(&mut parser, "a", "interrupted")).is_empty());
+    parser.prompting();
+    started(&mut parser, "b");
+    let events = parser.line(
+        &json!({"method": "turn/completed", "params": {"threadId": "t",
+        "turn": {"id": "b", "status": "failed", "error": {"message": "It broke."}}}}),
+    );
+    assert_eq!(
+        turn_ends(&events),
+        [&TurnEnd::Failed("It broke.".into())],
+        "{events:?}"
+    );
+}
+
+/// An error another turn reported is not the running turn's, nor the next one's.
+#[test]
+fn an_error_of_another_turn_is_not_this_ones() {
+    let limit = json!({"message": "Limit.", "codexErrorInfo": "usageLimitExceeded"});
+    let (mut parser, _) = parser();
+    started(&mut parser, "a");
+    parser.abandon("1");
+    parser.line(
+        &json!({"method": "error", "params": {"threadId": "t", "turnId": "a",
+        "willRetry": false, "error": limit}}),
+    );
+    assert!(turn_ends(&ended(&mut parser, "a", "failed")).is_empty());
+    parser.prompting();
+    started(&mut parser, "b");
+    parser.line(
+        &json!({"method": "error", "params": {"threadId": "t", "turnId": "old",
+        "willRetry": false, "error": limit}}),
+    );
+    let events = ended(&mut parser, "b", "completed");
+    assert_eq!(
+        turn_ends(&events),
+        [&TurnEnd::stopped(Stop::EndTurn)],
+        "{events:?}"
+    );
+}
+
+/// A prompt whose `turn/start` went unanswered, then another, then the first's answer after all: that turn is given up
+/// on when its answer names it, and its start and end touch nothing of the second.
+#[test]
+fn a_turn_given_up_on_that_starts_after_the_next_prompt_ends_nothing() {
+    let (mut parser, written) = parser();
+    parser.abandon("41");
+    parser.prompting();
+    parser.line(&json!({"id": 41, "result": {"turn": {"id": "a"}}}));
+    let sent = written
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("an interrupt");
+    assert_eq!(sent["method"], "turn/interrupt");
+    assert_eq!(sent["params"]["turnId"], "a");
+    started(&mut parser, "a");
+    assert_eq!(parser.turn(), None, "not the running turn");
+    assert!(turn_ends(&ended(&mut parser, "a", "interrupted")).is_empty());
+    started(&mut parser, "b");
+    assert_eq!(parser.turn(), Some("b"));
+    assert_eq!(turn_ends(&ended(&mut parser, "b", "completed")).len(), 1);
+}
+
+/// The same when its start comes before its answer.
+#[test]
+fn a_turn_given_up_on_is_known_by_its_answer_after_its_start() {
+    let (mut parser, written) = parser();
+    parser.abandon("41");
+    parser.prompting();
+    started(&mut parser, "a");
+    parser.line(&json!({"id": 41, "result": {"turn": {"id": "a"}}}));
+    let sent = written
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("an interrupt");
+    assert_eq!(sent["params"]["turnId"], "a");
+    assert!(turn_ends(&ended(&mut parser, "a", "interrupted")).is_empty());
+    assert_eq!(parser.turn(), None);
+}
+
+/// Two given up on in a row: neither end is anybody's.
+#[test]
+fn two_turns_given_up_on_end_nothing() {
+    let (mut parser, _) = parser();
+    started(&mut parser, "a");
+    parser.abandon("1");
+    started(&mut parser, "b");
+    parser.abandon("2");
+    assert!(turn_ends(&ended(&mut parser, "a", "interrupted")).is_empty());
+    assert!(turn_ends(&ended(&mut parser, "b", "interrupted")).is_empty());
 }

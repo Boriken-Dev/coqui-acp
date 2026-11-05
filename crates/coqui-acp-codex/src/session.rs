@@ -499,7 +499,20 @@ impl CodexSession {
     ///
     /// [`Error::Harness`] when Codex refused or could not be written to, [`Error::Timeout`] when it did not answer.
     pub fn request(&self, method: &str, params: Value, limit: Duration) -> Result<Value, Error> {
-        let number = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+        self.request_numbered(self.next_request(), method, params, limit)
+    }
+
+    fn next_request(&self) -> u64 {
+        self.requests.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn request_numbered(
+        &self,
+        number: u64,
+        method: &str,
+        params: Value,
+        limit: Duration,
+    ) -> Result<Value, Error> {
         let id = id_text(&json!(number));
         let (answer, answered) = mpsc::channel();
         locked(&self.waiting).insert(id.clone(), answer);
@@ -578,12 +591,13 @@ impl CodexSession {
             params["effort"] = json!(effort);
         }
         locked(&self.parser).prompting();
+        let number = self.next_request();
         let started = self
-            .request("turn/start", params, self.settings.request_timeout)
+            .request_numbered(number, "turn/start", params, self.settings.request_timeout)
             .inspect_err(|error| {
                 // No answer does not mean no turn: this one has failed, and must not run on unwatched.
                 if matches!(error, Error::Timeout { .. }) {
-                    locked(&self.parser).abandon();
+                    locked(&self.parser).abandon(&id_text(&json!(number)));
                 }
             })?;
         if let Some(turn) = started.pointer("/turn/id").and_then(Value::as_str) {

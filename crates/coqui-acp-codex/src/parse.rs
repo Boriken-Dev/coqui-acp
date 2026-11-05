@@ -104,8 +104,10 @@ pub struct Parser {
     edits: BTreeMap<String, ToolCall>,
     /// Whether the next turn to start was given up on before it started.
     abandon_next: bool,
-    /// The turn given up on: it is interrupted, and its end is nobody's.
-    abandoned: Option<String>,
+    /// The `turn/start` whose answer was given up on: when it comes after all, it names a turn given up on.
+    abandoned_request: Option<String>,
+    /// The turns given up on: each is interrupted, and its start and end are nobody's.
+    abandoned: BTreeSet<String>,
     turn: Option<String>,
     /// The turn that ended last: `turn/start`'s answer can be handled after that turn's end.
     ended: Option<String>,
@@ -143,7 +145,8 @@ impl Parser {
             mcp_running: VecDeque::new(),
             edits: BTreeMap::new(),
             abandon_next: false,
-            abandoned: None,
+            abandoned_request: None,
+            abandoned: BTreeSet::new(),
             turn: None,
             ended: None,
             interrupted: false,
@@ -172,18 +175,25 @@ impl Parser {
         self.thread = Some(thread.to_string());
     }
 
-    /// Gives up on the turn just asked for, whose `turn/start` went unanswered: it is interrupted, now or when it starts,
-    /// and its end is told to nobody, since the prompt has already failed.
-    pub fn abandon(&mut self) {
+    /// Gives up on the turn just asked for by request `request`, whose `turn/start` went unanswered: it is interrupted, now,
+    /// when it starts or when that answer comes after all, and its end is told to nobody, since the prompt has already
+    /// failed.
+    pub fn abandon(&mut self, request: &str) {
         match self.turn.clone() {
             Some(turn) => self.give_up(turn, None),
-            None => self.abandon_next = true,
+            None => {
+                self.abandon_next = true;
+                self.abandoned_request = Some(request.to_string());
+            }
         }
     }
 
-    /// A new prompt is on its way: a turn given up on that never started is not the one that starts next.
+    /// A new prompt is on its way: a turn given up on that has not started is not the one that starts next, and what was
+    /// left of the turn before says nothing of this one.
     pub fn prompting(&mut self) {
         self.abandon_next = false;
+        self.interrupted = false;
+        self.error = None;
     }
 
     fn give_up(&mut self, turn: String, thread: Option<&str>) {
@@ -192,7 +202,7 @@ impl Parser {
             &json!({"id": format!("given-up-{turn}"), "method": "turn/interrupt",
             "params": {"threadId": thread, "turnId": turn}}),
         );
-        self.abandoned = Some(turn);
+        self.abandoned.insert(turn);
     }
 
     /// The same with these bounds.
@@ -273,7 +283,15 @@ impl Parser {
                         .to_string()),
                     None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                 };
-                self.answers.push((id_text(id), answer));
+                let request = id_text(id);
+                if self.abandoned_request.as_deref() == Some(request.as_str()) {
+                    self.abandoned_request = None;
+                    self.abandon_next = false;
+                    if let Some(turn) = text(message, "/result/turn/id") {
+                        self.give_up(turn.to_string(), None);
+                    }
+                }
+                self.answers.push((request, answer));
                 Vec::new()
             }
             (Some(method), Some(id)) => {
@@ -308,6 +326,9 @@ impl Parser {
         }
         match method {
             "turn/started" => {
+                if text(params, "/turn/id").is_some_and(|turn| self.abandoned.contains(turn)) {
+                    return Vec::new();
+                }
                 self.turn = text(params, "/turn/id").map(str::to_string);
                 if core::mem::take(&mut self.abandon_next)
                     && let Some(turn) = self.turn.clone()
@@ -412,15 +433,23 @@ impl Parser {
                 }
             }
             "error" => {
-                if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
+                let of_another_turn = text(params, "/turnId").is_some_and(|turn| {
+                    self.abandoned.contains(turn)
+                        || self.turn.as_deref().is_some_and(|own| own != turn)
+                });
+                if !of_another_turn
+                    && params.get("willRetry").and_then(Value::as_bool) != Some(true)
+                {
                     self.error = params.get("error").cloned();
                 }
                 Vec::new()
             }
             "turn/completed" | "turn/failed" => {
                 let done = text(params, "/turn/id").map(str::to_string);
-                if done.is_some() && self.abandoned == done {
-                    self.abandoned = None;
+                if done
+                    .as_ref()
+                    .is_some_and(|turn| self.abandoned.remove(turn))
+                {
                     if self.turn == done {
                         self.turn = None;
                     }
