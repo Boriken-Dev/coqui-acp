@@ -5,11 +5,14 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::time::Duration;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, PoisonError};
+use std::thread;
+use std::time::Instant;
 
 /// What to start: a program, its arguments, its working directory and its environment.
 ///
@@ -145,6 +148,20 @@ pub trait Process: Send + Sync {
     ///
     /// The operating system could not tell.
     fn try_wait(&self) -> io::Result<Option<Exit>>;
+}
+
+/// How `process` ended, for a message, waiting up to `wait` for it to say: `exited with code 3`, `was ended by signal 9`,
+/// or `closed its output` when it does not.
+#[must_use]
+pub fn exit_text(process: &dyn Process, wait: Duration) -> String {
+    let until = Instant::now() + wait;
+    loop {
+        match process.try_wait() {
+            Ok(Some(exit)) => return exit.to_string(),
+            Ok(None) if Instant::now() < until => thread::sleep(Duration::from_millis(20)),
+            _ => return "closed its output".into(),
+        }
+    }
 }
 
 /// A started process and its pipes. Standard error is `None` when the spawner keeps it.

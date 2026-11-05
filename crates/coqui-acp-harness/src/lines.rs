@@ -4,6 +4,7 @@ use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use std::io::{self, BufRead, BufReader, Read};
+use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
 
@@ -119,6 +120,25 @@ impl Tail {
     }
 }
 
+/// Keeps what `reader` writes in `tail`, each line as text, until it ends: a harness's standard error. Past a line over
+/// `max_line` bytes the rest is read and dropped, since a harness writing to a closed pipe would fail.
+pub fn read_diagnostics(mut reader: impl Read, max_line: u64, tail: &Mutex<Tail>) {
+    let _ = read_lines(&mut reader, max_line, |line| {
+        let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
+        match line {
+            Line::Text(text) => tail.push(&text),
+            Line::Json(value) => tail.push(&value.to_string()),
+            Line::TooLong(bytes) => {
+                tail.push(&alloc::format!(
+                    "a diagnostic line of {bytes} bytes or more, past the limit"
+                ));
+            }
+        }
+        true
+    });
+    let _ = io::copy(&mut reader, &mut io::sink());
+}
+
 /// `text` cut to at most `max` bytes on a character boundary.
 #[must_use]
 pub fn cut(text: &str, max: usize) -> &str {
@@ -161,6 +181,22 @@ mod tests {
         })
         .unwrap();
         assert_eq!(seen, [Line::TooLong(9)]);
+    }
+
+    #[test]
+    fn diagnostics_are_kept_and_the_rest_past_an_overlong_line_is_still_read() {
+        let mut input = b"first\n".to_vec();
+        input.extend(core::iter::repeat_n(b'x', 100));
+        input.extend(b"\nafter\n");
+        let mut reader = &input[..];
+        let tail = Mutex::new(Tail::new(8, 64));
+        read_diagnostics(&mut reader, 16, &tail);
+        assert!(reader.is_empty(), "everything was read");
+        let kept = tail.lock().unwrap().text();
+        assert!(
+            kept.starts_with("first\n") && kept.contains("past the limit"),
+            "{kept}"
+        );
     }
 
     #[test]

@@ -12,11 +12,10 @@ use std::io::{self, Write};
 use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Instant;
 
-use coqui_acp_harness::event::{Content, Event, Severity};
+use coqui_acp_harness::event::{Content, Event, Severity, context_block};
 use coqui_acp_harness::lines::{self, Line, Tail};
-use coqui_acp_harness::{Process, Spawn, version};
+use coqui_acp_harness::{Process, Spawn, exit_text, version};
 use serde_json::{Value, json};
 
 use crate::launch::ClaudeLaunch;
@@ -213,23 +212,7 @@ impl ClaudeSession {
             let max_line = settings.max_line;
             thread::Builder::new()
                 .name("coqui-acp-claude-stderr".into())
-                .spawn(move || {
-                    let mut stderr = stderr;
-                    let _ = lines::read_lines(&mut stderr, max_line, |line| {
-                        match line {
-                            Line::Text(text) => locked(&tail).push(&text),
-                            Line::Json(value) => locked(&tail).push(&value.to_string()),
-                            Line::TooLong(bytes) => {
-                                locked(&tail).push(&format!(
-                                    "a diagnostic line of {bytes} bytes or more, past the limit"
-                                ));
-                            }
-                        }
-                        true
-                    });
-                    // Past a line too long to keep, the rest is read and dropped: a closed pipe would fail Claude Code.
-                    let _ = io::copy(&mut stderr, &mut io::sink());
-                })
+                .spawn(move || lines::read_diagnostics(stderr, max_line, &tail))
                 .map_err(Error::Spawn)?;
         }
         {
@@ -283,7 +266,7 @@ impl ClaudeSession {
                         open
                     });
                     let reason = wrong.unwrap_or_else(|| {
-                        let how = exit_of(process.as_ref(), exit_wait);
+                        let how = exit_text(process.as_ref(), exit_wait);
                         let mut reason = format!("Claude Code {how} before completing the session");
                         if let Err(error) = read {
                             reason.push_str(&format!(" (its output could not be read: {error})"));
@@ -476,17 +459,6 @@ impl Drop for ClaudeSession {
     }
 }
 
-fn exit_of(process: &dyn Process, wait: Duration) -> String {
-    let until = Instant::now() + wait;
-    loop {
-        match process.try_wait() {
-            Ok(Some(exit)) => return exit.to_string(),
-            Ok(None) if Instant::now() < until => thread::sleep(Duration::from_millis(20)),
-            _ => return "closed its output".to_string(),
-        }
-    }
-}
-
 /// A prompt as Claude Code's message content: text, base64 images, a link as a mention, and a text resource in a
 /// `<context>` block. A resource's bytes are taken only for an image.
 ///
@@ -503,40 +475,31 @@ pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error> {
                 let name = if name.is_empty() { uri } else { name };
                 json!({"type": "text", "text": format!("[@{name}]({uri})")})
             }
-            Content::Resource { uri, text: Some(text), .. } => {
-                json!({"type": "text", "text": format!("<context ref=\"{}\">\n{}\n</context>", attribute(uri), unclosed(text))})
+            Content::Resource {
+                uri,
+                text: Some(text),
+                ..
+            } => {
+                json!({"type": "text", "text": context_block(uri, text)})
             }
-            Content::Resource { mime_type: Some(mime_type), blob: Some(data), .. } if mime_type.starts_with("image/") => {
-                image(mime_type, data)
+            Content::Resource {
+                mime_type: Some(mime_type),
+                blob: Some(data),
+                ..
+            } if mime_type.starts_with("image/") => image(mime_type, data),
+            Content::Resource { .. } => {
+                return Err(Error::Refused(
+                    "Claude Code reads a resource's bytes only for an image".into(),
+                ));
             }
-            Content::Resource { .. } => return Err(Error::Refused("Claude Code reads a resource's bytes only for an image".into())),
-            _ => return Err(Error::Refused("Claude Code does not take that content".into())),
+            _ => {
+                return Err(Error::Refused(
+                    "Claude Code does not take that content".into(),
+                ));
+            }
         });
     }
     Ok(blocks)
-}
-
-/// `text` with every `</context` (any case) written `&lt;/context`, so a resource cannot close the block that holds it.
-fn unclosed(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut kept = String::with_capacity(text.len());
-    let mut from = 0;
-    while let Some(at) = lower[from..].find("</context") {
-        kept.push_str(&text[from..from + at]);
-        kept.push_str("&lt;");
-        from += at + 1;
-    }
-    kept.push_str(&text[from..]);
-    kept
-}
-
-/// `value` as a double-quoted attribute's text.
-fn attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 /// A file only this user can read, removed when dropped: the MCP configuration, which may hold credentials.

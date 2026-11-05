@@ -15,4 +15,4 @@ pub use acp::{
     McpTransport, Open, OpenRequest, OptionValue, Settings, Takes, serve,
 };
 pub use event::{Event, Outcome, PermissionRequest, Responder};
-pub use process::{Exit, Launch, PlainSpawn, Process, Spawn, Spawned};
+pub use process::{Exit, Launch, PlainSpawn, Process, Spawn, Spawned, exit_text};

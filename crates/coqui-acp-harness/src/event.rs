@@ -41,6 +41,27 @@ pub enum Content {
     },
 }
 
+/// A text resource as prompt text: `<context ref="uri">` around it, the address escaped as an attribute and every
+/// `</context` (any case) of the text written `&lt;/context`, so a resource cannot close the block that holds it.
+#[must_use]
+pub fn context_block(uri: &str, text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut kept = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("</context") {
+        kept.push_str(&text[from..from + at]);
+        kept.push_str("&lt;");
+        from += at + 1;
+    }
+    kept.push_str(&text[from..]);
+    let address = uri
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    alloc::format!("<context ref=\"{address}\">\n{kept}\n</context>")
+}
+
 /// What a tool does, as ACP names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
