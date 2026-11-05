@@ -17,7 +17,7 @@ use std::io;
 
 pub use agent::{CodexAgent, DEFAULT};
 pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned};
-pub use launch::{CodexLaunch, ThreadStart, toml_key, toml_value, valid_thread_id};
+pub use launch::{CodexLaunch, ThreadStart, toml_value, valid_config_key, valid_thread_id};
 pub use parse::Parser;
 pub use session::{CodexSession, CodexSettings, Model, models_of, user_input, version_of};
 

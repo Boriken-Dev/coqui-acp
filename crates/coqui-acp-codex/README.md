@@ -97,7 +97,7 @@ Exit status: 0 when the client closes the connection, 1 when reading it failed, 
 
 | Item | Purpose |
 | --- | --- |
-| `CodexLaunch`, `ThreadStart`, `toml_key`, `toml_value`, `valid_thread_id` | What Codex is started with |
+| `CodexLaunch`, `ThreadStart`, `valid_config_key`, `toml_value`, `valid_thread_id` | What Codex is started with |
 | `CodexSession`, `CodexSettings`, `Model`, `models_of`, `user_input`, `version_of` | A running app server and its thread |
 | `Parser` (`parse`) | App-server messages as events |
 | `CodexAgent` | The ACP agent |

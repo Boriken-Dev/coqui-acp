@@ -13,6 +13,7 @@ use coqui_acp_harness::event::{
     PermissionRequest, PlanEntry, PlanStatus, Responder, Severity, Stop, Terminal, ToolCall,
     ToolContent, ToolKind, ToolStatus, TurnEnd,
 };
+use coqui_acp_harness::lines::one_line;
 use serde_json::{Value, json};
 
 use crate::limits;
@@ -33,17 +34,23 @@ pub const ALLOW_RULE: &str = "accept_with_rule";
 pub const ALLOW_ALWAYS: &str = "accept_always";
 /// The id of the option that refuses the call.
 pub const REJECT: &str = "decline";
+/// The id of the option that keeps a rule letting a host through.
+pub const ALLOW_NETWORK_RULE: &str = "allow_network_rule";
+/// The id of the option that keeps a rule refusing a host.
+pub const REJECT_NETWORK_RULE: &str = "reject_network_rule";
 
 /// The longest title made from a command or a query, in bytes.
 const TITLE_BYTES: usize = 256;
+/// The most of a command a question's description tells, in bytes.
+const WHOLE_BYTES: usize = 16 * 1024;
 
 fn title(text: &str) -> String {
     let first = text.lines().next().unwrap_or_default();
-    let cut = coqui_acp_harness::lines::cut(first, TITLE_BYTES);
+    let cut = one_line(coqui_acp_harness::lines::cut(first, TITLE_BYTES));
     if cut.len() < text.len() {
         format!("{cut}…")
     } else {
-        cut.to_string()
+        cut
     }
 }
 
@@ -63,6 +70,16 @@ pub struct Parser {
     order: VecDeque<String>,
     /// Commands whose output arrived in pieces.
     output_streamed: BTreeSet<String>,
+    /// This session's thread, once known: what another thread says is not this session's.
+    thread: Option<String>,
+    /// Calls of MCP tools started and not finished, oldest first.
+    mcp_running: VecDeque<McpCall>,
+    /// The file changes started and not finished, as last told, for their approvals.
+    edits: BTreeMap<String, ToolCall>,
+    /// Whether the next turn to start was given up on before it started.
+    abandon_next: bool,
+    /// The turn given up on: it is interrupted, and its end is nobody's.
+    abandoned: Option<String>,
     turn: Option<String>,
     /// The turn that ended last: `turn/start`'s answer can be handled after that turn's end.
     ended: Option<String>,
@@ -95,6 +112,11 @@ impl Parser {
             items: BTreeMap::new(),
             order: VecDeque::new(),
             output_streamed: BTreeSet::new(),
+            thread: None,
+            mcp_running: VecDeque::new(),
+            edits: BTreeMap::new(),
+            abandon_next: false,
+            abandoned: None,
             turn: None,
             ended: None,
             interrupted: false,
@@ -117,6 +139,35 @@ impl Parser {
         }
     }
 
+    /// Names this session's thread: a notification of another thread is dropped, and another thread's question says
+    /// where it comes from.
+    pub fn set_thread(&mut self, thread: &str) {
+        self.thread = Some(thread.to_string());
+    }
+
+    /// Gives up on the turn just asked for, whose `turn/start` went unanswered: it is interrupted, now or when it starts,
+    /// and its end is told to nobody, since the prompt has already failed.
+    pub fn abandon(&mut self) {
+        match self.turn.clone() {
+            Some(turn) => self.give_up(turn, None),
+            None => self.abandon_next = true,
+        }
+    }
+
+    /// A new prompt is on its way: a turn given up on that never started is not the one that starts next.
+    pub fn prompting(&mut self) {
+        self.abandon_next = false;
+    }
+
+    fn give_up(&mut self, turn: String, thread: Option<&str>) {
+        let thread = self.thread.as_deref().or(thread);
+        let _ = (self.writer)(
+            &json!({"id": format!("given-up-{turn}"), "method": "turn/interrupt",
+            "params": {"threadId": thread, "turnId": turn}}),
+        );
+        self.abandoned = Some(turn);
+    }
+
     /// Marks the running turn as interrupted: its end reads as cancelled.
     pub fn interrupting(&mut self) {
         self.interrupted = true;
@@ -137,6 +188,7 @@ impl Parser {
             {
                 self.items.remove(&oldest);
                 self.output_streamed.remove(&oldest);
+                self.edits.remove(&oldest);
             }
             self.order.push_back(id.to_string());
         }
@@ -171,6 +223,9 @@ impl Parser {
             (Some(method), Some(id)) => {
                 self.request(method, id, message.get("params").unwrap_or(&Value::Null))
             }
+            (Some(_), None) if self.other_thread(message.get("params").unwrap_or(&Value::Null)) => {
+                Vec::new()
+            }
             (Some(method), None) => self.notification(method, message),
             (None, None) => Vec::new(),
         }
@@ -184,7 +239,22 @@ impl Parser {
         match method {
             "turn/started" => {
                 self.turn = text(params, "/turn/id").map(str::to_string);
+                if core::mem::take(&mut self.abandon_next)
+                    && let Some(turn) = self.turn.clone()
+                {
+                    self.give_up(turn, text(params, "/threadId"));
+                }
                 Vec::new()
+            }
+            "item/fileChange/patchUpdated" => {
+                let Some(id) = text(params, "/itemId") else {
+                    return Vec::new();
+                };
+                let call = file_change(id, params);
+                if self.items.contains_key(id) {
+                    self.edits.insert(id.to_string(), call.clone());
+                }
+                vec![Event::Tool(call)]
             }
             "item/started" => params
                 .get("item")
@@ -280,6 +350,10 @@ impl Parser {
                     .turn
                     .take()
                     .or_else(|| text(params, "/turn/id").map(str::to_string));
+                if self.abandoned.is_some() && self.abandoned == self.ended {
+                    self.abandoned = None;
+                    return Vec::new();
+                }
                 vec![Event::TurnEnd(end)]
             }
             "thread/compacted" => vec![Event::Compaction {
@@ -431,12 +505,30 @@ impl Parser {
             "commandExecution" => self.command(&id, item, done),
             "fileChange" => {
                 let mut call = file_change(&id, item);
+                if done {
+                    self.edits.remove(&id);
+                } else if !history && self.items.contains_key(&id) {
+                    self.edits.insert(id.clone(), call.clone());
+                }
                 call.status = Some(status(item, done));
                 vec![Event::Tool(call)]
             }
             "mcpToolCall" | "dynamicToolCall" => {
                 let server = text(item, "/server").or_else(|| text(item, "/namespace"));
                 let tool = text(item, "/tool").unwrap_or("tool");
+                if kind == "mcpToolCall" && !history {
+                    self.mcp_running.retain(|call| call.id != id);
+                    if !done && self.items.contains_key(&id) {
+                        if self.mcp_running.len() >= self.max_tools {
+                            self.mcp_running.pop_front();
+                        }
+                        self.mcp_running.push_back(McpCall {
+                            id: id.clone(),
+                            server: server.unwrap_or_default().to_string(),
+                            arguments: item.get("arguments").cloned(),
+                        });
+                    }
+                }
                 let mut call = ToolCall::new(id.clone());
                 call.name = Some(match server {
                     Some(server) => format!("mcp__{server}__{tool}"),
@@ -551,251 +643,561 @@ impl Parser {
     }
 
     fn request(&mut self, method: &str, id: &Value, params: &Value) -> Vec<Event> {
-        let writer = Arc::clone(&self.writer);
-        let id = id.clone();
-        let reason = text(params, "/reason").map(str::to_string);
-        let item = text(params, "/itemId")
-            .or_else(|| text(params, "/callId"))
-            .unwrap_or("approval")
-            .to_string();
         match method {
-            "item/commandExecution/requestApproval" | "execCommandApproval" => {
-                let command = match params.get("command") {
-                    Some(Value::String(command)) => command.clone(),
-                    Some(Value::Array(words)) => words
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => String::new(),
-                };
-                let mut tool = ToolCall::new(item);
-                tool.name = Some("exec_command".into());
-                tool.kind = Some(ToolKind::Execute);
-                tool.title = Some(title(&command));
-                tool.input = Some(json!({"command": command, "cwd": params.get("cwd")}));
-                let rule = params
-                    .get("proposedExecpolicyAmendment")
-                    .and_then(Value::as_array)
-                    .filter(|rule| !rule.is_empty())
-                    .cloned();
-                let mut options = vec![
-                    PermissionOption::new(ALLOW_ONCE, "Allow", OptionKind::AllowOnce),
-                    PermissionOption::new(
-                        ALLOW_SESSION,
-                        "Allow for this session",
-                        OptionKind::AllowAlways,
-                    ),
-                ];
-                if let Some(rule) = &rule {
-                    let words: Vec<&str> = rule.iter().filter_map(Value::as_str).collect();
-                    options.push(PermissionOption::new(
-                        ALLOW_RULE,
-                        format!("Always allow `{}`", words.join(" ")),
-                        OptionKind::AllowAlways,
-                    ));
-                }
-                options.push(PermissionOption::new(
-                    REJECT,
-                    "Reject",
-                    OptionKind::RejectOnce,
-                ));
-                let legacy = method == "execCommandApproval";
-                let responder = Responder::new(move |outcome| {
-                    let decision = match (outcome, legacy) {
-                        (Outcome::Selected(chosen), false) if chosen == ALLOW_ONCE => {
-                            json!("accept")
-                        }
-                        (Outcome::Selected(chosen), false) if chosen == ALLOW_SESSION => {
-                            json!("acceptForSession")
-                        }
-                        (Outcome::Selected(chosen), false) if chosen == ALLOW_RULE => {
-                            json!({"acceptWithExecpolicyAmendment": {"execpolicy_amendment": rule.unwrap_or_default()}})
-                        }
-                        (Outcome::Cancelled, false) => json!("cancel"),
-                        (_, false) => json!("decline"),
-                        (Outcome::Selected(chosen), true) if chosen == ALLOW_ONCE => {
-                            json!("approved")
-                        }
-                        (Outcome::Selected(chosen), true) if chosen == ALLOW_SESSION => {
-                            json!("approved_for_session")
-                        }
-                        (Outcome::Cancelled, true) => json!("abort"),
-                        (_, true) => json!({"denied": {"rejection": "The person refused this."}}),
-                    };
-                    writer(&json!({"id": id, "result": {"decision": decision}}))
-                });
-                let ask = format!("Run {}", title(&command));
-                vec![Event::Permission(PermissionRequest::new(
-                    tool, ask, reason, options, responder,
-                ))]
-            }
+            "item/commandExecution/requestApproval" => self.command_approval(id, params),
+            "execCommandApproval" => self.legacy_command_approval(id, params),
             "item/fileChange/requestApproval" | "applyPatchApproval" => {
-                let mut tool = match self.items.get(&item).map(String::as_str) {
-                    Some("fileChange") => ToolCall::new(item.clone()),
-                    _ => legacy_file_change(&item, params),
-                };
-                tool.kind = Some(ToolKind::Edit);
-                if tool.title.is_none() {
-                    tool.title = Some("Edit files".into());
-                }
-                let options = vec![
-                    PermissionOption::new(ALLOW_ONCE, "Allow", OptionKind::AllowOnce),
-                    PermissionOption::new(
-                        ALLOW_SESSION,
-                        "Allow for this session",
-                        OptionKind::AllowAlways,
-                    ),
-                    PermissionOption::new(REJECT, "Reject", OptionKind::RejectOnce),
-                ];
-                let legacy = method == "applyPatchApproval";
-                let responder = Responder::new(move |outcome| {
-                    let decision = match (outcome, legacy) {
-                        (Outcome::Selected(chosen), false) if chosen == ALLOW_ONCE => {
-                            json!("accept")
-                        }
-                        (Outcome::Selected(chosen), false) if chosen == ALLOW_SESSION => {
-                            json!("acceptForSession")
-                        }
-                        (Outcome::Cancelled, false) => json!("cancel"),
-                        (_, false) => json!("decline"),
-                        (Outcome::Selected(chosen), true) if chosen == ALLOW_ONCE => {
-                            json!("approved")
-                        }
-                        (Outcome::Selected(chosen), true) if chosen == ALLOW_SESSION => {
-                            json!("approved_for_session")
-                        }
-                        (Outcome::Cancelled, true) => json!("abort"),
-                        (_, true) => json!({"denied": {"rejection": "The person refused this."}}),
-                    };
-                    writer(&json!({"id": id, "result": {"decision": decision}}))
-                });
-                let ask = match text(params, "/grantRoot") {
-                    Some(root) => format!("Edit files, and write under {root} from now on"),
-                    None => "Edit files".to_string(),
-                };
-                vec![Event::Permission(PermissionRequest::new(
-                    tool, ask, reason, options, responder,
-                ))]
+                self.file_approval(method == "applyPatchApproval", id, params)
             }
-            "item/permissions/requestApproval" => {
-                let requested = params
-                    .get("permissions")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let mut tool = ToolCall::new(item);
-                tool.name = Some("permissions".into());
-                tool.kind = Some(ToolKind::Other);
-                tool.title = Some("More permissions".into());
-                tool.input = Some(requested.clone());
-                let options = vec![
-                    PermissionOption::new(ALLOW_ONCE, "Allow for this turn", OptionKind::AllowOnce),
-                    PermissionOption::new(
-                        ALLOW_SESSION,
-                        "Allow for this session",
-                        OptionKind::AllowAlways,
-                    ),
-                    PermissionOption::new(REJECT, "Reject", OptionKind::RejectOnce),
-                ];
-                let responder = Responder::new(move |outcome| {
-                    let result = match outcome {
-                        Outcome::Selected(chosen) if chosen == ALLOW_ONCE => {
-                            json!({"permissions": requested, "scope": "turn"})
-                        }
-                        Outcome::Selected(chosen) if chosen == ALLOW_SESSION => {
-                            json!({"permissions": requested, "scope": "session"})
-                        }
-                        _ => json!({"permissions": {}, "scope": "turn"}),
-                    };
-                    writer(&json!({"id": id, "result": result}))
-                });
-                vec![Event::Permission(PermissionRequest::new(
-                    tool,
-                    "Grant more permissions",
-                    reason,
-                    options,
-                    responder,
-                ))]
-            }
-            "mcpServer/elicitation/request"
-                if text(params, "/_meta/codex_approval_kind") == Some("mcp_tool_call") =>
-            {
-                let persist: Vec<&str> = match params.pointer("/_meta/persist") {
-                    Some(Value::String(one)) => vec![one.as_str()],
-                    Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
-                    _ => Vec::new(),
-                };
-                let server = text(params, "/serverName").unwrap_or("an MCP server");
-                let call = self
-                    .order
-                    .iter()
-                    .rev()
-                    .find(|known| self.items.get(*known).map(String::as_str) == Some("mcpToolCall"))
-                    .cloned();
-                let mut tool = match call {
-                    Some(call) => ToolCall::new(call),
-                    None => {
-                        let mut tool = ToolCall::new(item);
-                        tool.title = Some(format!("A tool of {}", title(server)));
-                        tool
-                    }
-                };
-                tool.kind = Some(ToolKind::Other);
-                tool.input = params.pointer("/_meta/tool_params").cloned();
-                let mut options = vec![PermissionOption::new(
-                    ALLOW_ONCE,
-                    "Allow",
-                    OptionKind::AllowOnce,
-                )];
-                if persist.contains(&"session") {
-                    options.push(PermissionOption::new(
-                        ALLOW_SESSION,
-                        "Allow for this session",
-                        OptionKind::AllowAlways,
-                    ));
-                }
-                if persist.contains(&"always") {
-                    options.push(PermissionOption::new(
-                        ALLOW_ALWAYS,
-                        "Always allow",
-                        OptionKind::AllowAlways,
-                    ));
-                }
-                options.push(PermissionOption::new(
-                    REJECT,
-                    "Reject",
-                    OptionKind::RejectOnce,
-                ));
-                let responder = Responder::new(move |outcome| {
-                    let result = match outcome {
-                        Outcome::Selected(chosen) if chosen == ALLOW_ONCE => {
-                            json!({"action": "accept", "content": null, "_meta": null})
-                        }
-                        Outcome::Selected(chosen) if chosen == ALLOW_SESSION => {
-                            json!({"action": "accept", "content": null, "_meta": {"persist": "session"}})
-                        }
-                        Outcome::Selected(chosen) if chosen == ALLOW_ALWAYS => {
-                            json!({"action": "accept", "content": null, "_meta": {"persist": "always"}})
-                        }
-                        Outcome::Selected(_) => json!({"action": "decline", "content": null}),
-                        _ => json!({"action": "cancel", "content": null}),
-                    };
-                    writer(&json!({"id": id, "result": result}))
-                });
-                let ask = text(params, "/message")
-                    .map_or_else(|| format!("Run a tool of {server}"), str::to_string);
-                vec![Event::Permission(PermissionRequest::new(
-                    tool, ask, reason, options, responder,
-                ))]
-            }
-            _ => {
-                let _ = writer(
-                    &json!({"id": id, "error": {"code": -32601, "message": "this client does not take that request"}}),
-                );
-                Vec::new()
-            }
+            "item/permissions/requestApproval" => self.permissions_approval(id, params),
+            "mcpServer/elicitation/request" => match self.mcp_call_asked_about(params) {
+                Some(call) => self.mcp_approval(&call, id, params),
+                None => self.not_taken(id),
+            },
+            _ => self.not_taken(id),
         }
     }
+
+    fn not_taken(&self, id: &Value) -> Vec<Event> {
+        let _ = (self.writer)(
+            &json!({"id": id, "error": {"code": -32601, "message": "this client does not take that request"}}),
+        );
+        Vec::new()
+    }
+
+    /// Whether `params` name a thread other than this session's.
+    fn other_thread(&self, params: &Value) -> bool {
+        let said = text(params, "/threadId").or_else(|| text(params, "/conversationId"));
+        matches!((&self.thread, said), (Some(own), Some(said)) if own != said)
+    }
+
+    /// A question whose chosen option's `result` goes back; an option not offered gets `rejected`, and nobody choosing
+    /// gets `cancelled`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a different part of the question"
+    )]
+    fn ask(
+        &self,
+        id: &Value,
+        params: &Value,
+        tool: ToolCall,
+        question: String,
+        description: Option<String>,
+        choices: Vec<Choice>,
+        rejected: Value,
+        cancelled: Value,
+    ) -> Vec<Event> {
+        let question = if self.other_thread(params) {
+            format!("In another thread of this session: {question}")
+        } else {
+            question
+        };
+        let options = choices.iter().map(|choice| choice.option.clone()).collect();
+        let writer = Arc::clone(&self.writer);
+        let id = id.clone();
+        let responder = Responder::new(move |outcome| {
+            let result = match outcome {
+                Outcome::Selected(chosen) => choices
+                    .into_iter()
+                    .find(|choice| choice.option.id == chosen)
+                    .map_or(rejected, |choice| choice.result),
+                _ => cancelled,
+            };
+            writer(&json!({"id": id, "result": result}))
+        });
+        vec![Event::Permission(PermissionRequest::new(
+            tool,
+            question,
+            description,
+            options,
+            responder,
+        ))]
+    }
+
+    fn command_approval(&self, id: &Value, params: &Value) -> Vec<Event> {
+        let command = text(params, "/command").unwrap_or_default();
+        let shown = title(command);
+        let network = text(params, "/networkApprovalContext/host").map(one_line);
+        let question = match &network {
+            Some(host) => format!(
+                "Let a command reach {host} over {}",
+                one_line(text(params, "/networkApprovalContext/protocol").unwrap_or("the network"))
+            ),
+            None if text(params, "/kind") == Some("writeStdin") => {
+                format!("Send input to a running command: {shown}")
+            }
+            None => format!("Run {shown}"),
+        };
+        let mut tool = ToolCall::new(item_of(params));
+        tool.name = Some("exec_command".into());
+        tool.kind = Some(ToolKind::Execute);
+        tool.title = Some(if command.is_empty() {
+            question.clone()
+        } else {
+            shown.clone()
+        });
+        let mut input = json!({"command": command, "cwd": params.get("cwd")});
+        if let Some(context) = params
+            .get("networkApprovalContext")
+            .filter(|it| !it.is_null())
+        {
+            input["network"] = context.clone();
+        }
+        tool.input = Some(input);
+        let mut told: Vec<String> = text(params, "/reason")
+            .map(str::to_string)
+            .into_iter()
+            .collect();
+        if shown != command || (network.is_some() && !command.is_empty()) {
+            told.push(format!(
+                "The whole command:\n{}",
+                coqui_acp_harness::lines::cut(command, WHOLE_BYTES)
+            ));
+        }
+        let description = (!told.is_empty()).then(|| told.join("\n\n"));
+
+        let listed = params.get("availableDecisions").and_then(Value::as_array);
+        let default;
+        let decisions = if let Some(listed) = listed {
+            listed
+        } else {
+            default = default_decisions(params);
+            &default
+        };
+        let decided = |decision: &Value| json!({"decision": decision});
+        let mut choices = Vec::new();
+        let mut cancel = false;
+        for decision in decisions {
+            match decision {
+                Value::String(word) => match word.as_str() {
+                    "accept" => choices.push(Choice::new(
+                        ALLOW_ONCE,
+                        network.as_ref().map_or_else(
+                            || "Allow".to_string(),
+                            |host| format!("Allow {host} this once"),
+                        ),
+                        OptionKind::AllowOnce,
+                        decided(decision),
+                    )),
+                    "acceptForSession" => choices.push(Choice::new(
+                        ALLOW_SESSION,
+                        network.as_ref().map_or_else(
+                            || "Allow for this session".to_string(),
+                            |host| format!("Allow {host} for this session"),
+                        ),
+                        OptionKind::AllowAlways,
+                        decided(decision),
+                    )),
+                    "cancel" => cancel = true,
+                    _ => {}
+                },
+                Value::Object(rule) => {
+                    if let Some(words) = rule
+                        .get("acceptWithExecpolicyAmendment")
+                        .and_then(|amendment| amendment.get("execpolicy_amendment"))
+                        .and_then(words_of)
+                    {
+                        choices.push(Choice::new(
+                            ALLOW_RULE,
+                            format!(
+                                "Allow, and from now on every command starting with `{}`",
+                                title(&one_line(&words.join(" ")))
+                            ),
+                            OptionKind::AllowAlways,
+                            decided(decision),
+                        ));
+                    } else if let Some(amendment) = rule
+                        .get("applyNetworkPolicyAmendment")
+                        .and_then(|amendment| amendment.get("network_policy_amendment"))
+                    {
+                        let host = one_line(text(amendment, "/host").unwrap_or("this host"));
+                        choices.push(if text(amendment, "/action") == Some("allow") {
+                            Choice::new(
+                                ALLOW_NETWORK_RULE,
+                                format!("Allow {host} from now on"),
+                                OptionKind::AllowAlways,
+                                decided(decision),
+                            )
+                        } else {
+                            Choice::new(
+                                REJECT_NETWORK_RULE,
+                                format!("Refuse {host} from now on"),
+                                OptionKind::RejectAlways,
+                                decided(decision),
+                            )
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Refusing one call never needs Codex's leave: 0.164.0 takes `decline` where it lists only `cancel`, and goes on.
+        let rejected = decided(&json!("decline"));
+        choices.push(Choice::new(
+            REJECT,
+            "Reject",
+            OptionKind::RejectOnce,
+            rejected.clone(),
+        ));
+        let cancelled = decided(&json!(if cancel { "cancel" } else { "decline" }));
+        self.ask(
+            id,
+            params,
+            tool,
+            question,
+            description,
+            choices,
+            rejected,
+            cancelled,
+        )
+    }
+
+    fn legacy_command_approval(&self, id: &Value, params: &Value) -> Vec<Event> {
+        let command = match params.get("command") {
+            Some(Value::Array(words)) => words
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|word| {
+                    if word.is_empty() || word.contains(|c: char| c.is_whitespace() || c == '"') {
+                        format!("{word:?}")
+                    } else {
+                        word.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            Some(Value::String(command)) => command.clone(),
+            _ => String::new(),
+        };
+        let shown = title(&command);
+        let mut tool = ToolCall::new(item_of(params));
+        tool.name = Some("exec_command".into());
+        tool.kind = Some(ToolKind::Execute);
+        tool.title = Some(shown.clone());
+        tool.input = Some(json!({"command": command, "cwd": params.get("cwd")}));
+        let mut told: Vec<String> = text(params, "/reason")
+            .map(str::to_string)
+            .into_iter()
+            .collect();
+        if shown != command {
+            told.push(format!(
+                "The whole command:\n{}",
+                coqui_acp_harness::lines::cut(&command, WHOLE_BYTES)
+            ));
+        }
+        let description = (!told.is_empty()).then(|| told.join("\n\n"));
+        self.ask(
+            id,
+            params,
+            tool,
+            format!("Run {shown}"),
+            description,
+            legacy_choices(),
+            legacy_denied(),
+            json!({"decision": "abort"}),
+        )
+    }
+
+    fn file_approval(&self, legacy: bool, id: &Value, params: &Value) -> Vec<Event> {
+        let item = item_of(params);
+        let mut tool = if legacy {
+            legacy_file_change(&item, params)
+        } else {
+            self.edits
+                .get(&item)
+                .cloned()
+                .unwrap_or_else(|| ToolCall::new(item.clone()))
+        };
+        tool.status = None;
+        tool.kind = Some(ToolKind::Edit);
+        let question = tool
+            .title
+            .get_or_insert_with(|| "Edit files".to_string())
+            .clone();
+        let root = text(params, "/grantRoot").map(one_line);
+        let session = root.as_ref().map_or_else(
+            || "Allow for this session".to_string(),
+            |root| format!("Allow for this session, and writing under {root}"),
+        );
+        let reason = text(params, "/reason").map(str::to_string);
+        if legacy {
+            return self.ask(
+                id,
+                params,
+                tool,
+                question,
+                reason,
+                legacy_choices(),
+                legacy_denied(),
+                json!({"decision": "abort"}),
+            );
+        }
+        let choices = vec![
+            Choice::new(
+                ALLOW_ONCE,
+                "Allow",
+                OptionKind::AllowOnce,
+                json!({"decision": "accept"}),
+            ),
+            Choice::new(
+                ALLOW_SESSION,
+                session,
+                OptionKind::AllowAlways,
+                json!({"decision": "acceptForSession"}),
+            ),
+            Choice::new(
+                REJECT,
+                "Reject",
+                OptionKind::RejectOnce,
+                json!({"decision": "decline"}),
+            ),
+        ];
+        self.ask(
+            id,
+            params,
+            tool,
+            question,
+            reason,
+            choices,
+            json!({"decision": "decline"}),
+            json!({"decision": "cancel"}),
+        )
+    }
+
+    fn permissions_approval(&self, id: &Value, params: &Value) -> Vec<Event> {
+        let requested = params
+            .get("permissions")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let what = granted(&requested);
+        let mut tool = ToolCall::new(item_of(params));
+        tool.name = Some("permissions".into());
+        tool.kind = Some(ToolKind::Other);
+        let question = format!("Grant more permissions: {what}");
+        tool.title = Some(question.clone());
+        tool.input = Some(requested.clone());
+        let none = json!({"permissions": {}, "scope": "turn"});
+        let choices = vec![
+            Choice::new(
+                ALLOW_ONCE,
+                format!("Allow for this turn: {what}"),
+                OptionKind::AllowOnce,
+                json!({"permissions": requested, "scope": "turn"}),
+            ),
+            Choice::new(
+                ALLOW_SESSION,
+                format!("Allow for this session: {what}"),
+                OptionKind::AllowAlways,
+                json!({"permissions": requested, "scope": "session"}),
+            ),
+            Choice::new(REJECT, "Reject", OptionKind::RejectOnce, none.clone()),
+        ];
+        let reason = text(params, "/reason").map(str::to_string);
+        self.ask(
+            id,
+            params,
+            tool,
+            question,
+            reason,
+            choices,
+            none.clone(),
+            none,
+        )
+    }
+
+    /// The running call an MCP tool's approval is about, the one with its arguments or else the server's latest. Any
+    /// other elicitation has none: a server's own question, which is not an approval, and has no fields to fill here.
+    fn mcp_call_asked_about(&self, params: &Value) -> Option<String> {
+        if text(params, "/_meta/codex_approval_kind") != Some("mcp_tool_call")
+            || text(params, "/mode") != Some("form")
+            || params
+                .pointer("/requestedSchema/properties")
+                .and_then(Value::as_object)
+                .is_some_and(|fields| !fields.is_empty())
+        {
+            return None;
+        }
+        let server = text(params, "/serverName")?;
+        let arguments = params.pointer("/_meta/tool_params");
+        let running = || {
+            self.mcp_running
+                .iter()
+                .rev()
+                .filter(|call| call.server == server)
+        };
+        running()
+            .find(|call| arguments == call.arguments.as_ref())
+            .or_else(|| running().next())
+            .map(|call| call.id.clone())
+    }
+
+    fn mcp_approval(&self, call: &str, id: &Value, params: &Value) -> Vec<Event> {
+        let persist: Vec<&str> = match params.pointer("/_meta/persist") {
+            Some(Value::String(one)) => vec![one.as_str()],
+            Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let server = one_line(text(params, "/serverName").unwrap_or("an MCP server"));
+        let mut tool = ToolCall::new(call);
+        tool.kind = Some(ToolKind::Other);
+        tool.input = params.pointer("/_meta/tool_params").cloned();
+        let accepted = |meta: Value| json!({"action": "accept", "content": null, "_meta": meta});
+        let mut choices = vec![Choice::new(
+            ALLOW_ONCE,
+            "Allow",
+            OptionKind::AllowOnce,
+            accepted(Value::Null),
+        )];
+        if persist.contains(&"session") {
+            choices.push(Choice::new(
+                ALLOW_SESSION,
+                "Allow for this session",
+                OptionKind::AllowAlways,
+                accepted(json!({"persist": "session"})),
+            ));
+        }
+        if persist.contains(&"always") {
+            choices.push(Choice::new(
+                ALLOW_ALWAYS,
+                "Always allow",
+                OptionKind::AllowAlways,
+                accepted(json!({"persist": "always"})),
+            ));
+        }
+        let declined = json!({"action": "decline", "content": null});
+        choices.push(Choice::new(
+            REJECT,
+            "Reject",
+            OptionKind::RejectOnce,
+            declined.clone(),
+        ));
+        // The server's name comes first: the message after it is the server's own words.
+        let question = format!(
+            "MCP server {server}: {}",
+            title(text(params, "/message").unwrap_or("run one of its tools"))
+        );
+        let reason = text(params, "/reason").map(str::to_string);
+        self.ask(
+            id,
+            params,
+            tool,
+            question,
+            reason,
+            choices,
+            declined,
+            json!({"action": "cancel", "content": null}),
+        )
+    }
+}
+
+/// One option of a question, and the result that goes back when it is chosen.
+struct Choice {
+    option: PermissionOption,
+    result: Value,
+}
+
+impl Choice {
+    fn new(id: &str, name: impl Into<String>, kind: OptionKind, result: Value) -> Self {
+        Self {
+            option: PermissionOption::new(id, name, kind),
+            result,
+        }
+    }
+}
+
+/// A running MCP tool call.
+struct McpCall {
+    id: String,
+    server: String,
+    arguments: Option<Value>,
+}
+
+fn item_of(params: &Value) -> String {
+    text(params, "/itemId")
+        .or_else(|| text(params, "/callId"))
+        .unwrap_or("approval")
+        .to_string()
+}
+
+/// The decisions of a command approval from a Codex that lists none.
+fn default_decisions(params: &Value) -> Vec<Value> {
+    let mut decisions = vec![json!("accept"), json!("acceptForSession")];
+    if let Some(rule) = params
+        .get("proposedExecpolicyAmendment")
+        .filter(|rule| !rule.is_null())
+    {
+        decisions.push(json!({"acceptWithExecpolicyAmendment": {"execpolicy_amendment": rule}}));
+    }
+    decisions.push(json!("decline"));
+    decisions.push(json!("cancel"));
+    decisions
+}
+
+/// A rule's words, when it has some and every one is text: a rule that cannot be shown whole is not offered.
+fn words_of(rule: &Value) -> Option<Vec<&str>> {
+    let words: Option<Vec<&str>> = rule.as_array()?.iter().map(Value::as_str).collect();
+    words.filter(|words| !words.is_empty())
+}
+
+fn legacy_choices() -> Vec<Choice> {
+    vec![
+        Choice::new(
+            ALLOW_ONCE,
+            "Allow",
+            OptionKind::AllowOnce,
+            json!({"decision": "approved"}),
+        ),
+        Choice::new(
+            ALLOW_SESSION,
+            "Allow for this session",
+            OptionKind::AllowAlways,
+            json!({"decision": "approved_for_session"}),
+        ),
+        Choice::new(REJECT, "Reject", OptionKind::RejectOnce, legacy_denied()),
+    ]
+}
+
+fn legacy_denied() -> Value {
+    json!({"decision": {"denied": {"rejection": "The person refused this."}}})
+}
+
+/// What a permissions request grants, in words: its paths, each with its access, and the network.
+fn granted(requested: &Value) -> String {
+    let mut what = Vec::new();
+    for (access, pointer) in [("read", "/fileSystem/read"), ("write", "/fileSystem/write")] {
+        for path in requested
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            what.push(format!("{access} {}", one_line(path)));
+        }
+    }
+    for entry in requested
+        .pointer("/fileSystem/entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let access = text(entry, "/access").unwrap_or("access");
+        let path = entry
+            .get("path")
+            .map_or_else(String::new, |path| match path.as_str() {
+                Some(path) => one_line(path),
+                None => one_line(&path.to_string()),
+            });
+        what.push(format!("{access} {path}"));
+    }
+    if requested.pointer("/network/enabled") == Some(&Value::Bool(true)) {
+        what.push("network access".to_string());
+    }
+    if what.is_empty() {
+        return "none named".to_string();
+    }
+    title(&what.join(", "))
 }
 
 /// A request or answer id as text, for matching.
@@ -832,7 +1234,8 @@ fn user_content(block: &Value) -> Option<Content> {
     }
 }
 
-/// A `fileChange` item as an edit: a diff per change, its patch made from Codex's hunks.
+/// A `fileChange` item as an edit, or an update of one: a diff per change, its patch made from Codex's hunks, and where
+/// a moved file goes, in the title and the locations.
 fn file_change(id: &str, item: &Value) -> ToolCall {
     let changes = item
         .get("changes")
@@ -846,15 +1249,27 @@ fn file_change(id: &str, item: &Value) -> ToolCall {
         .iter()
         .filter_map(|change| text(change, "/path").map(str::to_string))
         .collect();
-    call.title = Some(match paths.as_slice() {
-        [one] => format!("Edit {one}"),
-        [] => "Edit files".to_string(),
-        many => format!("Edit {} files", many.len()),
+    let moves: Vec<(&str, &str)> = changes
+        .iter()
+        .filter_map(|change| Some((text(change, "/path")?, text(change, "/kind/move_path")?)))
+        .collect();
+    call.title = Some(match (paths.as_slice(), moves.as_slice()) {
+        ([_], [(from, to)]) => format!("Move {from} to {to}"),
+        ([one], _) => format!("Edit {one}"),
+        ([], _) => "Edit files".to_string(),
+        (many, []) => format!("Edit {} files", many.len()),
+        (many, [(from, to), ..]) => format!(
+            "Edit {} files, moving {} of them, {from} to {to}",
+            many.len(),
+            moves.len()
+        ),
     });
     call.locations = Some(
         paths
             .iter()
-            .map(|path| Location::new(path.clone(), None))
+            .map(String::as_str)
+            .chain(moves.iter().map(|(_, to)| *to))
+            .map(|path| Location::new(path, None))
             .collect(),
     );
     call.content = Some(

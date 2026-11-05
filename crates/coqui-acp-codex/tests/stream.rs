@@ -98,7 +98,7 @@ fn recorded_approvals_offer_codexs_own_decisions_and_answer_the_one_chosen() {
     assert_eq!(asked[2].tool.kind, Some(ToolKind::Edit));
     assert_eq!(
         asked[3].title,
-        "Allow the echo MCP server to run tool \"echo\"?"
+        "MCP server echo: Allow the echo MCP server to run tool \"echo\"?"
     );
     assert!(
         asked[3]
@@ -340,8 +340,6 @@ fn every_recorded_line_parses_without_a_panic() {
     }
 }
 
-// Carried over from AI6's ai6-agent-codex (a40abe84): the same behaviour, against this crate's API.
-
 #[test]
 fn the_models_codex_lists_are_read_from_model_list_and_hidden_ones_are_left_out() {
     let models = models_of(&json!({"data": [
@@ -522,7 +520,7 @@ fn other_notifications_and_a_total_without_last_carry_no_usage() {
     assert!(!events.iter().any(|event| matches!(event, Event::Usage(_))));
 }
 
-/// AI6 answered every approval by its own gate; here the decision is the client's, and only an offered one is sent.
+/// The decision is the client's, and only an offered one is sent.
 #[test]
 fn an_approval_is_answered_with_the_decision_the_client_chose() {
     let (mut parser, written) = parser();
@@ -532,12 +530,11 @@ fn an_approval_is_answered_with_the_decision_the_client_chose() {
     let Some(Event::Permission(request)) = events.pop() else {
         panic!()
     };
-    assert!(
-        request
-            .options
-            .iter()
-            .any(|option| option.name == "Always allow `git push`")
-    );
+    assert!(request.options.iter().any(|option| {
+        option
+            .name
+            .contains("every command starting with `git push`")
+    }));
     request
         .responder
         .answer(Outcome::Selected("accept_with_rule".into()))

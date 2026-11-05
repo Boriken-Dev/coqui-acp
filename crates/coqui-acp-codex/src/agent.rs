@@ -111,6 +111,9 @@ impl CodexAgent {
     fn launch_for(&self, request: &OpenRequest) -> Result<CodexLaunch, HarnessError> {
         let mut launch = self.defaults.clone();
         launch.cwd.clone_from(&request.cwd);
+        launch
+            .working_roots
+            .extend(request.working_roots.iter().cloned());
         launch.thread = match &request.open {
             Open::New => ThreadStart::New,
             Open::Resume(id) | Open::Load(id) if !valid_thread_id(id) => {
@@ -138,7 +141,7 @@ impl CodexAgent {
                     "Codex has no SSE transport for MCP servers".into(),
                 ));
             }
-            if launch.mcp_servers.iter().any(|own| own.name == server.name) {
+            if launch.has_server(&server.name) {
                 return Err(HarnessError::Refused(format!(
                     "an MCP server named {} is the host's own",
                     server.name

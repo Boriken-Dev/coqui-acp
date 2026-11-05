@@ -9,6 +9,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -185,7 +186,7 @@ impl CodexSession {
     ///
     /// # Errors
     ///
-    /// [`Error::Spawn`] when it could not start; [`Error::Timeout`] or [`Error::Harness`] when a request failed, and
+    /// [`Error::Refused`] for a `--config` key that cannot be written; [`Error::Spawn`] when it could not start; [`Error::Timeout`] or [`Error::Harness`] when a request failed, and
     /// the app server has been ended.
     pub fn start(
         launch: &CodexLaunch,
@@ -193,6 +194,15 @@ impl CodexSession {
         settings: CodexSettings,
         sink: impl Fn(Event) -> bool + Send + Sync + 'static,
     ) -> Result<Self, Error> {
+        if let Some((key, _)) = launch
+            .config_overrides
+            .iter()
+            .find(|(key, _)| !crate::valid_config_key(key))
+        {
+            return Err(Error::Refused(format!(
+                "{key:?} cannot be written as a --config key"
+            )));
+        }
         let sink: Arc<dyn Fn(Event) -> bool + Send + Sync> = Arc::new(sink);
         let spawned = spawn.spawn(&launch.launch()).map_err(Error::Spawn)?;
         let stdin = Arc::new(Mutex::new(spawned.stdin));
@@ -363,14 +373,31 @@ impl CodexSession {
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Harness("Codex named no thread".into()))?;
-        if let Some(wanted) = wanted
-            && wanted != thread
-        {
-            return Err(Error::Harness(format!(
-                "Codex resumed thread {thread}, not the one requested"
-            )));
+        if let Some(wanted) = wanted {
+            if wanted != thread {
+                return Err(Error::Harness(format!(
+                    "Codex resumed thread {thread}, not the one requested"
+                )));
+            }
+            if !launch.working_roots.is_empty()
+                && !opened
+                    .pointer("/thread/cwd")
+                    .and_then(Value::as_str)
+                    .is_some_and(|cwd| {
+                        launch
+                            .working_roots
+                            .iter()
+                            .any(|root| Path::new(cwd).starts_with(root))
+                    })
+            {
+                return Err(Error::Refused(
+                    "that thread's directory is outside the directories this agent may work in"
+                        .into(),
+                ));
+            }
         }
         self.thread = thread.to_string();
+        locked(&self.parser).set_thread(thread);
         if matches!(launch.thread, ThreadStart::Load(_)) {
             let turns = opened
                 .pointer("/thread/turns")
@@ -484,7 +511,15 @@ impl CodexSession {
         if let Some(effort) = effort {
             params["effort"] = json!(effort);
         }
-        let started = self.request("turn/start", params, self.settings.request_timeout)?;
+        locked(&self.parser).prompting();
+        let started = self
+            .request("turn/start", params, self.settings.request_timeout)
+            .inspect_err(|error| {
+                // No answer does not mean no turn: this one has failed, and must not run on unwatched.
+                if matches!(error, Error::Timeout { .. }) {
+                    locked(&self.parser).abandon();
+                }
+            })?;
         if let Some(turn) = started.pointer("/turn/id").and_then(Value::as_str) {
             let mut parser = locked(&self.parser);
             if parser.turn().is_none() {

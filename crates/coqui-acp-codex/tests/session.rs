@@ -68,7 +68,7 @@ fn inputs(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
-/// Carried over from AI6: a thread runs, the app server ends, and a resume reaches the same thread.
+/// a thread runs, the app server ends, and a resume reaches the same thread.
 #[test]
 fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
     let scratch = Scratch::new("restart");
@@ -124,7 +124,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
         )
     );
     session.close();
-    // Carried over from AI6: resume reattaches and submits a turn to the same thread.
+    // resume reattaches and submits a turn to the same thread.
     let sent = inputs(&written);
     let methods: Vec<_> = sent
         .iter()
@@ -161,7 +161,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
     );
 }
 
-/// Carried over from AI6: a resume that reaches another thread closes the app server and fails.
+/// a resume that reaches another thread closes the app server and fails.
 #[test]
 fn resume_rejects_a_different_thread_and_closes_the_provider_process() {
     let scratch = Scratch::new("different");
@@ -172,7 +172,7 @@ fn resume_rejects_a_different_thread_and_closes_the_provider_process() {
     assert!(error.contains("not the one requested"), "{error}");
 }
 
-/// Carried over from AI6: an app server that exits fails with its status and what it wrote last.
+/// an app server that exits fails with its status and what it wrote last.
 #[test]
 fn an_app_server_that_exits_fails_the_session_with_its_status_and_last_output() {
     let scratch = Scratch::new("exit");
@@ -184,7 +184,7 @@ fn an_app_server_that_exits_fails_the_session_with_its_status_and_last_output() 
     assert!(error.contains("failed to load configuration"), "{error}");
 }
 
-/// Carried over from AI6: the end of the output is one failure, never an idle wait.
+/// the end of the output is one failure, never an idle wait.
 #[test]
 fn terminal_eof_is_a_provider_failure_not_an_idle_timeout() {
     let scratch = Scratch::new("eof");
@@ -306,4 +306,109 @@ fn live_codex_lists_models_with_no_login_and_no_turn() {
     assert!(session.version().is_some());
     assert!(!session.thread().is_empty());
     session.close();
+}
+
+/// A key that cannot be written is refused before anything starts.
+#[test]
+fn a_config_key_that_cannot_be_written_is_refused() {
+    let scratch = Scratch::new("key");
+    let mut launch = replaying(None, &scratch.0);
+    launch.config_overrides = vec![("model=x".into(), Value::Bool(true))];
+    let refused = CodexSession::start(&launch, &PlainSpawn, CodexSettings::new(), |_| true);
+    assert!(matches!(refused, Err(coqui_acp_codex::Error::Refused(_))));
+}
+
+/// The real Codex's commands end with its process tree: with a terminal and without, sandboxed by its own default and
+/// not. Nothing here reaches a model.
+#[test]
+#[ignore = "needs Codex installed; set COQUI_ACP_TEST_LIVE_HARNESSES=1 and run with --ignored"]
+fn live_a_killed_app_server_leaves_none_of_its_commands_running() {
+    use std::io::{BufRead, BufReader, Write};
+
+    use coqui_acp_codex::{Launch, Spawn};
+
+    assert!(
+        std::env::var_os("COQUI_ACP_TEST_LIVE_HARNESSES").is_some(),
+        "set COQUI_ACP_TEST_LIVE_HARNESSES=1"
+    );
+    let loop_writing = |marker: &std::path::Path| -> Vec<String> {
+        let path = marker.to_string_lossy();
+        if cfg!(windows) {
+            vec![
+                "powershell.exe".into(),
+                "-NoProfile".into(),
+                "-Command".into(),
+                format!(
+                    "while ($true) {{ Add-Content -LiteralPath '{path}' x; Start-Sleep -Milliseconds 100 }}"
+                ),
+            ]
+        } else {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("while :; do echo x >> '{path}'; sleep 0.1; done"),
+            ]
+        }
+    };
+    for (tty, sandbox) in [
+        (true, Value::Null),
+        (false, Value::Null),
+        (true, serde_json::json!({"type": "dangerFullAccess"})),
+        (false, serde_json::json!({"type": "dangerFullAccess"})),
+    ] {
+        let scratch = Scratch::new("tree");
+        let home = scratch.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let marker = scratch.0.join("marker.txt");
+        let mut launch = Launch::new("codex")
+            .arg("app-server")
+            .cwd(scratch.0.clone());
+        launch.env.insert("CODEX_HOME".into(), home.into());
+        let spawned = PlainSpawn.spawn(&launch).unwrap();
+        let mut stdin = spawned.stdin;
+        let mut send = |message: Value| {
+            let mut line = serde_json::to_vec(&message).unwrap();
+            line.push(b'\n');
+            stdin.write_all(&line).unwrap();
+            stdin.flush().unwrap();
+        };
+        let (lines, read) = mpsc::channel();
+        let stdout = spawned.stdout;
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if lines.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        send(
+            serde_json::json!({"id": 1, "method": "initialize", "params": {
+            "clientInfo": {"name": "test", "version": "0"}, "capabilities": {}}}),
+        );
+        read.recv_timeout(Duration::from_secs(30)).unwrap();
+        send(serde_json::json!({"method": "initialized", "params": {}}));
+        let mut exec = serde_json::json!({"id": 2, "method": "command/exec", "params": {
+            "command": loop_writing(&marker), "tty": tty, "processId": "tree", "streamStdoutStderr": true,
+            "disableTimeout": true, "cwd": scratch.0.to_string_lossy()}});
+        if !sandbox.is_null() {
+            exec["params"]["sandboxPolicy"] = sandbox.clone();
+        }
+        send(exec);
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while std::fs::metadata(&marker).map_or(0, |found| found.len()) < 8 {
+            assert!(
+                std::time::Instant::now() < until,
+                "the command never ran: tty {tty}, sandbox {sandbox}: {:?}",
+                read.try_iter().collect::<Vec<_>>()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        spawned.process.kill().unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let then = std::fs::metadata(&marker).unwrap().len();
+        std::thread::sleep(Duration::from_secs(2));
+        let now = std::fs::metadata(&marker).unwrap().len();
+        assert_eq!(then, now, "still running: tty {tty}, sandbox {sandbox}");
+        drop(scratch);
+    }
 }

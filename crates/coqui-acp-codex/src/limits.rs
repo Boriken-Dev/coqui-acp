@@ -132,7 +132,7 @@ pub(crate) fn usage(message: &Value) -> Option<Usage> {
     reported.output = count("outputTokens");
     reported.cache_read = cached;
     reported.cache_write = count("cacheWriteInputTokens");
-    reported.context_used = Some(count("inputTokens") + count("outputTokens"));
+    reported.context_used = Some(count("inputTokens").saturating_add(count("outputTokens")));
     reported.context_size = usage.get("modelContextWindow").and_then(Value::as_u64);
     Some(reported)
 }

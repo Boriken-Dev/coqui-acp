@@ -34,7 +34,7 @@ pub fn config(&self) -> Map<String, Value>     // mcp_servers, sandbox_workspace
 pub fn skill_roots(&self) -> Vec<String>       // the Agent Skills directory of each
 pub fn thread_params(&self) -> Value           // thread/start's, or thread/resume's with threadId and excludeTurns
 #[non_exhaustive] pub enum ThreadStart { New, Resume(String), Load(String) }
-pub fn toml_key(key: &str) -> String;  pub fn toml_value(value: &Value) -> String
+pub fn valid_config_key(key: &str) -> bool;  pub fn toml_value(value: &Value) -> String
 pub fn valid_thread_id(id: &str) -> bool       // letters, digits and dashes, 1 to 128
 ```
 

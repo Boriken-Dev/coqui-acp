@@ -48,13 +48,17 @@ pub struct CodexLaunch {
     /// More directories: the Agent Skills directory of each is a root Codex reads skills from
     /// (`skills/extraRoots/set`), and each is writable in a `workspace-write` sandbox (`sandbox_workspace_write.writable_roots`).
     pub additional_directories: Vec<PathBuf>,
+    /// When not empty, a resumed or loaded thread whose own directory lies in none of these is refused, compared as
+    /// written: a thread is found by its id alone, whatever `cwd` is asked for.
+    pub working_roots: Vec<PathBuf>,
     /// The approval policy: `untrusted`, `on-failure`, `on-request` or `never`.
     pub approval_policy: Option<String>,
     /// The sandbox: `read-only`, `workspace-write` or `danger-full-access`.
     pub sandbox: Option<String>,
     /// More of the thread's configuration, merged into its `config` as given: the caller's own.
     pub thread_config: Map<String, Value>,
-    /// `--config` overrides of the app server, each a dotted key and a JSON value written as TOML.
+    /// `--config` overrides of the app server, each a dotted key ([`valid_config_key`]; another is refused when the
+    /// session starts) and a JSON value written as TOML.
     pub config_overrides: Vec<(String, Value)>,
     /// Variables set for Codex over the inherited environment.
     pub env: BTreeMap<OsString, OsString>,
@@ -93,6 +97,7 @@ impl CodexLaunch {
             developer_instructions: None,
             mcp_servers: Vec::new(),
             additional_directories: Vec::new(),
+            working_roots: Vec::new(),
             approval_policy: None,
             sandbox: None,
             thread_config: Map::new(),
@@ -107,7 +112,7 @@ impl CodexLaunch {
     pub fn launch(&self) -> Launch {
         let mut args: Vec<OsString> = alloc::vec![OsString::from("app-server")];
         for (key, value) in &self.config_overrides {
-            args.push(format!("--config={}={}", toml_key(key), toml_value(value)).into());
+            args.push(format!("--config={key}={}", toml_value(value)).into());
         }
         let mut launch = Launch::new(self.executable.clone())
             .args(args)
@@ -117,30 +122,43 @@ impl CodexLaunch {
         launch
     }
 
-    /// The thread's `config`: its MCP servers, the writable roots of its directories, and `thread_config`.
+    /// The thread's `config`: `thread_config`, with the MCP servers added to its own, and the directories to its writable
+    /// roots.
     #[must_use]
     pub fn config(&self) -> Map<String, Value> {
         let mut config = self.thread_config.clone();
         if !self.mcp_servers.is_empty() {
-            let servers: Map<String, Value> = self
-                .mcp_servers
-                .iter()
-                .filter_map(|server| Some((server.name.clone(), mcp_server(&server.transport)?)))
-                .collect();
+            let mut servers = own_table(&config, "mcp_servers");
+            servers.extend(
+                self.mcp_servers.iter().filter_map(|server| {
+                    Some((server.name.clone(), mcp_server(&server.transport)?))
+                }),
+            );
             config.insert("mcp_servers".into(), Value::Object(servers));
         }
         if !self.additional_directories.is_empty() {
-            let roots: Vec<Value> = self
-                .additional_directories
-                .iter()
-                .map(|directory| json!(directory.to_string_lossy()))
-                .collect();
-            config.insert(
-                "sandbox_workspace_write".into(),
-                json!({"writable_roots": roots}),
+            let mut sandbox = own_table(&config, "sandbox_workspace_write");
+            let mut roots = sandbox
+                .get("writable_roots")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            roots.extend(
+                self.additional_directories
+                    .iter()
+                    .map(|directory| json!(directory.to_string_lossy())),
             );
+            sandbox.insert("writable_roots".into(), Value::Array(roots));
+            config.insert("sandbox_workspace_write".into(), Value::Object(sandbox));
         }
         config
+    }
+
+    /// Whether an MCP server of this name is already given, in `mcp_servers` or `thread_config`.
+    #[must_use]
+    pub fn has_server(&self, name: &str) -> bool {
+        self.mcp_servers.iter().any(|server| server.name == name)
+            || own_table(&self.thread_config, "mcp_servers").contains_key(name)
     }
 
     /// The skill roots of the additional directories: the Agent Skills directory of each.
@@ -192,6 +210,14 @@ impl CodexLaunch {
     }
 }
 
+fn own_table(config: &Map<String, Value>, key: &str) -> Map<String, Value> {
+    config
+        .get(key)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn pairs(pairs: &[(String, String)]) -> Value {
     Value::Object(
         pairs
@@ -215,23 +241,11 @@ fn mcp_server(transport: &McpTransport) -> Option<Value> {
     }
 }
 
-/// A dotted key as TOML: each part bare when it is letters, digits, `_` and `-`, else a quoted string.
+/// Whether `key` can name a `--config` key. Codex splits the argument at its first `=` and the key at each `.`, and takes
+/// a quote as part of a name, so a key is written as it is, and one holding `=` cannot be written at all.
 #[must_use]
-pub fn toml_key(key: &str) -> String {
-    key.split('.')
-        .map(|part| {
-            if !part.is_empty()
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                part.to_string()
-            } else {
-                toml_string(part)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(".")
+pub fn valid_config_key(key: &str) -> bool {
+    !key.is_empty() && !key.contains(|c: char| c == '=' || c.is_control())
 }
 
 /// A JSON value as one TOML value: strings quoted with every control character escaped, arrays, and objects as
@@ -292,7 +306,7 @@ mod tests {
                 "model".into(),
                 json!("--dangerously-bypass\"\nsandbox_mode=\"danger-full-access")
             ),
-            ("mcp_servers.a\"b.url".into(), json!("http://x\"}\nother=1")),
+            ("mcp_servers.docs.url".into(), json!("http://x\"}\nother=1")),
         ];
         let args: Vec<String> = launch
             .launch()
@@ -307,13 +321,47 @@ mod tests {
         );
         assert_eq!(
             args[2],
-            "--config=mcp_servers.\"a\\\"b\".url=\"http://x\\\"}\\nother=1\""
+            "--config=mcp_servers.docs.url=\"http://x\\\"}\\nother=1\""
         );
         assert!(args.iter().all(|arg| !arg.contains('\n')));
+        assert!(valid_config_key("mcp_servers.docs.url"));
+        assert!(!valid_config_key("model=other"));
+        assert!(!valid_config_key("a\nb"));
+        assert!(!valid_config_key(""));
         assert_eq!(
             toml_value(&json!({"a b": [1, true, "\u{1}"]})),
             "{\"a b\"=[1,true,\"\\u0001\"]}"
         );
+    }
+
+    #[test]
+    fn what_a_session_adds_keeps_what_the_host_configured() {
+        let mut launch = CodexLaunch::new("/w");
+        launch.thread_config.insert(
+            "sandbox_workspace_write".into(),
+            json!({"network_access": false, "writable_roots": ["/own"]}),
+        );
+        launch.thread_config.insert(
+            "mcp_servers".into(),
+            json!({"own": {"url": "https://o.invalid"}}),
+        );
+        launch.additional_directories = alloc::vec![PathBuf::from("/more")];
+        launch.mcp_servers = alloc::vec![McpServer::new(
+            "docs",
+            McpTransport::Http {
+                url: "https://docs.invalid/mcp".into(),
+                headers: alloc::vec![]
+            }
+        )];
+        let config = launch.config();
+        assert_eq!(config["sandbox_workspace_write"]["network_access"], false);
+        assert_eq!(
+            config["sandbox_workspace_write"]["writable_roots"],
+            json!(["/own", "/more"])
+        );
+        assert!(config["mcp_servers"]["own"].is_object());
+        assert!(config["mcp_servers"]["docs"].is_object());
+        assert!(launch.has_server("own") && launch.has_server("docs") && !launch.has_server("x"));
     }
 
     #[test]

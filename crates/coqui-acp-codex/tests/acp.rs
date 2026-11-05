@@ -301,3 +301,47 @@ fn a_version_1_load_replays_the_threads_history_and_a_bad_id_is_refused() {
     let sse = peer.request("session/new", json!({"cwd": scratch.0.to_string_lossy(), "mcpServers": [{"type": "sse", "name": "s", "url": "u", "headers": []}]}));
     assert_eq!(sse["error"]["code"], -32602, "Codex has no SSE transport");
 }
+
+/// A thread of another project is not replayed to a client held to its roots, whatever id it names.
+#[test]
+fn a_thread_outside_the_working_roots_is_not_opened() {
+    let scratch = Scratch::new("roots");
+    let mut settings = Settings::new();
+    settings.working_roots = vec![scratch.0.clone()];
+    let mut peer = Peer::serve(agent(Some("resume"), None), settings);
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    let thread = support::recorded("resume")
+        .iter()
+        .find_map(|line| line.pointer("/result/thread/id").cloned())
+        .expect("a resumed thread");
+    let refused = peer.request(
+        "session/load",
+        json!({"sessionId": thread, "cwd": scratch.0.to_string_lossy(), "mcpServers": []}),
+    );
+    assert!(refused.get("error").is_some(), "{refused}");
+    assert!(
+        !peer.kinds().iter().any(|kind| kind == "user_message_chunk"),
+        "nothing of it was told"
+    );
+}
+
+/// `session/set_config_option` names a value's type in version 2.
+#[test]
+fn a_config_value_may_name_its_type() {
+    let scratch = Scratch::new("type");
+    let mut peer = Peer::serve(agent(Some("turn"), None), Settings::new());
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 2, "capabilities": {}}),
+    );
+    let opened = peer.request("session/new", json!({"cwd": scratch.0.to_string_lossy()}));
+    let session = opened["result"]["sessionId"].clone();
+    let changed = peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "effort", "type": "id", "value": "low"}),
+    );
+    assert_eq!(changed["result"]["configOptions"][1]["currentValue"], "low");
+}
