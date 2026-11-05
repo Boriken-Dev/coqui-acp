@@ -238,7 +238,11 @@ impl Shared {
             return;
         };
         match method.as_str() {
-            "initialize" => self.initialize(&id, &params),
+            "initialize" => {
+                // A harness may take a while to say its name, as a command line asked its version does.
+                self.take_version(&params);
+                self.work(id, method, params, None);
+            }
             "authenticate" => self.respond(&id, json!({})),
             _ if self.version().is_none() => {
                 self.respond_error(&id, INVALID_REQUEST, "initialize first")
@@ -265,7 +269,8 @@ impl Shared {
         }
     }
 
-    fn initialize(&self, id: &Value, params: &Value) {
+    /// Takes the version the client asked for, on the thread that reads it, so its next line finds it.
+    fn take_version(&self, params: &Value) {
         let asked = params
             .get("protocolVersion")
             .and_then(Value::as_u64)
@@ -276,6 +281,10 @@ impl Shared {
             1
         };
         *locked(&self.version) = Some(version);
+    }
+
+    fn initialize(&self, id: &Value) {
+        let version = self.version().unwrap_or(1);
         let info = self.harness.info();
         let takes = self.harness.takes();
         let info = json!({"name": info.name, "title": info.title, "version": info.version});
@@ -396,6 +405,7 @@ impl Shared {
     fn handle(self: &Arc<Self>, id: &Value, method: &str, params: &Value) {
         let version = self.version().unwrap_or(1);
         match method {
+            "initialize" => self.initialize(id),
             "session/new" => self.open(id, params, Open::New, version),
             "session/load" => match parse::session_id(params) {
                 Ok(session) => self.open(id, params, Open::Load(session), version),

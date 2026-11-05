@@ -55,6 +55,8 @@ struct Fake {
     open_chunks: usize,
     /// A prompt does not return for this long.
     stuck_prompt: Duration,
+    /// Asking for its name does not return for this long.
+    info_delay: Duration,
 }
 
 impl Fake {
@@ -69,6 +71,7 @@ impl Fake {
             stuck_interrupt: Duration::ZERO,
             open_chunks: 0,
             stuck_prompt: Duration::ZERO,
+            info_delay: Duration::ZERO,
         }
     }
 }
@@ -88,6 +91,7 @@ impl Drop for FakeConversation {
 
 impl Harness for Fake {
     fn info(&self) -> AgentInfo {
+        std::thread::sleep(self.info_delay);
         AgentInfo::new("fake", "Fake", "0")
     }
 
@@ -823,4 +827,24 @@ fn a_link_out_of_a_working_root_is_outside_it() {
     let inside = client.answer(inside);
     assert!(inside.get("result").is_some(), "{inside}");
     std::fs::remove_dir_all(&scratch).unwrap();
+}
+
+/// Asking a harness about itself can take long: the client's next line is still read.
+#[test]
+fn initialize_does_not_hold_up_reading_the_client() {
+    let mut fake = Fake::new(Mode::Slow);
+    fake.info_delay = Duration::from_secs(3);
+    let mut client = Client::serve(fake, Settings::new());
+    let initialize = client.send(json!({"method": "initialize", "params": {"protocolVersion": 2}}));
+    let authenticate = client.send(json!({"method": "authenticate", "params": {}}));
+    let first = client
+        .from_agent
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(first["id"], json!(authenticate), "{first}");
+    let second = client
+        .from_agent
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(second["id"], json!(initialize), "{second}");
 }
