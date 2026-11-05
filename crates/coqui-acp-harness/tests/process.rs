@@ -406,3 +406,81 @@ fn a_line_the_host_refuses_ends_the_harness_before_anything_reads_it() {
         "{told:?}"
     );
 }
+
+struct Gone;
+
+impl coqui_acp_harness::Process for Gone {
+    fn kill(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn try_wait(&self) -> std::io::Result<Option<coqui_acp_harness::Exit>> {
+        let spawned = coqui_acp_harness::Spawn::spawn(&coqui_acp_harness::PlainSpawn, &quick())?;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(exit) = spawned.process.try_wait()? {
+                return Ok(Some(exit));
+            }
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// A client slow to read holds the reader back: an exit meanwhile is told after what was already read.
+#[test]
+fn an_exit_is_told_after_everything_read_however_slow_the_sink() {
+    use std::io::Write;
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    for number in 0..5 {
+        writeln!(writer, "{{\"n\":{number}}}").unwrap();
+    }
+    let (sender, events) = std::sync::mpsc::channel();
+    let sink: coqui_acp_harness::stream::EventHook = std::sync::Arc::new(move |event| {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        sender.send(event).is_ok()
+    });
+    let mut stream = coqui_acp_harness::Stream::new(
+        "Test",
+        std::sync::Arc::new(Gone),
+        std::sync::Arc::new(std::sync::Mutex::new(coqui_acp_harness::lines::Tail::new(
+            4, 64,
+        ))),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        sink,
+    );
+    stream.exit_poll = std::time::Duration::from_millis(5);
+    stream.exit_wait = std::time::Duration::from_millis(20);
+    stream
+        .read(
+            Box::new(reader),
+            "test-stdout",
+            |line| {
+                coqui_acp_harness::Step::new(
+                    vec![coqui_acp_harness::Event::Output(line["n"].to_string())],
+                    Vec::new(),
+                )
+            },
+            Vec::new,
+        )
+        .unwrap();
+    let mut told = Vec::new();
+    while let Ok(event) = events.recv_timeout(std::time::Duration::from_secs(5)) {
+        let over = matches!(event, coqui_acp_harness::Event::Exited(_));
+        told.push(event);
+        if over {
+            break;
+        }
+    }
+    drop(writer);
+    let lines = told
+        .iter()
+        .filter(|event| matches!(event, coqui_acp_harness::Event::Output(_)))
+        .count();
+    assert_eq!(lines, 5, "{told:?}");
+    assert!(
+        matches!(told.last(), Some(coqui_acp_harness::Event::Exited(_))),
+        "{told:?}"
+    );
+}

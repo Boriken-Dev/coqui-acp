@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 use std::io::{self, Read};
 use std::sync::mpsc;
@@ -150,6 +150,9 @@ impl Stream {
         let stopped: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let failed_read: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let done = ending_once();
+        // Lines started, and whether one is being told: a slow client holds the reader back, and that is not an end.
+        let progress = Arc::new(AtomicU64::new(0));
+        let telling = Arc::new(AtomicBool::new(false));
         let ending = Arc::new({
             let stream = self.clone();
             let open = Arc::clone(&open);
@@ -176,12 +179,26 @@ impl Stream {
         });
         {
             let ending = Arc::clone(&ending);
+            let progress = Arc::clone(&progress);
+            let telling = Arc::clone(&telling);
+            let quiet = self.exit_wait.max(Duration::from_millis(1));
             watch_exit(
                 Arc::clone(&self.process),
                 self.exit_poll,
                 self.exit_wait,
                 Arc::clone(&done),
-                move || ending(true),
+                move || {
+                    loop {
+                        let before = progress.load(Ordering::SeqCst);
+                        thread::sleep(quiet);
+                        if !telling.load(Ordering::SeqCst)
+                            && progress.load(Ordering::SeqCst) == before
+                        {
+                            break;
+                        }
+                    }
+                    ending(true);
+                },
             )?;
         }
         let stream = self;
@@ -189,60 +206,73 @@ impl Stream {
             .name(thread_name.into())
             .spawn(move || {
                 let read = lines::read_lines(stdout, stream.max_line, |read| {
-                    match read {
-                        Line::Json(value) => {
-                            if let Some(check) = &stream.on_line
-                                && !check(&value)
-                            {
-                                *locked(&stopped) =
-                                    Some(format!("{} wrote a line the host refused", stream.name));
-                                let _ = stream.process.kill();
-                                return false;
-                            }
-                            let step = line(&value);
-                            for (id, answer) in step.answers {
-                                let waiter = locked(&stream.waiting).remove(&id);
-                                match (waiter, answer) {
-                                    (Some(waiter), answer) => {
-                                        let _ = waiter.send(answer);
-                                    }
-                                    // Nobody waits for an interrupt's answer: a refusal is still told.
-                                    (None, Err(why)) => {
-                                        let told = (stream.sink)(Event::Notice {
-                                            severity: Severity::Warning,
-                                            title: why,
-                                        });
-                                        if !told {
-                                            open.store(false, Ordering::SeqCst);
+                    progress.fetch_add(1, Ordering::SeqCst);
+                    telling.store(true, Ordering::SeqCst);
+                    let going = {
+                        match read {
+                            Line::Json(value) => {
+                                if let Some(check) = &stream.on_line
+                                    && !check(&value)
+                                {
+                                    *locked(&stopped) = Some(format!(
+                                        "{} wrote a line the host refused",
+                                        stream.name
+                                    ));
+                                    let _ = stream.process.kill();
+                                    telling.store(false, Ordering::SeqCst);
+                                    return false;
+                                }
+                                let step = line(&value);
+                                for (id, answer) in step.answers {
+                                    let waiter = locked(&stream.waiting).remove(&id);
+                                    match (waiter, answer) {
+                                        (Some(waiter), answer) => {
+                                            let _ = waiter.send(answer);
                                         }
+                                        // Nobody waits for an interrupt's answer: a refusal is still told.
+                                        (None, Err(why)) => {
+                                            let told = (stream.sink)(Event::Notice {
+                                                severity: Severity::Warning,
+                                                title: why,
+                                            });
+                                            if !told {
+                                                open.store(false, Ordering::SeqCst);
+                                            }
+                                        }
+                                        (None, Ok(_)) => {}
                                     }
-                                    (None, Ok(_)) => {}
+                                }
+                                for event in step.events {
+                                    if open.load(Ordering::SeqCst) && !(stream.sink)(event) {
+                                        open.store(false, Ordering::SeqCst);
+                                    }
+                                }
+                                if let Some(why) = step.stop {
+                                    *locked(&stopped) = Some(why);
+                                    let _ = stream.process.kill();
+                                    telling.store(false, Ordering::SeqCst);
+                                    return false;
                                 }
                             }
-                            for event in step.events {
-                                if open.load(Ordering::SeqCst) && !(stream.sink)(event) {
+                            Line::Text(text) => {
+                                locked(&stream.tail).push(&text);
+                                if open.load(Ordering::SeqCst)
+                                    && !(stream.sink)(Event::Output(text))
+                                {
                                     open.store(false, Ordering::SeqCst);
                                 }
                             }
-                            if let Some(why) = step.stop {
-                                *locked(&stopped) = Some(why);
+                            Line::TooLong(bytes) => {
+                                locked(&stream.tail).push(&format!(
+                                    "a line of {bytes} bytes or more, past the limit"
+                                ));
                                 let _ = stream.process.kill();
-                                return false;
                             }
                         }
-                        Line::Text(text) => {
-                            locked(&stream.tail).push(&text);
-                            if open.load(Ordering::SeqCst) && !(stream.sink)(Event::Output(text)) {
-                                open.store(false, Ordering::SeqCst);
-                            }
-                        }
-                        Line::TooLong(bytes) => {
-                            locked(&stream.tail)
-                                .push(&format!("a line of {bytes} bytes or more, past the limit"));
-                            let _ = stream.process.kill();
-                        }
-                    }
-                    open.load(Ordering::SeqCst)
+                        open.load(Ordering::SeqCst)
+                    };
+                    telling.store(false, Ordering::SeqCst);
+                    going
                 });
                 if let Err(error) = read {
                     *locked(&failed_read) = Some(error.to_string());
