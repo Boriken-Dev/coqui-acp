@@ -20,8 +20,8 @@ use coqui_agentic_peer::auth::Identity;
 use coqui_agentic_peer::pairing;
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pairing, Pin, PinRole};
 use coqui_peer_webcrypto::{TrustStore, random};
-use coqui_web::websocket::{self, Frames};
-use coqui_web::{Channel, Dialer, Kind};
+use coqui_web_channel::websocket::{self, Frames};
+use coqui_web_channel::{Channel, Dialer, Kind};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use url::Url;
 

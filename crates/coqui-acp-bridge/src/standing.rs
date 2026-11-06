@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use coqui_agentic_peer::home;
 use coqui_agentic_peer::link::{Accepted, Handler};
 use coqui_agentic_peer::mux::{CloseReason, LinkStream, StreamLife};
-use coqui_web::Failure;
+use coqui_web_channel::Failure;
 use serde_json::{Value, json};
 
 /// What a peer opens `mcp-offer/1` with to keep a stream standing. An older bridge refuses it, as it is no server name.

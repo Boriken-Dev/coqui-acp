@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp-bridge` crate: its command line and its small library, so it can be used without reading the source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-agentic-peer` (which brings `coqui-peer-noise`), `coqui-peer-webcrypto`, `coqui-peer-tls`, `coqui-net-acl`, `clap`, `rustls`, `mdns-sd`, `serde_json` and `url`, with `rustix` on Unix and `win32job` on Windows for ending an agent and what it started.
+No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web-channel`, `coqui-peer`, `coqui-agentic-peer` (which brings `coqui-peer-noise`), `coqui-peer-webcrypto`, `coqui-peer-tls`, `coqui-net-acl`, `clap`, `rustls`, `mdns-sd`, `serde_json` and `url`, with `rustix` on Unix and `win32job` on Windows for ending an agent and what it started.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `linger`, `relay`. Proof, pairing, discovery and the companion are `coqui-agentic-peer`'s; see its `AGENTS.md`.
 

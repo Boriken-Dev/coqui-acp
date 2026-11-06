@@ -35,8 +35,8 @@ use coqui_net_acl::{Acl, Action, IpNet, Rule};
 use coqui_peer::pair::{CodeAlphabet, Pin};
 use coqui_peer::{PeerId, TrustStore};
 use coqui_peer_tls as tls;
-use coqui_web::websocket::Frames;
-use coqui_web::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
+use coqui_web_channel::websocket::Frames;
+use coqui_web_channel::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
 use url::Url;
 
 mod standing;

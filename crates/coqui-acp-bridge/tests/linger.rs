@@ -16,7 +16,7 @@ use coqui_agentic_peer::auth::{Identity, Proof, Trust};
 use coqui_agentic_peer::auth::{Sealed, prove_out};
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
 use coqui_peer_webcrypto::TrustStore;
-use coqui_web::{Channel, Dialer, Failure, Kind, websocket};
+use coqui_web_channel::{Channel, Dialer, Failure, Kind, websocket};
 use serde_json::{Value, json};
 
 const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
