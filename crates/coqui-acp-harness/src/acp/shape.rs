@@ -312,8 +312,9 @@ fn chunk(kind: &str, message: &str, content: Value, v2: bool) -> Value {
     }
 }
 
+/// A message's end carries no `content`: version 2 reads an empty array as clearing the message.
 fn ended(kind: &str, message: &str) -> Value {
-    json!({"sessionUpdate": kind, "messageId": message, "content": []})
+    json!({"sessionUpdate": kind, "messageId": message})
 }
 
 fn tool_content(content: &ToolContent, v2: bool) -> Option<Value> {
@@ -582,7 +583,7 @@ mod tests {
         assert!(v1.updates(&end).is_empty());
         assert_eq!(
             v2.updates(&end)[0],
-            json!({"sessionUpdate": "agent_message", "messageId": "m1", "content": []})
+            json!({"sessionUpdate": "agent_message", "messageId": "m1"})
         );
         let notice = Event::Notice {
             severity: crate::event::Severity::Warning,
