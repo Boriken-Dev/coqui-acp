@@ -88,6 +88,7 @@ coqui-acp-codex --effort low --approval-policy untrusted --sandbox workspace-wri
 | `--model`, `--effort` | Codex's | What every session starts with |
 | `--approval-policy` | Codex's | `untrusted`, `on-failure`, `on-request` or `never` |
 | `--sandbox` | Codex's | `read-only`, `workspace-write` or `danger-full-access` |
+| `--allow-bypass` | off | Offers the Bypass mode: never ask, no sandbox |
 | `--max-acp-version` | 2 | The highest ACP version answered |
 | `--max-sessions` | 8 | Sessions at once |
 | `--working-root` | any | A directory a session's `cwd` and more directories must lie in, repeated for more |

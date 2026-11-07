@@ -7,6 +7,7 @@ extern crate alloc;
 mod agent;
 mod launch;
 mod limits;
+pub mod mode;
 pub mod parse;
 mod session;
 

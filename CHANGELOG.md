@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `coqui_acp_harness::mode`: `Mode` (Manual, Accept edits, Auto, Plan, Bypass) and the `mode` config option every translator offers, so a client shows one control over every harness. `coqui-acp-claude` switches it with `set_permission_mode` and offers Bypass only with `ClaudeLaunch::allow_bypass`; `coqui-acp-codex` switches it at the next turn.
+
 - `coqui_acp` for Dart: `AcpAttachment.link`, a `resource_link` to a resource the agent reads itself, such as a file by its `file:` URI, with its name and optional type and size. Every agent takes one, whatever it advertises, as ACP says, and `isLink` tells it apart.
 - `coqui-acp-harness`: `Stream`, reading a harness's output until it ends or it exits with its output held open, with `Settings`-style hooks for each raw line; `line_writer`, so a harness that has stopped reading holds up nobody; `Usage::elsewhere`, `TurnEnd::Stopped { stop, result }` and `PermissionRequest::details`. Working roots and network paths follow links, `max_open_questions`, `max_tool_content_bytes` and `max_tool_content_items` are settings, and `initialize` is answered off the thread that reads the client.
 - `coqui-acp-claude`: `permission_prompts`, `SessionStart::Chosen`, and models unknown as distinct from empty. A rejected `rate_limit_event` gives the refused turn it came in its reset time, and `type: error` lines fail the turn. Plugins from a client are off until the host allows them, and held to the working roots.
@@ -46,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `coqui-acp-harness`: the end of an ACP version 2 message carries no `content`, where it carried `[]`, which version 2 reads as clearing the message.
 - `coqui_acp` for Dart: under v2, `setConfigOption` sends `type: "id"` beside the value, which v2's `session/set_config_option` requires; a v2 agent holding to the schema refused the request without it. v1's has no type.
 - **Breaking** for a provider in Python, `coqui-acp-provider`: Guatiao is pinned at `266baf9c`, and `AgentSession`'s `close` slot is `close` in Python, no longer `close_`, in `python/coqui_acp_provider_kinds.py` as `python -m guatiao.kinds` writes it. The kinds' floor hashes are unchanged. A Guatiao manifest is now `<name>.guatiao`: `examples/provider-python`'s is `echo/acp_echo.guatiao`.
 - `coqui-acp-bridge`: the channel crate is `coqui-web-channel`, renamed from coqui-web, pinned at `0b5b05c` (coqui-web's `3b39c00` under its new name, the revision Guatiao's remote source pins), and coqui-agentic-peer at `f6da790`, which pins the same.

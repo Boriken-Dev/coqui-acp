@@ -38,6 +38,9 @@ struct Cli {
     /// The approval policy: untrusted, on-failure, on-request or never.
     #[arg(long)]
     approval_policy: Option<String>,
+    /// Offer the Bypass mode: never ask, and no sandbox.
+    #[arg(long)]
+    allow_bypass: bool,
     /// The sandbox: read-only, workspace-write or danger-full-access.
     #[arg(long)]
     sandbox: Option<String>,
@@ -78,6 +81,7 @@ fn main() -> ExitCode {
     defaults.effort = cli.effort;
     defaults.approval_policy = cli.approval_policy;
     defaults.sandbox = cli.sandbox;
+    defaults.allow_bypass = cli.allow_bypass;
     let agent = CodexAgent::new().defaults(defaults);
     match serve(
         Arc::new(agent),

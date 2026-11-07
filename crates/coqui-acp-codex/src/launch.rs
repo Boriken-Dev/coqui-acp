@@ -80,6 +80,8 @@ pub struct CodexLaunch {
     pub approval_policy: Option<String>,
     /// The sandbox: `read-only`, `workspace-write` or `danger-full-access`.
     pub sandbox: Option<String>,
+    /// Whether the Bypass mode is offered: never ask, no sandbox.
+    pub allow_bypass: bool,
     /// More of the thread's configuration, merged into its `config` as given: the caller's own.
     pub thread_config: Map<String, Value>,
     /// `--config` overrides of the app server, each a dotted key ([`valid_config_key`]; another is refused when the
@@ -129,6 +131,7 @@ impl CodexLaunch {
             working_roots: Vec::new(),
             approval_policy: None,
             sandbox: None,
+            allow_bypass: false,
             thread_config: Map::new(),
             config_overrides: Vec::new(),
             extra_args: Vec::new(),

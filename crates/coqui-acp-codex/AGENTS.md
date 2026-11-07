@@ -24,6 +24,7 @@ pub struct CodexLaunch {
     pub working_roots: Vec<PathBuf>,           // a resumed thread's own directory must lie in one; empty takes any
     pub approval_policy: Option<String>,       // untrusted, on-failure, on-request, never
     pub sandbox: Option<String>,               // read-only, workspace-write, danger-full-access
+    pub allow_bypass: bool,                    // false: the Bypass mode is not offered
     pub thread_config: Map<String, Value>,     // merged into the thread's config, as given
     pub config_overrides: Vec<(String, Value)>,
     pub extra_args: Vec<OsString>,             // the caller's own, after the overrides, unchecked
@@ -138,6 +139,18 @@ pub const DEFAULT: &str = "default";
 
 `agentInfo` is `coqui-acp-codex`, titled `Codex <version>`, at this crate's version. It takes images, embedded context, MCP servers over stdio and HTTP, load, more directories and an appended system prompt. A session's parts are added to `defaults`: its `cwd`, `systemPrompt` after the defaults' developer instructions, `mcpServers`, and `additionalDirectories`, each a skill root (the Agent Skills directory inside it) and writable in a `workspace-write` sandbox. An SSE server or a thread id `valid_thread_id` refuses is refused. The session's id is the thread's.
 
+The mode option (`mode`, category `mode`; ids from `coqui_acp_harness::mode`; `coqui_acp_codex::mode` holds the table), measured on Codex 0.166.0 from `app-server generate-json-schema` and a `thread/start` with no turn. Approval policy is `untrusted`, `on-request` or `never`; the sandbox `read-only`, `workspace-write` or `danger-full-access`; the approvals reviewer `user`, `auto_review` or `guardian_subagent`; the collaboration modes (`collaborationMode/list`) `plan` and `default`.
+
+| Mode | `approvalPolicy` | `sandboxPolicy.type` | `approvalsReviewer` | `collaborationMode.mode` |
+| --- | --- | --- | --- | --- |
+| `manual` | `untrusted` | `workspaceWrite` | `user` | `default` |
+| `accept_edits` | `on-request` | `workspaceWrite` | `user` | `default` |
+| `auto` | `on-request` | `workspaceWrite` | `auto_review` | `default` |
+| `plan` | `on-request` | `readOnly` | `user` | `plan` |
+| `bypass` | `never` | `dangerFullAccess` | `user` | `default` |
+
+`bypass` is offered only with `allow_bypass`, or when the thread already runs that way. The current mode at the start is read from `thread/start`'s `approvalPolicy`, `approvalsReviewer` and `sandbox`: `never` with `dangerFullAccess` is Bypass, `untrusted` or `on-request` with `readOnly` is Manual, `on-request` with `workspaceWrite` is Accept edits, or Auto with `auto_review`. A combination with no name in the table (`never` with a sandbox, a granular policy) shows no mode option until one is chosen. A thread has no collaboration mode of its own to read, so a thread already in Codex's plan mode reads as Manual. Until a client chooses a mode no turn names any of the four settings, and the thread's own configuration holds; once one has, each `turn/start` carries all four (`sandboxPolicy` keeps the thread's `sandbox_workspace_write` roots and network setting), so a switch holds from the next turn, not the one running. `collaborationMode.settings` names the chosen model, else the thread's, and `developer_instructions: null`. A `workspace-write` sandbox falls back to `readOnly` in a directory the Codex home does not trust, as `thread/start` answers show.
+
 Config options: `model` (category `model`): `default` and the models Codex lists; `effort` (category `thought_level`): `default` and the current model's efforts. Setting one not offered is refused; a choice applies from the next turn.
 
 ## Errors
@@ -146,7 +159,7 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 
 ## Command line
 
-`coqui-acp-codex` serves `CodexAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CODEX_EXECUTABLE`, default `codex`), `--model`, `--effort`, `--approval-policy`, `--sandbox`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--no-client-mcp-servers`, `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
+`coqui-acp-codex` serves `CodexAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CODEX_EXECUTABLE`, default `codex`), `--model`, `--effort`, `--approval-policy`, `--sandbox`, `--allow-bypass`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--no-client-mcp-servers`, `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
 
 ## Environment variables
 

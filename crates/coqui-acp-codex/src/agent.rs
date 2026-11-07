@@ -16,6 +16,7 @@ use coqui_acp_harness::{
 use crate::Error;
 use crate::launch::{CodexLaunch, ThreadStart, valid_thread_id};
 use crate::session::{CodexSession, CodexSettings};
+use coqui_acp_harness::mode::{self, Mode};
 
 /// The value of the model and effort options that leaves Codex's own choice.
 pub const DEFAULT: &str = "default";
@@ -193,7 +194,10 @@ impl Harness for CodexAgent {
             move |event| sink.send(event),
         )
         .map_err(HarnessError::from)?;
-        Ok(Box::new(CodexConversation { session }))
+        Ok(Box::new(CodexConversation {
+            session,
+            offered: crate::mode::offered(launch.allow_bypass),
+        }))
     }
 }
 
@@ -208,6 +212,8 @@ impl From<Error> for HarnessError {
 
 struct CodexConversation {
     session: CodexSession,
+    /// The modes that can be chosen.
+    offered: Vec<Mode>,
 }
 
 impl CodexConversation {
@@ -277,10 +283,14 @@ impl Conversation for CodexConversation {
         if !efforts.iter().any(|value| value.id == effort) {
             efforts.push(OptionValue::new(effort.clone(), effort.clone(), None));
         }
-        alloc::vec![
+        let mut options = alloc::vec![
             ConfigOption::new("model", "Model", model, models).category("model"),
             ConfigOption::new("effort", "Effort", effort, efforts).category("thought_level"),
-        ]
+        ];
+        if let Some(current) = self.session.mode() {
+            options.push(mode::option(current, &self.offered));
+        }
+        options
     }
 
     fn prompt(&self, content: Vec<coqui_acp_harness::event::Content>) -> Result<(), HarnessError> {
@@ -292,6 +302,11 @@ impl Conversation for CodexConversation {
     }
 
     fn set_option(&self, id: &str, value: &str) -> Result<Vec<ConfigOption>, HarnessError> {
+        if id == mode::OPTION_ID {
+            let chosen = mode::chosen(value, &self.offered).map_err(HarnessError::Refused)?;
+            self.session.set_mode(chosen);
+            return Ok(self.options());
+        }
         let offered = self.options();
         let option = offered
             .iter()
