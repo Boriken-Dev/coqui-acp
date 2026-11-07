@@ -61,6 +61,9 @@ pub struct ClaudeLaunch {
     pub permission_prompts: bool,
     /// The permission mode: `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`, `auto` or `manual`.
     pub permission_mode: Option<String>,
+    /// Whether the session may be switched to `bypassPermissions` (`--allow-dangerously-skip-permissions`). Claude Code
+    /// takes that mode mid-session only when it was started allowing it; off, the bypass mode is not offered.
+    pub allow_bypass: bool,
     /// The setting sources Claude Code loads, of `user`, `project` and `local`; `Some` of an empty list loads none.
     /// `None` leaves Claude Code's own default, every source.
     pub setting_sources: Option<Vec<String>>,
@@ -90,6 +93,7 @@ impl core::fmt::Debug for ClaudeLaunch {
             .field("plugin_dirs", &self.plugin_dirs)
             .field("permission_prompts", &self.permission_prompts)
             .field("permission_mode", &self.permission_mode)
+            .field("allow_bypass", &self.allow_bypass)
             .field("setting_sources", &self.setting_sources)
             .field("env", &self.env.keys().collect::<Vec<_>>())
             .field("clear_env", &self.clear_env)
@@ -115,6 +119,7 @@ impl ClaudeLaunch {
             plugin_dirs: Vec::new(),
             permission_prompts: true,
             permission_mode: None,
+            allow_bypass: false,
             setting_sources: None,
             max_budget_micro_usd: None,
             partial_messages: true,
@@ -150,6 +155,9 @@ impl ClaudeLaunch {
         if self.permission_prompts {
             args.push("--permission-prompts=host".into());
             args.push("--permission-prompt-tool=stdio".into());
+        }
+        if self.allow_bypass {
+            args.push("--allow-dangerously-skip-permissions".into());
         }
         if self.partial_messages {
             args.push("--include-partial-messages".into());
@@ -283,6 +291,22 @@ mod tests {
             !args
                 .iter()
                 .any(|arg| arg == "--dangerously-skip-permissions")
+        );
+    }
+
+    #[test]
+    fn bypass_is_allowed_only_when_asked_for() {
+        let mut launch = ClaudeLaunch::new("/w");
+        assert!(
+            !args(&launch)
+                .iter()
+                .any(|arg| arg == "--allow-dangerously-skip-permissions")
+        );
+        launch.allow_bypass = true;
+        assert!(
+            args(&launch)
+                .iter()
+                .any(|arg| arg == "--allow-dangerously-skip-permissions")
         );
     }
 

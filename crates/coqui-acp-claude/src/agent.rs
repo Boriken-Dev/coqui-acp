@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::launch::{ClaudeLaunch, SessionStart, valid_session_id};
 use crate::session::{ClaudeSession, ClaudeSettings, Model};
 use crate::{Error, replay};
+use coqui_acp_harness::mode::{self, Mode};
 
 /// The efforts Claude Code 2.1.318 takes, offered when a model does not list its own.
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -271,10 +272,20 @@ impl Harness for ClaudeAgent {
         let models = session.models().unwrap_or_default();
         let model = launch.model.clone().unwrap_or_else(|| DEFAULT.to_string());
         let effort = launch.effort.clone().unwrap_or_else(|| DEFAULT.to_string());
+        let started = session
+            .permission_mode()
+            .or_else(|| launch.permission_mode.clone())
+            .unwrap_or_else(|| "default".to_string());
+        let mut offered = vec![Mode::Manual, Mode::AcceptEdits, Mode::Auto, Mode::Plan];
+        if launch.allow_bypass || started == "bypassPermissions" {
+            offered.push(Mode::Bypass);
+        }
         Ok(Box::new(ClaudeConversation {
             session,
             models,
             chosen: Mutex::new((model, effort)),
+            mode: Mutex::new(mode_of(&started)),
+            offered,
         }))
     }
 }
@@ -293,6 +304,35 @@ struct ClaudeConversation {
     models: Vec<Model>,
     /// The model and effort in use.
     chosen: Mutex<(String, String)>,
+    /// The mode in use, `None` when Claude Code runs in one the table has no name for (`dontAsk`).
+    mode: Mutex<Option<Mode>>,
+    /// The modes that can be switched to.
+    offered: Vec<Mode>,
+}
+
+/// Claude Code's `permissionMode` for each mode, the one table both directions read.
+const MODES: [(Mode, &str); 5] = [
+    (Mode::Manual, "default"),
+    (Mode::AcceptEdits, "acceptEdits"),
+    (Mode::Auto, "auto"),
+    (Mode::Plan, "plan"),
+    (Mode::Bypass, "bypassPermissions"),
+];
+
+fn mode_of(permission_mode: &str) -> Option<Mode> {
+    MODES
+        .iter()
+        .find(|(_, name)| {
+            *name == permission_mode || (permission_mode == "manual" && *name == "default")
+        })
+        .map(|(mode, _)| *mode)
+}
+
+fn permission_mode_of(mode: Mode) -> &'static str {
+    MODES
+        .iter()
+        .find(|(known, _)| *known == mode)
+        .map_or("default", |(_, name)| name)
 }
 
 impl ClaudeConversation {
@@ -345,10 +385,15 @@ impl Conversation for ClaudeConversation {
         if !efforts.iter().any(|value| value.id == effort) {
             efforts.push(OptionValue::new(effort.clone(), effort.clone(), None));
         }
-        vec![
+        let mut options = vec![
             ConfigOption::new("model", "Model", model, models).category("model"),
             ConfigOption::new("effort", "Effort", effort, efforts).category("thought_level"),
-        ]
+        ];
+        let current = *self.mode.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(current) = current {
+            options.push(mode::option(current, &self.offered));
+        }
+        options
     }
 
     fn prompt(&self, content: Vec<coqui_acp_harness::event::Content>) -> Result<(), HarnessError> {
@@ -360,6 +405,14 @@ impl Conversation for ClaudeConversation {
     }
 
     fn set_option(&self, id: &str, value: &str) -> Result<Vec<ConfigOption>, HarnessError> {
+        if id == mode::OPTION_ID {
+            let chosen = mode::chosen(value, &self.offered).map_err(HarnessError::Refused)?;
+            self.session
+                .set_permission_mode(permission_mode_of(chosen))
+                .map_err(HarnessError::from)?;
+            *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = Some(chosen);
+            return Ok(self.options());
+        }
         let offered = self.options();
         let option = offered
             .iter()

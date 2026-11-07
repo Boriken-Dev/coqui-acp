@@ -457,6 +457,29 @@ impl ClaudeSession {
         .map_err(|error| Error::Harness(format!("Claude Code could not be written to: {error}")))
     }
 
+    /// The permission mode Claude Code started in, from its answer to `initialize`.
+    #[must_use]
+    pub fn permission_mode(&self) -> Option<String> {
+        self.answer
+            .get("current_permission_mode")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// Switches the permission mode (`default`, `acceptEdits`, `plan`, `auto`, `dontAsk` or `bypassPermissions`) for
+    /// what follows, a running turn included. `bypassPermissions` only when the session was started allowing it.
+    ///
+    /// # Errors
+    ///
+    /// Claude Code refused the mode or did not answer in time.
+    pub fn set_permission_mode(&self, mode: &str) -> Result<(), Error> {
+        self.control(
+            json!({"subtype": "set_permission_mode", "mode": mode}),
+            self.settings.control_timeout,
+        )
+        .map(|_| ())
+    }
+
     /// Changes the model for the turns that follow.
     ///
     /// # Errors

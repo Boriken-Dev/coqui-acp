@@ -26,6 +26,7 @@ pub struct ClaudeLaunch {
     pub plugin_dirs: Vec<PathBuf>,
     pub permission_prompts: bool,          // true: --permission-prompts=host --permission-prompt-tool=stdio
     pub permission_mode: Option<String>,
+    pub allow_bypass: bool,                // false: no `--allow-dangerously-skip-permissions`, and no Bypass mode offered
     pub setting_sources: Option<Vec<String>>,   // None: Claude Code's default; Some(empty): none
     pub max_budget_micro_usd: Option<u64>,
     pub partial_messages: bool,            // true
@@ -55,6 +56,8 @@ pub fn prompt(&self, content: &[Content]) -> Result<(), Error>
 pub fn interrupt(&self) -> Result<(), Error>
 pub fn set_model(&self, model: &str) -> Result<(), Error>
 pub fn set_effort(&self, effort: Option<&str>) -> Result<(), Error>      // None: Claude Code's own
+pub fn permission_mode(&self) -> Option<String>                          // `current_permission_mode` of its initialize answer
+pub fn set_permission_mode(&self, mode: &str) -> Result<(), Error>       // `set_permission_mode`; takes effect at once, in a running turn too
 pub fn close(&self)                                                      // also on drop
 #[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>, pub efforts: Vec<String> }
 pub fn models_of(answer: &Value) -> Option<Vec<Model>>
@@ -130,6 +133,18 @@ pub const DEFAULT: &str = "default";
 
 `agentInfo` is `coqui-acp-claude`, titled `Claude Code <version>`, at this crate's version. It takes images, embedded context, MCP servers over stdio, HTTP and SSE (version 1), load, more directories and an appended system prompt. A session's parts are added to `defaults`: its `cwd`, a new UUID or the id resumed or loaded, `systemPrompt` appended after the defaults' own, `mcpServers`, `additionalDirectories` as `--add-dir`, and `_meta.claudeCode.options.plugins` (`[{"type": "local", "path": absolute}]`, as the Claude Agent SDK's `plugins` option) as `--plugin-dir`, whose skills are `<plugin>:<skill>`. A plugin of another type, a relative path, or any plugin when `client_plugins(false)`, is refused, as is an MCP server named as one of the defaults'. Load replays the transcript, then resumes.
 
+The mode option (`mode`, category `mode`; ids from `coqui_acp_harness::mode`), measured on Claude Code 2.1.318 with `initialize` and `set_permission_mode`, no prompt sent:
+
+| Mode | `permissionMode` | Offered |
+| --- | --- | --- |
+| `manual` | `default` (`manual` on the command line is `default`) | always |
+| `accept_edits` | `acceptEdits` | always |
+| `auto` | `auto` | always; Claude Code takes the switch, whether the account may use it shows at the first turn |
+| `plan` | `plan` | always |
+| `bypass` | `bypassPermissions` | only with `allow_bypass`, or when the session started in it: Claude Code refuses the switch otherwise (`bypass_not_launched`) |
+
+`dontAsk` (refuse what nothing granted) is not offered. A session started in it shows no mode option. The current mode at the start is `current_permission_mode` of the `initialize` answer. A switch is a `set_permission_mode` control request and holds for the turn running and every turn after it. Claude Code's own list of modes is the `--permission-mode` choices (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`) and the error text of an unknown mode (`acceptEdits, auto, bypassPermissions, default, dontAsk, plan`); its `initialize` answer lists none.
+
 Config options: `model` (category `model`): the models Claude Code lists, and the current one; `effort` (category `thought_level`): `default` and the current model's efforts, else `EFFORTS`. Setting one not offered is refused; setting one sends `set_model` or `apply_flag_settings` for the turns that follow.
 
 ## Errors
@@ -138,7 +153,7 @@ Config options: `model` (category `model`): the models Claude Code lists, and th
 
 ## Command line
 
-`coqui-acp-claude` serves `ClaudeAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CLAUDE_EXECUTABLE`, default `claude`), `--model`, `--effort`, `--permission-mode`, `--setting-sources` (comma-separated, empty for none), `--strict-mcp-config`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--no-permission-prompts`, `--allow-client-plugins`, `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--no-client-mcp-servers`, `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
+`coqui-acp-claude` serves `ClaudeAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_CLAUDE_EXECUTABLE`, default `claude`), `--model`, `--effort`, `--permission-mode`, `--allow-bypass`, `--setting-sources` (comma-separated, empty for none), `--strict-mcp-config`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--no-permission-prompts`, `--allow-client-plugins`, `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--no-client-mcp-servers`, `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
 
 ## Environment variables
 

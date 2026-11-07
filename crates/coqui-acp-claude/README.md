@@ -97,6 +97,7 @@ coqui-acp-claude --setting-sources "" --strict-mcp-config
 | `--executable` (`COQUI_ACP_CLAUDE_EXECUTABLE`) | `claude` | The Claude Code program |
 | `--model`, `--effort` | Claude Code's | What every session starts with |
 | `--permission-mode` | Claude Code's | `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`, `auto` or `manual` |
+| `--allow-bypass` | off | Starts Claude Code allowing a session to switch to `bypassPermissions`, and offers the Bypass mode |
 | `--setting-sources` | every source | Comma-separated, of `user`, `project` and `local`; empty loads none |
 | `--strict-mcp-config` | off | Only the MCP servers a session is given |
 | `--max-acp-version` | 2 | The highest ACP version answered |

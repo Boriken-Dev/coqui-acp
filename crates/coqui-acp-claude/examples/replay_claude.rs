@@ -6,6 +6,11 @@
 //! reads takes the place of the recorded one in the answer. An `initialize` the recording did not have is answered
 //! with no models or commands. Once the recording is told it answers control requests until its input ends.
 //!
+//! `COQUI_ACP_CLAUDE_CONTROLS` names a file each control request it reads is appended to, a line of JSON each. It answers
+//! `initialize` with the `--permission-mode=` it was given as `current_permission_mode`, and `set_permission_mode` as
+//! Claude Code 2.1.318 does: `manual` is `default`, `bypassPermissions` is refused unless it was started with
+//! `--allow-dangerously-skip-permissions` or in that mode, and a mode it has no name for is refused.
+//!
 //! `COQUI_ACP_CLAUDE_ARGS` names a file its arguments are written to, as JSON, and `COQUI_ACP_CLAUDE_COPY` a file the
 //! file `--mcp-config=` names is copied to. `COQUI_ACP_CLAUDE_STDERR` makes it write that many bytes of diagnostics on
 //! one line first, then a line of them per line told, failing if standard error is closed. `COQUI_ACP_CLAUDE_EXIT` makes it write
@@ -118,49 +123,107 @@ fn main() {
     };
     let mut ids: HashMap<String, String> = HashMap::new();
     let mut step = 0;
+    let mode = std::cell::RefCell::new(String::new());
     // The next input of the kind `expected` names; one of another kind is answered here, a control request with
     // success, so a client may ask what the recording did not.
-    let next_input =
-        |out: &mut std::io::StdoutLock<'_>, expected: Option<&Value>| -> Option<Value> {
-            let kind = |value: &Value| {
-                (
-                    value
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    value
-                        .pointer("/request/subtype")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                )
-            };
-            loop {
-                let input = inputs.recv().ok()?;
-                if expected.is_some_and(|expected| kind(expected) == kind(&input)) {
+    let next_input = |out: &mut std::io::StdoutLock<'_>,
+                      expected: Option<&Value>|
+     -> Option<Value> {
+        let kind = |value: &Value| {
+            (
+                value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                value
+                    .pointer("/request/subtype")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+        };
+        loop {
+            let input = inputs.recv().ok()?;
+            if expected.is_some_and(|expected| kind(expected) == kind(&input)) {
+                return Some(input);
+            }
+            if input.get("type").and_then(Value::as_str) != Some("control_request") {
+                if expected.is_none() {
                     return Some(input);
                 }
-                if input.get("type").and_then(Value::as_str) != Some("control_request") {
-                    if expected.is_none() {
-                        return Some(input);
-                    }
-                    continue;
-                }
-                let id = input
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let response = match input.pointer("/request/subtype").and_then(Value::as_str) {
-                    Some("initialize") => {
-                        json!({"commands": [], "models": [], "claude_code_version": "2.1.318"})
-                    }
-                    Some("interrupt") => json!({"still_queued": []}),
-                    Some("set_model") => json!({"model": input.pointer("/request/model")}),
-                    _ => json!({}),
-                };
-                writeln!(out, "{}", answer(id, &response)).unwrap();
-                out.flush().unwrap();
+                continue;
             }
-        };
+            let id = input
+                .get("request_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if let Some(path) = std::env::var_os("COQUI_ACP_CLAUDE_CONTROLS") {
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .unwrap();
+                writeln!(file, "{input}").unwrap();
+            }
+            let response = match input.pointer("/request/subtype").and_then(Value::as_str) {
+                Some("initialize") => {
+                    let launched = args
+                        .iter()
+                        .find_map(|arg| arg.strip_prefix("--permission-mode="))
+                        .unwrap_or("default");
+                    *mode.borrow_mut() = launched.to_string();
+                    json!({"commands": [], "models": [], "claude_code_version": "2.1.318",
+                               "current_permission_mode": launched})
+                }
+                Some("set_permission_mode") => {
+                    let wanted = input
+                        .pointer("/request/mode")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let wanted = if wanted == "manual" {
+                        "default"
+                    } else {
+                        wanted
+                    };
+                    let may_bypass = args
+                        .iter()
+                        .any(|arg| arg == "--allow-dangerously-skip-permissions")
+                        || args
+                            .iter()
+                            .any(|arg| arg == "--permission-mode=bypassPermissions");
+                    let refusal = if ![
+                        "acceptEdits",
+                        "auto",
+                        "bypassPermissions",
+                        "default",
+                        "dontAsk",
+                        "plan",
+                    ]
+                    .contains(&wanted)
+                    {
+                        Some("invalid_mode")
+                    } else if wanted == "bypassPermissions" && !may_bypass {
+                        Some("bypass_not_launched")
+                    } else {
+                        None
+                    };
+                    if let Some(code) = refusal {
+                        let line = json!({"type": "control_response", "response": {"subtype": "error",
+                                "request_id": id, "error": "refused", "error_code": code}});
+                        writeln!(out, "{line}").unwrap();
+                        out.flush().unwrap();
+                        continue;
+                    }
+                    *mode.borrow_mut() = wanted.to_string();
+                    json!({"mode": wanted})
+                }
+                Some("interrupt") => json!({"still_queued": []}),
+                Some("set_model") => json!({"model": input.pointer("/request/model")}),
+                _ => json!({}),
+            };
+            writeln!(out, "{}", answer(id, &response)).unwrap();
+            out.flush().unwrap();
+        }
+    };
     // A diagnostic line longer than any reader keeps, then one diagnostic line per line told.
     let diagnostics: Option<usize> = std::env::var("COQUI_ACP_CLAUDE_STDERR")
         .ok()
