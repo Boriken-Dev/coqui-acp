@@ -11,6 +11,9 @@
 //! Claude Code 2.1.318 does: `manual` is `default`, `bypassPermissions` is refused unless it was started with
 //! `--allow-dangerously-skip-permissions` or in that mode, and a mode it has no name for is refused.
 //!
+//! `COQUI_ACP_CLAUDE_MODE_LINE` names a `permissionMode` it reports in a `system` line each time it reads a message of the
+//! person's, as Claude Code does when its mode changes by itself.
+//!
 //! `COQUI_ACP_CLAUDE_ARGS` names a file its arguments are written to, as JSON, and `COQUI_ACP_CLAUDE_COPY` a file the
 //! file `--mcp-config=` names is copied to. `COQUI_ACP_CLAUDE_STDERR` makes it write that many bytes of diagnostics on
 //! one line first, then a line of them per line told, failing if standard error is closed. `COQUI_ACP_CLAUDE_EXIT` makes it write
@@ -147,6 +150,17 @@ fn main() {
                 return Some(input);
             }
             if input.get("type").and_then(Value::as_str) != Some("control_request") {
+                if let Ok(mode) = std::env::var("COQUI_ACP_CLAUDE_MODE_LINE")
+                    && input.get("type").and_then(Value::as_str) == Some("user")
+                {
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({"type": "system", "subtype": "status", "permissionMode": mode})
+                    )
+                    .unwrap();
+                    out.flush().unwrap();
+                }
                 if expected.is_none() {
                     return Some(input);
                 }

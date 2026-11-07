@@ -365,6 +365,8 @@ fn mode_agent(inputs: &std::path::Path, allow_bypass: bool) -> CodexAgent {
     let mut defaults = CodexLaunch::new(".");
     defaults.executable = replay_program().into();
     defaults.allow_bypass = allow_bypass;
+    // The person's own command line offers every mode; a host's entry gets the capped default.
+    defaults.modes = Some(coqui_acp_codex::harness::Mode::ALL.to_vec());
     defaults.env.insert(
         "COQUI_ACP_CODEX_REPLAY".into(),
         fixtures().join("turn").into(),
@@ -414,10 +416,20 @@ fn the_mode_is_an_option_whose_choice_each_later_turn_carries() {
     let mut peer = Peer::serve(mode_agent(&written, false), Settings::new());
     let opened = v2_session(&mut peer, &scratch.0, json!({}));
     let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
-    // The recording's thread asks for everything: `untrusted`, read-only.
+    // The recording's thread is `untrusted` with a read-only sandbox, which no mode sets: it shows as it is.
     let (current, offered) = mode_of(&opened["result"]["configOptions"]).expect("a mode option");
-    assert_eq!(current, "manual");
-    assert_eq!(offered, ["manual", "accept_edits", "auto", "plan"]);
+    assert_eq!(current, "custom");
+    assert_eq!(
+        offered,
+        ["custom", "manual", "accept_edits", "auto", "plan"]
+    );
+    let option = opened["result"]["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["configId"] == "mode")
+        .unwrap();
+    assert_eq!(option["options"][0]["name"], "Custom: untrusted, readOnly");
     let refused = peer.request(
         "session/set_config_option",
         json!({"sessionId": session, "configId": "mode", "value": "bypass", "type": "id"}),
@@ -473,7 +485,7 @@ fn bypass_is_offered_once_the_host_allows_it_and_neither_asks_nor_sandboxes() {
     let (_, offered) = mode_of(&opened["result"]["configOptions"]).unwrap();
     assert_eq!(
         offered,
-        ["manual", "accept_edits", "auto", "plan", "bypass"]
+        ["custom", "manual", "accept_edits", "auto", "plan", "bypass"]
     );
     peer.request(
         "session/set_config_option",
@@ -502,4 +514,126 @@ fn auto_names_codexs_automatic_review_in_a_sandbox_that_may_write_the_workspace(
     assert_eq!(params["approvalPolicy"], "on-request");
     assert_eq!(params["approvalsReviewer"], "auto_review");
     assert_eq!(params["sandboxPolicy"]["type"], "workspaceWrite");
+}
+
+/// A session a client opens on a host's entry: `approval` and `sandbox` as canoa.cfg names them, the thread's state as
+/// the stand-in answers it, and what was written to the stand-in.
+fn host_session(
+    scratch: &Scratch,
+    approval: &str,
+    sandbox: &str,
+    state: Option<&str>,
+    configure: impl FnOnce(&mut CodexLaunch),
+) -> (Peer, String, Value, std::path::PathBuf) {
+    let written = scratch.0.join("inputs.jsonl");
+    let mut defaults = CodexLaunch::new(".");
+    defaults.executable = replay_program().into();
+    defaults.approval_policy = Some(approval.into());
+    defaults.sandbox = Some(sandbox.into());
+    defaults.env.insert(
+        "COQUI_ACP_CODEX_REPLAY".into(),
+        fixtures().join("turn").into(),
+    );
+    defaults
+        .env
+        .insert("COQUI_ACP_CODEX_INPUTS".into(), written.clone().into());
+    if let Some(state) = state {
+        defaults
+            .env
+            .insert("COQUI_ACP_CODEX_THREAD_STATE".into(), state.into());
+    }
+    configure(&mut defaults);
+    let mut peer = Peer::serve(CodexAgent::new().defaults(defaults), Settings::new());
+    let opened = v2_session(&mut peer, &scratch.0, json!({}));
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    (
+        peer,
+        session,
+        opened["result"]["configOptions"].clone(),
+        written,
+    )
+}
+
+fn choose(peer: &mut Peer, session: &str, value: &str) -> Value {
+    peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": value, "type": "id"}),
+    )
+}
+
+/// A client reaches only the mode the host configured and the stricter ones.
+#[test]
+fn a_client_may_choose_the_configured_mode_and_stricter_ones_only() {
+    let scratch = Scratch::new("capped");
+    let (mut peer, session, options, written) =
+        host_session(&scratch, "on-request", "workspace-write", None, |_| {});
+    let (_, offered) = mode_of(&options).unwrap();
+    assert_eq!(offered, ["custom", "manual", "accept_edits", "plan"]);
+    for loosening in ["auto", "bypass"] {
+        assert!(
+            choose(&mut peer, &session, loosening)["error"].is_object(),
+            "{loosening}"
+        );
+    }
+    assert!(choose(&mut peer, &session, "accept_edits")["result"].is_object());
+    run_a_turn(&mut peer, &session);
+    assert_eq!(the_turn_start(&written)["approvalsReviewer"], "user");
+
+    let scratch = Scratch::new("capped-readonly");
+    let (_, _, options, _) = host_session(&scratch, "on-request", "read-only", None, |_| {});
+    assert_eq!(
+        mode_of(&options).unwrap().1,
+        ["custom", "plan"],
+        "a read-only host is offered Plan only"
+    );
+
+    let scratch = Scratch::new("capped-bypass-off");
+    let (_, _, options, _) = host_session(&scratch, "never", "danger-full-access", None, |_| {});
+    assert!(
+        !mode_of(&options).unwrap().1.contains(&"bypass".to_string()),
+        "Bypass needs its own switch"
+    );
+}
+
+/// A thread already in Plan's policy and sandbox reads as Plan, and choosing Plan still names it to Codex, which has
+/// no collaboration mode of its own to read back.
+#[test]
+fn choosing_the_mode_already_shown_applies_it() {
+    let scratch = Scratch::new("shown");
+    let (mut peer, session, options, written) = host_session(
+        &scratch,
+        "on-request",
+        "read-only",
+        Some("on-request,readOnly,user"),
+        |_| {},
+    );
+    assert_eq!(mode_of(&options).unwrap().0, "plan");
+    choose(&mut peer, &session, "plan");
+    run_a_turn(&mut peer, &session);
+    assert_eq!(
+        the_turn_start(&written)["collaborationMode"]["mode"],
+        "plan"
+    );
+}
+
+/// A collaboration mode takes the place of the thread's model, effort and developer instructions, so a turn in a mode
+/// names them: the session's own, never null.
+#[test]
+fn a_turn_in_a_mode_keeps_the_sessions_effort_and_instructions() {
+    let scratch = Scratch::new("keeps");
+    let (mut peer, session, _, written) =
+        host_session(&scratch, "on-request", "workspace-write", None, |launch| {
+            launch.effort = Some("low".into());
+            launch.developer_instructions = Some("Answer briefly.".into());
+        });
+    choose(&mut peer, &session, "plan");
+    run_a_turn(&mut peer, &session);
+    let params = the_turn_start(&written);
+    let settings = &params["collaborationMode"]["settings"];
+    assert_eq!(settings["reasoning_effort"], "low", "{params}");
+    assert_eq!(
+        settings["developer_instructions"], "Answer briefly.",
+        "{params}"
+    );
+    assert!(!params.to_string().contains("null"), "{params}");
 }

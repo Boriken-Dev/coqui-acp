@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `coqui-acp-harness`: `Event::Options`, told to the client as a `config_option_update`, so a translator can say its choices changed by themselves; `mode::up_to`, `named` and `custom_option`.
 - `coqui_acp_harness::mode`: `Mode` (Manual, Accept edits, Auto, Plan, Bypass) and the `mode` config option every translator offers, so a client shows one control over every harness. `coqui-acp-claude` switches it with `set_permission_mode` and offers Bypass only with `ClaudeLaunch::allow_bypass`; `coqui-acp-codex` switches it at the next turn.
 
 - `coqui_acp` for Dart: `AcpAttachment.link`, a `resource_link` to a resource the agent reads itself, such as a file by its `file:` URI, with its name and optional type and size. Every agent takes one, whatever it advertises, as ACP says, and `isLink` tells it apart.

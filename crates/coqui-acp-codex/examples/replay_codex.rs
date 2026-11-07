@@ -10,6 +10,9 @@
 //! `COQUI_ACP_CODEX_REFUSE` names a method such a request of is refused, and `COQUI_ACP_CODEX_THREAD` the thread an
 //! unrecorded `thread/start` opens.
 //!
+//! `COQUI_ACP_CODEX_THREAD_STATE` is the approval policy, sandbox and reviewer, comma-separated, a recorded `thread/start`
+//! answers with in place of the recorded ones.
+//!
 //! `COQUI_ACP_CODEX_ARGS` names a file its arguments are written to, as JSON, and `COQUI_ACP_CODEX_INPUTS` one each
 //! line it reads is added to. `COQUI_ACP_CODEX_EXIT` makes it write
 //! one line of diagnostics after its first input line and exit with that code, and `COQUI_ACP_CODEX_END` exit once
@@ -157,6 +160,17 @@ fn main() {
             }
             if let (Some(actual), Some(value)) = (ids.get(id), value.as_mut()) {
                 value["id"] = actual.clone();
+                // The state the thread opens in, as `approval,sandbox,reviewer`: the recording's own is `untrusted`,
+                // `readOnly`, `user`.
+                if let Ok(state) = std::env::var("COQUI_ACP_CODEX_THREAD_STATE")
+                    && value.pointer("/result/thread").is_some()
+                    && value.pointer("/result/approvalPolicy").is_some()
+                {
+                    let parts: Vec<&str> = state.split(',').collect();
+                    value["result"]["approvalPolicy"] = json!(parts[0]);
+                    value["result"]["sandbox"] = json!({"type": parts[1]});
+                    value["result"]["approvalsReviewer"] = json!(parts[2]);
+                }
                 writeln!(out, "{value}").unwrap();
                 out.flush().unwrap();
                 continue;

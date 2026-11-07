@@ -587,6 +587,8 @@ fn mode_agent(controls: &std::path::Path, allow_bypass: bool) -> ClaudeAgent {
     let mut defaults = ClaudeLaunch::new(".");
     defaults.executable = replay_program().into();
     defaults.allow_bypass = allow_bypass;
+    // The person's own command line offers every mode; a host's entry gets the capped default.
+    defaults.modes = Some(coqui_acp_claude::harness::Mode::ALL.to_vec());
     defaults
         .env
         .insert("COQUI_ACP_CLAUDE_CONTROLS".into(), controls.into());
@@ -683,7 +685,7 @@ fn bypass_is_offered_once_the_host_allows_it_and_switches_to_bypass_permissions(
 fn a_session_started_in_a_mode_shows_it() {
     let scratch = Scratch::new("startmode");
     let log = scratch.0.join("controls.jsonl");
-    for (launched, shown) in [("plan", Some("plan")), ("dontAsk", None)] {
+    for (launched, shown) in [("plan", Some("plan")), ("dontAsk", Some("custom"))] {
         let mut defaults = ClaudeLaunch::new(".");
         defaults.executable = replay_program().into();
         defaults.permission_mode = Some(launched.into());
@@ -702,4 +704,124 @@ fn a_session_started_in_a_mode_shows_it() {
         let current = mode_of(&opened["result"]["configOptions"]).map(|(current, _)| current);
         assert_eq!(current.as_deref(), shown, "{launched}");
     }
+}
+
+/// A session a client opens on an agent with these defaults: its mode option, and the controls the stand-in saw.
+fn opened_with(
+    scratch: &Scratch,
+    configure: impl FnOnce(&mut ClaudeLaunch),
+) -> (Peer, String, Value) {
+    let mut defaults = ClaudeLaunch::new(".");
+    defaults.executable = replay_program().into();
+    defaults.env.insert(
+        "COQUI_ACP_CLAUDE_CONTROLS".into(),
+        scratch.0.join("controls.jsonl").into(),
+    );
+    configure(&mut defaults);
+    let mut peer = Peer::serve(ClaudeAgent::new().defaults(defaults), Settings::new());
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    let opened = peer.request(
+        "session/new",
+        json!({"cwd": scratch.0.to_string_lossy(), "mcpServers": []}),
+    );
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    (peer, session, opened["result"]["configOptions"].clone())
+}
+
+fn set_mode(peer: &mut Peer, session: &str, value: &str) -> Value {
+    peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": value}),
+    )
+}
+
+/// A client reaches only the host's configured mode and the stricter ones: it cannot loosen what canoa.cfg set.
+#[test]
+fn a_client_may_choose_the_configured_mode_and_stricter_ones_only() {
+    let scratch = Scratch::new("capped");
+    let (mut peer, session, options) = opened_with(&scratch, |_| {});
+    let (current, offered) = mode_of(&options).unwrap();
+    assert_eq!(
+        (current.as_str(), offered),
+        ("manual", vec!["manual".to_string(), "plan".to_string()])
+    );
+    for loosening in ["accept_edits", "auto", "bypass"] {
+        let refused = set_mode(&mut peer, &session, loosening);
+        assert_eq!(refused["error"]["code"], -32602, "{loosening}: {refused}");
+    }
+    assert!(set_mode(&mut peer, &session, "plan")["result"].is_object());
+    let seen: Vec<Value> = controls(&scratch.0.join("controls.jsonl"))
+        .iter()
+        .filter(|control| control["request"]["subtype"] == "set_permission_mode")
+        .map(|control| control["request"]["mode"].clone())
+        .collect();
+    assert_eq!(
+        seen,
+        [json!("plan")],
+        "nothing looser was ever sent to Claude Code"
+    );
+
+    let scratch = Scratch::new("capped-edits");
+    let (_, _, options) = opened_with(&scratch, |launch| {
+        launch.permission_mode = Some("acceptEdits".into())
+    });
+    assert_eq!(
+        mode_of(&options).unwrap().1,
+        ["manual", "accept_edits", "plan"]
+    );
+
+    let scratch = Scratch::new("capped-named");
+    let (_, _, options) = opened_with(&scratch, |launch| {
+        launch.modes = Some(vec![
+            coqui_acp_claude::harness::Mode::Auto,
+            coqui_acp_claude::harness::Mode::Bypass,
+        ]);
+    });
+    assert_eq!(
+        mode_of(&options).unwrap().1,
+        ["manual", "auto", "plan"],
+        "the default widened by the named modes, and no Bypass without its switch"
+    );
+}
+
+/// An entry started in `bypassPermissions` with Bypass off shows it and cannot be taken back to it once left.
+#[test]
+fn a_launch_in_bypass_permissions_does_not_offer_bypass_without_its_switch() {
+    let scratch = Scratch::new("bypass-launched");
+    let (mut peer, session, options) = opened_with(&scratch, |launch| {
+        launch.permission_mode = Some("bypassPermissions".into())
+    });
+    let (current, _) = mode_of(&options).unwrap();
+    assert_eq!(current, "bypass", "what is running is shown");
+    assert!(set_mode(&mut peer, &session, "manual")["result"].is_object());
+    let again = set_mode(&mut peer, &session, "bypass");
+    assert_eq!(again["error"]["code"], -32602, "{again}");
+}
+
+/// What Claude Code reports about its own mode reaches the client as a `config_option_update`.
+#[test]
+fn the_mode_follows_what_claude_code_reports() {
+    let scratch = Scratch::new("drift");
+    let (mut peer, session, _) = opened_with(&scratch, |launch| {
+        launch.modes = Some(coqui_acp_claude::harness::Mode::ALL.to_vec());
+        launch
+            .env
+            .insert("COQUI_ACP_CLAUDE_MODE_LINE".into(), "acceptEdits".into());
+    });
+    let from = peer.updates.len();
+    // The stand-in never ends the turn, so the prompt is sent and not waited for.
+    peer.send(
+        json!({"jsonrpc": "2.0", "id": 900, "method": "session/prompt",
+        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}}),
+    );
+    let changed = peer.until(from, |update| {
+        update["sessionUpdate"] == "config_option_update"
+    });
+    assert_eq!(
+        mode_of(&changed["configOptions"]).unwrap().0,
+        "accept_edits"
+    );
 }

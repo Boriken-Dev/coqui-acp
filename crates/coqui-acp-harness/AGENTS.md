@@ -87,6 +87,7 @@ pub fn read_diagnostics(reader: impl Read, max_line: u64, tail: &Mutex<Tail>)   
 | `Usage(Usage)` | tokens (`input`, `output`, `cache_read`, `cache_write`, `cumulative`), `cost_usd`, `context_used`, `context_size`, `elsewhere` |
 | `Quota(Vec<Quota>)` | quota windows: `window`, `used_permille`, `resets_at`, `status` |
 | `Commands(Vec<Command>)` | commands by name: `name`, `description`, `hint` |
+| `Options(Vec<ConfigOption>)` | the session's choices as they stand now, after a change not a client's own |
 | `Title(String)` | the session's title |
 | `Notice { severity: Severity, title }` | something for the person outside the conversation |
 | `Compaction { id, summary: Option<String> }` | the conversation was compacted |
@@ -164,6 +165,7 @@ What each event becomes:
 | `Plan` | `plan` | `plan_update` with `planId` `plan` |
 | `Usage` with context | `usage_update` (`used`, `size`, `cost` in USD) | the same |
 | `Commands` | `available_commands_update` | the same, each tagged `type: "command"` |
+| `Options` | `config_option_update` | `configOptions`: every choice with its current value |
 | `Title` | `session_info_update` | the same |
 | `Notice`, `Denied` | nothing | `notice` |
 | `Compaction` | nothing | `compaction_summary_chunk`, `compaction_update` |
@@ -182,6 +184,11 @@ pub fn from_id(id: &str) -> Option<Mode>
 pub const OPTION_ID: &str = "mode"
 pub fn option(current: Mode, offered: &[Mode]) -> ConfigOption          // category `mode`; values in `Mode::ALL` order; `current` is listed even when not offered
 pub fn chosen(value: &str, offered: &[Mode]) -> Result<Mode, String>    // the reason, for `HarnessError::Refused`
+pub const fn looseness(self) -> u8                                       // Plan 0, Manual 1, Accept edits 2, Auto 3, Bypass 4
+pub fn up_to(loosest: Option<Mode>, allow_bypass: bool) -> Vec<Mode>    // the host's mode and every stricter one; None: Plan only; Bypass only if allowed
+pub fn widened(base: &[Mode], named: &[Mode], allow_bypass: bool) -> Vec<Mode>   // `base` and the modes a host named, Bypass only if allowed
+pub const CUSTOM: &str = "custom"
+pub fn custom_option(label: &str, offered: &[Mode]) -> ConfigOption     // a state no mode names, shown as `Custom: label` and not choosable
 ```
 
 How much a harness asks, named once so a client shows one control over every translator. A translator offers only the modes its tool has, and a mode in use is always listed. Each translator's table of what a mode sets is in its own header: `coqui-acp-claude` (`permissionMode`) and `coqui-acp-codex` (approval policy, sandbox, reviewer, collaboration mode).
