@@ -345,3 +345,161 @@ fn a_config_value_may_name_its_type() {
     );
     assert_eq!(changed["result"]["configOptions"][1]["currentValue"], "low");
 }
+
+/// The `mode` option of a version 2 `configOptions`: its current value and the ids it offers.
+fn mode_of(options: &Value) -> Option<(String, Vec<String>)> {
+    let option = options
+        .as_array()?
+        .iter()
+        .find(|option| option["configId"] == "mode")?;
+    assert_eq!(option["category"], "mode");
+    let offered = option["options"]
+        .as_array()?
+        .iter()
+        .map(|value| value["value"].as_str().unwrap().to_string())
+        .collect();
+    Some((option["currentValue"].as_str()?.to_string(), offered))
+}
+
+fn mode_agent(inputs: &std::path::Path, allow_bypass: bool) -> CodexAgent {
+    let mut defaults = CodexLaunch::new(".");
+    defaults.executable = replay_program().into();
+    defaults.allow_bypass = allow_bypass;
+    defaults.env.insert(
+        "COQUI_ACP_CODEX_REPLAY".into(),
+        fixtures().join("turn").into(),
+    );
+    defaults
+        .env
+        .insert("COQUI_ACP_CODEX_INPUTS".into(), inputs.into());
+    CodexAgent::new().defaults(defaults)
+}
+
+/// What was written to the stand-in, one message a line.
+fn written_to(path: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn run_a_turn(peer: &mut Peer, session: &str) {
+    peer.answers
+        .extend(["allow_once"; 4].into_iter().map(String::from));
+    let from = peer.updates.len();
+    peer.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "Change two to three."}]}),
+    );
+    peer.until(from, |update| {
+        update["sessionUpdate"] == "state_update" && update["state"] == "idle"
+    });
+}
+
+fn the_turn_start(path: &std::path::Path) -> Value {
+    written_to(path)
+        .into_iter()
+        .find(|input| input["method"] == "turn/start")
+        .unwrap()["params"]
+        .clone()
+}
+
+/// Codex 0.166.0 takes its approval policy, sandbox, reviewer and collaboration mode with each `turn/start`, so a
+/// mode changes at the next turn; before one is chosen, a turn names none of them and the configuration holds.
+#[test]
+fn the_mode_is_an_option_whose_choice_each_later_turn_carries() {
+    let scratch = Scratch::new("mode");
+    let written = scratch.0.join("inputs.jsonl");
+    let mut peer = Peer::serve(mode_agent(&written, false), Settings::new());
+    let opened = v2_session(&mut peer, &scratch.0, json!({}));
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    // The recording's thread asks for everything: `untrusted`, read-only.
+    let (current, offered) = mode_of(&opened["result"]["configOptions"]).expect("a mode option");
+    assert_eq!(current, "manual");
+    assert_eq!(offered, ["manual", "accept_edits", "auto", "plan"]);
+    let refused = peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "bypass", "type": "id"}),
+    );
+    assert!(refused["error"].is_object(), "{refused}");
+    let changed = peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "plan", "type": "id"}),
+    );
+    assert_eq!(
+        mode_of(&changed["result"]["configOptions"]).unwrap().0,
+        "plan",
+        "{changed}"
+    );
+    run_a_turn(&mut peer, &session);
+    let params = the_turn_start(&written);
+    assert_eq!(params["collaborationMode"]["mode"], "plan", "{params}");
+    assert_eq!(
+        params["collaborationMode"]["settings"]["model"],
+        "gpt-6.1-sol"
+    );
+    assert_eq!(params["approvalPolicy"], "on-request");
+    assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
+    assert_eq!(params["approvalsReviewer"], "user");
+}
+
+#[test]
+fn a_turn_before_any_mode_is_chosen_names_none_of_the_mode_settings() {
+    let scratch = Scratch::new("nomode");
+    let written = scratch.0.join("inputs.jsonl");
+    let mut peer = Peer::serve(mode_agent(&written, false), Settings::new());
+    let opened = v2_session(&mut peer, &scratch.0, json!({}));
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    run_a_turn(&mut peer, &session);
+    let params = the_turn_start(&written);
+    for key in [
+        "collaborationMode",
+        "approvalPolicy",
+        "sandboxPolicy",
+        "approvalsReviewer",
+    ] {
+        assert!(params.get(key).is_none(), "{key} in {params}");
+    }
+}
+
+#[test]
+fn bypass_is_offered_once_the_host_allows_it_and_neither_asks_nor_sandboxes() {
+    let scratch = Scratch::new("bypass");
+    let written = scratch.0.join("inputs.jsonl");
+    let mut peer = Peer::serve(mode_agent(&written, true), Settings::new());
+    let opened = v2_session(&mut peer, &scratch.0, json!({}));
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    let (_, offered) = mode_of(&opened["result"]["configOptions"]).unwrap();
+    assert_eq!(
+        offered,
+        ["manual", "accept_edits", "auto", "plan", "bypass"]
+    );
+    peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "bypass", "type": "id"}),
+    );
+    run_a_turn(&mut peer, &session);
+    let params = the_turn_start(&written);
+    assert_eq!(params["approvalPolicy"], "never");
+    assert_eq!(params["sandboxPolicy"]["type"], "dangerFullAccess");
+    assert_eq!(params["collaborationMode"]["mode"], "default");
+}
+
+#[test]
+fn auto_names_codexs_automatic_review_in_a_sandbox_that_may_write_the_workspace() {
+    let scratch = Scratch::new("auto");
+    let written = scratch.0.join("inputs.jsonl");
+    let mut peer = Peer::serve(mode_agent(&written, false), Settings::new());
+    let opened = v2_session(&mut peer, &scratch.0, json!({}));
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "auto", "type": "id"}),
+    );
+    run_a_turn(&mut peer, &session);
+    let params = the_turn_start(&written);
+    assert_eq!(params["approvalPolicy"], "on-request");
+    assert_eq!(params["approvalsReviewer"], "auto_review");
+    assert_eq!(params["sandboxPolicy"]["type"], "workspaceWrite");
+}

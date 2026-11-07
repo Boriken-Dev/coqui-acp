@@ -15,9 +15,10 @@ use std::thread;
 
 use coqui_acp_harness::event::{Content, Event, Severity, context_block};
 use coqui_acp_harness::lines::{self, Tail};
+use coqui_acp_harness::mode::Mode;
 use coqui_acp_harness::stream::Waiting;
 use coqui_acp_harness::{LineHook, Process, Spawn, Step, Stream, exit_text, line_writer, version};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::launch::{CodexLaunch, ThreadStart};
 use crate::parse::{Parser, ParserLimits, Writer, id_text};
@@ -230,6 +231,13 @@ pub struct CodexSession {
     version: Option<String>,
     models: Option<Vec<Model>>,
     choice: Mutex<(Option<String>, Option<String>)>,
+    /// The mode in use and whether a client chose it: until one has, a turn names none of a mode's settings, and the
+    /// thread's own configuration holds.
+    mode: Mutex<(Option<Mode>, bool)>,
+    /// The model the thread answered with, which a collaboration mode has to name.
+    thread_model: Option<String>,
+    /// The thread's `sandbox_workspace_write` table.
+    workspace_write: Map<String, Value>,
     titled: AtomicBool,
     sink: Arc<dyn Fn(Event) -> bool + Send + Sync>,
 }
@@ -336,6 +344,14 @@ impl CodexSession {
             version: None,
             models: None,
             choice: Mutex::new((launch.model.clone(), launch.effort.clone())),
+            mode: Mutex::new((None, false)),
+            thread_model: None,
+            workspace_write: launch
+                .config()
+                .get("sandbox_workspace_write")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
             titled: AtomicBool::new(false),
             sink,
         };
@@ -419,6 +435,11 @@ impl CodexSession {
             check(&opened).map_err(Error::Refused)?;
         }
         self.thread = thread.to_string();
+        self.thread_model = opened
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        locked(&self.mode).0 = crate::mode::of_thread(&opened);
         locked(&self.parser).set_thread(thread);
         if matches!(launch.thread, ThreadStart::Load(_)) {
             let turns = opened
@@ -563,6 +584,17 @@ impl CodexSession {
         locked(&self.choice).clone()
     }
 
+    /// The mode the thread is in, `None` while its approval policy and sandbox are a combination no mode names.
+    #[must_use]
+    pub fn mode(&self) -> Option<Mode> {
+        locked(&self.mode).0
+    }
+
+    /// Puts the turns that follow in `mode`: each names its approval policy, sandbox, reviewer and collaboration mode.
+    pub fn set_mode(&self, mode: Mode) {
+        *locked(&self.mode) = (Some(mode), true);
+    }
+
     /// Sets the model the turns that follow name; `None` leaves Codex's own.
     pub fn set_model(&self, model: Option<&str>) {
         locked(&self.choice).0 = model.map(str::to_string);
@@ -587,8 +619,21 @@ impl CodexSession {
         if let Some(model) = model {
             params["model"] = json!(model);
         }
-        if let Some(effort) = effort {
+        if let Some(effort) = &effort {
             params["effort"] = json!(effort);
+        }
+        let (mode, chosen) = *locked(&self.mode);
+        if let (Some(mode), true) = (mode, chosen) {
+            let named = params["model"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| self.thread_model.clone())
+                .ok_or_else(|| Error::Harness("Codex named no model for the mode".into()))?;
+            for (key, value) in
+                crate::mode::turn_params(mode, &named, effort.as_deref(), &self.workspace_write)
+            {
+                params[key] = value;
+            }
         }
         locked(&self.parser).prompting();
         let number = self.next_request();
