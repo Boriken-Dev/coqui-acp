@@ -157,7 +157,7 @@ What each event becomes:
 | Event | Version 1 | Version 2 |
 | --- | --- | --- |
 | user, message, thought chunks | `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk` | the same, with `messageId` |
-| their ends | nothing | `user_message`, `agent_message`, `agent_thought` with `content: []` |
+| their ends | nothing | `user_message`, `agent_message`, `agent_thought` with no `content`, since `[]` clears the message |
 | `Tool` | `tool_call` first, then `tool_call_update`; a diff as `{path, oldText, newText}`; `cancelled` as `failed` | `tool_call_update` only, with `name`; a diff as `{changes, patch}` |
 | `ToolChunk` | `tool_call_update` with the whole content so far | `tool_call_content_chunk` |
 | `Terminal` | its output added to its tool call's content | `terminal_update`, output base64-encoded |
