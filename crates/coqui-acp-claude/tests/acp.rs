@@ -558,3 +558,148 @@ fn a_clients_servers_are_refused_when_the_host_names_its_own_configuration_file(
     );
     assert_eq!(refused["error"]["code"], -32602, "{refused}");
 }
+
+/// The `mode` option of a session's `configOptions`: its current value and the ids it offers.
+fn mode_of(options: &Value) -> Option<(String, Vec<String>)> {
+    let option = options
+        .as_array()?
+        .iter()
+        .find(|option| option["id"] == "mode")?;
+    assert_eq!(option["category"], "mode");
+    let offered = option["options"]
+        .as_array()?
+        .iter()
+        .map(|value| value["value"].as_str().unwrap().to_string())
+        .collect();
+    Some((option["currentValue"].as_str()?.to_string(), offered))
+}
+
+/// What the stand-in was asked, one control request a line.
+fn controls(path: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn mode_agent(controls: &std::path::Path, allow_bypass: bool) -> ClaudeAgent {
+    let mut defaults = ClaudeLaunch::new(".");
+    defaults.executable = replay_program().into();
+    defaults.allow_bypass = allow_bypass;
+    defaults
+        .env
+        .insert("COQUI_ACP_CLAUDE_CONTROLS".into(), controls.into());
+    ClaudeAgent::new().defaults(defaults)
+}
+
+/// Claude Code 2.1.318 takes `set_permission_mode` for every mode but `bypassPermissions`, which it takes only when
+/// it was started allowing it.
+#[test]
+fn the_mode_is_an_option_switched_in_the_session_and_bypass_needs_its_launch_flag() {
+    let scratch = Scratch::new("mode");
+    let log = scratch.0.join("controls.jsonl");
+    let mut peer = Peer::serve(mode_agent(&log, false), Settings::new());
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    let opened = peer.request(
+        "session/new",
+        json!({"cwd": scratch.0.to_string_lossy(), "mcpServers": []}),
+    );
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    let (current, offered) = mode_of(&opened["result"]["configOptions"]).expect("a mode option");
+    assert_eq!(current, "manual");
+    assert_eq!(offered, ["manual", "accept_edits", "auto", "plan"]);
+    let changed = peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "plan"}),
+    );
+    assert_eq!(
+        mode_of(&changed["result"]["configOptions"]).unwrap().0,
+        "plan"
+    );
+    let changed = peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "accept_edits"}),
+    );
+    assert_eq!(
+        mode_of(&changed["result"]["configOptions"]).unwrap().0,
+        "accept_edits"
+    );
+    let refused = peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "bypass"}),
+    );
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let modes: Vec<Value> = controls(&log)
+        .iter()
+        .filter(|control| control["request"]["subtype"] == "set_permission_mode")
+        .map(|control| control["request"]["mode"].clone())
+        .collect();
+    assert_eq!(modes, [json!("plan"), json!("acceptEdits")]);
+}
+
+#[test]
+fn bypass_is_offered_once_the_host_allows_it_and_switches_to_bypass_permissions() {
+    let scratch = Scratch::new("bypass");
+    let log = scratch.0.join("controls.jsonl");
+    let mut peer = Peer::serve(mode_agent(&log, true), Settings::new());
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    let opened = peer.request(
+        "session/new",
+        json!({"cwd": scratch.0.to_string_lossy(), "mcpServers": []}),
+    );
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    let (_, offered) = mode_of(&opened["result"]["configOptions"]).unwrap();
+    assert_eq!(
+        offered,
+        ["manual", "accept_edits", "auto", "plan", "bypass"]
+    );
+    let changed = peer.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "mode", "value": "bypass"}),
+    );
+    assert_eq!(
+        mode_of(&changed["result"]["configOptions"]).unwrap().0,
+        "bypass",
+        "{changed}"
+    );
+    assert!(
+        controls(&log)
+            .iter()
+            .any(|control| control["request"]["mode"] == "bypassPermissions"),
+        "{:?}",
+        controls(&log)
+    );
+}
+
+/// A session Claude Code started in a mode of its own shows that mode, and a mode the table has no name for shows none.
+#[test]
+fn a_session_started_in_a_mode_shows_it() {
+    let scratch = Scratch::new("startmode");
+    let log = scratch.0.join("controls.jsonl");
+    for (launched, shown) in [("plan", Some("plan")), ("dontAsk", None)] {
+        let mut defaults = ClaudeLaunch::new(".");
+        defaults.executable = replay_program().into();
+        defaults.permission_mode = Some(launched.into());
+        defaults
+            .env
+            .insert("COQUI_ACP_CLAUDE_CONTROLS".into(), log.clone().into());
+        let mut peer = Peer::serve(ClaudeAgent::new().defaults(defaults), Settings::new());
+        peer.request(
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        );
+        let opened = peer.request(
+            "session/new",
+            json!({"cwd": scratch.0.to_string_lossy(), "mcpServers": []}),
+        );
+        let current = mode_of(&opened["result"]["configOptions"]).map(|(current, _)| current);
+        assert_eq!(current.as_deref(), shown, "{launched}");
+    }
+}

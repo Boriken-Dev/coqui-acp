@@ -38,6 +38,9 @@ struct Cli {
     /// The permission mode: default, acceptEdits, plan, dontAsk, bypassPermissions, auto or manual.
     #[arg(long)]
     permission_mode: Option<String>,
+    /// Offer the Bypass mode: Claude Code is started allowing a session to switch to `bypassPermissions`.
+    #[arg(long)]
+    allow_bypass: bool,
     /// The setting sources Claude Code loads, comma-separated, of user, project and local; empty loads none.
     #[arg(long)]
     setting_sources: Option<String>,
@@ -86,6 +89,7 @@ fn main() -> ExitCode {
     defaults.model = cli.model;
     defaults.effort = cli.effort;
     defaults.permission_mode = cli.permission_mode;
+    defaults.allow_bypass = cli.allow_bypass;
     defaults.setting_sources = cli.setting_sources.map(|sources| {
         sources
             .split(',')

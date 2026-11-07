@@ -394,6 +394,13 @@ fn live_claude_code_lists_models_with_no_login_and_no_turn() {
     let session = session.unwrap();
     assert!(!session.models().expect("listed").is_empty());
     assert!(session.version().is_some());
+    assert_eq!(session.permission_mode().as_deref(), Some("default"));
+    session.set_permission_mode("plan").unwrap();
+    session.set_permission_mode("acceptEdits").unwrap();
+    assert!(
+        session.set_permission_mode("bypassPermissions").is_err(),
+        "started without allowing it"
+    );
     session.close();
 }
 
