@@ -4,7 +4,7 @@ Header-file-style reference for the `coqui-acp-harness` crate: every public item
 
 There are no Cargo features. MSRV Rust 1.89. A default build depends on `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
-Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `ending_once`, `exit_text`, `line_writer` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The modules `acp`, `event`, `lines`, `process`, `stream` and `version` are public.
+Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `ending_once`, `exit_text`, `line_writer` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The root also re-exports `mode`'s `Mode`. The modules `acp`, `event`, `lines`, `mode`, `process`, `stream` and `version` are public.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state.
 
@@ -170,6 +170,21 @@ What each event becomes:
 | `Exited` | the running turn fails | the same |
 
 `Settings` (`#[non_exhaustive]`, `new()` and `Default`; set its fields): `max_line` (64 MiB; a longer client line ends the connection), `max_sessions` (8), `max_requests` (64 at once), `max_prompt_bytes` (16 MiB), `max_version` (2), `cancel_grace` (10 s), `permission_timeout` (`None`: as long as the person takes), `max_tools` (4096 tool calls tracked per session for version 1; past it the oldest is forgotten, and a later report of it is a new `tool_call`), `max_queued_events` (4096 events queued for a client that has not read them; past it the harness's `EventSink::send` waits, so a client that does not read holds the harness back; the same many are kept of what a session says before its answer, and past it they are dropped and the client told how many), `max_open_questions` (64 open at once per session, each holding a thread; past it one is answered cancelled without being asked), `client_mcp_servers` (true), `working_roots` (empty: any; links followed; also on `OpenRequest`, whose `path_admitted` holds what a harness reads from the request's other parts to the same rule, and for a harness that finds a session by its id alone), `network_paths` (false, as written or where links lead), `max_tool_content_bytes` (1 MiB) and `max_tool_content_items` (256) (version 1 sends a tool call's content whole each time; past them the rest is left out and the client told), `on_notice: Option<NoticeHook>` (called with each notice and each harness exit, for a host that logs them).
+
+## Modes (`coqui_acp_harness::mode`)
+
+```rust
+#[non_exhaustive] pub enum Mode { Manual, AcceptEdits, Auto, Plan, Bypass }   // Clone, Copy, Debug, PartialEq, Eq, Hash
+pub const ALL: [Mode; 5]   // Mode::ALL, in the order a client cycles them
+pub const fn id(self) -> &'static str          // manual, accept_edits, auto, plan, bypass
+pub const fn name(self) -> &'static str;  pub const fn description(self) -> &'static str
+pub fn from_id(id: &str) -> Option<Mode>
+pub const OPTION_ID: &str = "mode"
+pub fn option(current: Mode, offered: &[Mode]) -> ConfigOption          // category `mode`; values in `Mode::ALL` order; `current` is listed even when not offered
+pub fn chosen(value: &str, offered: &[Mode]) -> Result<Mode, String>    // the reason, for `HarnessError::Refused`
+```
+
+How much a harness asks, named once so a client shows one control over every translator. A translator offers only the modes its tool has, and a mode in use is always listed. Each translator's table of what a mode sets is in its own header: `coqui-acp-claude` (`permissionMode`) and `coqui-acp-codex` (approval policy, sandbox, reviewer, collaboration mode).
 
 ## Versions (`coqui_acp_harness::version`)
 
