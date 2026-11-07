@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use coqui_acp_harness::acp::absolute_path;
 use coqui_acp_harness::{
-    AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, Launch, Open,
+    AgentInfo, ConfigOption, Conversation, Event, EventSink, Harness, HarnessError, Launch, Open,
     OpenRequest, OptionValue, PlainSpawn, Spawn, Takes,
 };
 use serde_json::Value;
@@ -269,24 +269,34 @@ impl Harness for ClaudeAgent {
             move |event| sink.send(event),
         )
         .map_err(HarnessError::from)?;
-        let models = session.models().unwrap_or_default();
         let model = launch.model.clone().unwrap_or_else(|| DEFAULT.to_string());
         let effort = launch.effort.clone().unwrap_or_else(|| DEFAULT.to_string());
-        let started = session
-            .permission_mode()
-            .or_else(|| launch.permission_mode.clone())
-            .unwrap_or_else(|| "default".to_string());
-        let mut offered = vec![Mode::Manual, Mode::AcceptEdits, Mode::Auto, Mode::Plan];
-        if launch.allow_bypass || started == "bypassPermissions" {
-            offered.push(Mode::Bypass);
-        }
-        Ok(Box::new(ClaudeConversation {
-            session,
-            models,
+        let state = Arc::new(State {
+            models: session.models().unwrap_or_default(),
             chosen: Mutex::new((model, effort)),
-            mode: Mutex::new(mode_of(&started)),
-            offered,
-        }))
+            mode: Mutex::new(Current::None),
+            offered: offered_for(&launch),
+        });
+        // Claude Code's mode is its own: told by its `system` lines and by an "allow always" that switches it, so what
+        // the client shows follows it.
+        let configured = launch
+            .permission_mode
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        state.observe(&session.permission_mode().unwrap_or(configured));
+        let told = Arc::clone(&state);
+        let sink = events.clone();
+        session.on_permission_mode(move |raw| {
+            if told.observe(raw) {
+                sink.send(Event::Options(told.options()));
+            }
+        });
+        if let Some(raw) = session.permission_mode()
+            && state.observe(&raw)
+        {
+            events.send(Event::Options(state.options()));
+        }
+        Ok(Box::new(ClaudeConversation { session, state }))
     }
 }
 
@@ -301,13 +311,29 @@ impl From<Error> for HarnessError {
 
 struct ClaudeConversation {
     session: ClaudeSession,
+    state: Arc<State>,
+}
+
+/// What a conversation shows, shared with the thread that is told Claude Code's mode changes.
+struct State {
     models: Vec<Model>,
     /// The model and effort in use.
     chosen: Mutex<(String, String)>,
-    /// The mode in use, `None` when Claude Code runs in one the table has no name for (`dontAsk`).
-    mode: Mutex<Option<Mode>>,
+    /// The mode Claude Code is in.
+    mode: Mutex<Current>,
     /// The modes that can be switched to.
     offered: Vec<Mode>,
+}
+
+/// The mode Claude Code is in as far as it has said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Current {
+    /// It has not said.
+    None,
+    /// One of the modes.
+    Known(Mode),
+    /// A `permissionMode` no mode names, such as `dontAsk`: shown as it is called.
+    Custom(String),
 }
 
 /// Claude Code's `permissionMode` for each mode, the one table both directions read.
@@ -335,7 +361,21 @@ fn permission_mode_of(mode: Mode) -> &'static str {
         .map_or("default", |(_, name)| name)
 }
 
-impl ClaudeConversation {
+/// The modes a client may choose: the launch's own mode and every stricter one, and what the launch names besides. Bypass
+/// only when the launch allows it, whatever mode it was started in.
+fn offered_for(launch: &ClaudeLaunch) -> Vec<Mode> {
+    let configured = launch
+        .permission_mode
+        .as_deref()
+        .map_or(Some(Mode::Manual), mode_of);
+    mode::widened(
+        &mode::up_to(configured, launch.allow_bypass),
+        launch.modes.as_deref().unwrap_or(&[]),
+        launch.allow_bypass,
+    )
+}
+
+impl State {
     fn efforts(&self, model: &str) -> Vec<String> {
         let listed = self
             .models
@@ -349,11 +389,14 @@ impl ClaudeConversation {
             listed
         }
     }
-}
 
-impl Conversation for ClaudeConversation {
-    fn session_id(&self) -> String {
-        self.session.id().unwrap_or_default()
+    /// Takes Claude Code's `permissionMode`; whether that changed what is shown.
+    fn observe(&self, raw: &str) -> bool {
+        let now = mode_of(raw).map_or_else(|| Current::Custom(raw.to_string()), Current::Known);
+        let mut held = self.mode.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = *held != now;
+        *held = now;
+        changed
     }
 
     fn options(&self) -> Vec<ConfigOption> {
@@ -389,11 +432,27 @@ impl Conversation for ClaudeConversation {
             ConfigOption::new("model", "Model", model, models).category("model"),
             ConfigOption::new("effort", "Effort", effort, efforts).category("thought_level"),
         ];
-        let current = *self.mode.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(current) = current {
-            options.push(mode::option(current, &self.offered));
+        match self
+            .mode
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            Current::Known(current) => options.push(mode::option(current, &self.offered)),
+            Current::Custom(label) => options.push(mode::custom_option(&label, &self.offered)),
+            Current::None => {}
         }
         options
+    }
+}
+
+impl Conversation for ClaudeConversation {
+    fn session_id(&self) -> String {
+        self.session.id().unwrap_or_default()
+    }
+
+    fn options(&self) -> Vec<ConfigOption> {
+        self.state.options()
     }
 
     fn prompt(&self, content: Vec<coqui_acp_harness::event::Content>) -> Result<(), HarnessError> {
@@ -406,11 +465,11 @@ impl Conversation for ClaudeConversation {
 
     fn set_option(&self, id: &str, value: &str) -> Result<Vec<ConfigOption>, HarnessError> {
         if id == mode::OPTION_ID {
-            let chosen = mode::chosen(value, &self.offered).map_err(HarnessError::Refused)?;
+            let chosen = mode::chosen(value, &self.state.offered).map_err(HarnessError::Refused)?;
             self.session
                 .set_permission_mode(permission_mode_of(chosen))
                 .map_err(HarnessError::from)?;
-            *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = Some(chosen);
+            self.state.observe(permission_mode_of(chosen));
             return Ok(self.options());
         }
         let offered = self.options();
@@ -426,13 +485,21 @@ impl Conversation for ClaudeConversation {
         match id {
             "model" => {
                 self.session.set_model(value).map_err(HarnessError::from)?;
-                self.chosen.lock().unwrap_or_else(PoisonError::into_inner).0 = value.to_string();
+                self.state
+                    .chosen
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0 = value.to_string();
             }
             _ => {
                 self.session
                     .set_effort((value != DEFAULT).then_some(value))
                     .map_err(HarnessError::from)?;
-                self.chosen.lock().unwrap_or_else(PoisonError::into_inner).1 = value.to_string();
+                self.state
+                    .chosen
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .1 = value.to_string();
             }
         }
         Ok(self.options())

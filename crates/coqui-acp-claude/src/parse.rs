@@ -98,7 +98,12 @@ pub struct Parser {
     session: Option<String>,
     /// A compaction whose summary is still to come.
     compaction: Option<String>,
+    /// Told the permission mode Claude Code reports, or that an answer of the person's switched it.
+    mode_hook: Option<ModeHook>,
 }
+
+/// Told a Claude Code `permissionMode`.
+pub type ModeHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl core::fmt::Debug for Parser {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -133,7 +138,14 @@ impl Parser {
             version: None,
             session: None,
             compaction: None,
+            mode_hook: None,
         }
+    }
+
+    /// Sets what is told the permission mode Claude Code is in: the one its `system` lines report, and the one an
+    /// "allow always" answer switches it to by a `setMode` suggestion it is given.
+    pub fn on_permission_mode(&mut self, hook: ModeHook) {
+        self.mode_hook = Some(hook);
     }
 
     /// The same with these bounds.
@@ -375,7 +387,9 @@ impl Parser {
         details.insert("toolUseId".into(), json!(tool_id));
         details.insert("input".into(), input.clone());
         let writer = Arc::clone(&self.writer);
+        let hook = self.mode_hook.clone();
         let responder = Responder::new(move |outcome| {
+            let mut switched: Option<String> = None;
             let answer = match outcome {
                 Outcome::Selected(chosen) if chosen == ALLOW_ONCE => {
                     json!({"behavior": "allow", "updatedInput": input})
@@ -383,6 +397,15 @@ impl Parser {
                 Outcome::Selected(chosen) if chosen == ALLOW_ALWAYS => {
                     let mut answer = json!({"behavior": "allow", "updatedInput": input});
                     if let Some(suggestions) = suggestions {
+                        // The last `setMode` is the one Claude Code ends up in.
+                        switched = suggestions
+                            .iter()
+                            .rev()
+                            .find(|each| {
+                                each.get("type").and_then(Value::as_str) == Some("setMode")
+                            })
+                            .and_then(|each| each.get("mode").and_then(Value::as_str))
+                            .map(str::to_string);
                         answer["updatedPermissions"] = Value::Array(suggestions);
                     }
                     answer
@@ -392,9 +415,15 @@ impl Parser {
                 }
                 _ => json!({"behavior": "deny", "message": "The person refused this."}),
             };
-            writer(
+            let written = writer(
                 &json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": answer}}),
-            )
+            );
+            if written.is_ok()
+                && let (Some(mode), Some(hook)) = (&switched, &hook)
+            {
+                hook(mode);
+            }
+            written
         });
         Some(Event::Permission(
             PermissionRequest::new(tool, title, description, options, responder).details(details),
@@ -407,6 +436,12 @@ impl Parser {
             .and_then(Value::as_str)
             .unwrap_or("compaction")
             .to_string();
+        if let (Some(mode), Some(hook)) = (
+            value.get("permissionMode").and_then(Value::as_str),
+            &self.mode_hook,
+        ) {
+            hook(mode);
+        }
         match value.get("subtype").and_then(Value::as_str).unwrap_or("") {
             "init" => {
                 if let Some(version) = value.get("claude_code_version").and_then(Value::as_str) {

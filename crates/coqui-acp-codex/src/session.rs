@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
+use crate::mode::Shown;
 use coqui_acp_harness::event::{Content, Event, Severity, context_block};
 use coqui_acp_harness::lines::{self, Tail};
 use coqui_acp_harness::mode::Mode;
@@ -233,7 +234,11 @@ pub struct CodexSession {
     choice: Mutex<(Option<String>, Option<String>)>,
     /// The mode in use and whether a client chose it: until one has, a turn names none of a mode's settings, and the
     /// thread's own configuration holds.
-    mode: Mutex<(Option<Mode>, bool)>,
+    mode: Mutex<(Option<Shown>, bool)>,
+    /// The effort the thread answered with, and the developer instructions it was given: a collaboration mode takes the
+    /// place of both, so each turn in a mode names them again.
+    thread_effort: Option<String>,
+    instructions: Option<String>,
     /// The model the thread answered with, which a collaboration mode has to name.
     thread_model: Option<String>,
     /// The thread's `sandbox_workspace_write` table.
@@ -346,6 +351,8 @@ impl CodexSession {
             choice: Mutex::new((launch.model.clone(), launch.effort.clone())),
             mode: Mutex::new((None, false)),
             thread_model: None,
+            thread_effort: None,
+            instructions: launch.developer_instructions.clone(),
             workspace_write: launch
                 .config()
                 .get("sandbox_workspace_write")
@@ -437,6 +444,10 @@ impl CodexSession {
         self.thread = thread.to_string();
         self.thread_model = opened
             .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.thread_effort = opened
+            .get("reasoningEffort")
             .and_then(Value::as_str)
             .map(str::to_string);
         locked(&self.mode).0 = crate::mode::of_thread(&opened);
@@ -586,13 +597,13 @@ impl CodexSession {
 
     /// The mode the thread is in, `None` while its approval policy and sandbox are a combination no mode names.
     #[must_use]
-    pub fn mode(&self) -> Option<Mode> {
-        locked(&self.mode).0
+    pub fn mode(&self) -> Option<Shown> {
+        locked(&self.mode).0.clone()
     }
 
     /// Puts the turns that follow in `mode`: each names its approval policy, sandbox, reviewer and collaboration mode.
     pub fn set_mode(&self, mode: Mode) {
-        *locked(&self.mode) = (Some(mode), true);
+        *locked(&self.mode) = (Some(Shown::Known(mode)), true);
     }
 
     /// Sets the model the turns that follow name; `None` leaves Codex's own.
@@ -622,16 +633,32 @@ impl CodexSession {
         if let Some(effort) = &effort {
             params["effort"] = json!(effort);
         }
-        let (mode, chosen) = *locked(&self.mode);
-        if let (Some(mode), true) = (mode, chosen) {
+        let (mode, chosen) = locked(&self.mode).clone();
+        if let (Some(Shown::Known(mode)), true) = (mode, chosen) {
+            // The model named for the turn, else the thread's, else the one Codex lists as its own.
             let named = params["model"]
                 .as_str()
                 .map(str::to_string)
                 .or_else(|| self.thread_model.clone())
-                .ok_or_else(|| Error::Harness("Codex named no model for the mode".into()))?;
-            for (key, value) in
-                crate::mode::turn_params(mode, &named, effort.as_deref(), &self.workspace_write)
-            {
+                .or_else(|| {
+                    self.models
+                        .as_deref()
+                        .and_then(|models| models.iter().find(|model| model.is_default))
+                        .map(|model| model.id.clone())
+                });
+            if named.is_none() {
+                (self.sink)(Event::Notice {
+                    severity: Severity::Warning,
+                    title: "Codex named no model, so this turn is in the mode's approval and sandbox only".into(),
+                });
+            }
+            for (key, value) in crate::mode::turn_params(
+                mode,
+                named.as_deref(),
+                effort.as_deref().or(self.thread_effort.as_deref()),
+                self.instructions.as_deref(),
+                &self.workspace_write,
+            ) {
                 params[key] = value;
             }
         }

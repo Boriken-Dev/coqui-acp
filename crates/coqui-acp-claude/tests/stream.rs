@@ -1115,3 +1115,59 @@ fn an_error_line_says_what_any_of_its_shapes_say() {
         );
     }
 }
+
+/// What Claude Code says of its own mode, and a `setMode` the person let it apply, reach whoever shows the mode.
+#[test]
+fn the_parser_tells_the_mode_claude_code_reports_and_one_always_allow_switches_it_to() {
+    let (mut parser, _) = parser();
+    let told = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hear = Arc::clone(&told);
+    parser.on_permission_mode(Arc::new(move |mode: &str| {
+        hear.lock().unwrap().push(mode.into())
+    }));
+    parser.line(&json!({"type": "system", "subtype": "init", "permissionMode": "plan"}));
+    parser.line(&json!({"type": "system", "subtype": "status", "permissionMode": "acceptEdits"}));
+    assert_eq!(*told.lock().unwrap(), ["plan", "acceptEdits"]);
+    let events = parser.line(
+        &json!({"type": "control_request", "request_id": "r1", "request": {
+        "subtype": "can_use_tool", "tool_name": "Edit", "tool_use_id": "t1",
+        "input": {"file_path": "/w/a.txt", "old_string": "a", "new_string": "b"},
+        "permission_suggestions": [
+            {"type": "setMode", "mode": "default", "destination": "session"},
+            {"type": "setMode", "mode": "auto", "destination": "session"}
+        ]}}),
+    );
+    let Some(Event::Permission(request)) = events
+        .into_iter()
+        .find(|event| matches!(event, Event::Permission(_)))
+    else {
+        panic!("a permission request")
+    };
+    request
+        .responder
+        .answer(Outcome::Selected("allow_once".into()))
+        .unwrap();
+    assert_eq!(
+        told.lock().unwrap().len(),
+        2,
+        "an allow once switches nothing"
+    );
+    let events = parser.line(&json!({"type": "control_request", "request_id": "r2", "request": {
+        "subtype": "can_use_tool", "tool_name": "Edit", "tool_use_id": "t2",
+        "input": {"file_path": "/w/a.txt", "old_string": "a", "new_string": "b"},
+        "permission_suggestions": [{"type": "setMode", "mode": "auto", "destination": "session"}]}}));
+    let Some(Event::Permission(request)) = events
+        .into_iter()
+        .find(|event| matches!(event, Event::Permission(_)))
+    else {
+        panic!("a permission request")
+    };
+    request
+        .responder
+        .answer(Outcome::Selected("allow_always".into()))
+        .unwrap();
+    assert_eq!(
+        told.lock().unwrap().last().map(String::as_str),
+        Some("auto")
+    );
+}

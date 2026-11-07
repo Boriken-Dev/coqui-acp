@@ -82,6 +82,9 @@ pub struct CodexLaunch {
     pub sandbox: Option<String>,
     /// Whether the Bypass mode is offered: never ask, no sandbox.
     pub allow_bypass: bool,
+    /// The modes a client may choose, when the host names them: a widening of the default, which is the mode the
+    /// approval policy and sandbox amount to and every stricter one. Bypass only with `allow_bypass`.
+    pub modes: Option<Vec<coqui_acp_harness::Mode>>,
     /// More of the thread's configuration, merged into its `config` as given: the caller's own.
     pub thread_config: Map<String, Value>,
     /// `--config` overrides of the app server, each a dotted key ([`valid_config_key`]; another is refused when the
@@ -132,6 +135,7 @@ impl CodexLaunch {
             approval_policy: None,
             sandbox: None,
             allow_bypass: false,
+            modes: None,
             thread_config: Map::new(),
             config_overrides: Vec::new(),
             extra_args: Vec::new(),

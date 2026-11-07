@@ -27,6 +27,7 @@ pub struct ClaudeLaunch {
     pub permission_prompts: bool,          // true: --permission-prompts=host --permission-prompt-tool=stdio
     pub permission_mode: Option<String>,
     pub allow_bypass: bool,                // false: no `--allow-dangerously-skip-permissions`, and no Bypass mode offered
+    pub modes: Option<Vec<Mode>>,          // those named widen the launch's mode and stricter ones (Bypass still needs allow_bypass)
     pub setting_sources: Option<Vec<String>>,   // None: Claude Code's default; Some(empty): none
     pub max_budget_micro_usd: Option<u64>,
     pub partial_messages: bool,            // true
@@ -58,6 +59,7 @@ pub fn set_model(&self, model: &str) -> Result<(), Error>
 pub fn set_effort(&self, effort: Option<&str>) -> Result<(), Error>      // None: Claude Code's own
 pub fn permission_mode(&self) -> Option<String>                          // `current_permission_mode` of its initialize answer
 pub fn set_permission_mode(&self, mode: &str) -> Result<(), Error>       // `set_permission_mode`; takes effect at once, in a running turn too
+pub fn on_permission_mode(&self, hook: impl Fn(&str) + Send + Sync + 'static)   // told each mode Claude Code reports or an "allow always" switches it to
 pub fn close(&self)                                                      // also on drop
 #[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>, pub efforts: Vec<String> }
 pub fn models_of(answer: &Value) -> Option<Vec<Model>>
@@ -137,13 +139,13 @@ The mode option (`mode`, category `mode`; ids from `coqui_acp_harness::mode`), m
 
 | Mode | `permissionMode` | Offered |
 | --- | --- | --- |
-| `manual` | `default` (`manual` on the command line is `default`) | always |
-| `accept_edits` | `acceptEdits` | always |
-| `auto` | `auto` | always; Claude Code takes the switch, whether the account may use it shows at the first turn |
+| `manual` | `default` (`manual` on the command line is `default`) | the launch's mode and every stricter one |
+| `accept_edits` | `acceptEdits` | likewise; Claude Code takes the switch |
+| `auto` | `auto` | likewise; whether the account may use it shows at the first turn |
 | `plan` | `plan` | always |
-| `bypass` | `bypassPermissions` | only with `allow_bypass`, or when the session started in it: Claude Code refuses the switch otherwise (`bypass_not_launched`) |
+| `bypass` | `bypassPermissions` | only with `allow_bypass`, whatever the launch's mode: Claude Code refuses the switch otherwise (`bypass_not_launched`), and a launch in it with `allow_bypass` off shows Bypass and cannot be taken back to it |
 
-`dontAsk` (refuse what nothing granted) is not offered. A session started in it shows no mode option. The current mode at the start is `current_permission_mode` of the `initialize` answer. A switch is a `set_permission_mode` control request and holds for the turn running and every turn after it. Claude Code's own list of modes is the `--permission-mode` choices (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`) and the error text of an unknown mode (`acceptEdits, auto, bypassPermissions, default, dontAsk, plan`); its `initialize` answer lists none.
+What a client may choose is capped by the launch: the launch's own `permission_mode` (default `default`, so Manual) and every stricter one, in the order Plan, Manual, Accept edits, Auto, Bypass; `ClaudeLaunch::modes` names more (a host's widening, still with no Bypass unless `allow_bypass`). A launch in a mode no mode names (`dontAsk`) offers Plan only, and shows it as `custom`. The current mode at the start is `current_permission_mode` of the `initialize` answer. A switch is a `set_permission_mode` control request and holds for the turn running and every turn after it. The mode shown is the one Claude Code is really in: the session tells it when Claude Code reports a `permissionMode` (`system` lines, `init` included) and when a person's "allow always" forwards a `setMode` suggestion (the last one wins; `setMode` is never stripped, since the person chose it), and the conversation sends a `config_option_update` for each change. `ClaudeSession::on_permission_mode` is that hook. Claude Code's own list of modes is the `--permission-mode` choices (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`) and the error text of an unknown mode (`acceptEdits, auto, bypassPermissions, default, dontAsk, plan`); its `initialize` answer lists none.
 
 Config options: `model` (category `model`): the models Claude Code lists, and the current one; `effort` (category `thought_level`): `default` and the current model's efforts, else `EFFORTS`. Setting one not offered is refused; setting one sends `set_model` or `apply_flag_settings` for the turns that follow.
 

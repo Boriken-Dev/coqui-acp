@@ -86,6 +86,8 @@ impl Shapes {
                 usage_update(usage).into_iter().collect()
             }
             Event::Commands(commands) => vec![available_commands(commands, v2)],
+            Event::Options(options) => vec![json!({"sessionUpdate": "config_option_update",
+                "configOptions": config_options(options, self.version)})],
             Event::Title(title) => {
                 vec![json!({"sessionUpdate": "session_info_update", "title": title})]
             }

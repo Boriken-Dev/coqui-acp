@@ -706,6 +706,8 @@ pub enum Event {
     Quota(Vec<Quota>),
     /// The commands the person can give.
     Commands(Vec<Command>),
+    /// The session's choices as they stand now: a client is told of every change not its own.
+    Options(Vec<crate::acp::ConfigOption>),
     /// The session's title.
     Title(String),
     /// Something to tell the person that is not part of the conversation.

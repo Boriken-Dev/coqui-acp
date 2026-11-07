@@ -19,7 +19,7 @@ use coqui_acp_harness::{LineHook, Process, Spawn, Step, Stream, exit_text, line_
 use serde_json::{Value, json};
 
 use crate::launch::ClaudeLaunch;
-use crate::parse::{self, Parser, ParserLimits, Writer};
+use crate::parse::{self, ModeHook, Parser, ParserLimits, Writer};
 use crate::{Error, TESTED_VERSIONS};
 
 /// The bounds and waits of a session. Every one is a setting with a default, and any value is taken.
@@ -187,6 +187,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// A running Claude Code in stream-json mode. Its events go to the sink given to [`ClaudeSession::start`], from a
 /// thread of its own; every method may be called from any thread.
 pub struct ClaudeSession {
+    modes: Arc<ModeWatch>,
     id: Option<String>,
     writer: Writer,
     process: Arc<dyn Process>,
@@ -201,6 +202,13 @@ pub struct ClaudeSession {
     sink: Arc<dyn Fn(Event) -> bool + Send + Sync>,
     /// The MCP configuration's file, removed with the session.
     mcp_file: Option<PrivateFile>,
+}
+
+/// The permission mode Claude Code is in as far as it has said, and who is told when that changes.
+#[derive(Default)]
+struct ModeWatch {
+    current: Mutex<Option<String>>,
+    hook: Mutex<Option<ModeHook>>,
 }
 
 impl fmt::Debug for ClaudeSession {
@@ -246,11 +254,20 @@ impl ClaudeSession {
         )
         .map_err(Error::Spawn)?;
         let process: Arc<dyn Process> = Arc::from(spawned.process);
-        let parser = Arc::new(Mutex::new(Parser::with_limits(
-            Arc::clone(&writer),
-            settings.max_tools,
-            settings.parser,
-        )));
+        let modes = Arc::new(ModeWatch::default());
+        let mut reading_parser =
+            Parser::with_limits(Arc::clone(&writer), settings.max_tools, settings.parser);
+        {
+            let modes = Arc::clone(&modes);
+            reading_parser.on_permission_mode(Arc::new(move |mode| {
+                *locked(&modes.current) = Some(mode.to_string());
+                let hook = locked(&modes.hook).clone();
+                if let Some(hook) = hook {
+                    hook(mode);
+                }
+            }));
+        }
+        let parser = Arc::new(Mutex::new(reading_parser));
         let tail = Arc::new(Mutex::new(Tail::new(
             settings.tail_lines,
             settings.tail_line_bytes,
@@ -321,6 +338,7 @@ impl ClaudeSession {
                 .map_err(Error::Spawn)?;
         }
         let mut session = Self {
+            modes,
             id: launch.session_id().map(str::to_string),
             writer,
             process,
@@ -460,10 +478,18 @@ impl ClaudeSession {
     /// The permission mode Claude Code started in, from its answer to `initialize`.
     #[must_use]
     pub fn permission_mode(&self) -> Option<String> {
-        self.answer
-            .get("current_permission_mode")
-            .and_then(Value::as_str)
-            .map(str::to_string)
+        locked(&self.modes.current).clone().or_else(|| {
+            self.answer
+                .get("current_permission_mode")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+    }
+
+    /// Sets what is told each permission mode Claude Code reports, or an answer of the person's switches it to, after
+    /// the one [`ClaudeSession::permission_mode`] gives.
+    pub fn on_permission_mode(&self, hook: impl Fn(&str) + Send + Sync + 'static) {
+        *locked(&self.modes.hook) = Some(Arc::new(hook));
     }
 
     /// Switches the permission mode (`default`, `acceptEdits`, `plan`, `auto`, `dontAsk` or `bypassPermissions`) for
@@ -477,7 +503,11 @@ impl ClaudeSession {
             json!({"subtype": "set_permission_mode", "mode": mode}),
             self.settings.control_timeout,
         )
-        .map(|_| ())
+        .map(|answer| {
+            // Claude Code's own name for it: `manual` is `default`.
+            let held = answer.get("mode").and_then(Value::as_str).unwrap_or(mode);
+            *locked(&self.modes.current) = Some(held.to_string());
+        })
     }
 
     /// Changes the model for the turns that follow.

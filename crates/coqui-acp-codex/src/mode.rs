@@ -7,7 +7,6 @@
 //! collaboration modes `plan` and `default`. `turn/start` takes each of them, so a mode holds from the next turn.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use coqui_acp_harness::mode::Mode;
 use serde_json::{Map, Value, json};
@@ -44,34 +43,57 @@ pub const fn settings(mode: Mode) -> ModeSettings {
     }
 }
 
-/// The modes Codex offers: every one, Bypass only when the host allows it.
-#[must_use]
-pub fn offered(allow_bypass: bool) -> Vec<Mode> {
-    let mut modes = alloc::vec![Mode::Manual, Mode::AcceptEdits, Mode::Auto, Mode::Plan];
-    if allow_bypass {
-        modes.push(Mode::Bypass);
-    }
-    modes
+/// What a thread is in: one of the modes, or settings no mode names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// The settings of exactly this mode.
+    Known(Mode),
+    /// None of the modes: the real values, as a person reads them.
+    Custom(String),
 }
 
-/// The mode a thread is already in, from what Codex answered to `thread/start` or `thread/resume`; `None` for a
-/// combination the table has no name for (`never` with a sandbox, a granular policy).
+/// What a thread is in, from what Codex answered to `thread/start` or `thread/resume`: a mode only when its approval
+/// policy, sandbox and reviewer are exactly the ones the mode sets, else the real values. A thread has no collaboration
+/// mode of its own to read, so Plan is read as its policy and sandbox, `on-request` with `readOnly`. `None` when the
+/// answer names no policy or sandbox.
 #[must_use]
-pub fn of_thread(opened: &Value) -> Option<Mode> {
-    let approval = opened.get("approvalPolicy")?.as_str()?;
+pub fn of_thread(opened: &Value) -> Option<Shown> {
+    let approval = match opened.get("approvalPolicy")? {
+        Value::String(policy) => policy.as_str(),
+        _ => "granular",
+    };
     let reviewer = opened
         .get("approvalsReviewer")
         .and_then(Value::as_str)
         .unwrap_or("user");
     let sandbox = opened.pointer("/sandbox/type")?.as_str()?;
-    match (approval, sandbox) {
-        ("never", "dangerFullAccess") => Some(Mode::Bypass),
-        ("untrusted", _) => Some(Mode::Manual),
-        ("on-request", "readOnly") if reviewer == "user" => Some(Mode::Manual),
-        ("on-request", "workspaceWrite") if reviewer == "auto_review" => Some(Mode::Auto),
-        ("on-request", "workspaceWrite") if reviewer == "user" => Some(Mode::AcceptEdits),
-        _ => None,
+    for mode in Mode::ALL {
+        let table = settings(mode);
+        if (table.approval, table.sandbox, table.reviewer) == (approval, sandbox, reviewer) {
+            return Some(Shown::Known(mode));
+        }
     }
+    let mut label = format!("{approval}, {sandbox}");
+    if reviewer != "user" {
+        label.push_str(&format!(", reviewed by {reviewer}"));
+    }
+    Some(Shown::Custom(label))
+}
+
+/// The mode a host's own approval policy and sandbox (`CodexLaunch`'s words for them) amount to, `None` for a pair no
+/// mode names.
+#[must_use]
+pub fn configured(approval: &str, sandbox: &str) -> Option<Mode> {
+    let sandbox = match sandbox {
+        "read-only" => "readOnly",
+        "workspace-write" => "workspaceWrite",
+        "danger-full-access" => "dangerFullAccess",
+        other => other,
+    };
+    Mode::ALL.into_iter().find(|mode| {
+        let table = settings(*mode);
+        table.reviewer == "user" && (table.approval, table.sandbox) == (approval, sandbox)
+    })
 }
 
 /// The `turn/start` parameters that put a turn in `mode`. `model` and `effort` fill the collaboration mode's
@@ -80,8 +102,9 @@ pub fn of_thread(opened: &Value) -> Option<Mode> {
 #[must_use]
 pub fn turn_params(
     mode: Mode,
-    model: &str,
+    model: Option<&str>,
     effort: Option<&str>,
+    instructions: Option<&str>,
     workspace: &Map<String, Value>,
 ) -> Map<String, Value> {
     let table = settings(mode);
@@ -99,12 +122,23 @@ pub fn turn_params(
     params.insert("approvalPolicy".into(), json!(table.approval));
     params.insert("approvalsReviewer".into(), json!(table.reviewer));
     params.insert("sandboxPolicy".into(), Value::Object(sandbox));
-    params.insert(
-        "collaborationMode".into(),
-        json!({"mode": table.collaboration,
-               "settings": {"model": model, "developer_instructions": null,
-                            "reasoning_effort": effort.map(String::from)}}),
-    );
+    // Codex takes the collaboration mode over the model, effort and developer instructions the thread was started with
+    // (its schema says so), and `null` instructions mean the mode's built-in ones: so the thread's own go in, as does
+    // what the session uses now, and nothing is sent as null. Without a model there is no collaboration mode to name.
+    if let Some(model) = model {
+        let mut settings = Map::new();
+        settings.insert("model".into(), json!(model));
+        if let Some(effort) = effort {
+            settings.insert("reasoning_effort".into(), json!(effort));
+        }
+        if let Some(instructions) = instructions {
+            settings.insert("developer_instructions".into(), json!(instructions));
+        }
+        params.insert(
+            "collaborationMode".into(),
+            json!({"mode": table.collaboration, "settings": settings}),
+        );
+    }
     params
 }
 
@@ -112,32 +146,100 @@ pub fn turn_params(
 mod tests {
     use super::*;
 
+    fn opened(approval: &str, sandbox: &str, reviewer: &str) -> Value {
+        json!({"approvalPolicy": approval, "approvalsReviewer": reviewer, "sandbox": {"type": sandbox}})
+    }
+
     #[test]
-    fn a_thread_in_the_state_a_mode_sets_is_in_that_mode() {
+    fn a_thread_in_exactly_the_state_a_mode_sets_is_in_that_mode() {
         for mode in Mode::ALL {
             let table = settings(mode);
-            let opened = json!({"approvalPolicy": table.approval, "approvalsReviewer": table.reviewer,
-                                "sandbox": {"type": table.sandbox}});
-            // A thread has no collaboration mode of its own to read, so Plan reads as the read-only Manual it sits on.
-            let expected = if mode == Mode::Plan {
-                Mode::Manual
-            } else {
-                mode
-            };
-            assert_eq!(of_thread(&opened), Some(expected), "{mode:?}");
+            assert_eq!(
+                of_thread(&opened(table.approval, table.sandbox, table.reviewer)),
+                Some(Shown::Known(mode)),
+                "{mode:?}, Plan read back as its policy and sandbox"
+            );
         }
     }
 
     #[test]
-    fn a_policy_with_no_name_in_the_table_is_no_mode() {
-        let opened = json!({"approvalPolicy": "never", "approvalsReviewer": "user",
-                            "sandbox": {"type": "workspaceWrite"}});
-        assert_eq!(of_thread(&opened), None);
+    fn any_other_pair_is_custom_with_its_real_values_never_a_mode() {
+        for (approval, sandbox, reviewer, label) in [
+            ("untrusted", "readOnly", "user", "untrusted, readOnly"),
+            ("never", "workspaceWrite", "user", "never, workspaceWrite"),
+            (
+                "untrusted",
+                "dangerFullAccess",
+                "user",
+                "untrusted, dangerFullAccess",
+            ),
+            (
+                "on-request",
+                "workspaceWrite",
+                "guardian_subagent",
+                "on-request, workspaceWrite, reviewed by guardian_subagent",
+            ),
+            (
+                "never",
+                "dangerFullAccess",
+                "auto_review",
+                "never, dangerFullAccess, reviewed by auto_review",
+            ),
+        ] {
+            assert_eq!(
+                of_thread(&opened(approval, sandbox, reviewer)),
+                Some(Shown::Custom(label.to_string())),
+            );
+        }
         assert_eq!(
             of_thread(
                 &json!({"approvalPolicy": {"granular": {}}, "sandbox": {"type": "readOnly"}})
             ),
-            None
+            Some(Shown::Custom("granular, readOnly".to_string()))
+        );
+        assert_eq!(of_thread(&json!({})), None);
+    }
+
+    #[test]
+    fn a_hosts_policy_and_sandbox_amount_to_a_mode_or_to_none() {
+        assert_eq!(
+            configured("untrusted", "workspace-write"),
+            Some(Mode::Manual)
+        );
+        assert_eq!(
+            configured("on-request", "workspace-write"),
+            Some(Mode::AcceptEdits)
+        );
+        assert_eq!(configured("on-request", "read-only"), Some(Mode::Plan));
+        assert_eq!(
+            configured("never", "danger-full-access"),
+            Some(Mode::Bypass)
+        );
+        assert_eq!(configured("never", "workspace-write"), None);
+    }
+
+    #[test]
+    fn a_turn_names_the_sessions_effort_and_instructions_and_never_null() {
+        let params = turn_params(
+            Mode::Plan,
+            Some("gpt"),
+            Some("low"),
+            Some("Answer briefly."),
+            &Map::new(),
+        );
+        assert_eq!(
+            params["collaborationMode"]["settings"],
+            json!({"model": "gpt", "reasoning_effort": "low", "developer_instructions": "Answer briefly."})
+        );
+        let bare = turn_params(Mode::Manual, Some("gpt"), None, None, &Map::new());
+        assert_eq!(
+            bare["collaborationMode"]["settings"],
+            json!({"model": "gpt"})
+        );
+        assert!(
+            turn_params(Mode::Manual, None, None, None, &Map::new())
+                .get("collaborationMode")
+                .is_none()
         );
     }
 }

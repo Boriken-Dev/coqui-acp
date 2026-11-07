@@ -194,10 +194,21 @@ impl Harness for CodexAgent {
             move |event| sink.send(event),
         )
         .map_err(HarnessError::from)?;
-        Ok(Box::new(CodexConversation {
-            session,
-            offered: crate::mode::offered(launch.allow_bypass),
-        }))
+        // What a client may choose: what the host named; else the host's own mode and every stricter one, the host's mode
+        // being what its policy and sandbox amount to, or what the thread is really in when the host set neither.
+        let loosest = match (&launch.approval_policy, &launch.sandbox) {
+            (Some(approval), Some(sandbox)) => crate::mode::configured(approval, sandbox),
+            _ => match session.mode() {
+                Some(crate::mode::Shown::Known(mode)) => Some(mode),
+                _ => None,
+            },
+        };
+        let offered = mode::widened(
+            &mode::up_to(loosest, launch.allow_bypass),
+            launch.modes.as_deref().unwrap_or(&[]),
+            launch.allow_bypass,
+        );
+        Ok(Box::new(CodexConversation { session, offered }))
     }
 }
 
@@ -287,8 +298,14 @@ impl Conversation for CodexConversation {
             ConfigOption::new("model", "Model", model, models).category("model"),
             ConfigOption::new("effort", "Effort", effort, efforts).category("thought_level"),
         ];
-        if let Some(current) = self.session.mode() {
-            options.push(mode::option(current, &self.offered));
+        match self.session.mode() {
+            Some(crate::mode::Shown::Known(current)) => {
+                options.push(mode::option(current, &self.offered));
+            }
+            Some(crate::mode::Shown::Custom(label)) => {
+                options.push(mode::custom_option(&label, &self.offered));
+            }
+            None => {}
         }
         options
     }

@@ -64,6 +64,9 @@ pub struct ClaudeLaunch {
     /// Whether the session may be switched to `bypassPermissions` (`--allow-dangerously-skip-permissions`). Claude Code
     /// takes that mode mid-session only when it was started allowing it; off, the bypass mode is not offered.
     pub allow_bypass: bool,
+    /// The modes a client may choose, when the host names them: a widening of the default, which is the launch's own
+    /// mode and every stricter one. Bypass is offered only with `allow_bypass`, whatever this names.
+    pub modes: Option<Vec<coqui_acp_harness::Mode>>,
     /// The setting sources Claude Code loads, of `user`, `project` and `local`; `Some` of an empty list loads none.
     /// `None` leaves Claude Code's own default, every source.
     pub setting_sources: Option<Vec<String>>,
@@ -94,6 +97,7 @@ impl core::fmt::Debug for ClaudeLaunch {
             .field("permission_prompts", &self.permission_prompts)
             .field("permission_mode", &self.permission_mode)
             .field("allow_bypass", &self.allow_bypass)
+            .field("modes", &self.modes)
             .field("setting_sources", &self.setting_sources)
             .field("env", &self.env.keys().collect::<Vec<_>>())
             .field("clear_env", &self.clear_env)
@@ -120,6 +124,7 @@ impl ClaudeLaunch {
             permission_prompts: true,
             permission_mode: None,
             allow_bypass: false,
+            modes: None,
             setting_sources: None,
             max_budget_micro_usd: None,
             partial_messages: true,
