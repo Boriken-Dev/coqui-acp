@@ -469,16 +469,16 @@ fn proof_of(identity: Identity, session: SessionArgs) -> Result<Proof, String> {
     Ok(proof)
 }
 
-/// Says on standard error which method a proof runs, and each of its settings looser than the default. A parent that stopped
+/// Says on standard error which method a proof runs, and each of its settings other than the default. A parent that stopped
 /// reading standard error does not end the bridge for it.
 fn say_proof(proof: &Proof) {
     let mut said = std::io::stderr().lock();
     let _ = writeln!(said, "proving by {}", proof.method());
-    for weakened in proof.weakened() {
+    for setting in proof.non_defaults() {
         let _ = writeln!(
             said,
-            "weakened: {} is {}, looser than {}",
-            weakened.setting, weakened.value, weakened.strict
+            "non-default: {} is {}, default {}",
+            setting.setting, setting.value, setting.default
         );
     }
 }

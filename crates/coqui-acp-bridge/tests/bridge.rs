@@ -1386,13 +1386,13 @@ fn a_method_is_the_identitys_and_naming_another_is_refused() {
         None,
     );
     assert_eq!(heard_line(&heard, "proving by"), "proving by noise");
-    let weakened = [
-        heard_line(&heard, "weakened"),
-        heard_line(&heard, "weakened"),
+    let non_defaults = [
+        heard_line(&heard, "non-default"),
+        heard_line(&heard, "non-default"),
     ];
     assert!(
-        weakened.iter().any(|line| line.contains("rekey")),
-        "{weakened:?}"
+        non_defaults.iter().any(|line| line.contains("rekey")),
+        "{non_defaults:?}"
     );
     let _ = serving.kill();
     let _ = serving.wait();
