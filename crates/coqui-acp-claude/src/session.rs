@@ -209,6 +209,8 @@ pub struct ClaudeSession {
 struct ModeWatch {
     current: Mutex<Option<String>>,
     hook: Mutex<Option<ModeHook>>,
+    /// Whether a line is being read, and the modes it reported: told once the parser's lock is released, never under it.
+    line: Mutex<(bool, Vec<String>)>,
 }
 
 impl fmt::Debug for ClaudeSession {
@@ -261,6 +263,13 @@ impl ClaudeSession {
             let modes = Arc::clone(&modes);
             reading_parser.on_permission_mode(Arc::new(move |mode| {
                 *locked(&modes.current) = Some(mode.to_string());
+                {
+                    let mut line = locked(&modes.line);
+                    if line.0 {
+                        line.1.push(mode.to_string());
+                        return;
+                    }
+                }
                 let hook = locked(&modes.hook).clone();
                 if let Some(hook) = hook {
                     hook(mode);
@@ -297,15 +306,22 @@ impl ClaudeSession {
         {
             let reading = Arc::clone(&parser);
             let ending = Arc::clone(&parser);
+            let watching = Arc::clone(&modes);
             let expected = launch.session_id().map(str::to_string);
             stream
                 .read(
                     spawned.stdout,
                     "coqui-acp-claude-stdout",
                     move |value| {
+                        locked(&watching.line).0 = true;
                         let (events, answers) = {
                             let mut parser = locked(&reading);
                             (parser.line(value), parser.answers())
+                        };
+                        let reported = {
+                            let mut line = locked(&watching.line);
+                            line.0 = false;
+                            core::mem::take(&mut line.1)
                         };
                         let mut told = Vec::with_capacity(events.len());
                         for event in events {
@@ -323,6 +339,13 @@ impl ClaudeSession {
                             // What follows belongs to another session: nothing of it is told, but its id is.
                             if let Some(why) = wrong {
                                 return Step::stopping(told, answers, why);
+                            }
+                        }
+                        // Told with no lock held, and only for the session asked for.
+                        let hook = locked(&watching.hook).clone();
+                        if let Some(hook) = hook {
+                            for mode in &reported {
+                                hook(mode);
                             }
                         }
                         Step::new(told, answers)
@@ -484,6 +507,11 @@ impl ClaudeSession {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
+    }
+
+    /// Sets which modes an "allow always" may switch Claude Code to: a `setMode` suggestion naming another is not applied.
+    pub fn permit_modes(&self, permit: impl Fn(&str) -> bool + Send + Sync + 'static) {
+        locked(&self.parser).permit_modes(Arc::new(permit));
     }
 
     /// Sets what is told each permission mode Claude Code reports, or an answer of the person's switches it to, after

@@ -184,7 +184,7 @@ pub fn from_id(id: &str) -> Option<Mode>
 pub const OPTION_ID: &str = "mode"
 pub fn option(current: Mode, offered: &[Mode]) -> ConfigOption          // category `mode`; values in `Mode::ALL` order; `current` is listed even when not offered
 pub fn chosen(value: &str, offered: &[Mode]) -> Result<Mode, String>    // the reason, for `HarnessError::Refused`
-pub const fn looseness(self) -> u8                                       // Plan 0, Manual 1, Accept edits 2, Auto 3, Bypass 4
+pub const fn looseness(self) -> u8                                       // 0 for Plan up to 4 for Bypass, loosest last
 pub fn up_to(loosest: Option<Mode>, allow_bypass: bool) -> Vec<Mode>    // the host's mode and every stricter one; None: Plan only; Bypass only if allowed
 pub fn widened(base: &[Mode], named: &[Mode], allow_bypass: bool) -> Vec<Mode>   // `base` and the modes a host named, Bypass only if allowed
 pub const CUSTOM: &str = "custom"

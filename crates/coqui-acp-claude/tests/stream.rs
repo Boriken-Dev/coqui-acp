@@ -1171,3 +1171,77 @@ fn the_parser_tells_the_mode_claude_code_reports_and_one_always_allow_switches_i
         Some("auto")
     );
 }
+
+/// What "allow always" applies is cut to the modes the host lets a client choose: a `setMode` beyond them is left out, and
+/// an option that would grant nothing else is not offered.
+#[test]
+fn an_always_allow_leaves_out_a_set_mode_beyond_what_may_be_chosen() {
+    let (mut parser, written) = parser();
+    let told = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hear = Arc::clone(&told);
+    parser.on_permission_mode(Arc::new(move |mode: &str| {
+        hear.lock().unwrap().push(mode.into())
+    }));
+    parser.permit_modes(Arc::new(|mode: &str| mode == "default" || mode == "plan"));
+    let ask = |parser: &mut Parser, id: &str, suggestions: Value| {
+        parser
+            .line(
+                &json!({"type": "control_request", "request_id": id, "request": {
+                "subtype": "can_use_tool", "tool_name": "Edit", "tool_use_id": id,
+                "input": {"file_path": "/w/a.txt", "old_string": "a", "new_string": "b"},
+                "permission_suggestions": suggestions}}),
+            )
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Permission(request) => Some(request),
+                _ => None,
+            })
+            .expect("a permission request")
+    };
+    // Only the loosening suggestion: there is nothing to allow always.
+    let request = ask(
+        &mut parser,
+        "r1",
+        json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]),
+    );
+    assert!(
+        request
+            .options
+            .iter()
+            .all(|option| option.kind != OptionKind::AllowAlways),
+        "{:?}",
+        request.options
+    );
+    // A rule beside it stays, and the mode is not applied nor told.
+    let request = ask(
+        &mut parser,
+        "r2",
+        json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+               {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "rm:*"}], "behavior": "allow", "destination": "session"}]),
+    );
+    request
+        .responder
+        .answer(Outcome::Selected("allow_always".into()))
+        .unwrap();
+    let applied =
+        written.lock().unwrap().last().unwrap()["response"]["response"]["updatedPermissions"]
+            .clone();
+    assert_eq!(applied.as_array().unwrap().len(), 1, "{applied}");
+    assert_eq!(applied[0]["type"], "addRules");
+    assert!(
+        told.lock().unwrap().is_empty(),
+        "{:?}",
+        told.lock().unwrap()
+    );
+    // A mode that may be chosen is applied and told.
+    let request = ask(
+        &mut parser,
+        "r3",
+        json!([{"type": "setMode", "mode": "plan", "destination": "session"}]),
+    );
+    request
+        .responder
+        .answer(Outcome::Selected("allow_always".into()))
+        .unwrap();
+    assert_eq!(*told.lock().unwrap(), ["plan"]);
+}

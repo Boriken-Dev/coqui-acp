@@ -100,10 +100,15 @@ pub struct Parser {
     compaction: Option<String>,
     /// Told the permission mode Claude Code reports, or that an answer of the person's switched it.
     mode_hook: Option<ModeHook>,
+    /// Which `setMode` suggestions an "allow always" may apply; all of them when unset.
+    mode_permit: Option<ModePermit>,
 }
 
 /// Told a Claude Code `permissionMode`.
 pub type ModeHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Whether a `setMode` an "allow always" would apply names a mode that may be switched to.
+pub type ModePermit = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl core::fmt::Debug for Parser {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -139,7 +144,14 @@ impl Parser {
             session: None,
             compaction: None,
             mode_hook: None,
+            mode_permit: None,
         }
+    }
+
+    /// Sets which modes an "allow always" may switch Claude Code to. A `setMode` suggestion naming another is left out of
+    /// what the answer applies, so a person's "always" cannot loosen what a host capped.
+    pub fn permit_modes(&mut self, permit: ModePermit) {
+        self.mode_permit = Some(permit);
     }
 
     /// Sets what is told the permission mode Claude Code is in: the one its `system` lines report, and the one an
@@ -360,11 +372,25 @@ impl Parser {
             .or_else(|| request.get("description"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let permit = self.mode_permit.clone();
         let suggestions = request
             .get("permission_suggestions")
             .and_then(Value::as_array)
-            .filter(|suggestions| !suggestions.is_empty())
-            .cloned();
+            .map(|all| {
+                all.iter()
+                    .filter(|each| {
+                        each.get("type").and_then(Value::as_str) != Some("setMode")
+                            || each
+                                .get("mode")
+                                .and_then(Value::as_str)
+                                .is_some_and(|mode| {
+                                    permit.as_ref().is_none_or(|permit| permit(mode))
+                                })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|suggestions| !suggestions.is_empty());
         let mut options = vec![PermissionOption::new(
             ALLOW_ONCE,
             "Allow",
