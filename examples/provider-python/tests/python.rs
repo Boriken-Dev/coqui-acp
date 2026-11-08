@@ -75,7 +75,12 @@ mod with_python {
                 .join(revision);
             let copy = scratch.join("guatiao");
             if !copy.join("Cargo.toml").is_file() {
-                copy_tree(&guatiao().join("crates"), &copy.join("crates"));
+                // Every directory the root manifest's workspace lists a member in.
+                for dir in ["crates", "examples", "benchmarks"] {
+                    if guatiao().join(dir).is_dir() {
+                        copy_tree(&guatiao().join(dir), &copy.join(dir));
+                    }
+                }
                 std::fs::copy(guatiao().join("Cargo.toml"), copy.join("Cargo.toml"))
                     .expect("the root manifest copies");
             }
