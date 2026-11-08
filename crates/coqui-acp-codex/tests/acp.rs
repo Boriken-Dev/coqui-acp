@@ -595,10 +595,10 @@ fn a_client_may_choose_the_configured_mode_and_stricter_ones_only() {
     );
 }
 
-/// A thread already in Plan's policy and sandbox reads as Plan, and choosing Plan still names it to Codex, which has
-/// no collaboration mode of its own to read back.
+/// A thread whose policy and sandbox are Plan's has not been put in Plan: it is shown as it is, and choosing Plan names
+/// it to Codex, which has no collaboration mode of its own to read back.
 #[test]
-fn choosing_the_mode_already_shown_applies_it() {
+fn a_threads_policy_alone_is_not_plan_and_choosing_plan_applies_it() {
     let scratch = Scratch::new("shown");
     let (mut peer, session, options, written) = host_session(
         &scratch,
@@ -607,12 +607,43 @@ fn choosing_the_mode_already_shown_applies_it() {
         Some("on-request,readOnly,user"),
         |_| {},
     );
-    assert_eq!(mode_of(&options).unwrap().0, "plan");
-    choose(&mut peer, &session, "plan");
+    assert_eq!(mode_of(&options).unwrap().0, "custom");
+    assert!(
+        !written_to(&written)
+            .iter()
+            .any(|input| input["method"] == "turn/start"),
+        "no turn yet"
+    );
+    let shown = choose(&mut peer, &session, "plan");
+    assert_eq!(
+        mode_of(&shown["result"]["configOptions"]).unwrap().0,
+        "plan"
+    );
     run_a_turn(&mut peer, &session);
     assert_eq!(
         the_turn_start(&written)["collaborationMode"]["mode"],
         "plan"
+    );
+}
+
+/// A Plan turn takes the place of Codex's built-in Plan instructions with the session's own, which the person is told.
+#[test]
+fn a_plan_turn_with_instructions_of_its_own_says_it_replaces_the_built_in_ones() {
+    let scratch = Scratch::new("plan-notice");
+    let (mut peer, session, _, _) =
+        host_session(&scratch, "on-request", "workspace-write", None, |launch| {
+            launch.developer_instructions = Some("Answer briefly.".into());
+        });
+    choose(&mut peer, &session, "plan");
+    let from = peer.updates.len();
+    run_a_turn(&mut peer, &session);
+    assert!(
+        peer.updates[from..].iter().any(|update| {
+            update["sessionUpdate"] == "notice"
+                && update.to_string().contains("built-in Plan instructions")
+        }),
+        "{:?}",
+        peer.updates
     );
 }
 

@@ -284,6 +284,10 @@ impl Harness for ClaudeAgent {
             .clone()
             .unwrap_or_else(|| "default".to_string());
         state.observe(&session.permission_mode().unwrap_or(configured));
+        let allowed = Arc::clone(&state);
+        session.permit_modes(move |raw| {
+            mode_of(raw).is_some_and(|mode| allowed.offered.contains(&mode))
+        });
         let told = Arc::clone(&state);
         let sink = events.clone();
         session.on_permission_mode(move |raw| {

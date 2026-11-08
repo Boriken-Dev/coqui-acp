@@ -67,7 +67,9 @@ pub fn of_thread(opened: &Value) -> Option<Shown> {
         .and_then(Value::as_str)
         .unwrap_or("user");
     let sandbox = opened.pointer("/sandbox/type")?.as_str()?;
-    for mode in Mode::ALL {
+    // Plan is a collaboration mode, which a thread does not report: its policy and sandbox alone are read-only
+    // `on-request`, which a thread that was never put in Plan has too, so they are shown as they are.
+    for mode in Mode::ALL.into_iter().filter(|mode| *mode != Mode::Plan) {
         let table = settings(mode);
         if (table.approval, table.sandbox, table.reviewer) == (approval, sandbox, reviewer) {
             return Some(Shown::Known(mode));
@@ -151,14 +153,19 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_in_exactly_the_state_a_mode_sets_is_in_that_mode() {
+    fn a_thread_in_exactly_the_state_a_mode_sets_is_in_that_mode_except_plan() {
         for mode in Mode::ALL {
             let table = settings(mode);
-            assert_eq!(
-                of_thread(&opened(table.approval, table.sandbox, table.reviewer)),
-                Some(Shown::Known(mode)),
-                "{mode:?}, Plan read back as its policy and sandbox"
-            );
+            let read = of_thread(&opened(table.approval, table.sandbox, table.reviewer));
+            if mode == Mode::Plan {
+                // Plan is a collaboration mode a thread does not report: its policy and sandbox alone are shown as they are.
+                assert_eq!(
+                    read,
+                    Some(Shown::Custom("on-request, readOnly".to_string()))
+                );
+            } else {
+                assert_eq!(read, Some(Shown::Known(mode)), "{mode:?}");
+            }
         }
     }
 

@@ -239,6 +239,8 @@ pub struct CodexSession {
     /// place of both, so each turn in a mode names them again.
     thread_effort: Option<String>,
     instructions: Option<String>,
+    /// Whether the person has been told that a Plan turn's instructions are the session's own.
+    plan_told: AtomicBool,
     /// The model the thread answered with, which a collaboration mode has to name.
     thread_model: Option<String>,
     /// The thread's `sandbox_workspace_write` table.
@@ -353,6 +355,7 @@ impl CodexSession {
             thread_model: None,
             thread_effort: None,
             instructions: launch.developer_instructions.clone(),
+            plan_told: AtomicBool::new(false),
             workspace_write: launch
                 .config()
                 .get("sandbox_workspace_write")
@@ -646,6 +649,16 @@ impl CodexSession {
                         .and_then(|models| models.iter().find(|model| model.is_default))
                         .map(|model| model.id.clone())
                 });
+            if mode == Mode::Plan
+                && self.instructions.is_some()
+                && !self.plan_told.swap(true, Ordering::SeqCst)
+            {
+                (self.sink)(Event::Notice {
+                    severity: Severity::Info,
+                    title: "This session's developer instructions replace Codex's built-in Plan instructions in Plan turns"
+                        .into(),
+                });
+            }
             if named.is_none() {
                 (self.sink)(Event::Notice {
                     severity: Severity::Warning,
