@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Guatiao to `0350bae7`: a channel's `close` and `closed` carry a reason, which the `acp_harness` echoes give when they fail, and a Python method that raises gives up what it was handed.
 - `coqui-acp-harness`: `PlainSpawn`'s kill on Linux and Android also ends the processes that left its group or session, found through `/proc`, and on Unix a watcher in the group ends it when the host ends without a kill.
 - `coqui-acp-harness`: the end of an ACP version 2 message carries no `content`, where it carried `[]`, which version 2 reads as clearing the message.
 - `coqui_acp` for Dart: under v2, `setConfigOption` sends `type: "id"` beside the value, which v2's `session/set_config_option` requires; a v2 agent holding to the schema refused the request without it. v1's has no type.

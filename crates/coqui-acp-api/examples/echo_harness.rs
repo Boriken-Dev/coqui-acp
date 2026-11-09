@@ -357,8 +357,8 @@ struct Inner {
     items: VecDeque<Vec<u8>>,
     /// Either side has ended the connection: `send` answers GONE from here on.
     closed: bool,
-    /// The status it ends with, once one side has given it.
-    status: Option<u32>,
+    /// The status it ends with, and why, once one side has given them.
+    status: Option<(u32, String)>,
 }
 
 #[derive(Default)]
@@ -375,11 +375,14 @@ impl Queue {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Ends the connection with `status`, unless it has ended, dropping what is still queued.
-    fn end(&self, status: u32) {
+    /// Ends the connection with `status` and why, unless it has ended, dropping what is still
+    /// queued.
+    fn end(&self, status: u32, reason: &str) {
         let mut inner = self.lock();
         inner.closed = true;
-        inner.status.get_or_insert(status);
+        inner
+            .status
+            .get_or_insert_with(|| (status, reason.to_owned()));
         inner.items.clear();
         drop(inner);
         self.space.notify_all();
@@ -396,11 +399,9 @@ struct Connection {
 impl Channel for Connection {
     fn send(&self, bytes: &[u8]) -> Result<(), ProviderError> {
         if bytes.len() > self.limit {
-            self.queue.end(Status::GUATIAO_ERR_BAD_VALUE.into());
-            return Err(ProviderError::new(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the message is larger than the echo takes",
-            ));
+            const WHY: &str = "the message is larger than the echo takes";
+            self.queue.end(Status::GUATIAO_ERR_BAD_VALUE.into(), WHY);
+            return Err(ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, WHY));
         }
         let mut inner = self.queue.lock();
         loop {
@@ -425,13 +426,13 @@ impl Channel for Connection {
         Ok(())
     }
 
-    fn close(&self, status: u32) {
+    fn close(&self, status: u32, reason: &str) {
         let mut inner = self.queue.lock();
         if inner.closed {
             return;
         }
         inner.closed = true;
-        inner.status = Some(status);
+        inner.status = Some((status, reason.to_owned()));
         drop(inner);
         self.queue.space.notify_all();
         self.queue.arrived.notify_all();
@@ -440,7 +441,7 @@ impl Channel for Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.close(Status::GUATIAO_OK.into());
+        self.close(Status::GUATIAO_OK.into(), "");
     }
 }
 
@@ -449,9 +450,9 @@ fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, mut agent: Agent) {
     let send = |sink: &mut Object<dyn ChannelSink>, answers: Vec<Value>| {
         for answer in answers {
             sink.receive(answer.to_string().as_bytes())
-                .map_err(|refused| u32::from(refused.status))?;
+                .map_err(|refused| (u32::from(refused.status), refused.message().to_owned()))?;
         }
-        Ok::<(), u32>(())
+        Ok::<(), (u32, String)>(())
     };
     let status = loop {
         let message = {
@@ -471,8 +472,9 @@ fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, mut agent: Agent) {
             }
         };
         let Some(message) = message else {
-            // The host closed: every turn still running ends, answered, before `closed`.
-            let status = queue.lock().status.unwrap_or(0);
+            // The host closed: every turn still running ends, answered, before `closed`, which
+            // passes the host's reason on.
+            let status = queue.lock().status.clone().unwrap_or((0, String::new()));
             match send(&mut sink, agent.end_every_turn()) {
                 Ok(()) => break status,
                 Err(refused) => break refused,
@@ -480,16 +482,16 @@ fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, mut agent: Agent) {
         };
         let (answers, then_close) = agent.answer(&message);
         if let Err(refused) = send(&mut sink, answers) {
-            queue.end(refused);
+            queue.end(refused.0, &refused.1);
             break refused;
         }
         if then_close {
-            queue.end(0);
+            queue.end(0, "");
             let _ = send(&mut sink, agent.end_every_turn());
-            break 0;
+            break (0, String::new());
         }
     };
-    sink.closed(status);
+    sink.closed(status.0, &status.1);
 }
 
 /// A turn waiting on something: a cancel, or the client's answer to the agent's own request.

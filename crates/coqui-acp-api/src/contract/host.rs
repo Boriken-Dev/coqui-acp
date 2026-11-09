@@ -27,6 +27,8 @@ pub(super) const GRACE: Duration = Duration::from_millis(500);
 struct Log {
     received: Vec<Vec<u8>>,
     closed: Option<u32>,
+    /// The reason `closed` gave.
+    reason: String,
     held: bool,
     away: bool,
     sink_destroyed: bool,
@@ -76,12 +78,13 @@ impl ChannelSink for Sink {
         answer
     }
 
-    fn closed(&mut self, status: u32) {
+    fn closed(&mut self, status: u32, reason: &str) {
         let mut log = self.0.lock();
         if log.closed.is_some() {
             log.broken.push(format!("closed({status}) came twice"));
         }
         log.closed = Some(status);
+        log.reason = reason.to_owned();
         log.spawner_gone_at_close = Some(log.spawner_destroyed);
         drop(log);
         self.0.changed.notify_all();
@@ -302,6 +305,12 @@ impl Conn {
         self.must("closed", |log| log.closed)
     }
 
+    /// The reason the provider's `closed` gave, once it has come.
+    pub(super) fn reason(&self) -> Result<String, String> {
+        self.closed()?;
+        Ok(self.shared.lock().reason.clone())
+    }
+
     /// Whether the spawner was destroyed by the time `closed` came.
     pub(super) fn spawner_gone_at_close(&self) -> Result<bool, String> {
         self.must("closed", |log| log.spawner_gone_at_close)
@@ -347,7 +356,14 @@ impl Conn {
     /// Closes from the host's side with `code`, and checks the provider's `closed` follows with it
     /// and that both objects go.
     pub(super) fn close_with(&self, code: u32) -> Result<(), String> {
-        self.channel().close(code);
+        self.channel().close(
+            code,
+            if code == 0 {
+                ""
+            } else {
+                "the contract gives up"
+            },
+        );
         let closed = self.closed()?;
         if closed != code {
             return Err(format!(

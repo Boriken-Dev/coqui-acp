@@ -7,7 +7,7 @@
 //!
 //! | prompt | the agent |
 //! | --- | --- |
-//! | `close` | answers as any text, then ends the connection itself, `closed(GUATIAO_OK)` |
+//! | `close` | answers as any text, then ends the connection itself, `closed(GUATIAO_OK, "")` |
 //! | `wait` | ends the turn only on `session/cancel`, with `stopReason` `cancelled` |
 //! | `ask` | asks `session/request_permission` with options `allow` (`allow_once`) and `reject` (`reject_once`); on `allow` sends `echo: allowed`, on a cancelled outcome ends the turn `cancelled`, and on anything else (`reject`, an error, an outcome it does not know) sends `echo: refused` |
 //! | `read PATH` | with the client's `fs.readTextFile`, asks `fs/read_text_file` for PATH and sends `echo: CONTENT`, or `echo: refused` on an error; without it, sends `echo: no fs` and asks nothing |

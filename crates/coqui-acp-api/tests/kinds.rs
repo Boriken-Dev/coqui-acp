@@ -306,8 +306,8 @@ fn the_kinds_hashes_are_pinned() {
 }
 
 const HARNESS_HASH: u32 = 2577453137;
-const CHANNEL_HASH: u32 = 2843269355;
-const SINK_HASH: u32 = 3528315804;
+const CHANNEL_HASH: u32 = 3787630980;
+const SINK_HASH: u32 = 4115266557;
 const SPAWNER_HASH: u32 = 1466370631;
 const PROCESS_HASH: u32 = 3306532587;
 

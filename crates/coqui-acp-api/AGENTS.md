@@ -15,8 +15,8 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 | kind | table | `FLOOR_HASH` | who implements it |
 | --- | --- | --- | --- |
 | `acp_harness` | `AcpHarnessVtable` | `2577453137` | the provider |
-| `channel` | `ChannelVtable` | `2843269355` | the provider (Guatiao's, re-exported) |
-| `channel_sink` | `ChannelSinkVtable` | `3528315804` | the host (Guatiao's, re-exported) |
+| `channel` | `ChannelVtable` | `3787630980` | the provider (Guatiao's, re-exported) |
+| `channel_sink` | `ChannelSinkVtable` | `4115266557` | the host (Guatiao's, re-exported) |
 | `process_spawner` | `ProcessSpawnerVtable` | `1466370631` | the host |
 | `spawned_process` | `SpawnedProcessVtable` | `3306532587` | the host |
 
@@ -70,15 +70,15 @@ A provider in-process is trusted code: the kind cannot check that it keeps a req
 - **Back-pressure blocks**, as the channel's rules say. A provider's intake never waits on its agent's work, so a `session/cancel` reaches a running turn; it may wait on the host's sink. A host's `receive` never waits for its own `send`.
 - **Cancelling a turn is ACP's `session/cancel`**, a message like any other: the turn ends with `stopReason` `cancelled`. `$/cancel_request` passes through the same way. The kind has no cancellation of its own; a `send` waiting for room ends only with `close`, answered `GUATIAO_ERR_GONE`.
 - **What is not a message is answered, and the connection goes on**: the provider answers text that is not JSON `-32700`, a batch or anything not one JSON-RPC message `-32600` (id null), a request whose `method` is not text `-32600`, params of the wrong type `-32602`, an unknown method `-32601`; an unknown notification is ignored. A host receiving text that is not JSON, or a batch, refuses it from `receive` with `GUATIAO_ERR_BAD_VALUE`, which ends the connection.
-- **Closing.** On the host's `close(status)` the provider answers every request it still holds (a running prompt with `stopReason` `cancelled`, any other with an error), stops what it started (its whole process tree), destroys the spawner, then calls `closed(status)`. On its own end it does the same and calls `closed` with its status. After `closed`, the next `send` answers `GUATIAO_ERR_GONE`.
+- **Closing.** `close(status, reason)` and `closed(status, reason)` carry a reason: UTF-8 text lent for the call, empty when there is none, for logs and people only; nothing parses it. Dropping the channel is `close(GUATIAO_OK, "")`. On the host's `close` the provider answers every request it still holds (a running prompt with `stopReason` `cancelled`, any other with an error), stops what it started (its whole process tree), destroys the spawner, then calls `closed` with the host's status, passing the host's reason on or giving its own. On its own end it does the same and calls `closed` with its status; **a provider that fails says why in the reason**, which is how a failure between requests reaches the host. After `closed`, the next `send` answers `GUATIAO_ERR_GONE`.
 
 | the end | `closed` status |
 | --- | --- |
 | the host closed with `s` | `s` |
 | the agent ended normally, or the provider ended the connection | `GUATIAO_OK` |
-| the agent exited with a failure or could not start | `GUATIAO_ERR_INTERNAL`, after answering what is pending with errors saying why |
+| the agent exited with a failure or could not start | `GUATIAO_ERR_INTERNAL`, after answering what is pending with errors saying why; the reason says it too |
 | a message over the provider's size limit | `GUATIAO_ERR_BAD_VALUE`; the `send` that carried it answers the same |
-| the sink refused a message | the sink's status |
+| the sink refused a message | the sink's status, its message as the reason |
 
 A message's size limit is each side's own setting; the kind sets none. Requests either side was waiting on end unanswered when the other closes; a host does not resend them.
 
@@ -224,7 +224,7 @@ A session's `cwd` and every one of its `additionalDirectories`, on `session/new`
 
 ## A provider in another language
 
-Every method takes and answers plain data; `start` also takes the spawner and the sink and answers the channel, all objects. The Python module is what `python -m guatiao.kinds` writes from the description: a provider subclasses `AcpHarness` and `Channel`, calls the sink it is handed (`receive(bytes)`, `closed(status)`, then `destroy()`), from a `threading.Thread` of its own if it likes, and calls `destroy()` on the spawner it does not keep. A Python `start` that refuses destroys both before it raises: Guatiao's Python binding lets go of a taken argument only when the call never ran. The models' schemas in `include/coqui_acp_api.schemas.json` say which keys a request may have. A provider in a language whose objects are called on one engine thread (QuickJS, Node, Lua) has no thread of its own: it answers inside the `send` that took the message, so it cannot be told `session/cancel` while a turn runs.
+Every method takes and answers plain data; `start` also takes the spawner and the sink and answers the channel, all objects. The Python module is what `python -m guatiao.kinds` writes from the description: a provider subclasses `AcpHarness` and `Channel`, calls the sink it is handed (`receive(bytes)`, `closed(status, reason)`, then `destroy()`), from a `threading.Thread` of its own if it likes, and calls `destroy()` on the spawner it does not keep; its `Channel` implements `send(bytes)` and `close(status, reason)`. A method that raises gives up every object it was handed, and Guatiao's binding destroys them: a refusing `start` just raises. The models' schemas in `include/coqui_acp_api.schemas.json` say which keys a request may have. A provider in a language whose objects are called on one engine thread (QuickJS, Node, Lua) has no thread of its own: it answers inside the `send` that took the message, so it cannot be told `session/cancel` while a turn runs.
 
 ## The contract suite (feature `contract`)
 

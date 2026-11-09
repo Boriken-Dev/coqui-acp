@@ -25,7 +25,7 @@ impl ChannelSink for Forward {
             .ok_or_else(|| ProviderError::new(Status::GUATIAO_ERR_GONE, "the client is gone"))
     }
 
-    fn closed(&mut self, _status: u32) {
+    fn closed(&mut self, _status: u32, _reason: &str) {
         self.0 = None;
     }
 }

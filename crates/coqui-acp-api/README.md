@@ -44,8 +44,8 @@ impl ChannelSink for Host {
         Ok(())
     }
 
-    fn closed(&mut self, status: u32) {
-        let _ = status;
+    fn closed(&mut self, status: u32, reason: &str) {
+        let _ = (status, reason);
     }
 }
 
@@ -61,7 +61,7 @@ fn connect(
     }
     let channel = harness.start(request, spawner, Host.into_object())?;
     channel.send(br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}"#)?;
-    channel.close(0);
+    channel.close(0, "");
     Ok(())
 }
 ```

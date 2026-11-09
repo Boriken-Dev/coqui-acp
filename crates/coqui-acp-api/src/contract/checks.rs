@@ -302,7 +302,7 @@ fn describes_itself(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
 fn refused_with(harness: &dyn AcpHarness, request: StartRequest, expected: u32) -> Outcome {
     match host::start(harness, request) {
         Ok(conn) => {
-            conn.channel().close(OK);
+            conn.channel().close(OK, "");
             Err(format!("started where it had to refuse with {expected}"))
         }
         Err((error, conn)) => {
@@ -409,7 +409,7 @@ fn keeps_secrets(harness: &dyn AcpHarness) -> Outcome {
         .build();
     match host::start(harness, request) {
         Ok(conn) => {
-            conn.channel().close(OK);
+            conn.channel().close(OK, "");
             Err("started with a requirement it does not know".to_owned())
         }
         Err((error, conn)) => {
@@ -1123,7 +1123,7 @@ fn close_wakes_send(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
     let (taken, thread) = sender(conn.shared_channel(), contract.version, 64);
     settled(&taken);
     let closing = Instant::now();
-    conn.channel().close(OK);
+    conn.channel().close(OK, "");
     let woken = thread
         .join()
         .map_err(|_| "the sender panicked".to_owned())?;
@@ -1170,7 +1170,7 @@ fn close_answers_pending(contract: &Contract, harness: &dyn AcpHarness, place: &
     )?;
     conn.send(&prompt(2, &session, "wait"))?;
     ensure!(conn.quiet()?, "a waiting turn answered before the close");
-    conn.channel().close(OK);
+    conn.channel().close(OK, "");
     let (_, answer) = turn(&mut conn, 2)?;
     ensure!(
         answer["result"]["stopReason"] == "cancelled",
@@ -1210,7 +1210,7 @@ fn provider_closes(contract: &Contract, harness: &dyn AcpHarness, place: &Place)
         after == Err(GONE),
         "the first send after closed was answered {after:?}"
     );
-    conn.channel().close(OK);
+    conn.channel().close(OK, "");
     conn.destroyed()
 }
 
@@ -1313,9 +1313,13 @@ fn message_limit(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
     );
     let closed = conn.closed()?;
     ensure!(
+        !conn.reason()?.trim().is_empty(),
+        "a provider failing on a message over its limit gave no reason in closed"
+    );
+    ensure!(
         closed == BAD_VALUE,
         "a message over the limit ended it with {closed}"
     );
-    conn.channel().close(OK);
+    conn.channel().close(OK, "");
     conn.destroyed()
 }

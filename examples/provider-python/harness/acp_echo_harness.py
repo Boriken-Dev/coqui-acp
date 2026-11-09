@@ -245,15 +245,16 @@ class _Queue:
         self.items: Deque[bytes] = deque()
         #: Either side has ended the connection: `send` answers GONE.
         self.closed = False
-        #: The status it ends with, once one side has given it.
-        self.status: Optional[int] = None
+        #: The status it ends with, and why, once one side has given them.
+        self.status: Optional[Tuple[int, str]] = None
 
-    def end(self, status: int) -> None:
-        """Ends the connection with `status` unless it has ended, dropping what is still queued."""
+    def end(self, status: int, reason: str = "") -> None:
+        """Ends the connection with `status` and why, unless it has ended, dropping what is still
+        queued."""
         with self.cond:
             self.closed = True
             if self.status is None:
-                self.status = status
+                self.status = (status, reason)
             self.items.clear()
             self.cond.notify_all()
 
@@ -267,8 +268,9 @@ class Connection(Channel):
     def send(self, bytes: bytes) -> None:
         q = self._queue
         if len(bytes) > MAX_MESSAGE_BYTES:
-            q.end(BAD_VALUE)
-            raise BadValue("the message is larger than the echo takes")
+            why = "the message is larger than the echo takes"
+            q.end(BAD_VALUE, why)
+            raise BadValue(why)
         with q.cond:
             while True:
                 if q.closed:
@@ -279,17 +281,17 @@ class Connection(Channel):
             q.items.append(bytes)
             q.cond.notify_all()
 
-    def close(self, status: int) -> None:
+    def close(self, status: int, reason: str) -> None:
         q = self._queue
         with q.cond:
             if q.closed:
                 return
             q.closed = True
-            q.status = status
+            q.status = (status, reason)
             q.cond.notify_all()
 
     def __del__(self) -> None:
-        self.close(OK)
+        self.close(OK, "")
 
 
 def _result(id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -502,15 +504,15 @@ class _Agent:
 def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agent) -> None:
     """The connection's thread, and the only caller of the sink."""
 
-    def send(answers: List[Dict[str, Any]]) -> Optional[int]:
+    def send(answers: List[Dict[str, Any]]) -> Optional[Tuple[int, str]]:
         for answer in answers:
             try:
                 sink.receive(json.dumps(answer).encode("utf-8"))
             except Exception as e:  # any refusal ends the connection, once
-                return int(getattr(e, "status", INTERNAL))
+                return int(getattr(e, "status", INTERNAL)), str(e)
         return None
 
-    status = OK
+    status: Tuple[int, str] = (OK, "")
     try:
         while True:
             with q.cond:
@@ -519,9 +521,10 @@ def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agen
                 message: Optional[bytes] = q.items.popleft() if q.items else None
                 q.cond.notify_all()
             if message is None:
-                # The host closed: every turn still running ends, answered, before `closed`.
+                # The host closed: every turn still running ends, answered, before `closed`, which
+                # passes the host's reason on.
                 refused = send(agent.end_every_turn())
-                status = refused if refused is not None else (q.status if q.status is not None else OK)
+                status = refused if refused is not None else (q.status if q.status is not None else (OK, ""))
                 break
             try:
                 answers, then_close = agent.answer(message)
@@ -535,19 +538,19 @@ def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agen
             refused = send(answers)
             if refused is not None:
                 status = refused
-                q.end(refused)
+                q.end(*refused)
                 break
             if then_close:
                 q.end(OK)
                 send(agent.end_every_turn())
                 break
-    except BaseException:
-        status = INTERNAL
-        q.end(INTERNAL)
+    except BaseException as e:
+        status = (INTERNAL, f"the echo failed: {type(e).__name__}")
+        q.end(*status)
     finally:
         try:
             spawner.destroy()
-            sink.closed(status)
+            sink.closed(status[0], status[1])
         finally:
             sink.destroy()
 
@@ -563,21 +566,16 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         }
 
     def start(self, request: Ref, spawner: ProcessSpawner, sink: ChannelSink) -> Channel:
-        try:
-            asked = request.to_python()
-            if not isinstance(asked, dict) or not set(asked) <= START_KEYS:
-                raise BadValue("the request has a key the echo does not know")
-            refusal = _refusal(asked.get("requirements", []))
-            if refusal is not None:
-                raise Unsupported(refusal)
-            roots = asked.get("working_roots", [])
-            if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
-                raise BadValue("the working roots are not a list of texts")
-        except BaseException:
-            # A refused start still lets go of what it was handed.
-            spawner.destroy()
-            sink.destroy()
-            raise
+        # A refusal raises: the binding then destroys the spawner and the sink it was handed.
+        asked = request.to_python()
+        if not isinstance(asked, dict) or not set(asked) <= START_KEYS:
+            raise BadValue("the request has a key the echo does not know")
+        refusal = _refusal(asked.get("requirements", []))
+        if refusal is not None:
+            raise Unsupported(refusal)
+        roots = asked.get("working_roots", [])
+        if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
+            raise BadValue("the working roots are not a list of texts")
         q = _Queue()
         threading.Thread(
             target=_deliver,
