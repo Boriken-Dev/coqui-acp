@@ -11,10 +11,11 @@ use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
-    AcpHarnessVtable, ChannelSinkVtable, ChannelVtable, ErrorOutput, HarnessInfo, HistoryLoss,
-    ImportReport, LinkState, ModelInfo, ModelListing, NAMES, NonDefault, ProcessExit,
-    ProcessSpawnerVtable, Requirement, SeedPoint, SessionImport, SessionQuery, SessionRecordFile,
-    SpawnSpec, SpawnedProcessVtable, SpawnerInfo, StartRequest, Takes, TerminalSize,
+    AcpHarnessVtable, ChannelSinkVtable, ChannelVtable, ErrorOutput, ExportPage, HarnessInfo,
+    HistoryLoss, ImportReport, LinkState, ModelInfo, ModelListing, NAMES, NonDefault, ProcessExit,
+    ProcessSpawnerVtable, Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery,
+    SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo, StartRequest, Takes,
+    TerminalSize,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -71,6 +72,8 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("Requirement", schema_of::<Requirement>()),
         ("SessionQuery", schema_of::<SessionQuery>()),
         ("SessionImport", schema_of::<SessionImport>()),
+        ("SessionExport", schema_of::<SessionExport>()),
+        ("ExportPage", schema_of::<ExportPage>()),
         ("SpawnSpec", schema_of::<SpawnSpec>()),
         ("TerminalSize", schema_of::<TerminalSize>()),
         ("HarnessInfo", schema_of::<HarnessInfo>()),
@@ -107,7 +110,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 18] = [
+    let pinned: [(&str, &[&str], &[&str]); 20] = [
         (
             "StartRequest",
             &["environment", "requirements", "working_roots"],
@@ -124,6 +127,18 @@ fn every_models_keys_are_pinned() {
             &["environment", "history", "session_id", "working_directory"],
             &["session_id", "working_directory"],
         ),
+        (
+            "SessionExport",
+            &[
+                "after",
+                "environment",
+                "max_bytes",
+                "session_id",
+                "working_directory",
+            ],
+            &["session_id", "working_directory"],
+        ),
+        ("ExportPage", &["next", "text"], &["text"]),
         ("ImportReport", &["compacted", "losses", "seeded_from"], &[]),
         ("SeedPoint", &["digest", "line"], &["line"]),
         (
@@ -253,6 +268,11 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     import.set("working_directory", "/");
     import.set("history_format", "another");
     assert!(SessionImport::from_value(&Value::from(import)).is_err());
+    let mut export = Map::new();
+    export.set("session_id", "0f8fad5b-d9cb-469f-a165-70867728950e");
+    export.set("working_directory", "/");
+    export.set("page", 2);
+    assert!(SessionExport::from_value(&Value::from(export)).is_err());
     let mut spec = Map::new();
     spec.set("program", "sh");
     spec.set("sandbox", "strict");
@@ -285,7 +305,7 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(SpawnedProcessVtable::FLOOR_HASH, PROCESS_HASH);
 }
 
-const HARNESS_HASH: u32 = 2565176903;
+const HARNESS_HASH: u32 = 2577453137;
 const CHANNEL_HASH: u32 = 2843269355;
 const SINK_HASH: u32 = 3528315804;
 const SPAWNER_HASH: u32 = 1466370631;

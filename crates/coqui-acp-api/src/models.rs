@@ -1,7 +1,7 @@
 //! What crosses the `acp_harness` kind besides the channel and the spawner: plain data, the same in
 //! every language.
 //!
-//! What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport`) refuses a key it does
+//! What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport`, `SessionExport`) refuses a key it does
 //! not declare, so a field a newer host adds is never silently dropped by an older provider. What
 //! a provider answers is read leniently.
 
@@ -222,8 +222,7 @@ impl ModelListing {
     }
 }
 
-/// One session a harness keeps, for [`AcpHarness::session_record`](crate::AcpHarness::session_record)
-/// and [`AcpHarness::export_session`](crate::AcpHarness::export_session).
+/// One session a harness keeps, for [`AcpHarness::session_record`](crate::AcpHarness::session_record).
 #[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
 #[map(crate = ::guatiao, deny_unknown_fields)]
 #[non_exhaustive]
@@ -296,6 +295,91 @@ impl SessionImport {
     pub fn environment(mut self, environment: Environment) -> Self {
         self.environment = Secret::new(environment);
         self
+    }
+}
+
+/// One page of a session's history to export, for
+/// [`AcpHarness::export_session`](crate::AcpHarness::export_session).
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SessionExport {
+    /// The session's id as the provider reported it: a UUID.
+    pub session_id: String,
+    /// The directory the session worked in.
+    pub working_directory: String,
+    /// The variables its connection was started with.
+    #[map(default)]
+    pub environment: Secret<Environment>,
+    /// Where to go on from: the `next` of the page before, as the provider gave it; absent for the
+    /// first page.
+    pub after: Option<String>,
+    /// The most bytes a page holds. A page is whole lines only, so one that would hold none holds
+    /// the one line that does not fit, alone.
+    #[map(default = DEFAULT_PAGE_BYTES)]
+    pub max_bytes: u64,
+}
+
+/// [`SessionExport::max_bytes`] when a host gives none: 1 MiB.
+pub const DEFAULT_PAGE_BYTES: u64 = 1 << 20;
+
+impl SessionExport {
+    /// The first page of the history of `session_id`, which worked in `working_directory`, at most
+    /// [`DEFAULT_PAGE_BYTES`], with no environment.
+    #[must_use]
+    pub fn new(session_id: impl Into<String>, working_directory: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            working_directory: working_directory.into(),
+            environment: Secret::default(),
+            after: None,
+            max_bytes: DEFAULT_PAGE_BYTES,
+        }
+    }
+
+    /// The same export, with the variables its connection was started with.
+    #[must_use]
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environment = Secret::new(environment);
+        self
+    }
+
+    /// The page after the one whose `next` was `after`.
+    #[must_use]
+    pub fn after(mut self, after: impl Into<String>) -> Self {
+        self.after = Some(after.into());
+        self
+    }
+
+    /// Pages of at most `bytes`.
+    #[must_use]
+    pub const fn max_bytes(mut self, bytes: u64) -> Self {
+        self.max_bytes = bytes;
+        self
+    }
+}
+
+/// One page of an exported history, from
+/// [`AcpHarness::export_session`](crate::AcpHarness::export_session).
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct ExportPage {
+    /// Whole JSON lines, each ended by a line feed. Only the first page starts with the header.
+    pub text: String,
+    /// What to ask for the next page with ([`SessionExport::after`]); absent when the export is
+    /// complete.
+    pub next: Option<String>,
+}
+
+impl ExportPage {
+    /// A page holding `text`, followed by the page `next` names, if any.
+    #[must_use]
+    pub fn new(text: impl Into<String>, next: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            next,
+        }
     }
 }
 

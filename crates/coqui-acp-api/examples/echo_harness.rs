@@ -19,9 +19,9 @@ use std::thread::JoinHandle;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
 use coqui_acp_api::{
-    AcpHarness, Channel, ChannelSink, Environment, HarnessInfo, ImportReport, ModelInfo,
-    ModelListing, NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement, SeedPoint,
-    SessionImport, SessionQuery, StartRequest, WorkingRoots, is_session_id,
+    AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport,
+    ModelInfo, ModelListing, NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement,
+    SeedPoint, SessionExport, SessionImport, StartRequest, WorkingRoots, is_session_id,
 };
 use serde_json::{Value, json};
 
@@ -67,6 +67,26 @@ struct EchoSettings {
 const HISTORY_FORMAT: &str = "coqui-acp-history";
 const HISTORY_VERSION: u64 = 1;
 
+/// The digest a header gives its body: FNV-1a over each line and its line feed, `fnv1a64:` and 16
+/// hexadecimal digits. Enough to see a body changed; not a defence against anyone.
+fn digest_of<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in lines.flat_map(|line| line.bytes().chain(core::iter::once(b'\n'))) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+/// A session's history as lines, the header first, carrying the body's digest.
+fn history_lines(kept: &Kept) -> Vec<String> {
+    let body: Vec<String> = kept.lines.iter().map(Value::to_string).collect();
+    let digest = digest_of(body.iter().map(String::as_str));
+    let header =
+        json!({"format": HISTORY_FORMAT, "version": HISTORY_VERSION, "digest": digest}).to_string();
+    core::iter::once(header).chain(body).collect()
+}
+
 /// A session the echo keeps: its own id, and what it said, as history lines.
 #[derive(Default)]
 struct Kept {
@@ -104,7 +124,13 @@ fn read_history(history: &str) -> Result<Vec<Value>, ProviderError> {
             "the echo reads version 1 of the history format only",
         ));
     }
+    let lines: Vec<&str> = lines.collect();
+    let given = header["digest"].as_str();
+    if given.is_some_and(|digest| digest != digest_of(lines.iter().copied())) {
+        return Err(bad("the history's body does not match its header's digest"));
+    }
     lines
+        .into_iter()
         .map(|line| {
             let line: Value =
                 serde_json::from_str(line).map_err(|_| bad("a history line is not JSON"))?;
@@ -276,24 +302,49 @@ impl AcpHarness for EchoHarness {
         Ok(report)
     }
 
+    /// A position is `<line>:<digest>`: the next line to give, and the digest of the body when the
+    /// first page was given, so a session that has changed since refuses it.
     fn export_session(
         &self,
-        query: SessionQuery,
+        export: SessionExport,
         spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<ExportPage, ProviderError> {
         drop(spawner);
         self.keeps_sessions()?;
         let sessions = lock(&self.sessions);
-        let kept = sessions.get(&query.session_id).ok_or_else(|| {
+        let kept = sessions.get(&export.session_id).ok_or_else(|| {
             ProviderError::new(Status::GUATIAO_ERR_NOT_FOUND, "no session has this id")
         })?;
-        let mut history = json!({"format": HISTORY_FORMAT, "version": HISTORY_VERSION}).to_string();
-        history.push('\n');
-        for line in &kept.lines {
-            history.push_str(&line.to_string());
-            history.push('\n');
+        let lines = history_lines(kept);
+        drop(sessions);
+        let digest = digest_of(lines[1..].iter().map(String::as_str));
+        let start = match &export.after {
+            None => 0,
+            Some(after) => after
+                .split_once(':')
+                .filter(|(_, given)| *given == digest)
+                .and_then(|(line, _)| line.parse::<usize>().ok())
+                .filter(|line| (1..lines.len()).contains(line))
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        Status::GUATIAO_ERR_BAD_VALUE,
+                        "the position is not one the echo gave, or the session has changed since",
+                    )
+                })?,
+        };
+        let limit = usize::try_from(export.max_bytes).unwrap_or(usize::MAX);
+        let mut text = String::new();
+        let mut end = start;
+        while let Some(line) = lines.get(end) {
+            if end > start && text.len().saturating_add(line.len() + 1) > limit {
+                break;
+            }
+            text.push_str(line);
+            text.push('\n');
+            end += 1;
         }
-        Ok(history)
+        let next = (end < lines.len()).then(|| format!("{end}:{digest}"));
+        Ok(ExportPage::new(text, next))
     }
 
     fn models(&self, _environment: Secret<Environment>) -> Result<ModelListing, ProviderError> {

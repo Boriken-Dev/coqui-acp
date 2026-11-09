@@ -10,7 +10,7 @@
 - `AcpHarness`: `describe`, `start`, `refusal`, `program`, `import_session` and `export_session`, which every harness answers; `models`, `session_record` and `non_defaults`, whose defaults are true answers for a harness with nothing to say.
 - `ProcessSpawner` and `SpawnedProcess`: the host's spawner, here, over SSH or in a container: pipes or a terminal, reads that survive a dropped link, a kill that ends the whole tree.
 - `StartRequest`: what a host adds to the provider's own configuration for one connection: a secret environment, working roots and requirements with their values.
-- Sessions at the host's UUID: `import_session` seeds one from a history in the standard format (empty for a fresh one), ACP's `session/resume` opens it, `export_session` gives its history back; every session id a harness reports is a UUID.
+- Sessions at the host's UUID: `import_session` seeds one from a history in the standard format (empty for a fresh one), ACP's `session/resume` opens it, `export_session` gives its history back, page by page; every session id a harness reports is a UUID.
 - `Requirement` and its vocabulary (`read_only`, `no_commands`, `answer_only`, `no_project_settings`, `no_project_mcp`, `files_under`, `read_only_paths`, `denied_paths`, `network`, `sandboxed_scripts`, `only_skills`), which only narrow: a harness refuses a name it does not know.
 - `WorkingRoots`: the one way a path is compared with the roots (no `..`, case on Windows, links followed).
 - The kinds as data, `include/coqui_acp_api.kinds.json`, the models' schemas, `include/coqui_acp_api.schemas.json`, and a Python module, `python/coqui_acp_api_kinds.py`, for providers with no Rust.

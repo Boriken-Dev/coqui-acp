@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use super::Contract;
 use super::host::{self, Conn, GRACE, PATIENCE, open, status};
 use crate::{
-    AcpHarness, Environment, FILES_UNDER, ImportReport, Requirement, SessionImport, SessionQuery,
-    StartRequest, is_session_id,
+    AcpHarness, Environment, ExportPage, FILES_UNDER, ImportReport, Requirement, SessionExport,
+    SessionImport, SessionQuery, StartRequest, is_session_id,
 };
 
 // `guatiao_status` numbers, as a channel's `close` and `closed` carry them.
@@ -543,13 +543,69 @@ fn export(
     session: &str,
     cwd: &str,
 ) -> Result<Result<String, u32>, String> {
+    Ok(match export_page(harness, session, cwd, None, u64::MAX)? {
+        Ok(page) => {
+            ensure!(
+                page.next.is_none(),
+                "an export with no bound on its page came in more than one"
+            );
+            Ok(page.text)
+        }
+        Err(code) => Err(code),
+    })
+}
+
+/// One page of the history of `session`, checking the spawner it was handed is gone when it answers.
+fn export_page(
+    harness: &dyn AcpHarness,
+    session: &str,
+    cwd: &str,
+    after: Option<&str>,
+    max_bytes: u64,
+) -> Result<Result<ExportPage, u32>, String> {
     let (watch, spawner) = host::spawner();
-    let answer = harness.export_session(SessionQuery::new(session, cwd), spawner);
+    let mut asked = SessionExport::new(session, cwd).max_bytes(max_bytes);
+    if let Some(after) = after {
+        asked = asked.after(after);
+    }
+    let answer = harness.export_session(asked, spawner);
     ensure!(
         watch.destroyed(),
         "export_session answered with the spawner it was handed alive"
     );
     Ok(answer.map_err(|e| status(&e)))
+}
+
+/// Whether `line` is a history's header: an object naming the format and its version.
+fn is_header(line: &str) -> bool {
+    serde_json::from_str::<Value>(line)
+        .is_ok_and(|value| value.get("format").is_some() && value["version"].is_u64())
+}
+
+/// Pages `session`'s history at `max_bytes`, checking each page is whole lines.
+fn pages(
+    harness: &dyn AcpHarness,
+    session: &str,
+    cwd: &str,
+    max_bytes: u64,
+) -> Result<Vec<ExportPage>, String> {
+    let mut pages: Vec<ExportPage> = Vec::new();
+    loop {
+        let after = pages.last().and_then(|page| page.next.clone());
+        let page = export_page(harness, session, cwd, after.as_deref(), max_bytes)?
+            .map_err(|code| format!("page {} was refused with {code}", pages.len() + 1))?;
+        ensure!(
+            !page.text.is_empty() && page.text.ends_with('\n'),
+            "page {} is not whole lines",
+            pages.len() + 1
+        );
+        let done = page.next.is_none();
+        pages.push(page);
+        if done {
+            return Ok(pages);
+        }
+        ensure!(pages.len() < 10_000, "the pages never end");
+    }
 }
 
 /// The text a reopened session replays, and the answer to the reopening request `id`.
@@ -682,6 +738,67 @@ fn sessions(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
     ensure!(
         again.contains("echo: first") && again.contains("echo: second"),
         "an imported session's history lacks a turn"
+    );
+
+    // Paged: the pages join to the whole, only the first starts with the header, which carries a
+    // digest of the whole; a page too small for one line holds that line alone.
+    let paged = pages(harness, &moved, &place.root, 64)?;
+    ensure!(
+        paged.len() > 1,
+        "64-byte pages of a history of two turns came as one"
+    );
+    let joined: String = paged.iter().map(|page| page.text.as_str()).collect();
+    ensure!(joined == again, "the pages do not join to the whole export");
+    let header: Value = paged[0]
+        .text
+        .lines()
+        .next()
+        .and_then(|line| serde_json::from_str(line).ok())
+        .unwrap_or(Value::Null);
+    ensure!(
+        is_header(&header.to_string()) && header["digest"].is_string(),
+        "the first page does not start with a header carrying a digest: {header}"
+    );
+    ensure!(
+        paged[1..]
+            .iter()
+            .all(|page| !page.text.lines().any(is_header)),
+        "a page after the first carries a header"
+    );
+    let tiny = export_page(harness, &moved, &place.root, None, 1)?
+        .map_err(|code| format!("a one-byte page was refused with {code}"))?;
+    ensure!(
+        tiny.text.lines().count() == 1 && tiny.next.is_some(),
+        "a page too small for a line did not hold one line alone"
+    );
+
+    // An `after` the provider never gave, or one the session has moved past, is refused.
+    let unknown = export_page(
+        harness,
+        &moved,
+        &place.root,
+        Some("not a position it gave"),
+        64,
+    )?;
+    ensure!(
+        unknown.as_ref().err() == Some(&BAD_VALUE),
+        "an unknown `after` was answered {:?}",
+        unknown.map(|page| page.next)
+    );
+    let stale = paged[0].next.clone().unwrap_or_default();
+    let mut conn = open(harness, StartRequest::new())?;
+    conn.send(&initialize(0, contract.version, json!({})))?;
+    conn.answer(0)?;
+    conn.send(&reopen(1, method, &moved))?;
+    reopened(&mut conn, 1)?;
+    conn.send(&prompt(2, &moved, "third"))?;
+    turn(&mut conn, 2)?;
+    conn.close_with(OK)?;
+    let changed = export_page(harness, &moved, &place.root, Some(&stale), 64)?;
+    ensure!(
+        changed.as_ref().err() == Some(&BAD_VALUE),
+        "an `after` from before the session changed was answered {:?}",
+        changed.map(|page| page.next)
     );
 
     // What an import and an export refuse.

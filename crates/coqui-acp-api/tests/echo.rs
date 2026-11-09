@@ -13,7 +13,8 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
-    AcpHarness, ProcessSpawner, SessionImport, SessionQuery, SpawnSpec, SpawnedProcess, SpawnerInfo,
+    AcpHarness, ProcessSpawner, SessionExport, SessionImport, SessionQuery, SpawnSpec,
+    SpawnedProcess, SpawnerInfo,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -160,20 +161,23 @@ fn a_history_moves_between_harnesses() {
     assert_eq!(report.seeded_from.map(|point| point.line), Some(2));
     assert!(report.losses.is_empty() && !report.compacted);
     let exported = here
-        .export_session(SessionQuery::new(first, "/"), spawner())
+        .export_session(SessionExport::new(first, "/"), spawner())
         .expect("exported");
+    assert_eq!(exported.next, None, "a short history is one page");
+    let exported = exported.text;
     let second = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     there
         .import_session(SessionImport::new(second, "/", exported.clone()), spawner())
         .expect("seeded elsewhere");
     assert_eq!(
         there
-            .export_session(SessionQuery::new(second, "/"), spawner())
-            .expect("exported"),
+            .export_session(SessionExport::new(second, "/"), spawner())
+            .expect("exported")
+            .text,
         exported
     );
     let missing = there
-        .export_session(SessionQuery::new(first, "/"), spawner())
+        .export_session(SessionExport::new(first, "/"), spawner())
         .expect_err("another harness's session is not this one's");
     assert_eq!(missing.status, Status::GUATIAO_ERR_NOT_FOUND);
 }

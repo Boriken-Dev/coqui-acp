@@ -14,7 +14,7 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 
 | kind | table | `FLOOR_HASH` | who implements it |
 | --- | --- | --- | --- |
-| `acp_harness` | `AcpHarnessVtable` | `2565176903` | the provider |
+| `acp_harness` | `AcpHarnessVtable` | `2577453137` | the provider |
 | `channel` | `ChannelVtable` | `2843269355` | the provider (Guatiao's, re-exported) |
 | `channel_sink` | `ChannelSinkVtable` | `3528315804` | the host (Guatiao's, re-exported) |
 | `process_spawner` | `ProcessSpawnerVtable` | `1466370631` | the host |
@@ -37,8 +37,8 @@ pub trait AcpHarness: Send + Sync {
     fn program(&self) -> Result<Option<String>, ProviderError>;
     fn import_session(&self, session: SessionImport, spawner: Object<dyn ProcessSpawner>)
         -> Result<ImportReport, ProviderError>;
-    fn export_session(&self, query: SessionQuery, spawner: Object<dyn ProcessSpawner>)
-        -> Result<String, ProviderError>;
+    fn export_session(&self, export: SessionExport, spawner: Object<dyn ProcessSpawner>)
+        -> Result<ExportPage, ProviderError>;
     fn models(&self, environment: Secret<Environment>) -> Result<ModelListing, ProviderError>;     // default: unknown
     fn session_record(&self, query: SessionQuery) -> Result<Option<SessionRecordFile>, ProviderError>; // default: None
     fn non_defaults(&self) -> Result<Vec<NonDefault>, ProviderError>;                               // default: empty
@@ -51,8 +51,8 @@ Every method is synchronous; a host calls them from a thread of its own. Every m
 - `start`: one ACP connection. The host is the client, the provider the agent. `spawner` and `sink` are handed over: the provider destroys both, even when it refuses, and the spawner by the time it calls `closed`. It returns once the channel takes messages; the program may start later, and a failure then is answered in ACP before the provider closes. It refuses exactly when `refusal` would for the request's requirements, with the same status: `GUATIAO_ERR_UNSUPPORTED` for a requirement it cannot hold, `GUATIAO_ERR_BAD_VALUE` for a request it cannot read. It never starts with a requirement left out.
 - `refusal`: why the harness could not hold a connection to **all of** `requirements` together, started with `environment`, in a sentence; `None` when it can. An empty environment asks about the configuration alone and is answered. `GUATIAO_ERR_BAD_VALUE` for requirements `start` would refuse as unreadable. A host asks before it starts a connection and passes over a harness that would refuse.
 - `program`: the program the harness starts through the spawner (a path, or a name looked up on the `PATH` where it runs, the start's environment's `PATH` when that sets one); `None` for one that starts none.
-- `import_session`: seeds a session at the host's UUID from a history (below); an empty history seeds a fresh one. Answers an `ImportReport`. Refuses `GUATIAO_ERR_UNSUPPORTED`, with the reason, when the harness cannot import at all or does not read the history's version; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or a history it cannot read. Never a session half seeded and never a silent fallback: a harness with no native session to seed (a generic ACP agent) may import by replaying the history as context in its first prompt, and then says so in the report's losses (`replayed_as_prompt`).
-- `export_session`: the history of a session it reported, by its UUID, in the standard format, as it is. `GUATIAO_ERR_NOT_FOUND` for a session it does not have; `GUATIAO_ERR_UNSUPPORTED`, with the reason, when it cannot export.
+- `import_session`: seeds a session at the host's UUID from a history (below); an empty history seeds a fresh one. A UUID the provider already holds is `GUATIAO_ERR_BAD_VALUE`, never overwritten: a host moving a session back to a harness that still holds it imports at a new UUID or into a fresh store. Answers an `ImportReport`. Refuses `GUATIAO_ERR_UNSUPPORTED`, with the reason, when the harness cannot import at all or does not read the history's version; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or a history it cannot read. Never a session half seeded and never a silent fallback: a harness with no native session to seed (a generic ACP agent) may import by replaying the history as context in its first prompt, and then says so in the report's losses (`replayed_as_prompt`).
+- `export_session`: one page of the history of a session it reported, by its UUID, in the standard format, as it is. A page is whole lines, each ended by a line feed, at most `max_bytes`, except that a page too small for the next line holds that one line alone (so every page makes progress; never a refusal for size). Only the first page starts with the header, which carries the format's version and the digest of the whole body. `next` names the page after; absent, the export is complete; the pages joined are the export of one page as large as the whole. `after` is opaque, the provider's own. `GUATIAO_ERR_NOT_FOUND` for a session it does not have; `GUATIAO_ERR_BAD_VALUE` for an `after` it never gave or one the session has changed since (the host starts again from the first page); `GUATIAO_ERR_UNSUPPORTED`, with the reason, when it cannot export.
 - `models`: what the account behind `environment` may use, with no model turn, or why it cannot say.
 - `session_record`: where the harness keeps its own record of a session, by the UUID it reported.
 - `non_defaults`: how a configured harness departs from its defaults in ways its settings' schema cannot show (the detail of a rule a setting holds as text). The rest a host reads from the schema itself, with Guatiao's `schema::differences`.
@@ -128,7 +128,7 @@ ProcessExit::running();  ProcessExit::ended(code, signal)
 
 ## Requests and answers
 
-What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport`, and the provider's `SpawnSpec`) **refuses a key it does not declare** (`GUATIAO_ERR_BAD_VALUE`), so a narrowing a newer side adds is never dropped by an older one: a new key is a break. What is answered is read leniently.
+What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport`, `SessionExport`, and the provider's `SpawnSpec`) **refuses a key it does not declare** (`GUATIAO_ERR_BAD_VALUE`), so a narrowing a newer side adds is never dropped by an older one: a new key is a break. What is answered is read leniently.
 
 ```rust
 #[non_exhaustive] pub struct StartRequest {
@@ -164,6 +164,11 @@ SessionQuery::new(session_id, working_directory).environment(env)
 #[non_exhaustive] pub struct SessionImport { pub session_id: String, pub working_directory: String, pub history: String,
     pub environment: Secret<Environment> }
 SessionImport::new(session_id, working_directory, history).environment(env)
+#[non_exhaustive] pub struct SessionExport { pub session_id: String, pub working_directory: String,
+    pub environment: Secret<Environment>, pub after: Option<String>, pub max_bytes: u64 /* DEFAULT_PAGE_BYTES */ }
+SessionExport::new(session_id, working_directory).environment(env).after(next).max_bytes(n)
+pub const DEFAULT_PAGE_BYTES: u64 = 1 << 20;
+#[non_exhaustive] pub struct ExportPage { pub text: String, pub next: Option<String> }   ExportPage::new(text, next)
 #[non_exhaustive] #[derive(Default)] pub struct ImportReport { pub seeded_from: Option<SeedPoint>, pub losses: Vec<HistoryLoss>, pub compacted: bool }
 ImportReport::new()
 #[non_exhaustive] pub struct SeedPoint { pub line: u64, pub digest: Option<String> }   SeedPoint::line(n)   // the header is line 1
@@ -213,7 +218,7 @@ A session's `cwd` and every one of its `additionalDirectories`, on `session/new`
 
 **A host starts a session at an id of its own by seeding it**: it creates the UUID, calls `import_session` with that UUID and a history (empty for a fresh session), then opens a connection and sends ACP `session/resume` (or `session/load`, which replays the history as updates) with the UUID. The provider maps the UUID to the harness's own id and keeps the mapping. `session/load` and `session/resume` of a UUID the provider does not have are refused in ACP. Moving a session to another harness is an export from one and an import at the same or a new UUID in the other.
 
-**A history** is the standard session-history format: UTF-8 JSON lines in ACP's vocabulary, whose first line is a header object naming the format and its version (`{"format": "coqui-acp-history", "version": 1, ...}`), then the session's prompts and updates. The kind carries it as text and never reads it, so the format grows by its header's version without changing the kind; a provider refuses a version it does not read. Its content is context, never commands: an import never re-runs a tool.
+**A history** is the standard session-history format: UTF-8 JSON lines in ACP's vocabulary, whose first line is a header object naming the format, its version and the body's digest (`{"format": "coqui-acp-history", "version": 1, "digest": ..., ...}`), then the session's prompts and updates. The kind carries it as text and never reads it, so the format grows by its header's version without changing the kind; a provider refuses a version it does not read. Its content is context, never commands: an import never re-runs a tool.
 
 **The host stays the client.** Every request the agent makes of the client (`session/request_permission`, `fs/*`, `terminal/*`, `elicitation/create`) reaches the host, which answers it under its own rules, refusing by default. The agent asks only for what `initialize`'s `clientCapabilities` offered. A permission answered with anything but a selected option the request offered is a refusal; a cancelled outcome ends the turn `cancelled`. A provider's answer never overrides the host's refusal.
 
@@ -232,7 +237,7 @@ Contract::new(name) .version(u16 /* 1 */) .holds(Vec<Requirement> /* read_only, 
 pub struct contract::Failures { pub provider: String, pub failures: Vec<Failure> }   // Display lists each
 ```
 
-Every provider of the kind passes it, configured to drive the **contract agent**: a real harness supplies a stand-in for its program that behaves as the module's documentation says (`close`, `wait`, `ask`, `read PATH`, else `echo: TEXT`). It checks the methods, requirements, secrets, ACP and its errors, seeding a session at the host's UUID (empty, then resumed; exported after turns, imported at another UUID, then resumed; what an import and an export refuse), reopening, cancel, permission answers, client capabilities, back-pressure, every close, working roots, the size limit and a real `coqui_acp::Client`. It makes and removes a directory under the system's temporary one, with a link (a junction on Windows) when the platform allows.
+Every provider of the kind passes it, configured to drive the **contract agent**: a real harness supplies a stand-in for its program that behaves as the module's documentation says (`close`, `wait`, `ask`, `read PATH`, else `echo: TEXT`). It checks the methods, requirements, secrets, ACP and its errors, seeding a session at the host's UUID (empty, then resumed; exported after turns, imported at another UUID, then resumed; what an import and an export refuse), paging an export (pages join to the whole, the header with its digest on the first only, a one-byte page holding one line, an unknown or stale `after` refused), reopening, cancel, permission answers, client capabilities, back-pressure, every close, working roots, the size limit and a real `coqui_acp::Client`. It makes and removes a directory under the system's temporary one, with a link (a junction on Windows) when the platform allows.
 
 `acp-harness-check` runs it on a provider with no Rust of the provider's own: `--library FILE`, or `--source SOURCE_LIBRARY --source-config JSON` for one a Guatiao source loads; `--provider KEY`, `--settings JSON` (build an instance), `--version N`, `--holds NAME[=JSON]` (repeated), `--message-limit N`, `--no-imports` (it must refuse `import_session` with a reason). Exits 0, 1 listing each rule broken, or 2 when the provider could not be loaded.
 

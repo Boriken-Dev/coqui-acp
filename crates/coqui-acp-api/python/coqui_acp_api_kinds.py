@@ -162,7 +162,7 @@ class Channel(KindProtocol, Protocol, kind="channel", floor_hash=2843269355, is_
         ...
 
 
-class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=2565176903):
+class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=2577453137):
     """Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.
 
     The host is the ACP client and the provider the agent: each message on the channel, either way,
@@ -237,16 +237,21 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=25651769
         Answers what the seed was made from and what it lost. Refuses `GUATIAO_ERR_UNSUPPORTED`,
         with the reason, when the harness cannot import at all or does not read the history's
         version; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or
-        a history it cannot read. Never a session left half seeded, never a silent fallback.
+        a history it cannot read. Never a session left half seeded, never a silent fallback, and never
+        an overwrite: a host moving a session back to a harness that still holds it imports at a new
+        UUID or into a fresh store.
         """
         ...
 
     @required
     @fallible
-    def export_session(self, query: Ref, spawner: Taken[ProcessSpawner]) -> str:
-        """The history of the session `query` names (by its UUID), in the standard session-history
-        format, as it is. `spawner` is handed over as `import_session`'s is. Refuses
-        `GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_UNSUPPORTED`,
+    def export_session(self, export: Ref, spawner: Taken[ProcessSpawner]) -> ValueAnswer:
+        """One page of the history of the session `export` names (by its UUID), in the standard
+        session-history format, as it is: whole lines, at most `max_bytes` unless one line alone is
+        longer, the header on the first page only. The pages, joined, are the export of one page as
+        large as the whole. `spawner` is handed over as `import_session`'s is. Refuses
+        `GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_BAD_VALUE` for
+        an `after` it did not give or that the session has changed since, `GUATIAO_ERR_UNSUPPORTED`,
         with the reason, when it cannot export.
         """
         ...

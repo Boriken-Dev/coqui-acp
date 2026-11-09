@@ -125,6 +125,70 @@
       "working_directory"
     ]
   },
+  "SessionExport": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "session_id": {
+        "type": "string",
+        "description": "The session's id as the provider reported it: a UUID."
+      },
+      "working_directory": {
+        "type": "string",
+        "description": "The directory the session worked in."
+      },
+      "environment": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "writeOnly": true,
+        "x-sensitive": true,
+        "description": "The variables its connection was started with.",
+        "default": {}
+      },
+      "after": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Where to go on from: the `next` of the page before, as the provider gave it; absent for the first page."
+      },
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "The most bytes a page holds. A page is whole lines only, so one that would hold none holds the one line that does not fit, alone.",
+        "default": 1048576
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "session_id",
+      "working_directory"
+    ]
+  },
+  "ExportPage": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Whole JSON lines, each ended by a line feed. Only the first page starts with the header."
+      },
+      "next": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "What to ask for the next page with ([`SessionExport::after`]); absent when the export is complete."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "text"
+    ]
+  },
   "SpawnSpec": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

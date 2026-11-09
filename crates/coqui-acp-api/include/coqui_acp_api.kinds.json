@@ -2,7 +2,7 @@
   "kinds": [
     {
       "name": "acp_harness",
-      "floor_hash": 2565176903,
+      "floor_hash": 2577453137,
       "object": false,
       "doc": "Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.\n\nThe host is the ACP client and the provider the agent: each message on the channel, either way,\nis one whole JSON-RPC 2.0 message as UTF-8 JSON text. The kind never models ACP itself, so a\nprovider in any language implements ACP as the protocol defines it, and the version is agreed by\n`initialize` on the channel.\n\nEvery method answers for the provider as configured: a host builds an instance from the\nprovider's settings and asks it. Every method is synchronous; a host calls them from a thread\nof its own. The methods without a default are the ones a host acts on for every harness; a\ndefault is kept only where it is a true answer for a harness that has nothing to say.",
       "slots": [
@@ -96,7 +96,7 @@
           "answer": {
             "type": "value"
           },
-          "doc": "Seeds a session at the host's UUID from a history, so that a later connection's\n`session/resume` or `session/load` of that UUID opens it; an empty history seeds a fresh one.\nThe provider maps the UUID to the harness's own id and keeps the mapping. `spawner` is handed\nover as `start`'s is, for a harness whose files live where its programs run.\n\nAnswers what the seed was made from and what it lost. Refuses `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when the harness cannot import at all or does not read the history's\nversion; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or\na history it cannot read. Never a session left half seeded, never a silent fallback."
+          "doc": "Seeds a session at the host's UUID from a history, so that a later connection's\n`session/resume` or `session/load` of that UUID opens it; an empty history seeds a fresh one.\nThe provider maps the UUID to the harness's own id and keeps the mapping. `spawner` is handed\nover as `start`'s is, for a harness whose files live where its programs run.\n\nAnswers what the seed was made from and what it lost. Refuses `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when the harness cannot import at all or does not read the history's\nversion; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or\na history it cannot read. Never a session left half seeded, never a silent fallback, and never\nan overwrite: a host moving a session back to a harness that still holds it imports at a new\nUUID or into a fresh store."
         },
         {
           "name": "export_session",
@@ -104,7 +104,7 @@
           "fallible": true,
           "args": [
             {
-              "name": "query",
+              "name": "export",
               "type": "value",
               "pass": "borrowed"
             },
@@ -116,9 +116,9 @@
             }
           ],
           "answer": {
-            "type": "text"
+            "type": "value"
           },
-          "doc": "The history of the session `query` names (by its UUID), in the standard session-history\nformat, as it is. `spawner` is handed over as `import_session`'s is. Refuses\n`GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when it cannot export."
+          "doc": "One page of the history of the session `export` names (by its UUID), in the standard\nsession-history format, as it is: whole lines, at most `max_bytes` unless one line alone is\nlonger, the header on the first page only. The pages, joined, are the export of one page as\nlarge as the whole. `spawner` is handed over as `import_session`'s is. Refuses\n`GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_BAD_VALUE` for\nan `after` it did not give or that the session has changed since, `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when it cannot export."
         },
         {
           "name": "models",

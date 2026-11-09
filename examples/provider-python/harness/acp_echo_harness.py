@@ -44,7 +44,10 @@ WORDS = ("sandboxed_scripts", "only_skills")
 #: The keys a request may have: one it does not declare is refused, never dropped.
 START_KEYS = {"environment", "working_roots", "requirements"}
 IMPORT_KEYS = {"session_id", "working_directory", "history", "environment"}
-QUERY_KEYS = {"session_id", "working_directory", "environment"}
+EXPORT_KEYS = {"session_id", "working_directory", "environment", "after", "max_bytes"}
+
+#: How many bytes a page holds when the host gives no bound.
+DEFAULT_PAGE_BYTES = 1 << 20
 
 #: The header of the history the echo writes and reads: the standard format's name and the one
 #: version the echo knows. A history is this line, then one line per prompt and per update.
@@ -65,6 +68,24 @@ _SESSIONS_LOCK = threading.Lock()
 _NEXT = [1]
 
 
+def _digest(lines: List[str]) -> str:
+    """The digest a header gives its body: FNV-1a over each line and its line feed. Enough to see a
+    body changed; not a defence against anyone."""
+    value = 0xCBF29CE484222325
+    for line in lines:
+        for byte in line.encode("utf-8") + b"\n":
+            value ^= byte
+            value = (value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"fnv1a64:{value:016x}"
+
+
+def _history_lines(lines: List[Dict[str, Any]]) -> List[str]:
+    """A session's history as lines, the header first, carrying the body's digest."""
+    body = [json.dumps(line, separators=(",", ":")) for line in lines]
+    header = {"format": HISTORY_FORMAT, "version": HISTORY_VERSION, "digest": _digest(body)}
+    return [json.dumps(header, separators=(",", ":"))] + body
+
+
 def _read_history(history: str) -> List[Dict[str, Any]]:
     """The lines of `history` after its header; an empty history has none."""
     lines = [line for line in history.splitlines() if line.strip()]
@@ -83,6 +104,9 @@ def _read_history(history: str) -> List[Dict[str, Any]]:
         raise BadValue("the history has no header naming its format and version")
     if header["version"] != HISTORY_VERSION:
         raise Unsupported("the echo reads version 1 of the history format only")
+    digest = header.get("digest")
+    if digest is not None and digest != _digest(lines[1:]):
+        raise BadValue("the history's body does not match its header's digest")
     read = []
     for line in lines[1:]:
         try:
@@ -590,18 +614,40 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             report["seeded_from"] = {"line": 2}
         return report
 
-    def export_session(self, query: Ref, spawner: ProcessSpawner) -> str:
+    def export_session(self, export: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
+        """A position is `<line>:<digest>`: the next line to give, and the digest of the body when
+        the first page was given, so a session that has changed since refuses it."""
         spawner.destroy()
-        asked = query.to_python()
-        if not isinstance(asked, dict) or not set(asked) <= QUERY_KEYS:
-            raise BadValue("the query has a key the echo does not know")
+        asked = export.to_python()
+        if not isinstance(asked, dict) or not set(asked) <= EXPORT_KEYS:
+            raise BadValue("the export has a key the echo does not know")
         with _SESSIONS_LOCK:
             kept = _SESSIONS.get(asked.get("session_id"))
             if kept is None:
                 raise NotFound("no session has this id")
-            lines = list(kept["lines"])
-        header = {"format": HISTORY_FORMAT, "version": HISTORY_VERSION}
-        return "".join(json.dumps(line) + "\n" for line in [header] + lines)
+            lines = _history_lines(list(kept["lines"]))
+        digest = _digest(lines[1:])
+        after = asked.get("after")
+        start = 0
+        if after is not None:
+            line, _, given = str(after).partition(":")
+            if given != digest or not line.isdigit() or not 1 <= int(line) < len(lines):
+                raise BadValue("the position is not one the echo gave, or the session has changed since")
+            start = int(line)
+        limit = asked.get("max_bytes", DEFAULT_PAGE_BYTES)
+        text, end, size = "", start, 0
+        while end < len(lines):
+            line = lines[end] + "\n"
+            width = len(line.encode("utf-8"))
+            if end > start and size + width > limit:
+                break
+            text += line
+            size += width
+            end += 1
+        page: Dict[str, Any] = {"text": text}
+        if end < len(lines):
+            page["next"] = f"{end}:{digest}"
+        return page
 
     def models(self, environment: Ref) -> Dict[str, Any]:
         return {"known": True, "models": [{"id": "echo"}]}

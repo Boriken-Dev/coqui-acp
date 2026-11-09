@@ -18,8 +18,9 @@
 //! roots.
 //!
 //! Its sessions are kept: it imports a history at the host's UUID, an empty one seeding a fresh
-//! session, exports what its sessions said in the standard format (a header line with `version`,
-//! then the turns), and `session/load` replays a session's updates. A provider that cannot import
+//! session, exports what its sessions said in the standard format (a header line with `version`
+//! and a `digest`, then the turns) in pages of whole lines, and `session/load` replays a session's
+//! updates. A provider that cannot import
 //! is run with [`Contract::imports`] off and must refuse with a reason.
 //!
 //! The `acp-harness-check` program runs the same suite on a library file or a source file, for a

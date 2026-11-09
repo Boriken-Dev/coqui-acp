@@ -10,8 +10,8 @@ use guatiao_channel::{Channel, ChannelSink};
 
 use crate::environment::Environment;
 use crate::models::{
-    HarnessInfo, ImportReport, ModelListing, NonDefault, SessionImport, SessionQuery,
-    SessionRecordFile, StartRequest,
+    ExportPage, HarnessInfo, ImportReport, ModelListing, NonDefault, SessionExport, SessionImport,
+    SessionQuery, SessionRecordFile, StartRequest,
 };
 use crate::requirement::Requirement;
 use crate::spawner::ProcessSpawner;
@@ -80,22 +80,27 @@ pub trait AcpHarness: Send + Sync {
     /// Answers what the seed was made from and what it lost. Refuses `GUATIAO_ERR_UNSUPPORTED`,
     /// with the reason, when the harness cannot import at all or does not read the history's
     /// version; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or
-    /// a history it cannot read. Never a session left half seeded, never a silent fallback.
+    /// a history it cannot read. Never a session left half seeded, never a silent fallback, and never
+    /// an overwrite: a host moving a session back to a harness that still holds it imports at a new
+    /// UUID or into a fresh store.
     fn import_session(
         &self,
         session: SessionImport,
         spawner: Object<dyn ProcessSpawner>,
     ) -> Result<ImportReport, ProviderError>;
 
-    /// The history of the session `query` names (by its UUID), in the standard session-history
-    /// format, as it is. `spawner` is handed over as `import_session`'s is. Refuses
-    /// `GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_UNSUPPORTED`,
+    /// One page of the history of the session `export` names (by its UUID), in the standard
+    /// session-history format, as it is: whole lines, at most `max_bytes` unless one line alone is
+    /// longer, the header on the first page only. The pages, joined, are the export of one page as
+    /// large as the whole. `spawner` is handed over as `import_session`'s is. Refuses
+    /// `GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_BAD_VALUE` for
+    /// an `after` it did not give or that the session has changed since, `GUATIAO_ERR_UNSUPPORTED`,
     /// with the reason, when it cannot export.
     fn export_session(
         &self,
-        query: SessionQuery,
+        export: SessionExport,
         spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<String, ProviderError>;
+    ) -> Result<ExportPage, ProviderError>;
 
     /// The models the account behind `environment` may use, when the harness can say without a
     /// model turn. Never carries a value from `environment`. The default, for a harness with no
