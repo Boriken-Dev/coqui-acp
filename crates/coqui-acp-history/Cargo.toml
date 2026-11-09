@@ -1,0 +1,45 @@
+[package]
+name = "coqui-acp-history"
+description = "One file format for an Agent Client Protocol session's history: write, read, bound, redact, seed from a compaction and move it between harnesses"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["acp", "agent", "session", "history", "jsonl"]
+categories = ["parser-implementations", "development-tools"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+# The `coqui-acp-history` command.
+cli = ["dep:clap"]
+
+[[bin]]
+name = "coqui-acp-history"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+agent-client-protocol.workspace = true
+clap = { workspace = true, optional = true }
+data-encoding.workspace = true
+guatiao = { workspace = true, features = ["derive"] }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+guatiao-serde = { workspace = true, features = ["json"] }
+
+[lints]
+workspace = true
