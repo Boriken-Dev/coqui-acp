@@ -10,6 +10,9 @@
 //! `COQUI_ACP_CODEX_REFUSE` names a method such a request of is refused, and `COQUI_ACP_CODEX_THREAD` the thread an
 //! unrecorded `thread/start` opens.
 //!
+//! `COQUI_ACP_CODEX_RATE_LIMITS` names a file holding the JSON an unrecorded `account/rateLimits/read` answers with, read
+//! afresh at each request so a test may change it between reads.
+//!
 //! `COQUI_ACP_CODEX_THREAD_STATE` is the approval policy, sandbox and reviewer, comma-separated, a recorded `thread/start`
 //! answers with in place of the recorded ones.
 //!
@@ -119,6 +122,15 @@ fn main() {
             let result = match method {
                 Some("model/list") => json!({"data": [], "nextCursor": null}),
                 Some("config/read") => json!({"config": {"model": "from-config"}, "origins": {}}),
+                Some("account/rateLimits/read")
+                    if std::env::var_os("COQUI_ACP_CODEX_RATE_LIMITS").is_some() =>
+                {
+                    let path = std::env::var_os("COQUI_ACP_CODEX_RATE_LIMITS").unwrap();
+                    std::fs::read(path)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_else(|| json!({}))
+                }
                 Some("thread/start") if std::env::var_os("COQUI_ACP_CODEX_THREAD").is_some() => {
                     json!({"thread": {"id": std::env::var("COQUI_ACP_CODEX_THREAD").unwrap()}})
                 }

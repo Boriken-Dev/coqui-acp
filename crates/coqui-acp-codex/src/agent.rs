@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use std::io::Read;
 use std::sync::OnceLock;
 
-use coqui_acp_api::{Source, UsageSupport};
+use coqui_acp_api::{Bucket, Source, UsageSupport};
 use coqui_acp_harness::{
     AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, Launch, McpTransport,
     Open, OpenRequest, OptionValue, PlainSpawn, Spawn, Takes,
@@ -172,7 +172,14 @@ impl Harness for CodexAgent {
     }
 
     fn usage(&self) -> UsageSupport {
-        UsageSupport::new(alloc::vec![Source::Reported, Source::Inferred], false)
+        UsageSupport::new(alloc::vec![Source::Reported, Source::Inferred], true)
+    }
+
+    /// With no session open, an app server is started for the read and ended after it, so a host polls as often as it
+    /// can afford a process start. Nothing when Codex cannot be started or has no allowances to report.
+    fn read_usage(&self) -> Option<Vec<Bucket>> {
+        CodexSession::read_account_usage(&self.defaults, self.spawn.as_ref(), self.settings.clone())
+            .ok()
     }
 
     fn takes(&self) -> Takes {
@@ -321,6 +328,10 @@ impl Conversation for CodexConversation {
 
     fn interrupt(&self) -> Result<(), HarnessError> {
         self.session.interrupt().map_err(HarnessError::from)
+    }
+
+    fn read_usage(&self) -> Option<Vec<Bucket>> {
+        self.session.read_usage().ok()
     }
 
     fn set_option(&self, id: &str, value: &str) -> Result<Vec<ConfigOption>, HarnessError> {

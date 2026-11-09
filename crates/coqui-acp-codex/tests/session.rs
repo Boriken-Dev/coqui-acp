@@ -142,6 +142,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
             "initialized",
             "model/list",
             "thread/resume",
+            "account/rateLimits/read",
             "turn/start"
         ]
     );
@@ -155,7 +156,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
         (Some(resume_thread().as_str()), Some(true), Some("gpt-5"))
     );
     assert_eq!(resume["cwd"], scratch.0.to_string_lossy().as_ref());
-    let turn = &sent[4]["params"];
+    let turn = &sent[5]["params"];
     assert_eq!(
         (
             turn["threadId"].as_str(),

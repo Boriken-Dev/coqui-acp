@@ -668,3 +668,132 @@ fn a_turn_in_a_mode_keeps_the_sessions_effort_and_instructions() {
     );
     assert!(!params.to_string().contains("null"), "{params}");
 }
+
+const USAGE: &str = "dev.boriken.coqui.acp/usage";
+
+/// An agent whose stand-in answers `account/rateLimits/read` with the contents of `limits`.
+fn reading(limits: &std::path::Path) -> CodexAgent {
+    let mut defaults = CodexLaunch::new(".");
+    defaults.executable = replay_program().into();
+    defaults
+        .env
+        .insert("COQUI_ACP_CODEX_RATE_LIMITS".into(), limits.into());
+    defaults
+        .env
+        .insert("COQUI_ACP_CODEX_THREAD".into(), "thread-usage".into());
+    CodexAgent::new().defaults(defaults)
+}
+
+fn opt_in(peer: &mut Peer) -> Value {
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 2, "capabilities": {"_meta": {USAGE: {"notify": true, "account": "pool/codex"}}},
+               "info": {"name": "test", "version": "0"}}),
+    )
+}
+
+/// The recorded `account/rateLimits/read` answer of Codex 0.166.0, as a file the stand-in answers from.
+fn write_limits(path: &std::path::Path, weekly_percent: u64) {
+    let mut answer = support::recorded_166("rate_limits_read")
+        .into_iter()
+        .find_map(|line| line.get("result").cloned())
+        .expect("the recorded answer");
+    answer["rateLimits"]["secondary"]["usedPercent"] = json!(weekly_percent);
+    answer["rateLimitsByLimitId"]["codex"]["secondary"]["usedPercent"] = json!(weekly_percent);
+    std::fs::write(path, serde_json::to_vec(&answer).unwrap()).unwrap();
+}
+
+fn weekly(report: &Value) -> Value {
+    report["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bucket| bucket["id"] == "codex:weekly")
+        .unwrap_or_else(|| panic!("no weekly bucket in {report}"))
+        .clone()
+}
+
+#[test]
+fn a_session_tells_a_client_that_asked_where_the_account_stands_and_a_poll_reads_it_again() {
+    let scratch = Scratch::new("usage");
+    let limits = scratch.0.join("limits.json");
+    write_limits(&limits, 3);
+    let mut peer = Peer::serve(reading(&limits), Settings::new());
+    let initialized = opt_in(&mut peer);
+    let advertised = &initialized["result"]["capabilities"]["_meta"][USAGE];
+    assert_eq!(advertised["version"], 1, "{initialized}");
+    assert_eq!(advertised["spend"], true);
+    assert!(
+        advertised.get("needs_turn").is_none(),
+        "Codex is read without a turn: {advertised}"
+    );
+
+    // The read as the session opens reaches a client that asked, with the host's account.
+    let opened = peer.request("session/new", json!({"cwd": scratch.0.to_string_lossy()}));
+    assert!(opened["result"]["sessionId"].is_string(), "{opened}");
+    // What a session says while it opens is sent once its answer has gone: a round trip reads it.
+    for _ in 0..40 {
+        if !peer.usage_updates.is_empty() {
+            break;
+        }
+        peer.request("session/list", json!({}));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let told = peer
+        .usage_updates
+        .first()
+        .expect("a usage_update at open")
+        .clone();
+    let report = &told["report"];
+    assert_eq!(report["account"], "pool/codex");
+    let five = report["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bucket| bucket["id"] == "codex:five_hour")
+        .unwrap();
+    assert_eq!(
+        (
+            &five["used"],
+            &five["limit"],
+            &five["unit"],
+            &five["status"]
+        ),
+        (&json!(0), &json!(1000), &json!("permille"), &json!("ok"))
+    );
+    assert_eq!(five["refill"]["kind"], "fixed_window");
+    assert_eq!(five["refill"]["resets_at"], 1_794_248_766);
+    assert_eq!(five["refill"]["length"], json!([18_000, 0]));
+    assert_eq!(weekly(report)["used"], 30);
+    let revision = report["revision"].as_u64().unwrap();
+
+    // Asked again with the account unchanged, the revision stays.
+    let again = peer.request(USAGE_METHOD, json!({}));
+    assert_eq!(again["result"]["revision"], revision, "{again}");
+
+    // Codex moved on: the next poll sees it and the client is told, with no turn between.
+    write_limits(&limits, 9);
+    let polled = peer.request(USAGE_METHOD, json!({}));
+    assert_eq!(weekly(&polled["result"])["used"], 90, "{polled}");
+    assert!(polled["result"]["revision"].as_u64().unwrap() > revision);
+    peer.request(USAGE_METHOD, json!({})); // the notification was read while waiting for this answer
+    assert_eq!(
+        weekly(&peer.usage_updates.last().unwrap()["report"])["used"],
+        90
+    );
+}
+
+#[test]
+fn a_poll_with_no_session_starts_the_app_server_for_the_read_and_ends_it() {
+    let scratch = Scratch::new("usage-bare");
+    let limits = scratch.0.join("limits.json");
+    write_limits(&limits, 12);
+    let mut peer = Peer::serve(reading(&limits), Settings::new());
+    opt_in(&mut peer);
+    let polled = peer.request(USAGE_METHOD, json!({}));
+    assert_eq!(polled["result"]["supported"], true, "{polled}");
+    assert_eq!(weekly(&polled["result"])["used"], 120);
+    assert_eq!(polled["result"]["account"], "pool/codex");
+}
+
+const USAGE_METHOD: &str = "_coqui_acp/usage";

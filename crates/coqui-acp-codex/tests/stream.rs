@@ -8,14 +8,16 @@
 
 mod support;
 
-use coqui_acp_api::usage::{Bucket, Refill};
+use std::time::Duration;
+
+use coqui_acp_api::usage::{Bucket, Coverage, Refill, Status, Unit};
 use coqui_acp_codex::harness::event::{
     Content, Event, FileChange, OptionKind, Outcome, Stop, ToolContent, ToolKind, ToolStatus,
     TurnEnd,
 };
 use coqui_acp_codex::{models_of, user_input, version_of};
 use serde_json::{Value, json};
-use support::{parsed, parser, recorded};
+use support::{parsed, parser, recorded, recorded_166};
 
 fn events_of(lines: &[Value]) -> Vec<Event> {
     let (mut parser, _) = parser();
@@ -400,7 +402,7 @@ fn a_failed_turn_with_a_usage_limit_uses_the_exhausted_window_for_the_reset() {
         panic!()
     };
     assert_eq!(limit.resets_at, Some(1_790_000_000));
-    assert_eq!(limit.bucket.as_deref(), Some("five_hour"));
+    assert_eq!(limit.bucket.as_deref(), Some("codex:five_hour"));
     let TurnEnd::Limited(alone) = end_of(&events_of(&[failed])).clone() else {
         panic!()
     };
@@ -429,9 +431,12 @@ fn every_rate_limit_snapshot_reports_its_windows_as_buckets() {
     );
     assert_eq!(
         (both[0].id.as_str(), both[0].used, resets(&both[0])),
-        ("five_hour", Some(425), Some(1_790_000_000))
+        ("codex:five_hour", Some(425), Some(1_790_000_000))
     );
-    assert_eq!((both[1].id.as_str(), both[1].used), ("weekly", Some(400)));
+    assert_eq!(
+        (both[1].id.as_str(), both[1].used),
+        ("codex:weekly", Some(400))
+    );
     assert!(matches!(
         both[0].refill,
         Refill::FixedWindow { length: Some(length), .. } if length.as_secs() == 18_000
@@ -441,7 +446,7 @@ fn every_rate_limit_snapshot_reports_its_windows_as_buckets() {
     );
     assert_eq!(
         (partial.len(), partial[0].id.as_str(), partial[0].used),
-        (1, "primary", Some(990)),
+        (1, "codex:primary", Some(990)),
         "an unnamed window keeps its position"
     );
     assert!(quota(json!({"method": "turn/completed", "params": {}})).is_empty());
@@ -667,4 +672,266 @@ fn a_turn_that_has_ended_is_not_taken_as_running_from_a_late_answer() {
     assert_eq!(parser.turn(), None);
     parser.started("b");
     assert_eq!(parser.turn(), Some("b"));
+}
+
+// Usage: the account's allowances. The read answer is recorded from Codex 0.166.0 (`account/rateLimits/read`, asked
+// with no thread and no turn; its account id and reset-credit ids replaced); the empty update is recorded from 0.164.0.
+
+fn read_answer() -> Value {
+    recorded_166("rate_limits_read")
+        .into_iter()
+        .find_map(|line| line.get("result").cloned())
+        .expect("the recorded read answer")
+}
+
+fn buckets_of(events: &[Event]) -> Vec<Bucket> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Buckets(buckets) => Some(buckets.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn by_id<'a>(buckets: &'a [Bucket], id: &str) -> &'a Bucket {
+    buckets
+        .iter()
+        .find(|bucket| bucket.id == id)
+        .unwrap_or_else(|| panic!("no bucket {id} in {buckets:?}"))
+}
+
+#[test]
+fn a_recorded_account_read_becomes_its_two_windows() {
+    let (mut parser, _) = parser();
+    let buckets = parser.rate_limits_read(&read_answer());
+    assert_eq!(buckets.len(), 2, "{buckets:?}");
+    let five = by_id(&buckets, "codex:five_hour");
+    assert_eq!(
+        (five.used, five.limit, &five.unit, &five.status),
+        (Some(0), Some(1000), &Unit::Permille, &Status::Ok)
+    );
+    assert_eq!(five.models, Coverage::Unknown);
+    assert_eq!(
+        five.refill,
+        Refill::FixedWindow {
+            length: Some(Duration::from_secs(300 * 60)),
+            resets_at: Some(1_794_248_766)
+        }
+    );
+    let weekly = by_id(&buckets, "codex:weekly");
+    assert_eq!((weekly.used, weekly.limit), (Some(30), Some(1000)));
+    assert_eq!(
+        weekly.refill,
+        Refill::FixedWindow {
+            length: Some(Duration::from_secs(10_080 * 60)),
+            resets_at: Some(1_794_594_665)
+        }
+    );
+}
+
+#[test]
+fn a_recorded_update_with_no_windows_changes_nothing_the_read_gave() {
+    let (mut parser, _) = parser();
+    let read = parser.rate_limits_read(&read_answer());
+    let empty = recorded("turn")
+        .into_iter()
+        .find(|line| line["method"] == "account/rateLimits/updated")
+        .expect("a recorded update");
+    assert_eq!(
+        empty.pointer("/params/rateLimits/primary"),
+        Some(&Value::Null)
+    );
+    let events = parser.line(&empty);
+    assert!(buckets_of(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        parser.rate_limits(),
+        read,
+        "a null is a value the update lacks"
+    );
+}
+
+#[test]
+fn a_delta_updating_one_limit_keeps_the_others() {
+    let mut answer = read_answer();
+    // A second limit with its own model, as `rateLimitsByLimitId` lists them.
+    answer["rateLimitsByLimitId"]["codex_spark"] = json!({
+        "limitId": "codex_spark", "limitName": "Spark", "normalModelSlug": "gpt-spark",
+        "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1_794_249_000},
+        "secondary": null, "credits": null, "individualLimit": null, "spendControlReached": null,
+        "planType": "plus", "rateLimitReachedType": null});
+    let (mut parser, _) = parser();
+    let read = parser.rate_limits_read(&answer);
+    assert_eq!(read.len(), 3, "{read:?}");
+    let spark = by_id(&read, "codex_spark:five_hour");
+    assert_eq!(
+        spark.models,
+        Coverage::Only {
+            models: vec!["gpt-spark".into()]
+        }
+    );
+    assert_eq!(spark.label.as_deref(), Some("Spark"));
+
+    // A sparse delta: the one window of the one limit, with no length, and nothing else.
+    let events = parser.line(&json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "limitId": "codex", "primary": {"usedPercent": 64, "resetsAt": 1_794_248_800}, "secondary": null}}}));
+    let told = buckets_of(&events);
+    assert_eq!(told.len(), 2, "only the limit it named is told: {told:?}");
+    let five = by_id(&told, "codex:five_hour");
+    assert_eq!(five.used, Some(640));
+    assert_eq!(
+        five.refill,
+        Refill::FixedWindow {
+            length: Some(Duration::from_secs(300 * 60)),
+            resets_at: Some(1_794_248_800)
+        },
+        "the length the read gave is kept"
+    );
+    assert_eq!(
+        by_id(&told, "codex:weekly").used,
+        Some(30),
+        "the other window of that limit is kept"
+    );
+
+    let now = parser.rate_limits();
+    assert_eq!(now.len(), 3);
+    assert_eq!(
+        by_id(&now, "codex_spark:five_hour"),
+        spark,
+        "the other limit is untouched"
+    );
+    assert_eq!(by_id(&now, "codex:five_hour").used, Some(640));
+}
+
+#[test]
+fn an_update_before_any_read_stands_on_its_own() {
+    let events = events_of(&[
+        json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "limitId": "codex", "primary": {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1_790_000_000}}}}),
+    ]);
+    let told = buckets_of(&events);
+    assert_eq!(told.len(), 1);
+    assert_eq!(
+        (told[0].id.as_str(), told[0].used),
+        ("codex:five_hour", Some(120))
+    );
+}
+
+#[test]
+fn a_spend_cap_is_a_bucket_of_its_own_and_a_reached_one_is_exhausted() {
+    let (mut parser, _) = parser();
+    let mut answer = read_answer();
+    answer["rateLimits"]["individualLimit"] = json!({"limit": "50.00", "used": "12.50", "remainingPercent": 75, "resetsAt": 1_794_300_000});
+    answer["rateLimitsByLimitId"]["codex"]["individualLimit"] =
+        answer["rateLimits"]["individualLimit"].clone();
+    let buckets = parser.rate_limits_read(&answer);
+    let cap = by_id(&buckets, "codex:spend_control");
+    assert_eq!(
+        (cap.used, cap.limit, &cap.status),
+        (Some(250), Some(1000), &Status::Ok)
+    );
+    assert_eq!(
+        cap.refill,
+        Refill::FixedWindow {
+            length: None,
+            resets_at: Some(1_794_300_000)
+        }
+    );
+
+    let events = parser.line(&json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "limitId": "codex", "spendControlReached": true, "individualLimit": {"limit": "50.00", "used": "50.00", "remainingPercent": 0, "resetsAt": 1_794_300_000}}}}));
+    let told = buckets_of(&events);
+    let cap = by_id(&told, "codex:spend_control");
+    assert_eq!((cap.used, &cap.status), (Some(1000), &Status::Exhausted));
+}
+
+#[test]
+fn a_backend_that_does_not_allow_usage_holds_every_bucket_exhausted_until_a_read_says_otherwise() {
+    let mut answer = read_answer();
+    answer["ordinaryUsageAllowed"] = json!(false);
+    let (mut parser, _) = parser();
+    let read = parser.rate_limits_read(&answer);
+    assert!(
+        read.iter().all(|bucket| bucket.status == Status::Exhausted),
+        "{read:?}"
+    );
+    // Recovery is not to be inferred from a percentage that fell.
+    let events = parser.line(
+        &json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "limitId": "codex", "primary": {"usedPercent": 1}}}}),
+    );
+    assert!(
+        buckets_of(&events)
+            .iter()
+            .all(|bucket| bucket.status == Status::Exhausted)
+    );
+    let again = parser.rate_limits_read(&read_answer());
+    assert!(
+        again.iter().all(|bucket| bucket.status == Status::Ok),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn a_used_up_window_is_exhausted_and_its_reset_names_the_limit_error_that_follows() {
+    let (mut parser, _) = parser();
+    parser.rate_limits_read(&read_answer());
+    let events = parser.line(
+        &json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "limitId": "codex", "primary": {"usedPercent": 100, "resetsAt": 1_794_250_000}}}}),
+    );
+    assert_eq!(
+        by_id(&buckets_of(&events), "codex:five_hour").status,
+        Status::Exhausted
+    );
+    let ended = parser.line(&json!({"method": "turn/completed", "params": {"turn": {"id": "t", "status": "failed", "error": {"message": "usage limit", "codexErrorInfo": "usage_limit_exceeded"}}}}));
+    let TurnEnd::Limited(limit) = end_of(&ended) else {
+        panic!("{:?}", end_of(&ended))
+    };
+    assert_eq!(limit.bucket.as_deref(), Some("codex:five_hour"));
+    assert_eq!(limit.resets_at, Some(1_794_250_000));
+}
+
+#[test]
+fn a_recorded_turn_reports_the_threads_running_totals_as_spend_with_no_cost() {
+    let (events, _) = parsed("turn");
+    let spends: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Usage(usage) => usage.spend.clone(),
+            _ => None,
+        })
+        .collect();
+    assert!(spends.len() >= 2, "{spends:?}");
+    let last = spends.last().unwrap();
+    // The recorded last `total`: 147 input of which 35 cached, 63 output of which 14 reasoning.
+    assert_eq!(
+        (
+            last.input,
+            last.output,
+            last.cache_read,
+            last.cache_write,
+            last.reasoning
+        ),
+        (112, 63, 35, 0, Some(14))
+    );
+    assert_eq!(
+        last.cost_micro_usd, None,
+        "Codex reports no cost; none is not 0"
+    );
+    assert!(last.by_model.is_empty());
+}
+
+#[test]
+fn another_threads_usage_is_spent_but_not_this_sessions_spend() {
+    let (mut parser, _) = parser();
+    parser.set_thread("own");
+    let events = parser.line(&json!({"method": "thread/tokenUsage/updated", "params": {"threadId": "sub-agent", "turnId": "t", "tokenUsage": {
+        "total": {"totalTokens": 9, "inputTokens": 5, "outputTokens": 4}, "last": {"totalTokens": 9, "inputTokens": 5, "outputTokens": 4}}}}));
+    let Some(Event::Usage(usage)) = events.first() else {
+        panic!("{events:?}")
+    };
+    assert!(usage.elsewhere);
+    assert!(usage.spend.is_none());
 }

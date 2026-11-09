@@ -1,13 +1,18 @@
 //! Usage, quota and usage limits as Codex's app server reports them.
 
+use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use core::time::Duration;
 
-use coqui_acp_api::usage::{Bucket, LimitHit, Refill, Status, Unit};
+use coqui_acp_api::usage::{Bucket, Coverage, LimitHit, Refill, Spend, Status, Unit};
 use coqui_acp_harness::event::Usage;
 use serde_json::Value;
+
+/// The limit id of a snapshot that names none: Codex's own metered allowance.
+const DEFAULT_LIMIT: &str = "codex";
 
 /// The name of a quota window by its length, else its position.
 fn window_name(window: &Value, position: &str) -> String {
@@ -19,33 +24,167 @@ fn window_name(window: &Value, position: &str) -> String {
 }
 
 /// `percent` as thousandths, clamped to 0..=1000 before the cast.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=1000 first"
+)]
 fn permille(percent: f64) -> u16 {
     (percent * 10.0).round().clamp(0.0, 1000.0) as u16
 }
 
-/// Every bucket an `account/rateLimits/updated` notification reports: `usedPercent` as thousandths, `resetsAt` in
-/// Unix seconds, and the window's length when it says it.
-pub(crate) fn buckets(message: &Value) -> Vec<Bucket> {
-    if message.get("method").and_then(Value::as_str) != Some("account/rateLimits/updated") {
-        return Vec::new();
+/// Puts the values `delta` has over `held`: an object is merged key by key, and a null is a value the update does not
+/// have, never one that clears.
+fn merge(held: &mut Value, delta: &Value) {
+    match (held, delta) {
+        (_, Value::Null) => {}
+        (Value::Object(held), Value::Object(delta)) => {
+            for (key, value) in delta {
+                merge(held.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+        (held, delta) => *held = delta.clone(),
     }
-    let Some(limits) = message.pointer("/params/rateLimits") else {
-        return Vec::new();
-    };
-    ["primary", "secondary"]
+}
+
+/// The limit id of a snapshot.
+fn limit_id(snapshot: &Value) -> &str {
+    snapshot
+        .get("limitId")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_LIMIT)
+}
+
+/// What Codex has said of the account's allowances: the last full `account/rateLimits/read`, with each sparse
+/// `account/rateLimits/updated` merged into it, since an update holds only the values that changed.
+#[derive(Debug, Default)]
+pub(crate) struct Account {
+    /// The snapshots by limit id.
+    snapshots: BTreeMap<String, Value>,
+    /// The backend's `ordinaryUsageAllowed` of the last read that carried one. `false` holds every bucket exhausted
+    /// until a read says otherwise, since Codex says recovery is not to be inferred from percentages.
+    allowed: Option<bool>,
+}
+
+impl Account {
+    /// Takes a full `account/rateLimits/read` answer in place of what was known, and answers every bucket of it.
+    pub(crate) fn read(&mut self, answer: &Value) -> Vec<Bucket> {
+        self.snapshots.clear();
+        let listed = answer
+            .get("rateLimitsByLimitId")
+            .and_then(Value::as_object)
+            .filter(|listed| !listed.is_empty());
+        match listed {
+            Some(listed) => {
+                for (id, snapshot) in listed {
+                    let mut snapshot = snapshot.clone();
+                    if snapshot.get("limitId").is_none_or(Value::is_null) {
+                        snapshot["limitId"] = Value::String(id.clone());
+                    }
+                    self.snapshots.insert(id.clone(), snapshot);
+                }
+            }
+            None => {
+                if let Some(snapshot) = answer.get("rateLimits").filter(|one| one.is_object()) {
+                    self.snapshots
+                        .insert(limit_id(snapshot).to_string(), snapshot.clone());
+                }
+            }
+        }
+        self.allowed = answer.get("ordinaryUsageAllowed").and_then(Value::as_bool);
+        self.buckets()
+    }
+
+    /// Every bucket as it now stands.
+    pub(crate) fn buckets(&self) -> Vec<Bucket> {
+        self.snapshots
+            .values()
+            .flat_map(|snapshot| snapshot_buckets(snapshot, self.allowed))
+            .collect()
+    }
+
+    /// Merges an `account/rateLimits/updated` notification into the snapshot of its limit and answers that limit's
+    /// buckets as they now stand, or none when the update changed nothing of them; the other limits are untouched.
+    pub(crate) fn update(&mut self, message: &Value) -> Vec<Bucket> {
+        if message.get("method").and_then(Value::as_str) != Some("account/rateLimits/updated") {
+            return Vec::new();
+        }
+        let Some(delta) = message
+            .pointer("/params/rateLimits")
+            .filter(|delta| delta.is_object())
+        else {
+            return Vec::new();
+        };
+        let held = self
+            .snapshots
+            .entry(limit_id(delta).to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let before = snapshot_buckets(held, self.allowed);
+        merge(held, delta);
+        let after = snapshot_buckets(held, self.allowed);
+        if after == before { Vec::new() } else { after }
+    }
+
+    /// The window of the limit an update named that is used up, the one that resets last: the usage-limit error that
+    /// follows does not always repeat the reset time.
+    pub(crate) fn exhausted(&self, message: &Value) -> Option<LimitHit> {
+        if message.get("method").and_then(Value::as_str) != Some("account/rateLimits/updated") {
+            return None;
+        }
+        let id = limit_id(message.pointer("/params/rateLimits")?);
+        let snapshot = self.snapshots.get(id)?;
+        ["primary", "secondary"]
+            .iter()
+            .filter_map(|position| {
+                let window = snapshot.get(position)?;
+                (window.get("usedPercent")?.as_f64()? >= 100.0).then(|| {
+                    let mut limit = LimitHit::new(0);
+                    limit.resets_at = window.get("resetsAt").and_then(Value::as_i64);
+                    limit.bucket = Some(format!("{id}:{}", window_name(window, position)));
+                    limit
+                })
+            })
+            .max_by_key(|limit| limit.resets_at)
+    }
+}
+
+/// The buckets of one snapshot: each window as `<limit id>:<five_hour|weekly|primary|secondary>`, and the spend
+/// control as `<limit id>:spend_control`. `usedPercent` is thousandths and a window is fixed, with its length when
+/// Codex says it. A window at 100 percent is exhausted, and so is every bucket while the backend does not allow
+/// ordinary usage. A snapshot that names a model covers only it. `credits.balance` is left out: its unit is not known.
+fn snapshot_buckets(snapshot: &Value, allowed: Option<bool>) -> Vec<Bucket> {
+    let id = limit_id(snapshot);
+    let models = snapshot
+        .get("normalModelSlug")
+        .and_then(Value::as_str)
+        .filter(|slug| !slug.is_empty())
+        .map_or(Coverage::Unknown, |slug| Coverage::Only {
+            models: alloc::vec![slug.to_string()],
+        });
+    let label = snapshot
+        .get("limitName")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let blocked = allowed == Some(false);
+    let mut buckets: Vec<Bucket> = ["primary", "secondary"]
         .iter()
         .filter_map(|position| {
-            let window = limits.get(position).filter(|window| window.is_object())?;
-            let mut bucket = Bucket::new(window_name(window, position));
+            let window = snapshot.get(position).filter(|window| window.is_object())?;
+            let mut bucket = Bucket::new(format!("{id}:{}", window_name(window, position)));
+            bucket.label.clone_from(&label);
+            bucket.models = models.clone();
             bucket.unit = Unit::Permille;
             let used = window.get("usedPercent").and_then(Value::as_f64);
             if let Some(thousandths) = used.map(permille) {
                 bucket.used = Some(u64::from(thousandths));
                 bucket.limit = Some(1000);
             }
-            if used.is_some_and(|percent| percent >= 100.0) {
-                bucket.status = Status::Exhausted;
-            }
+            bucket.status = match used {
+                Some(percent) if percent >= 100.0 => Status::Exhausted,
+                _ if blocked => Status::Exhausted,
+                Some(_) => Status::Ok,
+                None => Status::Unknown,
+            };
             bucket.refill = Refill::FixedWindow {
                 length: window
                     .get("windowDurationMins")
@@ -56,31 +195,34 @@ pub(crate) fn buckets(message: &Value) -> Vec<Bucket> {
             };
             Some(bucket)
         })
-        .collect()
-}
-
-/// The window an `account/rateLimits/updated` notification reports as used up, the one that resets last: the
-/// usage-limit error that follows does not always repeat the reset time.
-pub(crate) fn exhausted(message: &Value) -> Option<LimitHit> {
-    if message.get("method")?.as_str()? != "account/rateLimits/updated" {
-        return None;
+        .collect();
+    if let Some(cap) = snapshot
+        .get("individualLimit")
+        .filter(|cap| cap.is_object())
+    {
+        let mut bucket = Bucket::new(format!("{id}:spend_control"));
+        bucket.label.clone_from(&label);
+        bucket.models = models;
+        bucket.unit = Unit::Permille;
+        let remaining = cap.get("remainingPercent").and_then(Value::as_f64);
+        if let Some(remaining) = remaining {
+            bucket.used = Some(1000 - u64::from(permille(remaining)));
+            bucket.limit = Some(1000);
+        }
+        let reached = snapshot.get("spendControlReached").and_then(Value::as_bool) == Some(true)
+            || remaining.is_some_and(|percent| percent <= 0.0);
+        bucket.status = match remaining {
+            _ if reached || blocked => Status::Exhausted,
+            Some(_) => Status::Ok,
+            None => Status::Unknown,
+        };
+        bucket.refill = Refill::FixedWindow {
+            length: None,
+            resets_at: cap.get("resetsAt").and_then(Value::as_i64),
+        };
+        buckets.push(bucket);
     }
-    let limits = message.pointer("/params/rateLimits")?;
-    ["primary", "secondary"]
-        .iter()
-        .filter_map(|key| {
-            let window = limits.get(key)?;
-            (window.get("usedPercent")?.as_f64()? >= 100.0).then(|| {
-                let mut limit = LimitHit::new(0);
-                limit.resets_at = window.get("resetsAt").and_then(Value::as_i64);
-                limit.bucket = match window.get("windowDurationMins").and_then(Value::as_i64) {
-                    Some(300 | 10_080) => Some(window_name(window, "")),
-                    _ => Some((*key).to_string()),
-                };
-                limit
-            })
-        })
-        .max_by_key(|limit| limit.resets_at)
+    buckets
 }
 
 /// The error object of an `error` or `turn/failed` notification, or of a failed `turn/completed`.
@@ -149,5 +291,24 @@ pub(crate) fn usage(message: &Value) -> Option<Usage> {
     reported.cache_write = count("cacheWriteInputTokens");
     reported.context_used = Some(count("inputTokens").saturating_add(count("outputTokens")));
     reported.context_size = usage.get("modelContextWindow").and_then(Value::as_u64);
+    reported.spend = usage
+        .get("total")
+        .filter(|total| total.is_object())
+        .map(spent);
     Some(reported)
+}
+
+/// What the thread has spent, from the `total` of its token usage: running totals for the thread, which a resumed
+/// thread carries over from its earlier turns. Codex reports no cost, so none is given. Reasoning tokens are part of
+/// the output ones. The session's id is the connection's to fill.
+fn spent(total: &Value) -> Spend {
+    let count = |key: &str| total.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let cached = count("cachedInputTokens");
+    let mut spend = Spend::new("");
+    spend.input = count("inputTokens").saturating_sub(cached);
+    spend.output = count("outputTokens");
+    spend.cache_read = cached;
+    spend.cache_write = count("cacheWriteInputTokens");
+    spend.reasoning = total.get("reasoningOutputTokens").and_then(Value::as_u64);
+    spend
 }

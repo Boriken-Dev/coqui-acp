@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::io;
 
-use coqui_acp_api::usage::LimitHit;
+use coqui_acp_api::usage::{Bucket, LimitHit};
 use coqui_acp_harness::event::{
     Content, Diff, Event, FileChange, Location, OptionKind, Outcome, PermissionOption,
     PermissionRequest, PlanEntry, PlanStatus, Responder, Severity, Stop, Terminal, ToolCall,
@@ -115,6 +115,8 @@ pub struct Parser {
     interrupted: bool,
     /// The latest window the account reported as used up.
     exhausted: Option<LimitHit>,
+    /// What the account has said of its allowances, for merging each sparse update into.
+    account: limits::Account,
     /// The error the running turn reported before its end.
     error: Option<Value>,
     answers: Vec<Answer>,
@@ -152,6 +154,7 @@ impl Parser {
             ended: None,
             interrupted: false,
             exhausted: None,
+            account: limits::Account::default(),
             error: None,
             answers: Vec::new(),
         }
@@ -306,6 +309,7 @@ impl Parser {
                     limits::usage(message)
                         .map(|mut usage| {
                             usage.elsewhere = true;
+                            usage.spend = None;
                             usage.context_used = None;
                             usage.context_size = None;
                             vec![Event::Usage(usage)]
@@ -320,10 +324,26 @@ impl Parser {
         }
     }
 
+    /// Takes a full `account/rateLimits/read` answer as the account's allowances, in place of what was known, and
+    /// answers the buckets of it. Later sparse updates merge into it.
+    pub fn rate_limits_read(&mut self, answer: &Value) -> Vec<Bucket> {
+        self.account.read(answer)
+    }
+
+    /// The account's allowances as they now stand: the last full read with every update merged in.
+    #[must_use]
+    pub fn rate_limits(&self) -> Vec<Bucket> {
+        self.account.buckets()
+    }
+
     fn notification(&mut self, method: &str, message: &Value) -> Vec<Event> {
         let params = message.get("params").unwrap_or(&Value::Null);
-        if let Some(window) = limits::exhausted(message) {
-            self.exhausted = Some(window);
+        let mut buckets = Vec::new();
+        if method == "account/rateLimits/updated" {
+            buckets = self.account.update(message);
+            if let Some(window) = self.account.exhausted(message) {
+                self.exhausted = Some(window);
+            }
         }
         match method {
             "turn/started" => {
@@ -425,14 +445,7 @@ impl Parser {
             "thread/tokenUsage/updated" => limits::usage(message)
                 .map(|usage| vec![Event::Usage(usage)])
                 .unwrap_or_default(),
-            "account/rateLimits/updated" => {
-                let buckets = limits::buckets(message);
-                if buckets.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![Event::Buckets(buckets)]
-                }
-            }
+            "account/rateLimits/updated" if !buckets.is_empty() => vec![Event::Buckets(buckets)],
             "error" => {
                 let of_another_turn = text(params, "/turnId").is_some_and(|turn| {
                     self.abandoned.contains(turn)

@@ -28,6 +28,21 @@ pub fn recorded(name: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The lines the app server of Codex 0.166.0 wrote in recording `name`, which holds only what was read with no thread
+/// and no turn.
+pub fn recorded_166(name: &str) -> Vec<Value> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("codex-0.166.0")
+        .join(format!("{name}.stdout"));
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 /// The thread recording `name` opened.
 pub fn recorded_thread(name: &str) -> String {
     recorded(name)
@@ -116,6 +131,8 @@ pub struct Peer {
     from_agent: std::sync::mpsc::Receiver<Value>,
     next: u64,
     pub updates: Vec<Value>,
+    /// Every `_coqui_acp/usage_update` seen, in order: its params.
+    pub usage_updates: Vec<Value>,
     /// The answers to permission requests, in order: an option kind to choose, or `cancel`.
     pub answers: VecDeque<String>,
     pub asked: Vec<Value>,
@@ -150,6 +167,7 @@ impl Peer {
             from_agent: receiver,
             next: 0,
             updates: Vec::new(),
+            usage_updates: Vec::new(),
             answers: VecDeque::new(),
             asked: Vec::new(),
         }
@@ -164,6 +182,10 @@ impl Peer {
 
     fn take(&mut self, message: Value) -> Option<Value> {
         match message.get("method").and_then(Value::as_str) {
+            Some("_coqui_acp/usage_update") => {
+                self.usage_updates.push(message["params"].clone());
+                None
+            }
             Some("session/update") => {
                 self.updates.push(message["params"]["update"].clone());
                 None

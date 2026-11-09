@@ -14,6 +14,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
 use crate::mode::Shown;
+use coqui_acp_api::usage::Bucket;
 use coqui_acp_harness::event::{Content, Event, Severity, context_block};
 use coqui_acp_harness::lines::{self, Tail};
 use coqui_acp_harness::mode::Mode;
@@ -274,6 +275,40 @@ impl CodexSession {
         settings: CodexSettings,
         sink: impl Fn(Event) -> bool + Send + Sync + 'static,
     ) -> Result<Self, Error> {
+        let mut session = Self::connect(launch, spawn, settings, sink)?;
+        if let Err(error) = session.open(launch) {
+            session.close();
+            return Err(error);
+        }
+        Ok(session)
+    }
+
+    /// Reads the account's allowances with no thread and no turn: starts `codex app-server` as `launch` says,
+    /// initializes it, asks `account/rateLimits/read`, and ends it. This is what a poll with no session open costs.
+    ///
+    /// # Errors
+    ///
+    /// As [`CodexSession::start`], and as [`CodexSession::read_usage`].
+    pub fn read_account_usage(
+        launch: &CodexLaunch,
+        spawn: &dyn Spawn,
+        settings: CodexSettings,
+    ) -> Result<Vec<Bucket>, Error> {
+        let mut session = Self::connect(launch, spawn, settings, |_| true)?;
+        let read = session
+            .handshake(launch)
+            .and_then(|()| session.read_usage());
+        session.close();
+        read
+    }
+
+    /// Starts the process and its readers, with no request made yet.
+    fn connect(
+        launch: &CodexLaunch,
+        spawn: &dyn Spawn,
+        settings: CodexSettings,
+        sink: impl Fn(Event) -> bool + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
         if let Some((key, _)) = launch
             .config_overrides
             .iter()
@@ -338,7 +373,7 @@ impl CodexSession {
                 )
                 .map_err(Error::Spawn)?;
         }
-        let mut session = Self {
+        Ok(Self {
             thread: String::new(),
             writer,
             process,
@@ -364,15 +399,11 @@ impl CodexSession {
                 .unwrap_or_default(),
             titled: AtomicBool::new(false),
             sink,
-        };
-        if let Err(error) = session.open(launch) {
-            session.close();
-            return Err(error);
-        }
-        Ok(session)
+        })
     }
 
-    fn open(&mut self, launch: &CodexLaunch) -> Result<(), Error> {
+    /// Initializes the app server and tells it so.
+    fn handshake(&mut self, launch: &CodexLaunch) -> Result<(), Error> {
         let initialized = self.request(
             "initialize",
             json!({"clientInfo": {"name": launch.client_info.name, "title": launch.client_info.title,
@@ -389,6 +420,11 @@ impl CodexSession {
                 title: warning,
             });
         }
+        Ok(())
+    }
+
+    fn open(&mut self, launch: &CodexLaunch) -> Result<(), Error> {
+        self.handshake(launch)?;
         if self.settings.list_models {
             self.list_models();
         }
@@ -444,6 +480,13 @@ impl CodexSession {
         if let Some(check) = self.settings.check_thread.clone() {
             check(&opened).map_err(Error::Refused)?;
         }
+        // Where the account stands is told as soon as the session opens; a login that has no allowances to report, or
+        // a Codex that does not know the request, stops nothing.
+        if let Ok(buckets) = self.read_usage()
+            && !buckets.is_empty()
+        {
+            (self.sink)(Event::Buckets(buckets));
+        }
         self.thread = thread.to_string();
         self.thread_model = opened
             .get("model")
@@ -482,6 +525,22 @@ impl CodexSession {
             }
         }
         Ok(())
+    }
+
+    /// Reads the account's allowances with `account/rateLimits/read`, which needs no turn, and answers them as buckets.
+    /// The answer becomes the account's last full report, which later sparse updates are merged into.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Harness`] when Codex refused (it is not signed in with an account that has allowances), or
+    /// [`Error::Timeout`] when it did not answer.
+    pub fn read_usage(&self) -> Result<Vec<Bucket>, Error> {
+        let answer = self.request(
+            "account/rateLimits/read",
+            json!({}),
+            self.settings.request_timeout,
+        )?;
+        Ok(locked(&self.parser).rate_limits_read(&answer))
     }
 
     /// Asks for the models. Their being unknown stops nothing: a notice says so.

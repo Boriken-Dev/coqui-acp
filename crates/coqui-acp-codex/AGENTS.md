@@ -62,6 +62,8 @@ pub fn prompt(&self, content: &[Content]) -> Result<(), Error>
 pub fn interrupt(&self) -> Result<(), Error>
 pub fn steer(&self, turn: &str, content: &[Content]) -> Result<(), Error>   // turn/steer, its answer not awaited
 pub fn request(&self, method: &str, params: Value, limit: Duration) -> Result<Value, Error>
+pub fn read_usage(&self) -> Result<Vec<Bucket>, Error>      // account/rateLimits/read: needs no turn; the answer is the base later updates merge into
+pub fn CodexSession::read_account_usage(launch: &CodexLaunch, spawn: &dyn Spawn, settings: CodexSettings) -> Result<Vec<Bucket>, Error>   // starts app-server, initializes, reads, ends it: no thread, no turn
 pub fn close(&self)                                              // also on drop
 #[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>,
     pub efforts: Vec<String>, pub default_effort: Option<String>, pub is_default: bool }
@@ -105,8 +107,9 @@ pub fn git_patch(path: &str, change: FileChange, hunks: &str) -> String
 | `mcpToolCall`, `dynamicToolCall` | `Tool` named `mcp__<server>__<tool>`, its result or error text as a `ToolChunk` |
 | `webSearch`, `imageView` | `Tool` |
 | `turn/plan/updated` | `Plan` |
-| `thread/tokenUsage/updated` | `Usage` of `last`: cached input split out, not cumulative, no cost, context used and `modelContextWindow` |
-| `account/rateLimits/updated` | `Buckets`, one per window (`five_hour`, `weekly`, else its position; `usedPercent` as permille, a fixed window with its length and `resetsAt`, `exhausted` from 100), and the exhausted window kept |
+| `thread/tokenUsage/updated` | `Usage` of `last`: cached input split out, not cumulative, no cost, context used and `modelContextWindow`; its `spend` is the thread's `total` (cached split out, reasoning kept, `cost_micro_usd` unset), which a resumed thread carries over from its earlier turns; another thread's has no `spend` |
+| `account/rateLimits/updated` | merged into the last `account/rateLimits/read` (a sparse update: an object merges key by key, a null clears nothing), then `Buckets` for that limit when its buckets changed, none when they did not; the exhausted window kept for the limit error that follows |
+| `account/rateLimits/read` answer | `Buckets` of every limit (`CodexSession::read_usage`, asked once as the session opens and by `Conversation::read_usage`): `rateLimitsByLimitId`, else `rateLimits`; each snapshot's window is `<limitId>:<five_hour|weekly|primary|secondary>` (300 min, 10080 min, else its position), `usedPercent` as permille of 1000, a fixed window with `windowDurationMins` as its length and `resetsAt`, `ok` below 100 and `exhausted` from 100; `limitName` the label; `normalModelSlug` makes the coverage `only {slug}`, else unknown; `individualLimit` is `<limitId>:spend_control` (permille `1000 - remainingPercent * 10`, exhausted when `spendControlReached` or none remains); `ordinaryUsageAllowed: false` holds every bucket exhausted until a later read says otherwise (Codex: recovery is not to be inferred from percentages); `credits.balance` is left unmapped, its unit being unknown |
 | `turn/completed`, `turn/failed` | `TurnEnd`: a limit (`codexErrorInfo` naming a usage or rate limit, or a failed connection with HTTP 429; reset from `resetsAt` else the exhausted window) is `Limited`; `interrupted`, or `failed` after `interrupting`, is `Stopped(Cancelled)`; `failed` is `Failed` with the error's message; else `Stopped(EndTurn)` |
 | `error` | kept for the running turn's end, unless Codex will retry or it names another turn |
 | `thread/compacted`, `contextCompaction` items | `Compaction` |
@@ -174,6 +177,7 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 - `availableDecisions` is what a command's approval offers; `decline` is always offered, since 0.164.0 and 0.166.0 take it where they list only `cancel`, mark the command `declined` and go on with the turn (each one's recording `turn`). A version after those is untested.
 - A tool call is named as ACP's clients expect, `web_search` and `mcp__<server>__<tool>`; the server and tool are in the name.
 - An `error` with `willRetry` is no limit: Codex may yet succeed. The turn's end decides, with the window an earlier report said was used up.
+- `describe` says `usage.needs_turn` false: with no session open, a poll starts an app server for the read (`CodexAgent` as a `Harness`), so how often is the host's cost; with one open it asks that session's. A login with no allowances answers the read with an error, and nothing is reported. Measured on Codex 0.166.0 with no turn: one `codex` limit with a five-hour and a weekly window, `credits` and reset credits (`rateLimitResetCredits`, unmapped); `tests/fixtures/codex-0.166.0/rate_limits_read.stdout` is that answer with its account id and credit ids replaced. Every recorded `updated` line has null windows: it changes nothing.
 - Another thread's usage comes as `Usage` with `elsewhere`, as spent and no part of this conversation's context; nothing else of it does.
 - `--config` keys are not TOML: Codex splits the argument at its first `=` and the key at each `.`, and a quote is part of a name. A key holding `=` cannot be written and is refused. A JSON `null` value is the empty string, which is not unset.
 - A login file needs `tokens.refresh_token` to be read, or Codex answers every turn `401`. Empty, a second client cannot rotate the person's login, and the access token goes on working until it expires.
