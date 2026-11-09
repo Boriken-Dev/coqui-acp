@@ -16,7 +16,8 @@ A history is context, not commands. A tool call in it records what happened; an 
 - JSON Lines: each line is one JSON value that is an object, and each line, the last included, ends with a line feed (U+000A). A carriage return anywhere in the file, an empty line, or a file whose last byte is not a line feed is refused (the last rule is how a cut-short file shows).
 - Line 1 is the header. Every other line is a body line. Line numbers count from 1, the header being line 1.
 - In every object, a key repeated is refused: two readers would resolve it differently.
-- Numbers are JSON numbers. A reader keeps one that does not fit a signed or unsigned 64-bit integer as a double.
+- The text of a line is JSON (RFC 8259) and nothing more. What other parsers accept and this format does not is refused as `syntax`: `NaN`, `Infinity` and `-Infinity`; a number with a leading zero, a plus sign, or no digit before or after its point; a number no double holds (`1e400`); a raw control character inside a string; a surrogate escape that is not half of a pair (`"\ud800"`, `"\udc00"`, or a high one not followed by a low one); a byte-order mark anywhere but the start of line 1. A pair of surrogate escapes (`"😀"`) is the one character it spells.
+- Numbers are read like this. An integer (digits, an optional minus sign, no point or exponent) that fits a signed or unsigned 64-bit integer is that integer, exactly. Every other number is the binary64 double nearest to it (ties to even); a magnitude too small for a double is zero and one too large is refused. A minus sign on a zero (`-0`, `-0.0`, `-0e5`) makes negative zero, a double. How a number is written is under Canonical spelling.
 - A conventional name is `<id>.jsonl`, where `<id>` is the header's `id`.
 
 ## The header
@@ -33,17 +34,19 @@ Line 1, an object with these keys and no others. A reader checks `format` first,
 | `model` | string | no | The model, as the harness names it. At most 256 bytes. |
 | `mode` | string | no | The permission mode. At most 256 bytes. |
 | `effort` | string | no | The reasoning effort. At most 256 bytes. |
-| `cwd` | string | no | The session's absolute working directory. At most 4096 bytes. |
+| `cwd` | string | no | The session's absolute working directory, in the path style of the machine that recorded it. At most 4096 bytes. |
 | `acpVersion` | unsigned integer | no | The ACP version of the updates, 1 or more. |
-| `digest` | string | no | `sha256:` and 64 lower-case hexadecimal digits: the SHA-256 of the body, every byte after the header line, line feeds included. |
+| `digest` | string | no | `sha256:` and 64 lower-case hexadecimal digits: the SHA-256 of the body, every byte after the header line, line feeds included. It shows an accidental change; see Paging and the digest. |
 | `redacted` | object | no | `{"rules": n, "replaced": n}`, present when a redaction changed the body; see Redaction. |
 | `_meta` | object | no | Anything else. The format reads none of it. |
 
 `origin` holds `harness` (required: 1 to 64 bytes of lower-case letters, digits and `.`, `_`, `-`, `:`, starting with a letter or digit: `claude`, `codex`, `agy`, `acp:name`), `version` (the harness's version, at most 128 bytes) and `sessionId` (the harness's own id for the session, at most 256 bytes). Those are all its keys.
 
+The text fields of the header (`model`, `mode`, `effort`, `cwd`, `origin.version`, `origin.sessionId`) hold no control character: not NUL, not a C0 or C1 control, not DEL. A reader refuses one as `shape`, at the field. `cwd` is an absolute path in the Unix style (`/dir`) or the Windows style (`C:\dir`, `C:/dir`, `\\server\share`); a relative path, a drive-relative path (`C:dir`) and a URL are refused. These fields describe where and by what the session was recorded. They are not names to open: see Importing hostile histories.
+
 ### The session UUID
 
-A session is named by a UUID the host creates. The header's `id` is that UUID and `origin.sessionId` is whatever the origin harness called the session. Importing a history into a harness creates a session there under the header's `id` (a provider maps the UUID to the harness's own id and reports the UUID back), and converting a history to another harness keeps the `id`. A history whose `id` is not a canonical lower-case UUID is refused.
+A session is named by a UUID the host creates. The header's `id` is that UUID and `origin.sessionId` is whatever the origin harness called the session: any text with no control character, so a value such as `../../x` is valid and means nothing to anyone but the origin harness. Importing a history into a harness creates a session there under the header's `id` (a provider maps the UUID to the harness's own id and reports the UUID back), and converting a history to another harness keeps the `id`. A history whose `id` is not a canonical lower-case UUID is refused.
 
 ## Body lines
 
@@ -127,8 +130,15 @@ Every bound is a setting with a default and no floor. A reader holds the file to
 | `max_lines` | 5,000,000, the header included | `too_many_lines` |
 | `max_total_bytes` | 4 GiB (4294967296), line feeds included | `too_large` |
 | `max_depth` | 64, the nesting of arrays and objects in a line | `too_deep`, at the line |
+| `max_values` | 500,000, the values in a line: every scalar, array and object, and every key of an object | `too_many_values`, at the line |
 
-A JSON parser may stop earlier: the reference reader stops at 128 levels whatever `max_depth` says. A reader that verifies the digest does so when it reaches the end (`digest_mismatch`), and a setting turns that off.
+The nesting a reader must be able to parse is 127 levels (the line is level 1), whatever `max_depth` says: a `max_depth` above 127 changes nothing, and a line nested past 127 is `too_deep`. A refusal by the setting names the setting's limit; one by the parser names 127 as the parser's own limit, so a caller who raised `max_depth` learns why it had no effect. `bounds.json` holds both edges. `max_values` is counted while the line is parsed, so a refused line has not been built.
+
+A reader that verifies the digest does so when it reaches the end (`digest_mismatch`), and a setting turns that off.
+
+### Memory
+
+A parsed line is a tree of values. Ordinary text costs 3 to 4 times its bytes, and a line of tiny objects (`{"a":0}`) up to about 60 times; `max_values` bounds one line's tree to roughly 150 bytes a value, so the largest line a reader holds is a bounded multiple of what the settings allow. A reader that streams holds one line at a time, whatever the size of the file. A history read as a whole holds every line at once: the reference `Document` reads under a `max_total_bytes` of 16 MiB unless the caller chose bounds, which keeps even a history of the worst shape near 1 GiB. An importer that reads a history whole passes bounds of its own, sized to the memory it may use; the `acp_harness` kind's `import_session` takes the history as one string, whose bytes are in memory already, and passes them too.
 
 ## Errors
 
@@ -138,14 +148,14 @@ A reader reports a code, and, where it applies, the line and the JSON pointer of
 | --- | --- |
 | `empty` | no header line |
 | `not_utf8`, `blank_line`, `line_ending`, `truncated` | the line is not UTF-8, is empty, holds a carriage return, or the file does not end in a line feed |
-| `syntax` | not JSON, or text after the value |
+| `syntax` | not JSON as the file section reads it, or text after the value |
 | `duplicate_key` | an object repeats a key |
 | `shape` | a field is missing, of the wrong type or out of range (pointer given) |
 | `unknown_field` | an object has a key the format does not define there (pointer of the object) |
 | `unknown_format`, `unknown_version` | line 1 is not a version-1 header |
 | `unknown_line` | a body line of a kind the format does not define |
 | `order` | the line breaks an ordering rule |
-| `too_long`, `too_many_lines`, `too_large`, `too_deep` | a bound |
+| `too_long`, `too_many_lines`, `too_large`, `too_deep`, `too_many_values` | a bound |
 | `digest_mismatch` | the header's digest is not the body's |
 
 `vectors/session_history/refusals.json` pairs each malformed input with its code, line and pointer.
@@ -156,7 +166,8 @@ A writer writes the following, and a writer in any language that does is byte-id
 
 - compact JSON, no spaces, strings with the escapes JSON requires and UTF-8 otherwise;
 - the header's keys in the order of the table above, the body line's in the order `method`, `params`, `at`, `_meta`;
-- every other object's keys sorted by code point.
+- every other object's keys sorted by code point;
+- numbers: an integer in the signed or unsigned 64-bit range is its digits, with a minus sign only when it is not zero. Every other number is a double, written as the shortest digit string that reads back to it (the closest to its exact value if several, the even one if two are equally close). When the decimal exponent of its first digit is from -5 to 15 it is plain decimal, always with a point and a digit after it: `100.0`, `0.00001`, `123.456`. Otherwise it is the first digit, a point and the rest of the digits if there are any, `e`, and the exponent, with no plus sign and no leading zero: `1e16`, `1.5e-7`, `1.8446744073709552e19`. Zero is `0.0` and negative zero `-0.0`. `numbers.json` holds the cases, among them the integers past 64 bits and the doubles a lossy parser reads one unit away.
 
 Reading then writing a history gives it in this spelling. A file that must stay byte for byte as it is (an export left unchanged) is copied line by line after the reader has checked it, never re-spelled.
 
@@ -178,14 +189,29 @@ The header's `version` is the format's. A reader refuses a version it does not k
 | `replayed_as_prompt` | the target has no transcript of its own, so the history was replayed to it as a prompt |
 | `summary_missing` | the latest boundary has no summary, so the seed starts earlier or at the start |
 
+## Importing hostile histories
+
+A history is read for what it says and never run, and it may have been written by someone who wants the importer to do something. An importer into a harness keeps to these rules, and a consumer that only reads or shows a history keeps to those that apply to it.
+
+- (a) **Nothing is left pending in the target's transcript.** A turn open at the end of the history, and a tool call still in progress, are closed as cancelled in what the importer writes (a result for the call with a cancelled status, a turn that ended `cancelled`), so the target never resumes waiting on a tool call or a turn that no one is running.
+- (b) **An answer to a permission request is history, not a grant.** An importer never turns a `history/permission_answer` into an allowance in the target, and never writes `allow_always` or any rule that outlives the session: the target asks again.
+- (c) **No file snapshot or checkpoint comes from imported content.** A harness keeps file-history snapshots, checkpoints and undo state of the files as they were on the machine that wrote them. An importer writes none, so a later rewind cannot restore files from a history.
+- (d) **Nothing a history names is opened.** A `resource_link` URI, a tool call's `locations`, a diff's `path` and every path in `rawInput` or `rawOutput` are text to show. An importer neither fetches nor reads them, and does not resolve them against the file system.
+- (e) **The latest compaction summary is chosen by the history's author and goes to a privileged place.** It becomes the target's account of the conversation so far, which a model reads as its own earlier work. An importer gives it only to the slot the target keeps for a summary, never to a system prompt or a settings file, and lets the caller seed without it (the seed is then every body line).
+- **A name in a history is never turned into a path.** An importer names the session by the host's UUID (the header's `id`, `SessionImport.session_id`) and works in the directory the host gives (`SessionImport.working_directory`). It builds no path from the header's `cwd`, `origin.sessionId`, a native id in `_meta` or any text in a line.
+- **Content is verified before it is acted on, and read within bounds the importer chose.** A reader that streams hands over each line before the end, where the digest is compared. An importer reads the whole history first (the reference crate's `Document::from_reader` returns only after the digest is checked), or makes one pass to check it and a second to import, and passes `Bounds` sized to the memory it may use (see Memory).
+
+Rules (a) to (e) are about what an importer writes: each codec has tests for them, and the reference crate has none of that code. The last two rules apply to every consumer.
+
 ## Redaction
 
 Redaction is an option of the caller who exports (the values or patterns to remove); it is off by default. When used it:
 
-- replaces every match, in every string of the header and of the lines' payloads, with a replacement text (default `[redacted]`), leaving keys, the `method`, the time of a line and three identifiers the format pairs lines by (`sessionUpdate`, `toolCallId`, `optionId`) as they are;
+- replaces every match, in every string of the header and of the lines' payloads, with a replacement text (default `[redacted]`), leaving keys, the `method`, the time of a line and the identifiers the format pairs lines by, in the place that pairs them, as they are: an update's `sessionUpdate` and `toolCallId`, a permission request's `toolCall.toolCallId` and each option's `optionId`, an answer's `outcome.optionId`. The same key anywhere else, in `rawInput` or `_meta` say, is text like any other;
+- finds every occurrence of every value and every match of every pattern in the original text and replaces the stretches they cover once, so a value inside a longer value (`sk-` and `sk-SECRET`), a value that overlaps itself, or one that cuts a pattern's match leaves none of the longer text behind;
 - refuses, changing nothing, a removal that would leave a line the format refuses (a pattern that matches `selected`, say);
-- reports what it removed as counts per rule, rules named by their place in the settings and never by their text, and per line changed;
-- writes `redacted: {"rules": n, "replaced": n}` into the header, so a reader knows the body is not as recorded, and drops the header's digest (a new one is made by sealing).
+- reports what it removed as counts per rule, rules named by their place in the settings and never by their text, and per line changed. A rule counts what it found; matches that overlap are replaced once, so the total of replacements can be less than the sum of the rules;
+- when it removed anything, writes `redacted: {"rules": n, "replaced": n}` into the header, so a reader knows the body is not as recorded, and drops the header's digest (a new one is made by sealing). A redaction that removed nothing leaves the history, its header and its digest as they were.
 
 Values are literal text; patterns are regular expressions that match in linear time and must not match the empty string.
 
@@ -195,12 +221,12 @@ The crate's settings are Guatiao values (JSON, TOML or YAML through `guatiao-ser
 
 ```json
 {
-  "bounds": {"max_line_bytes": 16777216, "max_lines": 5000000, "max_total_bytes": 4294967296, "max_depth": 64},
+  "bounds": {"max_line_bytes": 16777216, "max_lines": 5000000, "max_total_bytes": 4294967296, "max_depth": 64, "max_values": 500000},
   "verify_digest": true
 }
 ```
 
-and, for redaction, `{"values": [], "patterns": [], "replacement": "[redacted]"}`. Unknown keys are refused. A setting that is not at its default is reported by `non_defaults()`.
+and, for redaction, `{"values": [], "patterns": [], "replacement": "[redacted]"}`. Unknown keys are refused. A setting that is not at its default is reported by `non_defaults()`, which reads the settings' schema, so a redaction's `values` are named and not shown wherever the settings are nested.
 
 ## Conformance vectors
 
@@ -208,11 +234,16 @@ and, for redaction, `{"values": [], "patterns": [], "replacement": "[redacted]"}
 
 - `valid.json`: `cases[]` with `lines` (the text of each line without its line feed; the file is those lines each ended by one) and `expect`: the header's `id`, `harness` and optional fields; the summary (`lines`, `turns`, `updates`, `compactions`, `open_turn`, `last_stop`); the `methods` of the body lines in order; and the `seed` (`line`, `digest` in canonical spelling, `summary`, `first_line`, `mid_turn`, `turns`). `canonical: true` means writing what was read gives the lines back identically; the others are another producer's spelling.
 - `refusals.json`: `cases[]` with `lines`, or `text` where the exact bytes matter (a missing final line feed, a carriage return), and `expect` with the error `code`, the `line` (absent when the error has none) and, for `shape` and `unknown_field`, the JSON `pointer`. A reader must also refuse invalid UTF-8 with `not_utf8` at its line; JSON cannot hold such a case.
-- `bounds.json`: `cases[]` with `limits` (`max_line_bytes`, `max_lines`, `max_total_bytes`, `max_depth`; a limit not named is its default), `lines`, and `expect` either `{"ok": true}` or an error `code` and `line`.
-- `tools.json`: the normalised tool table: each tool's ACP `kind`, `normalise` cases (a harness, a native name and input, the tool and normalised input), `denormalise` cases, and names with no tool.
+- `bounds.json`: `cases[]` with `limits` (`max_line_bytes`, `max_lines`, `max_total_bytes`, `max_depth`, `max_values`; a limit not named is its default), `lines`, and `expect` either `{"ok": true}` or an error `code` and `line`.
+- `numbers.json`: `cases[]` with a `number`, a JSON number token placed as the `rawOutput` of an update on line 2 (`{"method":"session/update","params":{"update":{"rawOutput":NUMBER,"sessionUpdate":"x"}}}`), and either `canonical`, the token a writer writes for it, or `refused`, the code. A Python or Dart reader checks its reading of integers past 64 bits, `-0`, the doubles at the edges of the plain notation and the ones a lossy parser misreads.
+- `tools.json`: the normalised tool table: each tool's ACP `kind`, `normalise` cases (a harness, a native name and input, the tool and normalised input), `denormalise` cases, names with no tool, and the `collisions` that normalise or denormalise to nothing because two keys would become one.
 
 ## Paging and the digest
 
-The header's `digest` is always SHA-256, written `sha256:<hex>`, never a weaker checksum. It covers the body: every byte after the header line, line feeds included, exactly as written. A moved history is trusted whole when the digest of the reassembled body equals it.
+The header's `digest` is always SHA-256, written `sha256:<hex>`, never a weaker checksum. It covers the body: every byte after the header line, line feeds included, exactly as written. A reassembled body whose digest equals the header's is the body that was written, which catches a cut, a mix-up and a flipped bit.
+
+It is not authenticity. The digest is optional and recomputable: anyone who changes a body can write the digest of the new one, so it shows accidental change and says nothing of who wrote the file. A history is as trusted as the channel it came over, and an importer treats its content as untrusted either way (Importing hostile histories).
+
+A reader compares the digest when it reaches the end, so a reader that streams has handed over every line by then. A writer that gives a header a digest writes the digest of the body it writes: the reference `Document` makes it again when canonical spelling changes the body, and its streaming `Writer` fails at `finish` if a digest it was given is not the body's.
 
 A history may travel in pages (the `acp_harness` kind's export does). A page is whole lines, each ending in a line feed, so the concatenation of the pages' bytes is the file. Only the first page carries the header, and with it the digest of the whole body; a reader reassembles the pages, then checks the digest as for any file. A line larger than a caller's page size is refused with its size, never split: splitting a line would break the format.

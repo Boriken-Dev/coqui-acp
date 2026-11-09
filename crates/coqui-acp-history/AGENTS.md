@@ -2,13 +2,17 @@
 
 Header-file-style reference for the `coqui-acp-history` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. The format itself is specified in `docs/session-history.md` of <https://github.com/Boriken-Dev/coqui-acp>, with shared vectors in `vectors/session_history/` that a Dart or Python reader runs too.
 
-Cargo feature `cli` (off by default) builds the `coqui-acp-history` command and pulls in `clap`. MSRV Rust 1.89. Default dependencies: `agent-client-protocol` (for ACP's `StopReason` and `ToolKind`), `guatiao` (settings), `regex`, `serde`, `serde_json`, `sha2`, `data-encoding`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
+Cargo feature `cli` (off by default) builds the `coqui-acp-history` command and pulls in `clap`. MSRV Rust 1.89. Default dependencies: `agent-client-protocol` (for ACP's `StopReason` and `ToolKind`), `guatiao` and `guatiao-serde` (settings, and the JSON text of `non_defaults`), `regex`, `serde`, `serde_json` (with `float_roundtrip`, so a double reads back exactly), `sha2`, `data-encoding`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: everything is at the crate root except the tool table, `coqui_acp_history::tools`. `StopReason` is ACP's (`agent_client_protocol::schema::v1`), re-exported.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state. Text only: the crate reads and writes UTF-8 JSON Lines; it parses no harness's own files (the Claude and Codex codecs live in their crates).
 
-Dialect: strict UTF-8; one leading byte-order mark ignored on line 1; a repeated object key, a carriage return, an empty line and a missing final line feed are refused; a number outside `i64`/`u64` is read as `f64`; nesting stops at 128 levels whatever `max_depth` is.
+Dialect: strict UTF-8 and strict JSON; one leading byte-order mark ignored on line 1 and none elsewhere; a repeated object key, a carriage return, an empty line, a missing final line feed, `NaN`/`Infinity`, a lone surrogate escape and a number no double holds (`1e400`) are refused; an integer outside `i64`/`u64` is read as the nearest `f64`; nesting stops at `PARSER_DEPTH` (127) levels whatever `max_depth` is. Written numbers follow the format document's canonical rule (`100.0`, `1e16`, `-0.0`), not `serde_json`'s.
+
+Memory: a parsed line costs 3 to 4 times its bytes for text and up to about 60 times for a line of tiny objects. `Bounds::max_values` (default 500,000, keys counted) bounds one line while it is parsed. `Document` holds every line at once, so `Document::from_slice` and `str::parse` read under `ReaderSettings::for_document()` (16 MiB total); a larger history is read with a `Reader`, or with `Document::from_reader` under bounds you chose. An importer passes bounds of its own.
+
+Untrusted text: a header's `model`, `mode`, `effort`, `cwd`, `origin.version` and `origin.sessionId` hold no control character, and `cwd` is an absolute path in the Unix or the Windows style. They describe the recording: **never build a path from `cwd`, `origin.sessionId`, a `_meta` native id or any text of a line**; use the host's session UUID (the header's `id`) and the working directory the host gives. Print anything from a history with its control and bidirectional characters escaped, as the command does.
 
 ## The format in brief
 
@@ -24,11 +28,16 @@ pub fn Reader::header(&self) -> &Header;
 pub fn Reader::header_raw(&self) -> &str;             // line 1 as the file has it
 pub fn Reader::summary(&self) -> &Summary;            // what has been read so far
 pub fn Reader::next_entry(&mut self) -> Result<Option<Entry>, HistoryError>;
-pub fn Reader::copy_to<W: Write>(self, sink: W) -> Result<Summary, HistoryError>;   // lines verbatim, after checking each
+pub fn Reader::check(self) -> Result<Summary, HistoryError>;                       // reads to the end, checking every line and the digest; keeps nothing
+pub fn Reader::copy_to<W: Write>(self, sink: W) -> Result<Summary, HistoryError>;   // lines verbatim, each checked before it is written
 #[non_exhaustive] pub struct Entry { pub number: u64, pub line: Line, pub raw: String }
 ```
 
-`open` reads and checks the header (nothing before it performs I/O). It holds at most one line plus the one being returned. After any error `next_entry` returns `Ok(None)`. A digest in the header is checked when the end is reached, and a mismatch is the error that replaces the `None`. `Document::from_reader`, `from_slice` and `str::parse::<Document>()` read all of a history with the default settings.
+`open` reads and checks the header (nothing before it performs I/O). It holds at most one line plus the one being returned. After any error `next_entry` returns `Ok(None)`.
+
+**Entries are unverified until the end.** A line is checked for shape, order and bounds when `next_entry` returns it, but a digest in the header is compared only when the end is reached, and a mismatch is the error that replaces the `None`. A consumer that acts on entries as they come acts on content the digest has not vouched for; `copy_to` leaves the sink holding every line when it then fails (buffer the sink if it must never hold unverified content). To act only on verified content: read the whole history with `Document::from_reader` (returned only after the check), or call `Reader::check` on a source you can read again and then read it a second time. The digest shows accidental change only: it is optional and anyone can recompute it.
+
+`Document::from_reader` reads under the reader's own settings; `Document::from_slice` and `str::parse::<Document>()` read under `ReaderSettings::for_document()`.
 
 ## Writing
 
@@ -41,7 +50,7 @@ pub fn Writer::body_digest(&self) -> String;          // "sha256:<hex>" of the b
 pub fn Writer::finish(self) -> Result<(W, Summary), HistoryError>;
 ```
 
-`start` writes the header (a header carrying a digest is written as given; `Document::seal` makes one). `write` serialises the line, re-reads it with the reader's own checks (shape, order, bounds) and writes it only if they pass; a refused line writes nothing and the writer goes on, but a sink failure poisons it. The output is in canonical spelling: compact, header keys in table order, `method` `params` `at` `_meta` in lines, every other object's keys sorted. Reading and writing a document gives that spelling; use `Reader::copy_to` to keep a file byte for byte.
+`start` writes the header under the writer's bounds (nesting and values included: a header it writes is one a reader with the same bounds reads). A header carrying a digest is written as given, and `finish` returns `DigestMismatch` if the body written is not the one it names (`body_digest` or `Document::seal` makes the right one). `write` serialises the line, re-reads it with the reader's own checks (shape, order, bounds) and writes it only if they pass; a refused line writes nothing and the writer goes on, but a sink failure poisons it. The output is in canonical spelling: compact, header keys in table order, `method` `params` `at` `_meta` in lines, every other object's keys sorted. Reading and writing a document gives that spelling; use `Reader::copy_to` to keep a file byte for byte.
 
 ```rust
 #[non_exhaustive] pub struct Document { pub header: Header, pub lines: Vec<Line> }
@@ -50,12 +59,14 @@ impl Document { fn new(Header); fn from_reader(Reader<R>); fn from_slice(&[u8]);
                 fn seal(&mut self) -> Result<(), HistoryError>; fn seed(&self) -> Seed<'_>; }
 ```
 
+`Document::to_writer`, `to_vec` and `to_string` write a header that has a digest with the digest of the body as written, so a document read from another producer's spelling is written in canonical spelling with a digest that is true of it. `check` ignores the digest.
+
 ## Types
 
 ```rust
 #[non_exhaustive] pub struct Header { pub id: String /*UUID*/, pub origin: Origin, pub created_at, model, mode, effort, cwd: Option<String>,
     pub acp_version: Option<u64>, pub digest: Option<String>, pub redacted: Option<Redacted>, pub meta: Option<serde_json::Value> }
-fn Header::new(id: impl Into<String>, origin: Origin) -> Header;  fn Header::to_line(&self) -> Result<String, HistoryError>;
+fn Header::new(id: impl Into<String>, origin: Origin) -> Header;  fn Header::to_line(&self) -> Result<String, HistoryError>;   // under the default bounds
 #[non_exhaustive] pub struct Origin { pub harness: String, pub version: Option<String>, pub session_id: Option<String> }  // Origin::new(harness)
 #[non_exhaustive] pub struct Line { pub at: Option<String>, pub meta: Option<Value>, pub body: Body }
 // Line::new(Body), prompt(Vec<Value>), text_prompt(&str), update(Value), turn_end(Stop), compaction(summary), .at(..), .meta(..), to_json()
@@ -88,13 +99,13 @@ The seed starts at the latest `history/compaction` that has a summary (else at t
 pub fn Redactor::try_new(settings: &RedactionSettings) -> Result<Redactor, HistoryError>;   // Pattern { index } for a bad, huge or empty-matching pattern
 pub fn Redactor::header(&mut self, &mut Header) -> Result<(), HistoryError>;
 pub fn Redactor::line(&mut self, number: u64, &mut Line) -> Result<(), HistoryError>;
-pub fn Redactor::document(&mut self, &mut Document) -> Result<RedactionReport, HistoryError>;   // marks header.redacted, drops the digest
+pub fn Redactor::document(&mut self, &mut Document) -> Result<RedactionReport, HistoryError>;   // when it removed anything: marks header.redacted, drops the digest
 pub fn Redactor::report(&self) -> &RedactionReport;   pub fn Redactor::mark(&self) -> Redacted;
 #[non_exhaustive] pub struct RedactionReport { pub replaced: u64, pub lines: u64, pub rules: Vec<RuleReport> }
 #[non_exhaustive] pub struct RuleReport { pub kind: RuleKind /*Value|Pattern*/, pub index: usize, pub replaced: u64, pub lines: u64 }
 ```
 
-Off unless a caller builds a `Redactor`. Strings are changed everywhere in the header (not `format`, `id`, `createdAt`, `digest`, `origin.harness`) and the payloads, except `sessionUpdate`, `toolCallId` and `optionId`, which pair lines. A removal that would leave a line the format refuses (for example a pattern matching `selected`) is an error and leaves the line and the document as they were. The report and the redactor's `Debug` never hold a value or a pattern, only its position. `document` marks `header.redacted` and drops `header.digest`; call `Document::seal` after.
+Off unless a caller builds a `Redactor`. Strings are changed everywhere in the header (not `format`, `id`, `createdAt`, `digest`, `origin.harness`) and the payloads, except the identifiers that pair lines, in the place that pairs them: an update's `sessionUpdate` and `toolCallId`, a request's `toolCall.toolCallId` and each option's `optionId`, an answer's `outcome.optionId` (the same key inside `rawInput` or `_meta` is changed). Every occurrence of every value and every match of every pattern is found in the original text and the stretches they cover are replaced once, so a value inside a longer one leaves none of the longer text; a rule's `replaced` counts what it found, the report's total counts replacements, and the two differ where matches overlap. A removal that would leave a line the format refuses (for example a pattern matching `selected`) is an error and leaves the line and the document as they were. The report and the redactor's `Debug` never hold a value or a pattern, only its position. `document` marks `header.redacted` and drops `header.digest` only when it removed something (call `Document::seal` after); with nothing removed the document is untouched.
 
 ## Loss report
 
@@ -117,7 +128,7 @@ pub fn tools::normalise(harness: &str, name: &str, input: &Value) -> Option<(Too
 pub fn tools::denormalise(tool: Tool, harness: &str, input: &Value) -> Option<(&'static str, Value)>;
 ```
 
-Harness names are `claude`, `codex`, `agy`. The functions rename input keys only; a change of shape is the codec's. agy's input keys are unverified.
+Harness names are `claude`, `codex`, `agy`. The functions rename input keys only; a change of shape is the codec's. When two keys of the input would become the same key (Claude `Read` with both `file_path` and `path`) the result is `None`: neither value may win. agy's input keys are unverified.
 
 ## Settings (Guatiao values)
 
@@ -128,17 +139,20 @@ All `#[non_exhaustive]`, `Default`, public fields, unknown keys refused, `ToValu
 | `Bounds` | `max_line_bytes` | 16777216 |
 | | `max_lines` | 5000000 |
 | | `max_total_bytes` | 4294967296 |
-| | `max_depth` | 64 |
+| | `max_depth` (capped at `PARSER_DEPTH`, 127) | 64 |
+| | `max_values` | 500000 |
 | `ReaderSettings` | `bounds`, `verify_digest` | `Bounds` default, `true` |
 | `WriterSettings` | `bounds` | `Bounds` default |
 | `RedactionSettings` | `values` (sensitive), `patterns`, `replacement` | `[]`, `[]`, `[redacted]` |
 
-`non_defaults<T: Serialize + Default>(&T) -> Vec<NonDefault { setting, value, default }>` lists, by key path, every setting not at its default; a redaction's `values` are named and shown as `[not shown]`. Precedence for the command: its flags over the defaults; the library reads no environment variable and no file.
+Constants: `DEFAULT_MAX_LINE_BYTES`, `DEFAULT_MAX_LINES`, `DEFAULT_MAX_TOTAL_BYTES`, `DEFAULT_MAX_DEPTH`, `DEFAULT_MAX_VALUES`, `DEFAULT_DOCUMENT_MAX_TOTAL_BYTES` (16 MiB), `PARSER_DEPTH` (127), `DEFAULT_REPLACEMENT`. `Bounds::for_document()` and `ReaderSettings::for_document()` are the defaults with the smaller total that `Document::from_slice` reads under.
+
+`non_defaults<T: ToValue + Schema + Default>(&T) -> Vec<NonDefault { setting, value, default }>` lists, by key path, every setting not at its default, from the settings' schema; values and defaults are JSON text. A field the schema marks sensitive (a redaction's `values`, at any depth of a caller's own settings) is named and shown as `"[not shown]"`. Precedence for the command: its flags over the defaults; the library reads no environment variable and no file.
 
 ## Errors
 
-`HistoryError` (`#[non_exhaustive]`, `Display` one lowercase clause quoting nothing from the document): `Io`, `Empty`, `NotUtf8`, `BlankLine`, `LineEnding`, `Truncated`, `Syntax { line, column }`, `DuplicateKey`, `Shape { line, pointer, expected }`, `UnknownField { line, pointer }`, `UnknownFormat`, `UnknownVersion { version }`, `UnknownLine`, `Order { line, rule: OrderRule }`, `TooLong`, `TooManyLines`, `TooLarge`, `TooDeep`, `DigestMismatch`, `Pattern { index }`. `code() -> &'static str` is the stable name the vectors use, `line()` and `pointer()` the place.
+`HistoryError` (`#[non_exhaustive]`, `Display` one lowercase clause quoting nothing from the document): `Io`, `Empty`, `NotUtf8`, `BlankLine`, `LineEnding`, `Truncated`, `Syntax { line, column }`, `DuplicateKey`, `Shape { line, pointer, expected }`, `UnknownField { line, pointer }`, `UnknownFormat`, `UnknownVersion { version }`, `UnknownLine`, `Order { line, rule: OrderRule }`, `TooLong`, `TooManyLines`, `TooLarge`, `TooDeep { line, limit, by_parser }`, `TooManyValues { line, limit }`, `DigestMismatch`, `Pattern { index }`. `TooDeep`'s `limit` is the nesting allowed and `by_parser` says it is the parser's own `PARSER_DEPTH` because `max_depth` was set above it. `code() -> &'static str` is the stable name the vectors use, `line()` and `pointer()` the place.
 
 ## Command (`--features cli`)
 
-`coqui-acp-history list [DIR]`, `show FILE`, `convert IN -o OUT [--redact-pattern RE]... [--redact-values-file FILE] [--replacement TEXT] [--seal]`, `export --harness H SESSION` and `import --harness H FILE` (exit status 2: they need a harness's codec), and `--max-line-bytes`, `--max-lines`, `--max-total-bytes`, `--max-depth` on the first three. `convert` with no redaction option copies the checked lines verbatim and writes the output whole or not at all (`OUT.part`, then renamed). A secret to remove is read from a file, never an argument. A bound looser than its default is reported on standard error. Exit status 1 for a refused history, 2 for a usage error.
+`coqui-acp-history list [DIR]`, `show FILE`, `convert IN -o OUT [--redact-pattern RE]... [--redact-values-file FILE] [--replacement TEXT] [--seal]`, `export --harness H SESSION` and `import --harness H FILE` (exit status 2: they need a harness's codec), and `--max-line-bytes`, `--max-lines`, `--max-total-bytes`, `--max-depth`, `--max-values` on the first three. `show` and a `convert` that redacts or seals hold the history in memory, so they start from the 16 MiB total of `ReaderSettings::for_document()`; `list` and a verbatim `convert` stream. `convert` copies the checked lines verbatim, after the whole history has been checked, unless a redaction removes something or `--seal` asks for a rewrite in canonical spelling with a digest; the output is written whole or not at all, to a new uniquely named file beside it (created exclusively, so no existing file or link is written through) and renamed. A secret to remove is read from a file, never an argument. A bound looser than its default is reported on standard error. Everything a history says is printed with control, line-separator and bidirectional characters escaped as `\u{..}`. Exit status 1 for a refused history, 2 for a usage error.

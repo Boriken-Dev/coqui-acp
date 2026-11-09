@@ -14,9 +14,11 @@ reference implementation, and `vectors/session_history/` holds the cases a reade
 
 ## Features
 
-- `Reader`: a bounded, streaming reader. It holds one line at a time, refuses an unknown line kind, version, key, repeated key,
-  out-of-order line or malformed input with the line and the JSON pointer of the place (never the content), and checks the
-  header's digest at the end.
+- `Reader`: a bounded, streaming reader. It holds one line at a time (a line costs a bounded multiple of its bytes: at most
+  `max_values` values, and about 4 times its size for text, up to 60 for tiny objects), refuses an unknown line kind, version,
+  key, repeated key, out-of-order line, header text with a control character or malformed input with the line and the JSON
+  pointer of the place (never the content), and checks the header's digest at the end. Lines are handed over before that
+  check: `Reader::check`, or reading a `Document`, is how a consumer acts only on a verified history.
 - `Writer`: checks every line the way the reader does, so it cannot write a file the reader refuses.
 - `Document`: a whole history in memory, and `Document::seed`, the latest compaction summary and the lines after it, with
   `Seed::fit` for the latest whole turns that fit a budget.
@@ -26,8 +28,9 @@ reference implementation, and `vectors/session_history/` holds the cases a reade
 - `LossReport`: what an import could not carry (thinking dropped, tools turned into notes, attachments known only by digest).
 - Settings as Guatiao values: `Bounds`, `ReaderSettings`, `WriterSettings`, `RedactionSettings`, each with defaults, unknown keys
   refused, and `non_defaults()`.
-- `coqui-acp-history`, a command (feature `cli`): `list`, `show`, `convert` (checked, and unaltered unless redaction is asked
-  for), and `export` and `import`, which need a harness's codec and say so.
+- `coqui-acp-history`, a command (feature `cli`): `list`, `show` (both print what a history says with control and
+  bidirectional characters escaped), `convert` (checked, and its lines copied as they are unless redaction removes something or
+  `--seal` is asked for), and `export` and `import`, which need a harness's codec and say so.
 
 ## Installation
 
