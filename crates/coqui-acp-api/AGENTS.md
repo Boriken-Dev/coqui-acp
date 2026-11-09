@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp-api` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-MSRV Rust 1.89. A default build depends on `guatiao` (with `provider`) and `guatiao-channel`, both pinned by one revision: a host and every provider build against the same one, and a library built against another `guatiao::library::ABI_VERSION` is refused at load. Feature `contract` (off by default) adds the contract suite, `contract::Contract`, and the program `acp-harness-check`, with `serde_json`, `coqui-acp` and Guatiao's `load`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
+MSRV Rust 1.89. A default build depends on `guatiao` (with `provider`), `guatiao-channel` (both pinned by one revision) and `serde`: a host and every provider build against the same one, and a library built against another `guatiao::library::ABI_VERSION` is refused at load. Feature `contract` (off by default) adds the contract suite, `contract::Contract`, and the program `acp-harness-check`, with `serde_json`, `coqui-acp` and Guatiao's `load`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: everything is at the crate root, but the suite (`contract`). `coqui_acp_api::guatiao` is Guatiao, so a provider names one version of it (`#[provider(AcpHarness, crate = ::coqui_acp_api::guatiao)]`).
 
@@ -14,7 +14,7 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 
 | kind | table | `FLOOR_HASH` | who implements it |
 | --- | --- | --- | --- |
-| `acp_harness` | `AcpHarnessVtable` | `2577453137` | the provider |
+| `acp_harness` | `AcpHarnessVtable` | `1326996142` | the provider |
 | `channel` | `ChannelVtable` | `3787630980` | the provider (Guatiao's, re-exported) |
 | `channel_sink` | `ChannelSinkVtable` | `4115266557` | the host (Guatiao's, re-exported) |
 | `process_spawner` | `ProcessSpawnerVtable` | `1466370631` | the host |
@@ -41,11 +41,13 @@ pub trait AcpHarness: Send + Sync {
         -> Result<ExportPage, ProviderError>;
     fn models(&self, environment: Secret<Environment>) -> Result<ModelListing, ProviderError>;     // default: unknown
     fn session_record(&self, query: SessionQuery) -> Result<Option<SessionRecordFile>, ProviderError>; // default: None
+    fn usage(&self, query: UsageQuery, spawner: Object<dyn ProcessSpawner>) -> Result<UsageReport, ProviderError>;
+                                                                                                    // default: unsupported
     fn non_defaults(&self) -> Result<Vec<NonDefault>, ProviderError>;                               // default: empty
 }
 ```
 
-Every method is synchronous; a host calls them from a thread of its own. Every method answers for the provider **as configured**: a host builds an instance from the provider's settings (`offer.instantiate(&settings)`) and asks it, so `describe` and `refusal` are a configured harness's answers. The six without a default are the ones a host acts on for every harness (a harness that cannot import says so by refusing, with its reason); the three defaults are true answers for a harness with nothing to say (no way to list models, no record kept, settings its schema shows in full).
+Every method is synchronous; a host calls them from a thread of its own. Every method answers for the provider **as configured**: a host builds an instance from the provider's settings (`offer.instantiate(&settings)`) and asks it, so `describe` and `refusal` are a configured harness's answers. The six without a default are the ones a host acts on for every harness (a harness that cannot import says so by refusing, with its reason); the four defaults are true answers for a harness with nothing to say (no way to list models, no record kept, no usage to report, settings its schema shows in full).
 
 - `describe`: who the harness is and what its `initialize` will advertise, with nothing started. Cheap, the same on every call.
 - `start`: one ACP connection. The host is the client, the provider the agent. `spawner` and `sink` are handed over: the provider destroys both, even when it refuses, and the spawner by the time it calls `closed`. It returns once the channel takes messages; the program may start later, and a failure then is answered in ACP before the provider closes. It refuses exactly when `refusal` would for the request's requirements, with the same status: `GUATIAO_ERR_UNSUPPORTED` for a requirement it cannot hold, `GUATIAO_ERR_BAD_VALUE` for a request it cannot read. It never starts with a requirement left out.
@@ -55,6 +57,7 @@ Every method is synchronous; a host calls them from a thread of its own. Every m
 - `export_session`: one page of the history of a session it reported, by its UUID, in the standard format, as it is. A page is whole lines, each ended by a line feed, never more than `max_bytes`: the caller's memory bound, since one line can hold a whole tool output or an attachment. A next line longer than `max_bytes` (line feed included) is refused `GUATIAO_ERR_BAD_VALUE` with the message `line too large: <N> bytes` (`LINE_TOO_LARGE`, read back with `line_too_large(message) -> Option<u64>`), so the host asks again with a `max_bytes` of at least N or stops and says why. Only the first page starts with the header, which carries the format's version and the digest of the whole body. `next` names the page after; absent, the export is complete; the pages joined are the export of one page as large as the whole. `after` is opaque, the provider's own. `GUATIAO_ERR_NOT_FOUND` for a session it does not have; `GUATIAO_ERR_BAD_VALUE` for an `after` it never gave or one the session has changed since (the host starts again from the first page); `GUATIAO_ERR_UNSUPPORTED`, with the reason, when it cannot export.
 - `models`: what the account behind `environment` may use, with no model turn, or why it cannot say.
 - `session_record`: where the harness keeps its own record of a session, by the UUID it reported.
+- `usage`: what the account behind `query`'s environment has used and has left, with no session and no model turn, as a `UsageReport` ("Usage", below). Cheap: a host may poll it as often as it likes. A harness that learns usage only during a turn answers the newest report its connections saw for `query.account`, with its `observed_at`. A provider that runs a program to ask (Codex's `account/rateLimits/read`) runs it through `spawner` and destroys it, as `import_session` does. The default, `UsageReport::unsupported("this harness reports no usage")`, is a true answer. Never carries a value of the environment.
 - `non_defaults`: how a configured harness departs from its defaults in ways its settings' schema cannot show (the detail of a rule a setting holds as text). The rest a host reads from the schema itself, with Guatiao's `schema::differences`.
 
 **Nothing a provider answers carries a value of an environment**: not an answer, a refusal, an error or a log line. `Secret<Environment>` prints `[redacted]`, and its schema marks it `writeOnly` and `x-sensitive`. The copies Guatiao's proxy makes of an argument while converting it are not wiped.
@@ -135,8 +138,9 @@ What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport
     pub environment: Secret<Environment>,   // over the configuration's; sensitive
     pub working_roots: Vec<String>,         // every session's directories lie in one; empty adds none
     pub requirements: Vec<Requirement>,     // what the connection is held to; each name once
+    pub account: Option<String>,            // the host's id for the account; echoed into every usage report, never interpreted
 }
-StartRequest::new();  StartRequest::builder() -> StartRequestBuilder   // .environment(env) .working_root(r) .requirement(r) .build()
+StartRequest::new();  StartRequest::builder() -> StartRequestBuilder   // .environment(env) .working_root(r) .requirement(r) .account(id) .build()
 
 #[non_exhaustive] pub struct Requirement { pub name: String, pub value: Option<Value> }
 Requirement::new(name);  Requirement::with_value(name, value);  requirement.narrowing() -> Result<Narrowing, RequirementError>
@@ -152,7 +156,8 @@ pub const NAMES: [&str; 11];
 pub struct Environment;   // BTreeMap<String, String> inside; Debug names the variables only; Wipe zeroes names and values
 Environment::new(); .insert(name, value); .get(name); .iter(); .names(); .len(); .is_empty(); FromIterator; From<BTreeMap<String, String>>
 
-#[non_exhaustive] pub struct HarnessInfo { pub title: String, pub versions: Vec<u16>, pub takes: Takes, pub resumes_wider: bool }
+#[non_exhaustive] pub struct HarnessInfo { pub title: String, pub versions: Vec<u16>, pub takes: Takes, pub resumes_wider: bool,
+    pub usage: UsageSupport }
 HarnessInfo::new(title, versions)
 #[non_exhaustive] #[derive(Default)] pub struct Takes { pub images: bool, pub audio: bool, pub embedded_context: bool,
     pub mcp_http: bool, pub mcp_sse: bool, pub load: bool, pub resume: bool, pub additional_directories: bool, pub system_prompt: bool }
@@ -179,6 +184,8 @@ ImportReport::new()
 #[non_exhaustive] pub struct SessionRecordFile { pub path: String, pub format: String }   // `claude-code-jsonl`, `codex-rollout-jsonl`
 #[non_exhaustive] pub struct NonDefault { pub setting: String, pub value: String, pub default: String }   NonDefault::new(setting, value, default)
 ```
+
+`usage`: what the harness can report (`UsageSupport { sources, spend }`; empty `sources` is none), which `initialize` agrees with: a harness that reports any advertises the usage capability, one that reports none does not.
 
 `resumes_wider`: a session held to requirements can be reopened (`session/load` or `session/resume`) on a later connection started with fewer, and then has what that connection allows. A host that changes what a session may do starts a new connection with the new requirements and reopens the session there.
 
@@ -224,6 +231,58 @@ A session's `cwd` and every one of its `additionalDirectories`, on `session/new`
 
 **The host stays the client.** Every request the agent makes of the client (`session/request_permission`, `fs/*`, `terminal/*`, `elicitation/create`) reaches the host, which answers it under its own rules, refusing by default. The agent asks only for what `initialize`'s `clientCapabilities` offered. A permission answered with anything but a selected option the request offered is a refusal; a cancelled outcome ends the turn `cancelled`. A provider's answer never overrides the host's refusal.
 
+## Usage (`coqui_acp_api::usage`)
+
+How much of each usage allowance an account has used, how it refills and when: one model, one ACP extension, one kind method. Counts and money are integers (millionths of a US dollar), times are Unix seconds, lengths are Guatiao's `Duration` (JSON `[seconds, nanoseconds]`); no float appears. The model derives Guatiao's `ToValue`, `FromValue` and `Schema` and serde's `Serialize` and `Deserialize`, with one spelling on both wires: an absent optional is left out (a reader also takes `null`), a list is always written, even empty. `vectors/usage.json` holds every reader to it, and the schemas in `include/coqui_acp_api.schemas.json` are the contract for other languages. A request model (`UsageQuery`, `StartRequest`) refuses a key it does not declare; every answer is read leniently.
+
+```rust
+#[non_exhaustive] pub struct UsageReport { pub supported: bool, pub unsupported_because: Option<String>, pub sources: Vec<Source>,
+    pub account: Option<String>, pub revision: u64, pub observed_at: i64, pub buckets: Vec<Bucket>, pub limit: Option<LimitHit>,
+    pub spend: Option<Spend> }
+UsageReport::new();  UsageReport::unsupported(reason);  UsageReport::fraction_permille(&Bucket) -> Option<u16>
+#[non_exhaustive] pub struct Bucket { pub id: String, pub label: Option<String>, pub models: Coverage, pub unit: Unit,
+    pub used: Option<u64>, pub limit: Option<u64>, pub remaining: Option<u64>, pub refill: Refill, pub status: Status,
+    pub observed_at: i64, pub source: Source, pub evidence: Option<String> }
+Bucket::new(id);  bucket.resets_in(now: i64) -> Option<Duration>
+#[non_exhaustive] pub enum Coverage { All, Unknown, Only { models: Vec<String> }, Other }       // JSON {"kind": "only", "models": [..]}
+#[non_exhaustive] pub enum Unit { Tokens, Requests, MicroUsd, Permille, Other(String) }          // "tokens" "requests" "micro_usd" "permille"
+#[non_exhaustive] pub enum Refill { FixedWindow { length: Option<Duration>, resets_at: Option<i64> },
+    TokenBucket { amount: u64, per: Duration, max: u64 }, Never, Unknown, Other }                // kinds fixed_window, token_bucket, none, unknown
+#[non_exhaustive] pub enum Status { Ok, Warning, Exhausted, Unknown, Other(String) }
+#[non_exhaustive] pub enum Source { Reported, Inferred, Other(String) }
+#[non_exhaustive] pub struct LimitHit { pub bucket: Option<String>, pub resets_at: Option<i64>, pub retry_after: Option<Duration>,
+    pub source: Source, pub text: Option<String>, pub observed_at: i64 }                         // LimitHit::new(observed_at)
+#[non_exhaustive] pub struct Spend { pub session_id: String, pub input: u64, pub output: u64, pub cache_read: u64,
+    pub cache_write: u64, pub reasoning: Option<u64>, pub cost_micro_usd: Option<u64>, pub by_model: Vec<ModelSpend> }   // Spend::new(session_id)
+#[non_exhaustive] pub struct ModelSpend { pub model: String, pub input: u64, pub output: u64, pub cache_read: u64,
+    pub cache_write: u64, pub cost_micro_usd: Option<u64> }                                      // ModelSpend::new(model)
+#[non_exhaustive] pub struct UsageSupport { pub sources: Vec<Source>, pub spend: bool }          // none(); new(sources, spend); reports()
+#[non_exhaustive] pub struct UsageQuery { pub environment: Secret<Environment>, pub account: Option<String> }   // new(); .environment(env); .account(id)
+pub const USAGE_CAPABILITY: &str = "dev.boriken.coqui.acp/usage";   pub const USAGE_METHOD: &str = "_coqui_acp/usage";
+pub const USAGE_NOTIFICATION: &str = "_coqui_acp/usage_update";     pub const LIMIT_META_KEY: &str = "dev.boriken.coqui.acp/limit";
+pub const USAGE_VERSION: u32 = 1;
+```
+
+- **`supported: false` is a real answer** (this harness reports no usage, and `unsupported_because` says why); `supported` with no buckets is another, nothing reported yet. `sources` says which kinds of figure the harness can give at all: `reported` (its own structured figure) or `inferred` (read from an error's words, a 429 or a refusal, by the provider or the host; the bucket's `evidence` holds the words, for logs, and nothing parses it). A host knows from `sources` that an agent never reports figures.
+- **A bucket** names the models it covers (`unknown` counts as covering every model, so an exhausted bucket of unknown coverage stops the account for each of them), what it counts (`unit`), `used`, `limit` and `remaining` as the harness gave them, and how it refills. A provider fills only what it was told and never derives one figure from another. The fraction a reader uses is `UsageReport::fraction_permille`: `used / limit`, else `(limit - remaining) / limit`, in thousandths, at most 1000, `None` without a limit. `Unit::Permille` is a percentage-only bucket: `limit` is 1000 and `used` thousandths, so the arithmetic is the same for every unit. `id` is stable per harness and account (`five_hour`, `seven_day`, `seven_day_opus`, `codex:primary`, `inferred`).
+- **Refill.** `FixedWindow` resets all at once when the window ends, at `resets_at` (a subscription's five hours or week); `TokenBucket` adds `amount` units each `per`, up to `max`, continuously; `Never` is a balance. `resets_in(now)` is how long until a fixed window ends, zero once it has (the bucket is then due a new report), `None` for any other. A unit, status, source, refill or coverage a newer writer names reads as `Other` and the report is still read; `Unit`, `Status` and `Source` keep the name they were sent under.
+- **Warning thresholds are the host's.** A provider reports `Status::Warning` only when the harness said so (Claude's `allowed_warning`), and never invents a level; a host applies its own to the fraction.
+- **`revision` and `observed_at`.** Each bucket has its own `observed_at`; the report's is the newest bucket's. `revision` grows by one with each change on a connection (and per provider instance for the kind's answer), and a repeat of figures already held changes nothing, so a host that polls keeps the newest by revision and an unchanged account costs it nothing.
+- **A refusal** is a `LimitHit`: the bucket it names (`exhausted` in the same report), `resets_at` when the harness said, and `retry_after` when the refusal did (a 429's header), both explicit fields, never only text. The report keeps it until its reset passes or a later report shows room; a retry-after can move, which is why a host reads the report again and does not trust it once.
+- **`Spend`** is a session's running totals; `cost_micro_usd` is `None` when the harness reported no cost or a partial one, never `0` for unknown. A conversion from another unit rounds to the nearest micro-USD, halves up.
+
+**The ACP extension** runs on ACP versions 1 and 2 and has a version of its own (`USAGE_VERSION`, 1; until the first release a change is a break and stays 1):
+
+| part | where | shape |
+| --- | --- | --- |
+| capability | `agentCapabilities._meta[USAGE_CAPABILITY]` (version 2: `capabilities._meta`) | `{"version": 1, "sources": ["reported", "inferred"], "spend": true}`; absent means the agent reports none, and a client does not call it |
+| opt-in | `initialize`'s `clientCapabilities._meta[USAGE_CAPABILITY]` | `{"notify": true, "account": "<host id>"}`; notifications go only to a client that set `notify` |
+| request | `_coqui_acp/usage` | `{"sessionId"?: uuid}` answers a `UsageReport`, with the session's `spend` when one is named and none otherwise; an unknown session is `-32602`, an agent without the capability answers `-32601` |
+| notification | `_coqui_acp/usage_update` | `{"sessionId"?: uuid, "report": UsageReport}`: the whole report on every change (a bucket's figures, status or reset, a limit hit, a session's spend after a turn), never a delta |
+| refused turn | the turn's answer (version 2: the `idle` update) | `stopReason: "refusal"` and `_meta[LIMIT_META_KEY]` holding the `LimitHit` |
+
+The request needs no session and no turn and is cheap, so a host may poll it; how often is the host's choice. `account` is the host's id for the account a connection runs on, taken from `StartRequest.account` (else the client's opt-in), echoed into every report and never interpreted; a host that launched the connection overwrites it in what it relays, so a provider cannot misattribute. It picks no credentials.
+
 ## A provider in another language
 
 Every method takes and answers plain data; `start` also takes the spawner and the sink and answers the channel, all objects. The Python module is what `python -m guatiao.kinds` writes from the description: a provider subclasses `AcpHarness` and `Channel`, calls the sink it is handed (`receive(bytes)`, `closed(status, reason)`, then `destroy()`), from a `threading.Thread` of its own if it likes, and calls `destroy()` on the spawner it does not keep; its `Channel` implements `send(bytes)` and `close(status, reason)`. A method that raises gives up every object it was handed, and Guatiao's binding destroys them: a refusing `start` just raises. The models' schemas in `include/coqui_acp_api.schemas.json` say which keys a request may have. A provider in a language whose objects are called on one engine thread (QuickJS, Node, Lua) has no thread of its own: it answers inside the `send` that took the message, so it cannot be told `session/cancel` while a turn runs.
@@ -239,10 +298,10 @@ Contract::new(name) .version(u16 /* 1 */) .holds(Vec<Requirement> /* read_only, 
 pub struct contract::Failures { pub provider: String, pub failures: Vec<Failure> }   // Display lists each
 ```
 
-Every provider of the kind passes it, configured to drive the **contract agent**: a real harness supplies a stand-in for its program that behaves as the module's documentation says (`close`, `wait`, `ask`, `read PATH`, else `echo: TEXT`). It checks the methods, requirements, secrets, ACP and its errors, seeding a session at the host's UUID (empty, then resumed; exported after turns, imported at another UUID, then resumed; what an import and an export refuse), paging an export (pages join to the whole, the header with its digest on the first only, a one-byte page refused with the next line's size, an unknown or stale `after` refused), reopening, cancel, permission answers, client capabilities, back-pressure, every close, working roots, the size limit and a real `coqui_acp::Client`. It makes and removes a directory under the system's temporary one, with a link (a junction on Windows) when the platform allows.
+Every provider of the kind passes it, configured to drive the **contract agent**: a real harness supplies a stand-in for its program that behaves as the module's documentation says (`close`, `wait`, `ask`, `read PATH`, else `echo: TEXT`; a harness whose `describe` lists usage sources also understands `quota P` and `limit`). It checks the methods, requirements, secrets, ACP and its errors, seeding a session at the host's UUID (empty, then resumed; exported after turns, imported at another UUID, then resumed; what an import and an export refuse), paging an export (pages join to the whole, the header with its digest on the first only, a one-byte page refused with the next line's size, an unknown or stale `after` refused), usage (a harness that reports none advertises nothing and answers `_coqui_acp/usage` with `-32601`; one that reports answers it with no session and no turn, grows `revision` on a change and not on a repeat, tells only the client that asked, echoes the account, ends a limited turn `refusal` with the `LimitHit`, and has `usage()` agree with its last connection), reopening, cancel, permission answers, client capabilities, back-pressure, every close, working roots, the size limit and a real `coqui_acp::Client`. It makes and removes a directory under the system's temporary one, with a link (a junction on Windows) when the platform allows.
 
 `acp-harness-check` runs it on a provider with no Rust of the provider's own: `--library FILE`, or `--source SOURCE_LIBRARY --source-config JSON` for one a Guatiao source loads; `--provider KEY`, `--settings JSON` (build an instance), `--version N`, `--holds NAME[=JSON]` (repeated), `--message-limit N`, `--no-imports` (it must refuse `import_session` with a reason). Exits 0, 1 listing each rule broken, or 2 when the provider could not be loaded.
 
 ## Tests
 
-`examples/echo_harness.rs` is the contract agent in Rust, built by `cargo test` into a `cdylib` the tests load, with settings (`title`, `max_message_bytes`) a host builds instances from. `examples/provider-python/harness/acp_echo_harness.py` in the repository is the same in Python.
+`examples/echo_harness.rs` is the contract agent in Rust, built by `cargo test` into a `cdylib` the tests load, with settings (`title`, `max_message_bytes`, `imports`, `usage` of `none` (the default) or `scripted`) a host builds instances from. `examples/provider-python/harness/acp_echo_harness.py` in the repository is the same in Python.

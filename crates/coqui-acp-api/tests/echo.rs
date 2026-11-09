@@ -13,8 +13,9 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
-    AcpHarness, ProcessSpawner, SessionExport, SessionImport, SessionQuery, SpawnSpec,
-    SpawnedProcess, SpawnerInfo,
+    AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport,
+    ProcessSpawner, Requirement, SessionExport, SessionImport, SessionQuery, Source, SpawnSpec,
+    SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery, UsageReport, UsageSupport,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -202,5 +203,128 @@ fn a_harness_that_cannot_import_refuses_with_a_reason() {
         .run(&*harness)
     {
         panic!("{failures}");
+    }
+}
+
+/// A harness that reports usage is held to the scripted half of the contract, and is told apart from
+/// one that does not.
+#[test]
+fn a_scripted_echo_reports_usage_as_the_contract_documents() {
+    let registry = registry();
+    let mut settings = Map::new();
+    settings.set("usage", "scripted");
+    let harness = instance(&registry, settings);
+    let info = harness.describe().expect("described");
+    assert_eq!(info.usage.sources, vec![Source::Reported]);
+    assert!(info.usage.spend);
+    if let Err(failures) = Contract::new("the scripted Rust echo")
+        .message_limit(1 << 20)
+        .run(&*harness)
+    {
+        panic!("{failures}");
+    }
+}
+
+#[test]
+fn an_echo_that_reports_no_usage_says_so_with_a_reason() {
+    let (_registry, harness) = loaded();
+    assert!(!harness.describe().expect("described").usage.reports());
+    let report = harness
+        .usage(UsageQuery::new().account("pool/alice"), spawner())
+        .expect("answered");
+    assert!(!report.supported && report.buckets.is_empty());
+    assert!(
+        report
+            .unsupported_because
+            .as_deref()
+            .is_some_and(|why| !why.is_empty())
+    );
+}
+
+/// A provider that reports usage differently from what it says is caught: a harness whose `describe`
+/// hides what its connections do, and one whose `usage` slot contradicts its connections.
+#[test]
+fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
+    struct Disagrees {
+        inner: Arc<dyn AcpHarness>,
+        hides_in_describe: bool,
+    }
+
+    impl AcpHarness for Disagrees {
+        fn describe(&self) -> Result<HarnessInfo, ProviderError> {
+            let mut info = self.inner.describe()?;
+            if self.hides_in_describe {
+                info.usage = UsageSupport::none();
+            }
+            Ok(info)
+        }
+
+        fn start(
+            &self,
+            request: StartRequest,
+            spawner: Object<dyn ProcessSpawner>,
+            sink: Object<dyn ChannelSink>,
+        ) -> Result<Object<dyn Channel>, ProviderError> {
+            self.inner.start(request, spawner, sink)
+        }
+
+        fn refusal(
+            &self,
+            requirements: Vec<Requirement>,
+            environment: Secret<Environment>,
+        ) -> Result<Option<String>, ProviderError> {
+            self.inner.refusal(requirements, environment)
+        }
+
+        fn program(&self) -> Result<Option<String>, ProviderError> {
+            self.inner.program()
+        }
+
+        fn import_session(
+            &self,
+            session: SessionImport,
+            spawner: Object<dyn ProcessSpawner>,
+        ) -> Result<ImportReport, ProviderError> {
+            self.inner.import_session(session, spawner)
+        }
+
+        fn export_session(
+            &self,
+            export: SessionExport,
+            spawner: Object<dyn ProcessSpawner>,
+        ) -> Result<ExportPage, ProviderError> {
+            self.inner.export_session(export, spawner)
+        }
+
+        fn usage(
+            &self,
+            query: UsageQuery,
+            spawner: Object<dyn ProcessSpawner>,
+        ) -> Result<UsageReport, ProviderError> {
+            if self.hides_in_describe {
+                return self.inner.usage(query, spawner);
+            }
+            drop((query, spawner));
+            Ok(UsageReport::unsupported("it says it has none"))
+        }
+    }
+
+    let registry = registry();
+    let mut settings = Map::new();
+    settings.set("usage", "scripted");
+    let inner = instance(&registry, settings);
+    for hides_in_describe in [false, true] {
+        let harness = Disagrees {
+            inner: Arc::clone(&inner),
+            hides_in_describe,
+        };
+        let failures = Contract::new("a provider that disagrees with itself")
+            .run(&harness)
+            .expect_err("the contract finds the disagreement");
+        let said = failures.to_string();
+        assert!(
+            said.contains("describes itself") || said.contains("reports usage as it says"),
+            "{said}"
+        );
     }
 }

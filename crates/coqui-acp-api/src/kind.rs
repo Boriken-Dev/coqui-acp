@@ -15,6 +15,7 @@ use crate::models::{
 };
 use crate::requirement::Requirement;
 use crate::spawner::ProcessSpawner;
+use crate::usage::{UsageQuery, UsageReport};
 
 /// Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.
 ///
@@ -122,6 +123,23 @@ pub trait AcpHarness: Send + Sync {
     ) -> Result<Option<SessionRecordFile>, ProviderError> {
         drop(query);
         Ok(None)
+    }
+
+    /// What the account behind `query`'s environment has used and has left, with no session and no
+    /// model turn; cheap, so a host may poll it as often as it likes. A harness that learns usage
+    /// only while a turn runs answers the newest report its connections saw for the account, with
+    /// its `observed_at`. Never carries a value from the environment. The default, for a harness
+    /// that reports no usage, is a true answer: [`UsageReport::unsupported`].
+    ///
+    /// A provider that runs a program to ask (Codex's `account/rateLimits/read`) runs it through
+    /// `spawner`, and destroys it as `import_session` does.
+    fn usage(
+        &self,
+        query: UsageQuery,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<UsageReport, ProviderError> {
+        drop((query, spawner));
+        Ok(UsageReport::unsupported("this harness reports no usage"))
     }
 
     /// Each way this configured harness departs from its defaults that its settings' schema cannot

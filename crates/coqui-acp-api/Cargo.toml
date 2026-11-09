@@ -26,6 +26,7 @@ contract = ["dep:serde_json", "dep:coqui-acp", "guatiao/load"]
 [dependencies]
 guatiao = { workspace = true, features = ["provider"] }
 guatiao-channel.workspace = true
+serde.workspace = true
 coqui-acp = { path = "../coqui-acp", optional = true }
 serde_json = { workspace = true, optional = true }
 

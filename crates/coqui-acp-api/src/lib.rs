@@ -13,6 +13,7 @@ mod models;
 mod requirement;
 mod roots;
 mod spawner;
+pub mod usage;
 
 pub use guatiao;
 pub use guatiao_channel::{Channel, ChannelSink, ChannelSinkVtable, ChannelVtable};
@@ -33,4 +34,9 @@ pub use roots::{PathRefusal, PathStyle, WorkingRoots, is_plain_absolute, is_sess
 pub use spawner::{
     ErrorOutput, LinkState, ProcessExit, ProcessSpawner, ProcessSpawnerVtable, READ_LINK_DOWN,
     READ_TIMED_OUT, SpawnSpec, SpawnedProcess, SpawnedProcessVtable, SpawnerInfo, TerminalSize,
+};
+pub use usage::{
+    Bucket, Coverage, LIMIT_META_KEY, LimitHit, ModelSpend, Refill, Source, Spend, Status,
+    USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit, UsageQuery,
+    UsageReport, UsageSupport,
 };

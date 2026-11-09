@@ -171,7 +171,7 @@ class Channel(KindProtocol, Protocol, kind="channel", floor_hash=3787630980, is_
         ...
 
 
-class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=2577453137):
+class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=1326996142):
     """Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.
 
     The host is the ACP client and the provider the agent: each message on the channel, either way,
@@ -279,6 +279,19 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=25774531
         """Where the harness keeps its own record of the session `query` names (by the session id it
         reported, a UUID), when it keeps one and the file is there. The default, for a harness that
         keeps none: none.
+        """
+        ...
+
+    @fallible
+    def usage(self, query: Ref, spawner: Taken[ProcessSpawner]) -> ValueAnswer:
+        """What the account behind `query`'s environment has used and has left, with no session and no
+        model turn; cheap, so a host may poll it as often as it likes. A harness that learns usage
+        only while a turn runs answers the newest report its connections saw for the account, with
+        its `observed_at`. Never carries a value from the environment. The default, for a harness
+        that reports no usage, is a true answer: [`UsageReport::unsupported`].
+
+        A provider that runs a program to ask (Codex's `account/rateLimits/read`) runs it through
+        `spawner`, and destroys it as `import_session` does.
         """
         ...
 

@@ -7,7 +7,8 @@
 
 ## Features
 
-- `AcpHarness`: `describe`, `start`, `refusal`, `program`, `import_session` and `export_session`, which every harness answers; `models`, `session_record` and `non_defaults`, whose defaults are true answers for a harness with nothing to say.
+- `AcpHarness`: `describe`, `start`, `refusal`, `program`, `import_session` and `export_session`, which every harness answers; `models`, `session_record`, `usage` and `non_defaults`, whose defaults are true answers for a harness with nothing to say.
+- `usage`: how much of each usage allowance the account has used, how it refills and when (`UsageReport`, its `Bucket`s with their coverage, unit and refill, a refused request's `LimitHit`, a session's `Spend`), answerable with no session and no turn, and the same model on the ACP extension `_coqui_acp/usage`.
 - `ProcessSpawner` and `SpawnedProcess`: the host's spawner, here, over SSH or in a container: pipes or a terminal, reads that survive a dropped link, a kill that ends the whole tree.
 - `StartRequest`: what a host adds to the provider's own configuration for one connection: a secret environment, working roots and requirements with their values.
 - Sessions at the host's UUID: `import_session` seeds one from a history in the standard format (empty for a fresh one), ACP's `session/resume` opens it, `export_session` gives its history back, page by page; every session id a harness reports is a UUID.
@@ -15,7 +16,7 @@
 - `WorkingRoots`: the one way a path is compared with the roots (no `..`, case on Windows, links followed).
 - The kinds as data, `include/coqui_acp_api.kinds.json`, the models' schemas, `include/coqui_acp_api.schemas.json`, and a Python module, `python/coqui_acp_api_kinds.py`, for providers with no Rust.
 - Feature `contract`: the suite every provider passes, as a module and as `acp-harness-check`, which runs it on a library or a source file in any language.
-- No dependency but Guatiao and its channel kinds by default; no `unsafe`.
+- No dependency but Guatiao, its channel kinds and serde by default; no `unsafe`.
 
 ## Installation
 

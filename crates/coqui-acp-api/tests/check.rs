@@ -67,3 +67,20 @@ fn the_checker_builds_an_instance_from_settings() {
     let refused = check(&["--settings", r#"{"titel": "misspelled"}"#]);
     assert_eq!(refused.status.code(), Some(2));
 }
+
+#[test]
+fn the_checker_runs_the_scripted_usage_half_on_a_provider_configured_for_it() {
+    let out = check(&[
+        "--settings",
+        r#"{"usage": "scripted"}"#,
+        "--message-limit",
+        "1048576",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let refused = check(&["--settings", r#"{"usage": "sometimes"}"#]);
+    assert_eq!(refused.status.code(), Some(2));
+}

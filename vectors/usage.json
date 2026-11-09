@@ -1,0 +1,597 @@
+{
+  "about": "The usage model (`coqui_acp_api::usage`) as every reader and writer must spell it, in Rust here and in Dart for Canoa's app. `roundtrip` is a report written in its one canonical form: an absent optional left out (a reader also takes null), a list always written, even empty, a length as [seconds, nanoseconds], a time in Unix seconds, no float. Reading it and writing it again must give the same JSON. `lenient` is what a reader is given that a newer writer could send: a unit, status, source, refill or coverage it does not know reads as its `other` (a unit, status or source keeps the name it was sent under, a refill or coverage keeps none) and the whole report is still read; `reads_as` is what is written back. `refused` is a request that names a key it does not declare. `fraction` is `UsageReport::fraction_permille` of the bucket, in thousandths and at most 1000, or null: used over limit, else limit minus remaining over limit. `resets_in` is `Bucket::resets_in(now)` in seconds, null for a bucket that is not a fixed window with a known end, and 0 once the end has passed.",
+  "roundtrip": [
+    {
+      "name": "a harness that reports no usage",
+      "report": {
+        "supported": false,
+        "unsupported_because": "this harness reports no usage",
+        "sources": [],
+        "revision": 0,
+        "observed_at": 0,
+        "buckets": []
+      }
+    },
+    {
+      "name": "supported, nothing reported yet",
+      "report": {
+        "supported": true,
+        "sources": [
+          "reported"
+        ],
+        "account": "pool/alice",
+        "revision": 0,
+        "observed_at": 0,
+        "buckets": []
+      }
+    },
+    {
+      "name": "Claude's two windows, one covering a model",
+      "report": {
+        "supported": true,
+        "sources": [
+          "reported",
+          "inferred"
+        ],
+        "account": "pool/alice",
+        "revision": 7,
+        "observed_at": 1788900000,
+        "buckets": [
+          {
+            "id": "five_hour",
+            "label": "5 hours",
+            "models": {
+              "kind": "all"
+            },
+            "unit": "permille",
+            "used": 620,
+            "limit": 1000,
+            "refill": {
+              "kind": "fixed_window",
+              "length": [
+                18000,
+                0
+              ],
+              "resets_at": 1788915000
+            },
+            "status": "ok",
+            "observed_at": 1788900000,
+            "source": "reported"
+          },
+          {
+            "id": "seven_day_opus",
+            "models": {
+              "kind": "only",
+              "models": [
+                "opus"
+              ]
+            },
+            "unit": "permille",
+            "used": 810,
+            "limit": 1000,
+            "refill": {
+              "kind": "fixed_window",
+              "length": [
+                604800,
+                0
+              ],
+              "resets_at": 1789300000
+            },
+            "status": "warning",
+            "observed_at": 1788899000,
+            "source": "reported"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a token bucket in requests, and a balance in money that never refills",
+      "report": {
+        "supported": true,
+        "sources": [
+          "reported"
+        ],
+        "revision": 3,
+        "observed_at": 1788900100,
+        "buckets": [
+          {
+            "id": "rpm",
+            "label": "Requests a minute",
+            "models": {
+              "kind": "unknown"
+            },
+            "unit": "requests",
+            "limit": 60,
+            "remaining": 41,
+            "refill": {
+              "kind": "token_bucket",
+              "amount": 60,
+              "per": [
+                60,
+                0
+              ],
+              "max": 60
+            },
+            "status": "ok",
+            "observed_at": 1788900100,
+            "source": "reported"
+          },
+          {
+            "id": "credit",
+            "label": "Credit",
+            "models": {
+              "kind": "all"
+            },
+            "unit": "micro_usd",
+            "used": 3500000,
+            "limit": 5000000,
+            "remaining": 1500000,
+            "refill": {
+              "kind": "none"
+            },
+            "status": "ok",
+            "observed_at": 1788900050,
+            "source": "reported"
+          },
+          {
+            "id": "tpm",
+            "models": {
+              "kind": "all"
+            },
+            "unit": "tokens",
+            "used": 12000,
+            "limit": 400000,
+            "refill": {
+              "kind": "token_bucket",
+              "amount": 400000,
+              "per": [
+                60,
+                500000000
+              ],
+              "max": 400000
+            },
+            "status": "unknown",
+            "observed_at": 1788900100,
+            "source": "reported"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a window whose length and end are not known, inferred from a refusal",
+      "report": {
+        "supported": true,
+        "sources": [
+          "inferred"
+        ],
+        "account": "pool/bob",
+        "revision": 1,
+        "observed_at": 1788900200,
+        "buckets": [
+          {
+            "id": "inferred",
+            "models": {
+              "kind": "unknown"
+            },
+            "unit": "permille",
+            "refill": {
+              "kind": "fixed_window"
+            },
+            "status": "exhausted",
+            "observed_at": 1788900200,
+            "source": "inferred",
+            "evidence": "RESOURCE_EXHAUSTED"
+          }
+        ],
+        "limit": {
+          "bucket": "inferred",
+          "source": "inferred",
+          "text": "Error 429: RESOURCE_EXHAUSTED",
+          "observed_at": 1788900200
+        }
+      }
+    },
+    {
+      "name": "a refusal with a reset and a retry-after, and a session's spend by model",
+      "report": {
+        "supported": true,
+        "sources": [
+          "reported"
+        ],
+        "account": "pool/alice",
+        "revision": 12,
+        "observed_at": 1788900300,
+        "buckets": [
+          {
+            "id": "codex:primary",
+            "models": {
+              "kind": "only",
+              "models": [
+                "gpt-5-codex",
+                "gpt-5"
+              ]
+            },
+            "unit": "permille",
+            "used": 1000,
+            "limit": 1000,
+            "refill": {
+              "kind": "fixed_window",
+              "length": [
+                18000,
+                0
+              ],
+              "resets_at": 1788910000
+            },
+            "status": "exhausted",
+            "observed_at": 1788900300,
+            "source": "reported"
+          }
+        ],
+        "limit": {
+          "bucket": "codex:primary",
+          "resets_at": 1788910000,
+          "retry_after": [
+            90,
+            0
+          ],
+          "source": "reported",
+          "text": "You have hit your usage limit.",
+          "observed_at": 1788900300
+        },
+        "spend": {
+          "session_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+          "input": 1200,
+          "output": 340,
+          "cache_read": 9000,
+          "cache_write": 800,
+          "reasoning": 120,
+          "cost_micro_usd": 48500,
+          "by_model": [
+            {
+              "model": "gpt-5-codex",
+              "input": 1000,
+              "output": 300,
+              "cache_read": 8000,
+              "cache_write": 700,
+              "cost_micro_usd": 40000
+            },
+            {
+              "model": "gpt-5",
+              "input": 200,
+              "output": 40,
+              "cache_read": 1000,
+              "cache_write": 100
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a spend whose cost is unknown stays unknown, never zero",
+      "report": {
+        "supported": true,
+        "sources": [
+          "reported"
+        ],
+        "revision": 2,
+        "observed_at": 0,
+        "buckets": [],
+        "spend": {
+          "session_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+          "input": 100,
+          "output": 40,
+          "cache_read": 20,
+          "cache_write": 10,
+          "by_model": []
+        }
+      }
+    }
+  ],
+  "lenient": [
+    {
+      "name": "a unit, status and source a newer writer named are kept under their names",
+      "read": {
+        "supported": true,
+        "unsupported_because": null,
+        "sources": [
+          "reported",
+          "scraped"
+        ],
+        "account": null,
+        "revision": 1,
+        "observed_at": 5,
+        "buckets": [
+          {
+            "id": "b",
+            "label": null,
+            "models": {
+              "kind": "all"
+            },
+            "unit": "credits",
+            "used": 1,
+            "limit": 2,
+            "remaining": null,
+            "refill": {
+              "kind": "none"
+            },
+            "status": "throttled",
+            "observed_at": 5,
+            "source": "estimated",
+            "evidence": null
+          }
+        ],
+        "limit": null,
+        "spend": null
+      },
+      "reads_as": {
+        "supported": true,
+        "sources": [
+          "reported",
+          "scraped"
+        ],
+        "revision": 1,
+        "observed_at": 5,
+        "buckets": [
+          {
+            "id": "b",
+            "models": {
+              "kind": "all"
+            },
+            "unit": "credits",
+            "used": 1,
+            "limit": 2,
+            "refill": {
+              "kind": "none"
+            },
+            "status": "throttled",
+            "observed_at": 5,
+            "source": "estimated"
+          }
+        ]
+      },
+      "unknown": {
+        "unit": "other",
+        "status": "other",
+        "source": "other"
+      }
+    },
+    {
+      "name": "a refill and a coverage of a kind no reader knows read as other, and the bucket is still read",
+      "read": {
+        "supported": true,
+        "unsupported_because": null,
+        "sources": [
+          "reported"
+        ],
+        "account": null,
+        "revision": 1,
+        "observed_at": 5,
+        "buckets": [
+          {
+            "id": "b",
+            "label": null,
+            "models": {
+              "kind": "tier",
+              "tier": "pro"
+            },
+            "unit": "tokens",
+            "used": 1,
+            "limit": 2,
+            "remaining": null,
+            "refill": {
+              "kind": "leaky_bucket",
+              "rate": 3
+            },
+            "status": "ok",
+            "observed_at": 5,
+            "source": "reported",
+            "evidence": null
+          }
+        ],
+        "limit": null,
+        "spend": null
+      },
+      "reads_as": {
+        "supported": true,
+        "sources": [
+          "reported"
+        ],
+        "revision": 1,
+        "observed_at": 5,
+        "buckets": [
+          {
+            "id": "b",
+            "models": {
+              "kind": "other"
+            },
+            "unit": "tokens",
+            "used": 1,
+            "limit": 2,
+            "refill": {
+              "kind": "other"
+            },
+            "status": "ok",
+            "observed_at": 5,
+            "source": "reported"
+          }
+        ]
+      },
+      "unknown": {
+        "refill": "other",
+        "models": "other"
+      }
+    },
+    {
+      "name": "a report with only what it must say is read, and a list or an optional left out is empty or absent",
+      "read": {
+        "supported": false,
+        "revision": 0,
+        "observed_at": 0
+      },
+      "reads_as": {
+        "supported": false,
+        "sources": [],
+        "revision": 0,
+        "observed_at": 0,
+        "buckets": []
+      },
+      "unknown": {}
+    }
+  ],
+  "refused": [
+    {
+      "name": "a query that names a key it does not declare",
+      "type": "UsageQuery",
+      "json": {
+        "account": "pool/alice",
+        "refresh": true
+      }
+    },
+    {
+      "name": "a start request that names a key it does not declare",
+      "type": "StartRequest",
+      "json": {
+        "account": "pool/alice",
+        "tier": "pro"
+      }
+    }
+  ],
+  "fraction": [
+    {
+      "name": "used over limit",
+      "bucket": {
+        "used": 620,
+        "limit": 1000
+      },
+      "permille": 620
+    },
+    {
+      "name": "used over limit, rounded down",
+      "bucket": {
+        "used": 1,
+        "limit": 3
+      },
+      "permille": 333
+    },
+    {
+      "name": "limit minus remaining over limit",
+      "bucket": {
+        "remaining": 1500000,
+        "limit": 5000000
+      },
+      "permille": 700
+    },
+    {
+      "name": "used wins over remaining",
+      "bucket": {
+        "used": 100,
+        "remaining": 100,
+        "limit": 1000
+      },
+      "permille": 100
+    },
+    {
+      "name": "over the limit is a whole",
+      "bucket": {
+        "used": 5000,
+        "limit": 1000
+      },
+      "permille": 1000
+    },
+    {
+      "name": "remaining past the limit is nothing used",
+      "bucket": {
+        "remaining": 90,
+        "limit": 60
+      },
+      "permille": 0
+    },
+    {
+      "name": "a limit of zero says nothing",
+      "bucket": {
+        "used": 1,
+        "limit": 0
+      },
+      "permille": null
+    },
+    {
+      "name": "no limit says nothing",
+      "bucket": {
+        "used": 100
+      },
+      "permille": null
+    },
+    {
+      "name": "no figure says nothing",
+      "bucket": {
+        "limit": 1000
+      },
+      "permille": null
+    },
+    {
+      "name": "counts as large as a double holds exactly",
+      "bucket": {
+        "used": 9007199254740991,
+        "limit": 9007199254740991
+      },
+      "permille": 1000
+    }
+  ],
+  "resets_in": [
+    {
+      "name": "a fixed window with its end ahead",
+      "refill": {
+        "kind": "fixed_window",
+        "length": null,
+        "resets_at": 1000
+      },
+      "now": 400,
+      "seconds": 600
+    },
+    {
+      "name": "a fixed window whose end has passed",
+      "refill": {
+        "kind": "fixed_window",
+        "length": null,
+        "resets_at": 1000
+      },
+      "now": 1500,
+      "seconds": 0
+    },
+    {
+      "name": "a fixed window with no known end",
+      "refill": {
+        "kind": "fixed_window",
+        "length": [
+          18000,
+          0
+        ],
+        "resets_at": null
+      },
+      "now": 400,
+      "seconds": null
+    },
+    {
+      "name": "a token bucket refills continuously",
+      "refill": {
+        "kind": "token_bucket",
+        "amount": 60,
+        "per": [
+          60,
+          0
+        ],
+        "max": 60
+      },
+      "now": 400,
+      "seconds": null
+    },
+    {
+      "name": "a balance never refills",
+      "refill": {
+        "kind": "none"
+      },
+      "now": 400,
+      "seconds": null
+    }
+  ]
+}

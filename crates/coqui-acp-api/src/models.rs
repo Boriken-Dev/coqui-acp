@@ -12,6 +12,7 @@ use guatiao::{FromValue, Schema, Secret, ToValue};
 
 use crate::environment::Environment;
 use crate::requirement::Requirement;
+use crate::usage::UsageSupport;
 
 /// What a harness's `initialize` will advertise, known before anything starts. `initialize`'s own
 /// answer governs; this is what a host shows before it has one.
@@ -82,10 +83,14 @@ pub struct HarnessInfo {
     /// on a later connection started with fewer, and then have what that connection allows.
     #[map(default)]
     pub resumes_wider: bool,
+    /// What usage it reports, and so whether its `initialize` advertises the usage extension.
+    #[map(default)]
+    pub usage: UsageSupport,
 }
 
 impl HarnessInfo {
-    /// A harness named `title` for people, answering the ACP `versions`, taking nothing more.
+    /// A harness named `title` for people, answering the ACP `versions`, taking nothing more and
+    /// reporting no usage.
     #[must_use]
     pub fn new(title: impl Into<String>, versions: Vec<u16>) -> Self {
         Self {
@@ -93,6 +98,7 @@ impl HarnessInfo {
             versions,
             takes: Takes::new(),
             resumes_wider: false,
+            usage: UsageSupport::none(),
         }
     }
 }
@@ -114,6 +120,10 @@ pub struct StartRequest {
     /// What the connection is held to. A name may come once.
     #[map(default)]
     pub requirements: Vec<Requirement>,
+    /// The host's id for the account the connection runs on, echoed into every usage report of
+    /// the connection and never interpreted. It picks no credentials: those stay in
+    /// `environment`.
+    pub account: Option<String>,
 }
 
 impl StartRequest {
@@ -150,6 +160,12 @@ impl StartRequestBuilder {
     /// Adds a requirement.
     pub fn requirement(mut self, requirement: impl Into<Requirement>) -> Self {
         self.0.requirements.push(requirement.into());
+        self
+    }
+
+    /// The host's id for the account.
+    pub fn account(mut self, account: impl Into<String>) -> Self {
+        self.0.account = Some(account.into());
         self
     }
 

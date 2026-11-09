@@ -15,9 +15,11 @@ use serde_json::{Value, json};
 
 use super::Contract;
 use super::host::{self, Conn, GRACE, PATIENCE, open, status};
+use crate::usage::{LimitHit, Refill, Status, UsageQuery, UsageReport};
 use crate::{
-    AcpHarness, Environment, ExportPage, FILES_UNDER, ImportReport, Requirement, SessionExport,
-    SessionImport, SessionQuery, StartRequest, is_session_id,
+    AcpHarness, Environment, ExportPage, FILES_UNDER, ImportReport, LIMIT_META_KEY, Requirement,
+    SessionExport, SessionImport, SessionQuery, StartRequest, USAGE_CAPABILITY, USAGE_METHOD,
+    USAGE_NOTIFICATION, is_session_id,
 };
 
 // `guatiao_status` numbers, as a channel's `close` and `closed` carry them.
@@ -72,6 +74,7 @@ pub(super) fn all(contract: &Contract, harness: &dyn AcpHarness) -> Vec<(&'stati
             "asks only what the client offers",
             client_capabilities(contract, harness, &place),
         ),
+        ("reports usage as it says", usage(contract, harness, &place)),
         ("holds a sender back", back_pressure(contract, harness)),
         (
             "close wakes a waiting send",
@@ -295,6 +298,32 @@ fn describes_itself(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
         .session_record(SessionQuery::new(fresh_uuid(), "/"))
         .map_err(|e| e.message().to_owned())?;
     harness.non_defaults().map_err(|e| e.message().to_owned())?;
+    let (watch, spawner) = host::spawner();
+    let report = harness
+        .usage(UsageQuery::new(), spawner)
+        .map_err(|e| e.message().to_owned())?;
+    ensure!(
+        watch.destroyed(),
+        "usage answered with the spawner it was handed alive"
+    );
+    ensure!(
+        report.supported == info.usage.reports(),
+        "describe says it reports {} usage, and `usage` answers `supported: {}`",
+        if info.usage.reports() { "some" } else { "no" },
+        report.supported
+    );
+    if !report.supported {
+        ensure!(
+            report
+                .unsupported_because
+                .as_deref()
+                .is_some_and(|why| !why.is_empty())
+                && report.buckets.is_empty()
+                && report.limit.is_none()
+                && report.spend.is_none(),
+            "an unsupported report carries no reason, or carries figures: {report:?}"
+        );
+    }
     Ok(())
 }
 
@@ -393,11 +422,15 @@ fn keeps_secrets(harness: &dyn AcpHarness) -> Outcome {
     let secret = || Secret::new(environment.clone());
     let unknown = vec![Requirement::new("no_such_requirement")];
     let answered = format!(
-        "{:?} {:?} {:?}",
+        "{:?} {:?} {:?} {:?}",
         harness.refusal(unknown.clone(), secret()),
         harness.models(secret()),
         harness
             .session_record(SessionQuery::new(fresh_uuid(), "/").environment(environment.clone())),
+        harness.usage(
+            UsageQuery::new().environment(environment.clone()),
+            host::spawner().1
+        ),
     );
     ensure!(
         !answered.contains(CANARY),
@@ -1041,6 +1074,292 @@ fn permission(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
         );
     }
     conn.close_with(OK)
+}
+
+/// The agent's capabilities in an `initialize` answer: version 1's `agentCapabilities`, version 2's
+/// `capabilities`.
+fn capabilities_of(answer: &Value, version: u16) -> &Value {
+    if version >= 2 {
+        &answer["result"]["capabilities"]
+    } else {
+        &answer["result"]["agentCapabilities"]
+    }
+}
+
+/// Every message until request `id` is answered: the usage notifications it saw, the text said and
+/// the answer. Anything else from the agent is an error.
+fn turn_with_usage(conn: &mut Conn, id: u64) -> Result<(String, Value, Vec<Value>), String> {
+    let mut text = String::new();
+    let mut told = Vec::new();
+    loop {
+        let message = conn.next()?;
+        match message.get("method").and_then(Value::as_str) {
+            Some("session/update") => {
+                if let Some(more) = message["params"]["update"]["content"]["text"].as_str() {
+                    text.push_str(more);
+                }
+            }
+            Some(USAGE_NOTIFICATION) => told.push(message),
+            Some(_) => return Err(format!("the agent sent {message} during the turn")),
+            None if message.get("id") == Some(&json!(id)) => return Ok((text, message, told)),
+            None => return Err(format!("the agent sent {message} during the turn")),
+        }
+    }
+}
+
+/// Asks `_coqui_acp/usage` and reads the report.
+fn usage_report(conn: &mut Conn, id: u64, session: Option<&str>) -> Result<UsageReport, String> {
+    let params = session.map_or_else(|| json!({}), |session| json!({"sessionId": session}));
+    conn.send(&request(id, USAGE_METHOD, params))?;
+    let answer = conn.answer(id)?;
+    ensure!(
+        answer.get("error").is_none(),
+        "{USAGE_METHOD} was answered {answer}"
+    );
+    serde_json::from_value(answer["result"].clone())
+        .map_err(|e| format!("{USAGE_METHOD} answered no report ({e}): {answer}"))
+}
+
+/// What `usage` says a harness reports is what it does: nothing advertised and `-32601` for one that
+/// reports none; for one that does (the contract agent scripts it: `quota P`, `limit`, fixed spend
+/// each turn), the figures, the revisions, the notification only a client that asked gets, the
+/// account, and the kind's answer agreeing with the connection's.
+fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
+    let info = harness.describe().map_err(|e| e.message().to_owned())?;
+    let optin =
+        json!({"_meta": {USAGE_CAPABILITY: {"notify": true, "account": "from-the-client"}}});
+    if !info.usage.reports() {
+        // Nothing advertised, `-32601`, and the scripted prompts are plain text.
+        let mut conn = open(harness, StartRequest::builder().account("acct-1").build())?;
+        conn.send(&initialize(0, contract.version, optin))?;
+        let answer = conn.answer(0)?;
+        ensure!(
+            capabilities_of(&answer, contract.version)["_meta"]
+                .get(USAGE_CAPABILITY)
+                .is_none(),
+            "a harness that reports no usage advertised it: {answer}"
+        );
+        conn.send(&request(1, USAGE_METHOD, json!({})))?;
+        let answer = conn.answer(1)?;
+        ensure!(
+            code(&answer) == Some(-32601),
+            "{USAGE_METHOD} of a harness that reports none was answered {answer}"
+        );
+        conn.send(&new_session(2, &place.root))?;
+        let session = conn.answer(2)?["result"]["sessionId"]
+            .as_str()
+            .ok_or("session/new gave no id")?
+            .to_owned();
+        conn.send(&prompt(3, &session, "quota 620"))?;
+        let (said, _) = turn(&mut conn, 3)?;
+        ensure!(
+            said == "echo: quota 620",
+            "a harness that reports none scripted `quota`: {said:?}"
+        );
+        return conn.close_with(OK);
+    }
+
+    // A harness that reports: the capability agrees with `describe`.
+    let account = "acct-1";
+    let mut conn = open(harness, StartRequest::builder().account(account).build())?;
+    conn.send(&initialize(
+        0,
+        contract.version,
+        json!({"_meta": {USAGE_CAPABILITY: {"notify": true, "account": "from-the-client"}}}),
+    ))?;
+    let answer = conn.answer(0)?;
+    let advertised = &capabilities_of(&answer, contract.version)["_meta"][USAGE_CAPABILITY];
+    ensure!(
+        advertised["version"] == json!(1),
+        "the usage capability is {advertised}, not version 1"
+    );
+    let sources: Vec<&str> = advertised["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let described: Vec<&str> = info
+        .usage
+        .sources
+        .iter()
+        .map(crate::Source::as_str)
+        .collect();
+    ensure!(
+        sources == described && advertised["spend"] == json!(info.usage.spend),
+        "initialize advertises {advertised}, describe says {:?}",
+        info.usage
+    );
+
+    // Answerable with no session and no turn, and an unchanged account costs nothing to read.
+    let first = usage_report(&mut conn, 1, None)?;
+    ensure!(
+        first.supported
+            && first.buckets.is_empty()
+            && first.spend.is_none()
+            && first.account.as_deref() == Some(account),
+        "the report before any turn is {first:?}, not an empty one for `{account}`"
+    );
+    let again = usage_report(&mut conn, 2, None)?;
+    ensure!(
+        again == first,
+        "polling an unchanged account changed the report: {first:?} then {again:?}"
+    );
+    conn.send(&request(
+        3,
+        USAGE_METHOD,
+        json!({"sessionId": fresh_uuid()}),
+    ))?;
+    let refused = conn.answer(3)?;
+    ensure!(
+        code(&refused) == Some(-32602),
+        "a session that is not open was answered {refused}"
+    );
+
+    conn.send(&new_session(4, &place.root))?;
+    let session = conn.answer(4)?["result"]["sessionId"]
+        .as_str()
+        .ok_or("session/new gave no id")?
+        .to_owned();
+
+    // `quota 620`: the five-hour window used 620 of 1000, a token bucket beside it.
+    conn.send(&prompt(5, &session, "quota 620"))?;
+    let (said, end, told) = turn_with_usage(&mut conn, 5)?;
+    ensure!(
+        said == "echo: quota 620" && end["result"]["stopReason"] == "end_turn",
+        "`quota 620` said {said:?} and ended {end}"
+    );
+    ensure!(
+        !told.is_empty(),
+        "a client that asked was told nothing of a report that changed"
+    );
+    let quota = usage_report(&mut conn, 6, None)?;
+    ensure!(
+        quota.revision > first.revision,
+        "the revision did not grow: {} then {}",
+        first.revision,
+        quota.revision
+    );
+    let five = quota
+        .buckets
+        .iter()
+        .find(|bucket| bucket.id == "five_hour")
+        .ok_or_else(|| format!("no `five_hour` bucket in {quota:?}"))?;
+    ensure!(
+        (five.used, five.limit) == (Some(620), Some(1000))
+            && UsageReport::fraction_permille(five) == Some(620)
+            && five.status == Status::Ok
+            && matches!(five.refill, Refill::FixedWindow { resets_at: Some(at), .. } if at > five.observed_at),
+        "the five-hour bucket is {five:?}"
+    );
+    ensure!(
+        quota.buckets.iter().any(|bucket| bucket.id == "rpm"
+            && matches!(
+                bucket.refill,
+                Refill::TokenBucket {
+                    amount: 60,
+                    max: 60,
+                    ..
+                }
+            )),
+        "no token bucket in {quota:?}"
+    );
+    ensure!(
+        quota.account.as_deref() == Some(account) && quota.spend.is_none(),
+        "the account or the spend of a report with no session: {quota:?}"
+    );
+    let with_session = usage_report(&mut conn, 7, Some(&session))?;
+    ensure!(
+        with_session
+            .spend
+            .as_ref()
+            .is_some_and(|spend| spend.session_id == session
+                && spend.input > 0
+                && spend.output > 0),
+        "the session's spend is {:?}",
+        with_session.spend
+    );
+    let last = told
+        .last()
+        .map(|message| message["params"].clone())
+        .unwrap_or(Value::Null);
+    ensure!(
+        last["sessionId"] == json!(session)
+            && serde_json::from_value::<UsageReport>(last["report"].clone())
+                .is_ok_and(|told| told == with_session),
+        "the last notification {last} is not the report {with_session:?}"
+    );
+
+    // `limit`: the turn is refused, and the report keeps the hit.
+    conn.send(&prompt(8, &session, "limit"))?;
+    let (_, end, _) = turn_with_usage(&mut conn, 8)?;
+    ensure!(
+        end["result"]["stopReason"] == "refusal",
+        "a refused turn ended {end}"
+    );
+    let hit: LimitHit = serde_json::from_value(end["result"]["_meta"][LIMIT_META_KEY].clone())
+        .map_err(|e| format!("the refusal's `_meta` holds no limit hit ({e}): {end}"))?;
+    ensure!(
+        hit.bucket.as_deref() == Some("five_hour")
+            && hit.resets_at.is_some()
+            && hit.retry_after.is_some()
+            && hit.text.is_some(),
+        "the limit hit is {hit:?}"
+    );
+    let limited = usage_report(&mut conn, 9, None)?;
+    ensure!(
+        limited.limit.as_ref() == Some(&hit)
+            && limited.revision > quota.revision
+            && limited
+                .buckets
+                .iter()
+                .any(|bucket| bucket.id == "five_hour" && bucket.status == Status::Exhausted),
+        "after the refusal the report is {limited:?}"
+    );
+
+    // The kind answers what the connection last reported for the account, and an empty report for
+    // one it never saw.
+    let (watch, spawner) = host::spawner();
+    let kind = harness
+        .usage(UsageQuery::new().account(account), spawner)
+        .map_err(|e| e.message().to_owned())?;
+    ensure!(watch.destroyed(), "usage kept the spawner it was handed");
+    ensure!(
+        kind == limited,
+        "the kind answers {kind:?}, the connection's last report was {limited:?}"
+    );
+    let (_, spawner) = host::spawner();
+    let unseen = harness
+        .usage(UsageQuery::new().account("nobody"), spawner)
+        .map_err(|e| e.message().to_owned())?;
+    ensure!(
+        unseen.supported
+            && unseen.buckets.is_empty()
+            && unseen.account.as_deref() == Some("nobody"),
+        "an account no connection ran on is {unseen:?}"
+    );
+    conn.close_with(OK)?;
+
+    // A client that did not ask is told nothing, and the account is the client's when the host named none.
+    let (mut quiet, session) = open_session(
+        contract,
+        harness,
+        StartRequest::new(),
+        &place.root,
+        json!({}),
+    )?;
+    quiet.send(&prompt(10, &session, "quota 100"))?;
+    let (said, _) = turn(&mut quiet, 10)?;
+    ensure!(
+        said == "echo: quota 100",
+        "a client that did not ask: {said:?}"
+    );
+    let report = usage_report(&mut quiet, 11, None)?;
+    ensure!(
+        report.buckets.iter().any(|bucket| bucket.used == Some(100)),
+        "a client that did not ask reads {report:?}"
+    );
+    quiet.close_with(OK)
 }
 
 fn client_capabilities(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {

@@ -11,11 +11,11 @@ use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
-    AcpHarnessVtable, ChannelSinkVtable, ChannelVtable, ErrorOutput, ExportPage, HarnessInfo,
-    HistoryLoss, ImportReport, LinkState, ModelInfo, ModelListing, NAMES, NonDefault, ProcessExit,
-    ProcessSpawnerVtable, Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery,
-    SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo, StartRequest, Takes,
-    TerminalSize,
+    AcpHarnessVtable, Bucket, ChannelSinkVtable, ChannelVtable, ErrorOutput, ExportPage,
+    HarnessInfo, HistoryLoss, ImportReport, LimitHit, LinkState, ModelInfo, ModelListing,
+    ModelSpend, NAMES, NonDefault, ProcessExit, ProcessSpawnerVtable, Requirement, SeedPoint,
+    SessionExport, SessionImport, SessionQuery, SessionRecordFile, SpawnSpec, SpawnedProcessVtable,
+    SpawnerInfo, Spend, StartRequest, Takes, TerminalSize, UsageQuery, UsageReport, UsageSupport,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -89,6 +89,13 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("ProcessExit", schema_of::<ProcessExit>()),
         ("LinkState", schema_of::<LinkState>()),
         ("ErrorOutput", schema_of::<ErrorOutput>()),
+        ("UsageQuery", schema_of::<UsageQuery>()),
+        ("UsageReport", schema_of::<UsageReport>()),
+        ("Bucket", schema_of::<Bucket>()),
+        ("LimitHit", schema_of::<LimitHit>()),
+        ("Spend", schema_of::<Spend>()),
+        ("ModelSpend", schema_of::<ModelSpend>()),
+        ("UsageSupport", schema_of::<UsageSupport>()),
     ]
 }
 
@@ -110,10 +117,10 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 20] = [
+    let pinned: [(&str, &[&str], &[&str]); 27] = [
         (
             "StartRequest",
-            &["environment", "requirements", "working_roots"],
+            &["account", "environment", "requirements", "working_roots"],
             &[],
         ),
         ("Requirement", &["name", "value"], &["name"]),
@@ -163,7 +170,7 @@ fn every_models_keys_are_pinned() {
         ("TerminalSize", &["cols", "rows"], &["cols", "rows"]),
         (
             "HarnessInfo",
-            &["resumes_wider", "takes", "title", "versions"],
+            &["resumes_wider", "takes", "title", "usage", "versions"],
             &["title", "versions"],
         ),
         (
@@ -213,6 +220,87 @@ fn every_models_keys_are_pinned() {
         ),
         ("ProcessExit", &["code", "running", "signal"], &["running"]),
         ("LinkState", &["drops", "up"], &["drops", "up"]),
+        ("UsageQuery", &["account", "environment"], &[]),
+        (
+            "UsageReport",
+            &[
+                "account",
+                "buckets",
+                "limit",
+                "observed_at",
+                "revision",
+                "sources",
+                "spend",
+                "supported",
+                "unsupported_because",
+            ],
+            &["observed_at", "revision", "supported"],
+        ),
+        (
+            "Bucket",
+            &[
+                "evidence",
+                "id",
+                "label",
+                "limit",
+                "models",
+                "observed_at",
+                "refill",
+                "remaining",
+                "source",
+                "status",
+                "unit",
+                "used",
+            ],
+            &[
+                "id",
+                "models",
+                "observed_at",
+                "refill",
+                "source",
+                "status",
+                "unit",
+            ],
+        ),
+        (
+            "LimitHit",
+            &[
+                "bucket",
+                "observed_at",
+                "resets_at",
+                "retry_after",
+                "source",
+                "text",
+            ],
+            &["observed_at", "source"],
+        ),
+        (
+            "Spend",
+            &[
+                "by_model",
+                "cache_read",
+                "cache_write",
+                "cost_micro_usd",
+                "input",
+                "output",
+                "reasoning",
+                "session_id",
+            ],
+            &["cache_read", "cache_write", "input", "output", "session_id"],
+        ),
+        (
+            "ModelSpend",
+            &[
+                "cache_read",
+                "cache_write",
+                "cost_micro_usd",
+                "input",
+                "model",
+                "output",
+            ],
+            &["cache_read", "cache_write", "input", "model", "output"],
+        ),
+        ("UsageSupport", &["sources", "spend"], &[]),
     ];
     let schemas = schemas();
     for (name, keys, required) in pinned {
@@ -277,6 +365,10 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     spec.set("program", "sh");
     spec.set("sandbox", "strict");
     assert!(SpawnSpec::from_value(&Value::from(spec)).is_err());
+    let mut usage = Map::new();
+    usage.set("account", "pool/alice");
+    usage.set("refresh", true);
+    assert!(UsageQuery::from_value(&Value::from(usage)).is_err());
 }
 
 /// The environment is a secret wherever it crosses: its schema says so, for `redact` and forms.
@@ -305,7 +397,7 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(SpawnedProcessVtable::FLOOR_HASH, PROCESS_HASH);
 }
 
-const HARNESS_HASH: u32 = 2577453137;
+const HARNESS_HASH: u32 = 1326996142;
 const CHANNEL_HASH: u32 = 3787630980;
 const SINK_HASH: u32 = 4115266557;
 const SPAWNER_HASH: u32 = 1466370631;

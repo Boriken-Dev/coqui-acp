@@ -2,7 +2,7 @@
   "kinds": [
     {
       "name": "acp_harness",
-      "floor_hash": 2577453137,
+      "floor_hash": 1326996142,
       "object": false,
       "doc": "Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.\n\nThe host is the ACP client and the provider the agent: each message on the channel, either way,\nis one whole JSON-RPC 2.0 message as UTF-8 JSON text. The kind never models ACP itself, so a\nprovider in any language implements ACP as the protocol defines it, and the version is agreed by\n`initialize` on the channel.\n\nEvery method answers for the provider as configured: a host builds an instance from the\nprovider's settings and asks it. Every method is synchronous; a host calls them from a thread\nof its own. The methods without a default are the ones a host acts on for every harness; a\ndefault is kept only where it is a true answer for a harness that has nothing to say.",
       "slots": [
@@ -151,6 +151,28 @@
             "type": "value"
           },
           "doc": "Where the harness keeps its own record of the session `query` names (by the session id it\nreported, a UUID), when it keeps one and the file is there. The default, for a harness that\nkeeps none: none."
+        },
+        {
+          "name": "usage",
+          "required": false,
+          "fallible": true,
+          "args": [
+            {
+              "name": "query",
+              "type": "value",
+              "pass": "borrowed"
+            },
+            {
+              "name": "spawner",
+              "type": "object",
+              "kind": "process_spawner",
+              "pass": "taken"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "What the account behind `query`'s environment has used and has left, with no session and no\nmodel turn; cheap, so a host may poll it as often as it likes. A harness that learns usage\nonly while a turn runs answers the newest report its connections saw for the account, with\nits `observed_at`. Never carries a value from the environment. The default, for a harness\nthat reports no usage, is a true answer: [`UsageReport::unsupported`].\n\nA provider that runs a program to ask (Codex's `account/rateLimits/read`) runs it through\n`spawner`, and destroys it as `import_session` does."
         },
         {
           "name": "non_defaults",

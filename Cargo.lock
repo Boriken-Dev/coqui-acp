@@ -434,6 +434,7 @@ dependencies = [
  "guatiao",
  "guatiao-channel",
  "guatiao-serde",
+ "serde",
  "serde_json",
  "uuid",
 ]
@@ -463,6 +464,7 @@ version = "0.0.0-alpha.0"
 dependencies = [
  "clap",
  "coqui-acp",
+ "coqui-acp-api",
  "coqui-acp-harness",
  "serde_json",
  "uuid",
@@ -474,6 +476,7 @@ version = "0.0.0-alpha.0"
 dependencies = [
  "clap",
  "coqui-acp",
+ "coqui-acp-api",
  "coqui-acp-harness",
  "serde_json",
 ]
@@ -521,6 +524,7 @@ version = "0.0.0-alpha.0"
 dependencies = [
  "agent-client-protocol",
  "coqui-acp",
+ "coqui-acp-api",
  "futures",
  "guatiao",
  "guatiao-serde",

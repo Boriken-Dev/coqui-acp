@@ -5,6 +5,9 @@
 //! It keeps every rule of the channel: `send` waits for room in a queue of a few messages and `close`
 //! wakes it; one thread of its own answers, in order, and is the only caller of the sink; a sink
 //! that refuses ends the stream. It starts no program, so it lets go of the spawner unused.
+//!
+//! With the setting `usage = "scripted"` it also reports usage, as the contract documents: `quota P`
+//! reports two buckets, `limit` refuses the turn with a limit hit, and every turn spends fixed tokens.
 #![allow(
     clippy::std_instead_of_core,
     clippy::std_instead_of_alloc,
@@ -15,9 +18,15 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
-use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
+use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status, ToValue};
+use coqui_acp_api::usage::{
+    Bucket, Coverage, LIMIT_META_KEY, LimitHit, Refill, Source, Spend, Status as Level,
+    USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit, UsageQuery,
+    UsageReport, UsageSupport,
+};
 use coqui_acp_api::{
     AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport,
     LINE_TOO_LARGE, ModelInfo, ModelListing, NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY,
@@ -47,10 +56,24 @@ extern "C" fn threads_done() -> Status {
     Status::GUATIAO_OK
 }
 
+/// Whether an echo reports usage.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[map(crate = ::coqui_acp_api::guatiao, rename_all = "snake_case")]
+enum EchoUsage {
+    /// It reports none: the extension is not advertised and `usage` says so.
+    #[default]
+    None,
+    /// It reports what its prompts script.
+    Scripted,
+}
+
 /// How an echo is configured.
 #[derive(FromValue, Schema, Debug, Clone)]
 #[map(crate = ::coqui_acp_api::guatiao)]
 struct EchoSettings {
+    /// Whether it reports usage.
+    #[map(default)]
+    usage: EchoUsage,
     /// Its name for people.
     #[map(default = String::from("Echo"))]
     title: String,
@@ -100,6 +123,161 @@ struct Kept {
 }
 
 type Store = Arc<Mutex<BTreeMap<String, Kept>>>;
+
+/// The newest report any connection of an instance made, by the account it ran on (`""` for none).
+type Reports = Arc<Mutex<BTreeMap<String, UsageReport>>>;
+
+/// Unix seconds now.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// What a scripted echo reports.
+const SOURCES: [Source; 1] = [Source::Reported];
+
+/// The tokens every turn of a scripted echo spends: input, output, cache read, cache write.
+const SPENT: [u64; 4] = [100, 40, 20, 10];
+
+/// The usage of one connection of a scripted echo.
+struct UsageState {
+    report: UsageReport,
+    spends: BTreeMap<String, Spend>,
+    /// Whether the client asked for `_coqui_acp/usage_update`.
+    notify: bool,
+    reports: Reports,
+}
+
+impl UsageState {
+    fn new(account: Option<String>, reports: Reports) -> Self {
+        let mut report = UsageReport::new();
+        report.sources = SOURCES.to_vec();
+        report.account = account;
+        Self {
+            report,
+            spends: BTreeMap::new(),
+            notify: false,
+            reports,
+        }
+    }
+
+    /// The report, with `session`'s spend when one is named.
+    fn snapshot(&self, session: Option<&str>) -> UsageReport {
+        let mut report = self.report.clone();
+        report.spend = session.and_then(|session| self.spends.get(session).cloned());
+        report
+    }
+
+    /// Something changed: a new revision, kept for the kind's `usage`, and the notification when
+    /// the client asked.
+    fn changed(&mut self, session: Option<&str>) -> Vec<Value> {
+        self.report.revision += 1;
+        self.report.observed_at = self
+            .report
+            .buckets
+            .iter()
+            .map(|bucket| bucket.observed_at)
+            .max()
+            .unwrap_or(0);
+        let key = self.report.account.clone().unwrap_or_default();
+        self.reports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, self.report.clone());
+        if !self.notify {
+            return Vec::new();
+        }
+        let report = serde_json::to_value(self.snapshot(session)).expect("a report is JSON");
+        vec![json!({
+            "jsonrpc": "2.0",
+            "method": USAGE_NOTIFICATION,
+            "params": {"sessionId": session, "report": report},
+        })]
+    }
+
+    /// `quota P`: the five-hour window used `P` thousandths, and a request bucket that refills
+    /// continuously.
+    fn quota(&mut self, permille: u64, session: &str) -> Vec<Value> {
+        let at = now();
+        let mut five = Bucket::new("five_hour");
+        five.label = Some("5 hours".into());
+        five.models = Coverage::All;
+        five.unit = Unit::Permille;
+        five.used = Some(permille);
+        five.limit = Some(1000);
+        five.refill = Refill::FixedWindow {
+            length: Some(Duration::from_secs(5 * 3600)),
+            resets_at: Some(at + 5 * 3600),
+        };
+        five.status = if permille >= 1000 {
+            Level::Exhausted
+        } else {
+            Level::Ok
+        };
+        five.observed_at = at;
+        let mut rpm = Bucket::new("rpm");
+        rpm.models = Coverage::All;
+        rpm.unit = Unit::Requests;
+        rpm.limit = Some(60);
+        rpm.remaining = Some(60);
+        rpm.refill = Refill::TokenBucket {
+            amount: 60,
+            per: Duration::from_secs(60),
+            max: 60,
+        };
+        rpm.status = Level::Ok;
+        rpm.observed_at = at;
+        self.report.buckets = vec![five, rpm];
+        self.report.limit = None;
+        self.changed(Some(session))
+    }
+
+    /// `limit`: the five-hour window is used up and the turn is refused.
+    fn limit(&mut self, session: &str) -> (Vec<Value>, LimitHit) {
+        let at = now();
+        let mut hit = LimitHit::new(at);
+        hit.bucket = Some("five_hour".into());
+        hit.resets_at = Some(at + 3600);
+        hit.retry_after = Some(Duration::from_secs(60));
+        hit.text = Some("usage limit reached".into());
+        if let Some(five) = self
+            .report
+            .buckets
+            .iter_mut()
+            .find(|bucket| bucket.id == "five_hour")
+        {
+            five.status = Level::Exhausted;
+            five.used = Some(1000);
+            five.observed_at = at;
+        } else {
+            let mut five = Bucket::new("five_hour");
+            five.unit = Unit::Permille;
+            five.used = Some(1000);
+            five.limit = Some(1000);
+            five.status = Level::Exhausted;
+            five.observed_at = at;
+            self.report.buckets.push(five);
+        }
+        self.report.limit = Some(hit.clone());
+        (self.changed(Some(session)), hit)
+    }
+
+    /// A turn ended: its fixed spend is added to the session's totals.
+    fn spent(&mut self, session: &str) -> Vec<Value> {
+        let spend = self
+            .spends
+            .entry(session.to_owned())
+            .or_insert_with(|| Spend::new(session));
+        spend.input += SPENT[0];
+        spend.output += SPENT[1];
+        spend.cache_read += SPENT[2];
+        spend.cache_write += SPENT[3];
+        self.changed(Some(session))
+    }
+}
 
 fn lock(store: &Store) -> MutexGuard<'_, BTreeMap<String, Kept>> {
     store.lock().unwrap_or_else(PoisonError::into_inner)
@@ -157,6 +335,8 @@ struct EchoHarness {
     sessions: Store,
     /// The next of its own ids.
     next: Arc<AtomicU64>,
+    /// What its connections reported, for `usage`.
+    reports: Reports,
 }
 
 impl EchoHarness {
@@ -165,11 +345,13 @@ impl EchoHarness {
             settings,
             sessions: Arc::default(),
             next: Arc::new(AtomicU64::new(1)),
+            reports: Arc::default(),
         }
     }
 
     fn unconfigured() -> Self {
         Self::configured(EchoSettings {
+            usage: EchoUsage::None,
             title: "Echo".into(),
             max_message_bytes: 1 << 20,
             imports: true,
@@ -219,6 +401,9 @@ impl AcpHarness for EchoHarness {
         info.takes.load = true;
         info.takes.resume = true;
         info.takes.additional_directories = true;
+        if self.settings.usage == EchoUsage::Scripted {
+            info.usage = UsageSupport::new(SOURCES.to_vec(), true);
+        }
         Ok(info)
     }
 
@@ -243,6 +428,8 @@ impl AcpHarness for EchoHarness {
             reads_files: false,
             turns: BTreeMap::new(),
             asked: 0,
+            usage: (self.settings.usage == EchoUsage::Scripted)
+                .then(|| UsageState::new(request.account, Arc::clone(&self.reports))),
         };
         let thread_queue = Arc::clone(&queue);
         let thread = std::thread::Builder::new()
@@ -357,6 +544,29 @@ impl AcpHarness for EchoHarness {
 
     fn models(&self, _environment: Secret<Environment>) -> Result<ModelListing, ProviderError> {
         Ok(ModelListing::of(vec![ModelInfo::new("echo")]))
+    }
+
+    fn usage(
+        &self,
+        query: UsageQuery,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<UsageReport, ProviderError> {
+        drop(spawner);
+        if self.settings.usage != EchoUsage::Scripted {
+            return Ok(UsageReport::unsupported("this echo reports no usage"));
+        }
+        let held = self
+            .reports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&query.account.clone().unwrap_or_default())
+            .cloned();
+        Ok(held.unwrap_or_else(|| {
+            let mut report = UsageReport::new();
+            report.sources = SOURCES.to_vec();
+            report.account = query.account;
+            report
+        }))
     }
 }
 
@@ -542,6 +752,8 @@ struct Agent {
     turns: BTreeMap<String, Turn>,
     /// How many requests the agent has made of the client.
     asked: u64,
+    /// What a scripted echo reports; none for one that reports nothing.
+    usage: Option<UsageState>,
 }
 
 impl Agent {
@@ -601,13 +813,26 @@ impl Agent {
         Ok(match method {
             "initialize" => {
                 self.reads_files = params["clientCapabilities"]["fs"]["readTextFile"] == true;
+                let mut capabilities = json!({
+                    "loadSession": true,
+                    "promptCapabilities": {},
+                    "mcpCapabilities": {"http": false, "sse": false},
+                });
+                if let Some(usage) = &mut self.usage {
+                    let asked = &params["clientCapabilities"]["_meta"][USAGE_CAPABILITY];
+                    usage.notify = asked["notify"] == true;
+                    if usage.report.account.is_none() {
+                        usage.report.account = asked["account"].as_str().map(str::to_owned);
+                    }
+                    capabilities["_meta"] = json!({USAGE_CAPABILITY: {
+                        "version": USAGE_VERSION,
+                        "sources": ["reported"],
+                        "spend": true,
+                    }});
+                }
                 let answer = json!({
                     "protocolVersion": 1,
-                    "agentCapabilities": {
-                        "loadSession": true,
-                        "promptCapabilities": {},
-                        "mcpCapabilities": {"http": false, "sse": false},
-                    },
+                    "agentCapabilities": capabilities,
                     "authMethods": [],
                     "agentInfo": {"name": "echo_harness", "title": "Echo", "version": "1.0.0"},
                 });
@@ -667,6 +892,24 @@ impl Agent {
                     json!({"method": "session/prompt", "params": {"prompt": blocks}}),
                 );
                 self.prompted(id, &session, &said)
+            }
+            USAGE_METHOD if self.usage.is_some() => {
+                let session = match params.get("sessionId") {
+                    None | Some(Value::Null) => None,
+                    Some(named) => Some(
+                        named
+                            .as_str()
+                            .filter(|named| self.open.iter().any(|open| open == named))
+                            .ok_or("no such session is open here")?,
+                    ),
+                };
+                let report = self
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.snapshot(session))
+                    .expect("checked above");
+                let report = serde_json::to_value(report).expect("a report is JSON");
+                (vec![result(id, report)], false)
             }
             _ => (vec![error(id, -32601, "method not found")], false),
         })
@@ -744,6 +987,32 @@ impl Agent {
             );
             return (vec![asked], false);
         }
+        if let Some(usage) = &mut self.usage {
+            if let Some(permille) = said
+                .strip_prefix("quota ")
+                .and_then(|rest| rest.trim().parse::<u64>().ok())
+            {
+                let mut answers = usage.quota(permille, session);
+                answers.extend(self.finish(
+                    session,
+                    id,
+                    Some(&format!("echo: {said}")),
+                    "end_turn",
+                ));
+                return (answers, false);
+            }
+            if said == "limit" {
+                let (mut answers, hit) = usage.limit(session);
+                let mut ended = self.finish(session, id, Some("echo: limit"), "refusal");
+                if let Some(result) = ended.last_mut() {
+                    result["result"]["_meta"] = json!({
+                        LIMIT_META_KEY: serde_json::to_value(&hit).expect("a hit is JSON"),
+                    });
+                }
+                answers.extend(ended);
+                return (answers, false);
+            }
+        }
         (
             self.finish(session, id, Some(&format!("echo: {said}")), "end_turn"),
             said == "close",
@@ -812,8 +1081,20 @@ impl Agent {
     }
 
     /// A turn's end, with what the agent said kept in the session's history.
-    fn finish(&self, session: &str, prompt: &Value, said: Option<&str>, stop: &str) -> Vec<Value> {
-        let messages = finish(session, prompt, said, stop);
+    fn finish(
+        &mut self,
+        session: &str,
+        prompt: &Value,
+        said: Option<&str>,
+        stop: &str,
+    ) -> Vec<Value> {
+        let mut messages = Vec::new();
+        if matches!(stop, "end_turn" | "refusal")
+            && let Some(usage) = &mut self.usage
+        {
+            messages.extend(usage.spent(session));
+        }
+        messages.extend(finish(session, prompt, said, stop));
         for message in &messages {
             if message["method"] == "session/update" {
                 self.keep(
