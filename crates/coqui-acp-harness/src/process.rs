@@ -312,64 +312,116 @@ pub trait Spawn: Send + Sync {
     fn spawn(&self, launch: &Launch) -> io::Result<Spawned>;
 }
 
-/// Starts a plain process whose [`Process::kill`] ends the whole tree it started: on Windows every process of a job
-/// object of its own, on Unix its process group. Standard error is piped.
+/// Starts a plain process whose [`Process::kill`] ends the whole tree it started. Standard error is piped.
 ///
-/// On Windows a process the harness starts in the instant before it joins its job is outside it. On Unix a process
-/// that leaves the group escapes it. Dropping the process kills it as `kill` does.
+/// On Windows the process and everything it starts are in a job object of its own, which ends them all when it closes:
+/// at `kill`, and when the host itself ends without one. A process the harness starts in the instant before it joins
+/// its job is outside it.
+///
+/// On Unix the process leads a process group, which `kill` sends `SIGKILL`; on Linux and Android `kill` first stops
+/// and then ends every process descended from it too, those that left the group or session included. A watcher in
+/// the group, a `/bin/sh` reading a pipe only the host holds, ends the group when the host ends without a kill; a
+/// process that left the group escapes that. Dropping the process kills it as `kill` does.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlainSpawn;
 
+/// Where a started process's standard error goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ErrorStream {
+    /// A pipe of its own.
+    Piped,
+    /// The same pipe as standard output.
+    IntoOutput,
+    /// Nowhere.
+    Discarded,
+}
+
 impl Spawn for PlainSpawn {
     fn spawn(&self, launch: &Launch) -> io::Result<Spawned> {
-        let mut command = Command::new(&launch.program);
-        command
-            .args(&launch.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if launch.clear_env {
-            command.env_clear();
-        }
-        for name in &launch.remove_env {
-            command.env_remove(name);
-        }
-        command.envs(&launch.env);
-        if let Some(cwd) = &launch.cwd {
-            command.current_dir(cwd);
-        }
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command.spawn()?;
-        #[cfg(windows)]
-        let job = match contain(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        let taken = (child.stdin.take(), child.stdout.take(), child.stderr.take());
-        let (Some(stdin), Some(stdout), stderr) = taken else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(io::Error::other("the process's pipes were not opened"));
-        };
-        Ok(Spawned {
-            stdin: Box::new(stdin),
-            stdout: Box::new(stdout),
-            stderr: stderr.map(|stderr| Box::new(stderr) as Box<dyn Read + Send>),
-            process: Box::new(PlainProcess {
-                child: Mutex::new(Running {
-                    child,
-                    collected: None,
-                }),
-                #[cfg(windows)]
-                job: Mutex::new(Some(job)),
-            }),
-        })
+        start(launch, ErrorStream::Piped)
     }
+}
+
+/// Starts `launch` as [`PlainSpawn`] does, standard error going where `errors` says.
+pub(crate) fn start(launch: &Launch, errors: ErrorStream) -> io::Result<Spawned> {
+    let mut command = Command::new(&launch.program);
+    command
+        .args(&launch.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut merged = None;
+    match errors {
+        ErrorStream::Piped => {
+            command.stderr(Stdio::piped());
+        }
+        ErrorStream::Discarded => {
+            command.stderr(Stdio::null());
+        }
+        ErrorStream::IntoOutput => {
+            let (reader, writer) = io::pipe()?;
+            command.stdout(writer.try_clone()?).stderr(writer);
+            merged = Some(reader);
+        }
+    }
+    if launch.clear_env {
+        command.env_clear();
+    }
+    for name in &launch.remove_env {
+        command.env_remove(name);
+    }
+    command.envs(&launch.env);
+    if let Some(cwd) = &launch.cwd {
+        command.current_dir(cwd);
+    }
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn()?;
+    // The pipe's write ends are the child's now: the reader sees the end once it and its tree close theirs.
+    drop(command);
+    let abandon = |child: &mut Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    #[cfg(windows)]
+    let job = match contain(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            abandon(&mut child);
+            return Err(error);
+        }
+    };
+    #[cfg(unix)]
+    let watcher = match watch_group(&child) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            abandon(&mut child);
+            return Err(error);
+        }
+    };
+    let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    let stdout: Option<Box<dyn Read + Send>> = match merged {
+        Some(reader) => Some(Box::new(reader)),
+        None => stdout.map(|out| Box::new(out) as Box<dyn Read + Send>),
+    };
+    let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
+        abandon(&mut child);
+        return Err(io::Error::other("the process's pipes were not opened"));
+    };
+    Ok(Spawned {
+        stdin: Box::new(stdin),
+        stdout,
+        stderr: stderr.map(|stderr| Box::new(stderr) as Box<dyn Read + Send>),
+        process: Box::new(PlainProcess {
+            child: Mutex::new(Running {
+                child,
+                collected: None,
+                #[cfg(unix)]
+                watcher: Some(watcher),
+            }),
+            #[cfg(windows)]
+            job: Mutex::new(Some(job)),
+        }),
+    })
 }
 
 struct PlainProcess {
@@ -384,6 +436,9 @@ struct Running {
     /// How it ended, once it has been collected: from then on its id, and its group's, may be another process's, so
     /// nothing is sent to them again.
     collected: Option<Exit>,
+    /// The group's watcher and the pipe that keeps it waiting, until the group is ended.
+    #[cfg(unix)]
+    watcher: Option<(Child, std::process::ChildStdin)>,
 }
 
 fn exit_of(status: std::process::ExitStatus) -> Exit {
@@ -416,8 +471,14 @@ impl Process for PlainProcess {
             .filter(|pid| *pid > 1)
             .and_then(rustix::process::Pid::from_raw)
         {
-            // The process is not collected before this, so its group id is still its own.
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            use rustix::process::{Signal, kill_process, kill_process_group};
+            // The process is not collected before this, so its group id is still its own, and its descendants
+            // still name it, or one another, as their parent.
+            let escaped = descendants::stopped(group);
+            let _ = kill_process_group(group, Signal::KILL);
+            for pid in escaped {
+                let _ = kill_process(pid, Signal::KILL);
+            }
         }
         match running.child.kill() {
             Ok(()) => {}
@@ -426,6 +487,12 @@ impl Process for PlainProcess {
         }
         let status = running.child.wait()?;
         running.collected = Some(exit_of(status));
+        #[cfg(unix)]
+        if let Some((mut watcher, pipe)) = running.watcher.take() {
+            drop(pipe);
+            let _ = watcher.kill();
+            let _ = watcher.wait();
+        }
         Ok(())
     }
 
@@ -467,6 +534,105 @@ fn peek(pid: u32) -> io::Result<Option<Exit>> {
         code: status.exit_status(),
         signal: status.terminating_signal(),
     }))
+}
+
+/// Starts a watcher in `child`'s process group: a shell that reads a pipe only this process holds, and ends the group
+/// when the pipe ends, which it does when this process ends without a kill. A kill ends the watcher with the group.
+#[cfg(unix)]
+fn watch_group(child: &Child) -> io::Result<(Child, std::process::ChildStdin)> {
+    let group = child.id().to_string();
+    let mut command = Command::new("/bin/sh");
+    command
+        .args([
+            "-c",
+            r#"while read -r _; do :; done; kill -s KILL -- "-$1""#,
+            "watcher",
+        ])
+        .arg(&group)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    std::os::unix::process::CommandExt::process_group(
+        &mut command,
+        i32::try_from(child.id()).map_err(io::Error::other)?,
+    );
+    let mut watcher = command.spawn()?;
+    let pipe = watcher
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("the watcher's pipe was not opened"))?;
+    Ok((watcher, pipe))
+}
+
+/// The processes descended from one, found through `/proc` by their parents.
+#[cfg(unix)]
+mod descendants {
+    use alloc::vec::Vec;
+
+    use rustix::process::Pid;
+
+    /// Every process descended from `root`, each stopped so it starts no more, found again until no new one
+    /// appears. Empty where there is no `/proc` to read.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) fn stopped(root: Pid) -> Vec<Pid> {
+        use rustix::process::{Signal, kill_process};
+        let mut found = alloc::collections::BTreeSet::new();
+        for _ in 0..16 {
+            let parents = parents();
+            let mut grown = false;
+            let mut queue = Vec::from([root.as_raw_nonzero().get()]);
+            while let Some(parent) = queue.pop() {
+                for (child, _) in parents.iter().filter(|(_, p)| **p == parent) {
+                    if found.insert(*child) {
+                        grown = true;
+                        if let Some(pid) = Pid::from_raw(*child) {
+                            let _ = kill_process(pid, Signal::STOP);
+                        }
+                    }
+                    queue.push(*child);
+                }
+            }
+            if !grown {
+                break;
+            }
+        }
+        found.into_iter().filter_map(Pid::from_raw).collect()
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub(super) fn stopped(_root: Pid) -> Vec<Pid> {
+        Vec::new()
+    }
+
+    /// Each process's parent, as `/proc/<pid>/stat` says.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn parents() -> alloc::collections::BTreeMap<i32, i32> {
+        let mut parents = alloc::collections::BTreeMap::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return parents;
+        };
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            // `pid (name) state ppid ...`: the name may hold spaces and parentheses, so read from its last `)`.
+            let parent = stat
+                .rfind(')')
+                .and_then(|end| stat[end + 1..].split_whitespace().nth(1))
+                .and_then(|ppid| ppid.parse::<i32>().ok());
+            if let Some(parent) = parent {
+                parents.insert(pid, parent);
+            }
+        }
+        parents
+    }
 }
 
 /// Puts a process just started in a job object of its own that ends everything in it when its last handle closes.

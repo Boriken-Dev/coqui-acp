@@ -2,9 +2,9 @@
 
 Header-file-style reference for the `coqui-acp-harness` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-There are no Cargo features. MSRV Rust 1.89. A default build depends on `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
+MSRV Rust 1.89. A default build depends on `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Feature `kind` (off by default) adds `spawner`, the `acp_harness` kind's spawner on this machine and `Spawn` through any host's, with `coqui-acp-harness-kind`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
-Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `ending_once`, `exit_text`, `line_writer` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The root also re-exports `mode`'s `Mode`. The modules `acp`, `event`, `lines`, `mode`, `process`, `stream` and `version` are public.
+Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `ending_once`, `exit_text`, `line_writer` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The root also re-exports `mode`'s `Mode`, and with `kind` `spawner`'s `LocalSpawner` and `ThroughSpawner`. The modules `acp`, `event`, `lines`, `mode`, `process`, `stream` and `version` are public, and `spawner` with `kind`.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state.
 
@@ -34,9 +34,25 @@ pub fn ending_once() -> Arc<AtomicBool>
 
 Each argument reaches the program as one argument, with no shell. `Launch`'s `Debug` names the environment's variables and counts the arguments, never showing their values.
 
-`PlainSpawn` pipes all three streams. Its `kill` ends the tree: on Windows the process is put in a job object of its own just after it starts, and closing the job ends everything in it; on Unix it leads a process group, which is sent `SIGKILL`, and it is not collected before that, so the group id stays its own. A process started in the instant before it joins its job, or one that leaves the group, as anything in a session of its own has, escapes. `kill` then collects the process; killing one that has ended is no error, and once it is collected nothing is sent to its id or group again; `try_wait` then answers how it ended. On Unix `try_wait` leaves a running process uncollected. Dropping the process kills it as `kill` does.
+`PlainSpawn` pipes all three streams. Its `kill` ends the tree. On Windows the process is put in a job object of its own just after it starts, and closing the job ends everything in it, at `kill` and when the host ends without one; a process started in the instant before it joins its job escapes. On Unix it leads a process group, which is sent `SIGKILL`, and it is not collected before that, so the group id stays its own; on Linux and Android `kill` first stops, then kills, every process descended from it, found through `/proc` by parent, those in a session of their own included. A watcher in the group (`/bin/sh` reading a pipe only the host holds) ends the group when the host ends without a kill; there a process that left the group escapes, and on other Unix systems it escapes `kill` too. `kill` then collects the process; killing one that has ended is no error, and once it is collected nothing is sent to its id or group again; `try_wait` then answers how it ended. On Unix `try_wait` leaves a running process uncollected. Dropping the process kills it as `kill` does.
 
 Implement `Spawn` to run a harness elsewhere: in a container, over SSH, under a terminal.
+
+## Spawner (`coqui_acp_harness::spawner`, feature `kind`)
+
+```rust
+pub struct LocalSpawner;                         // Clone, Copy, Debug, Default; #[must_use]
+pub const fn LocalSpawner::new() -> LocalSpawner // 1 MiB of each output stream held unread
+pub const fn buffer(self, bytes: usize) -> Self  // past it the program waits to write
+impl coqui_acp_harness_kind::ProcessSpawner for LocalSpawner
+pub struct ThroughSpawner;                       // Debug
+pub fn ThroughSpawner::new(spawner: Object<dyn ProcessSpawner>) -> ThroughSpawner
+impl Spawn for ThroughSpawner
+```
+
+`LocalSpawner` is the spawner a host hands an `acp_harness` start by default: it starts a `SpawnSpec` as `PlainSpawn` starts a `Launch`, standard error apart, into its standard output or nowhere, as the spec says, and gives no terminal (`GUATIAO_ERR_UNSUPPORTED`). A missing program is `GUATIAO_ERR_NOT_FOUND`. A thread per output stream reads it into the buffer; `read` and `read_error` wait up to their timeout. `describe` says `local`, `separate_error`, `ends_with_host`, and `kills_escaped` on Windows, Linux and Android. Its link is always up. Destroying a process kills its tree.
+
+`ThroughSpawner` is `Spawn` over any host's spawner, so a translator served with `serve` starts its program wherever the host's spawner runs it. Every text of the `Launch` must be UTF-8. Its reads wait through a link that is down; dropping its standard input closes the program's.
 
 ## Stream (`coqui_acp_harness::stream`)
 

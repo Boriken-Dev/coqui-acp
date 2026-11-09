@@ -9,6 +9,9 @@ pub mod event;
 pub mod lines;
 pub mod mode;
 pub mod process;
+#[cfg(feature = "kind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
+pub mod spawner;
 pub mod stream;
 pub mod version;
 
@@ -22,4 +25,6 @@ pub use process::{
     Exit, Launch, LineWriter, PlainSpawn, Process, Spawn, Spawned, ending_once, exit_text,
     line_writer, watch_exit,
 };
+#[cfg(feature = "kind")]
+pub use spawner::{LocalSpawner, ThroughSpawner};
 pub use stream::{Answer, LineHook, Step, Stream, Waiting};

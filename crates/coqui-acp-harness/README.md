@@ -16,7 +16,9 @@ and [`coqui-acp-codex`](https://github.com/Boriken-Dev/coqui-acp/tree/main/crate
 ## Features
 
 - `Launch`, `Spawn` and `PlainSpawn`: a process whose `kill` ends its whole tree, a job object on Windows and a process group on
-  Unix. Implement `Spawn` to run the harness elsewhere.
+  Unix (with every descendant on Linux), and whose tree ends with the host. Implement `Spawn` to run the harness elsewhere.
+- Feature `kind`: `LocalSpawner`, the `acp_harness` kind's spawner on this machine, and `ThroughSpawner`, `Spawn` through any
+  host's spawner.
 - `lines`: a harness's output, one JSON value per line, with a limit on a line, and the last lines that were not protocol.
 - `event`: messages and thoughts, tool calls with diffs, locations and terminals, plans, permission requests with a responder, usage
   and context, quota and limits, commands, notices, compaction, and how a turn ended.
@@ -26,7 +28,7 @@ and [`coqui-acp-codex`](https://github.com/Boriken-Dev/coqui-acp/tree/main/crate
 
 ## Installation
 
-Not published: `publish = false` until a release is chosen. Depend on it by path or by git revision. There are no Cargo features.
+Not published: `publish = false` until a release is chosen. Depend on it by path or by git revision. Feature `kind` adds the spawner.
 
 ## Quick start
 
