@@ -849,7 +849,7 @@
       "why": "One leading byte-order mark on line 1 is ignored.",
       "canonical": false,
       "lines": [
-        "﻿{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "\ufeff{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
         "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
         "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
       ],
