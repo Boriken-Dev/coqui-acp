@@ -1,6 +1,6 @@
 [package]
 name = "provider-python"
-description = "An echo agent written in Python: a Guatiao provider, served over the Agent Client Protocol by coqui-acp-provider"
+description = "Agents written in Python: an echo agent provider served over the Agent Client Protocol by coqui-acp-provider, and an echo ACP harness that speaks the protocol itself"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,7 @@ coqui-acp-provider = { path = "../../crates/coqui-acp-provider" }
 guatiao = { workspace = true, features = ["provider", "load"] }
 
 [dev-dependencies]
+coqui-acp-harness-kind = { path = "../../crates/coqui-acp-harness-kind" }
 serde_json.workspace = true
 
 [lints]

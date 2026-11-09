@@ -1942,6 +1942,7 @@ name = "provider-python"
 version = "0.0.0-alpha.0"
 dependencies = [
  "coqui-acp",
+ "coqui-acp-harness-kind",
  "coqui-acp-provider",
  "guatiao",
  "serde_json",
