@@ -16,7 +16,7 @@ use coqui_acp::{Authenticate, Client, Event, Exchange, RpcFailure, Session};
 use coqui_acp_provider::{
     AcpFacade, AgentEvent, BLOCKED_EVENT, CANCELLED_EVENT, COMPLETED_EVENT, DENIED_EVENT,
     EVENT_NOTIFICATION, EVENTS_CAPABILITY, FAILED_EVENT, FacadeAuth, LAUNCH_META_KEY, LIMIT_EVENT,
-    QuotaReport, TEXT_EVENT, TOOL_EVENT, TURN_CANCELLED, TokenUsage, UsageLimit,
+    TEXT_EVENT, TOOL_EVENT, TURN_CANCELLED,
 };
 use serde_json::{Map, Value, json};
 use support::{Probe, Raw, WAIT, cwd, detail, eventually, facade, joined, prompt_params, quick};
@@ -239,13 +239,13 @@ fn each_event_becomes_what_acp_has_for_it() {
         let mut tool = AgentEvent::new(TOOL_EVENT, Some("Read a file".to_owned()));
         tool.tools.push("Read".to_owned());
         let mut cost = AgentEvent::new("usage", None);
-        cost.usage = Some(TokenUsage {
-            input: 1,
-            output: 2,
-            cost_micro_usd: 1_500_000,
-            cumulative: true,
-            ..TokenUsage::default()
-        });
+        let mut spend = coqui_acp_api::Spend::new("s");
+        spend.input = 1;
+        spend.output = 2;
+        spend.cost_micro_usd = Some(1_500_000);
+        let mut report = coqui_acp_api::UsageReport::new();
+        report.spend = Some(spend);
+        cost.report = Some(report);
         vec![
             AgentEvent::new(TEXT_EVENT, Some("before".to_owned())),
             tool,
@@ -356,16 +356,15 @@ fn a_limit_refuses_the_turn_and_its_details_reach_the_client() {
     *probe.identity.lock().unwrap() = Some("provider-7".to_owned());
     probe.script(|_| {
         let mut limit = AgentEvent::new(LIMIT_EVENT, Some("out of quota".to_owned()));
-        limit.limit = Some(UsageLimit {
-            resets_at: Some(1_800_000_000),
-            window: Some("weekly".to_owned()),
-        });
-        limit.quota = vec![QuotaReport {
-            window: "weekly".to_owned(),
-            used_permille: Some(1000),
-            resets_at: None,
-            status: Some("rejected".to_owned()),
-        }];
+        let mut hit = coqui_acp_api::LimitHit::new(1_790_000_000);
+        hit.resets_at = Some(1_800_000_000);
+        hit.bucket = Some("weekly".to_owned());
+        limit.limit = Some(hit);
+        let mut bucket = coqui_acp_api::Bucket::new("weekly");
+        bucket.status = coqui_acp_api::Status::Exhausted;
+        let mut report = coqui_acp_api::UsageReport::new();
+        report.buckets = vec![bucket];
+        limit.report = Some(report);
         vec![limit]
     });
     let session = connect(&probe, "go");
@@ -388,8 +387,11 @@ fn a_limit_refuses_the_turn_and_its_details_reach_the_client() {
             _ => None,
         })
         .expect("the limit's details are told");
-    assert_eq!(extension["event"]["limit"]["window"], "weekly");
-    assert_eq!(extension["event"]["quota"][0]["status"], "rejected");
+    assert_eq!(extension["event"]["limit"]["bucket"], "weekly");
+    assert_eq!(
+        extension["event"]["report"]["buckets"][0]["status"],
+        "exhausted"
+    );
     assert_eq!(extension["providerSessionId"], "provider-7");
     session.close();
 }

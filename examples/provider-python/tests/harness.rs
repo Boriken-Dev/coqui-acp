@@ -27,11 +27,38 @@ mod with_python {
     use std::sync::Arc;
 
     use coqui_acp_api::contract::Contract;
-    use coqui_acp_api::guatiao::library::Registry;
-    use coqui_acp_api::guatiao::{List, Map, Secret};
-    use coqui_acp_api::{AcpHarness, SessionQuery};
+    use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
+    use coqui_acp_api::guatiao::{List, Map, Secret, Status, Value};
+    use coqui_acp_api::{
+        AcpHarness, ProcessSpawner, SessionQuery, Source, SpawnSpec, SpawnedProcess, SpawnerInfo,
+        UsageQuery,
+    };
 
     use super::support::{guatiao, manifest_dir, python, source};
+
+    /// A spawner nobody uses: the echo starts nothing.
+    struct Unused;
+
+    impl ProcessSpawner for Unused {
+        fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
+            Ok(SpawnerInfo::new(
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                true,
+            ))
+        }
+
+        fn spawn(&self, _spec: SpawnSpec) -> Result<Object<dyn SpawnedProcess>, ProviderError> {
+            Err(ProviderError::new(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "unused",
+            ))
+        }
+    }
+
+    fn unused_spawner() -> Object<dyn ProcessSpawner> {
+        Unused.into_object()
+    }
 
     fn kinds_crate() -> PathBuf {
         manifest_dir().join("../../crates/coqui-acp-api")
@@ -101,6 +128,43 @@ mod with_python {
         let models = harness.models(Secret::default()).expect("answered");
         assert!(models.known);
         assert_eq!(models.models[0].id, "echo");
+    }
+
+    /// Scripted, the Python echo reports usage as the contract documents, through the kind and through ACP.
+    #[test]
+    fn a_scripted_python_echo_reports_usage_as_the_contract_documents() {
+        let (registry, plain) = loaded();
+        assert!(!plain.describe().expect("described").usage.reports());
+        let report = plain
+            .usage(UsageQuery::new().account("pool/alice"), unused_spawner())
+            .expect("answered");
+        assert!(!report.supported && report.unsupported_because.is_some());
+        let offer = registry
+            .offer::<dyn AcpHarness>("acp_echo_harness_echo_harness")
+            .expect("the source offers it")
+            .expect("its table is the Rust-declared kind");
+        let mut settings = Map::new();
+        settings.set("usage", "scripted");
+        let scripted: Arc<dyn AcpHarness> = Arc::new(
+            offer
+                .instantiate(&Value::from(settings))
+                .expect("the settings fit the schema"),
+        );
+        let info = scripted.describe().expect("described");
+        assert_eq!(info.usage.sources, vec![Source::Reported]);
+        assert!(info.usage.spend);
+        if let Err(failures) = Contract::new("the scripted Python echo")
+            .message_limit(1 << 20)
+            .run(&*scripted)
+        {
+            panic!("{failures}");
+        }
+        let mut wrong = Map::new();
+        wrong.set("usage", "sometimes");
+        assert!(
+            offer.instantiate(&Value::from(wrong)).is_err(),
+            "a value the settings do not take was accepted"
+        );
     }
 
     #[test]

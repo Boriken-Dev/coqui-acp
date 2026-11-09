@@ -6,6 +6,9 @@ JSON-RPC message per channel message, and keeps every rule of the channel: `send
 queue of a few messages and `close` wakes it; one thread of its own answers, in order, and is the only
 caller of the sink; a sink that refuses ends the connection. It starts no program, so it lets go of the
 spawner unused.
+
+With the setting `usage = "scripted"` it also reports usage, as the contract documents: `quota P`
+reports two buckets, `limit` refuses the turn with a limit hit, and every turn spends fixed tokens.
 """
 
 from __future__ import annotations
@@ -14,8 +17,10 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from coqui_acp_api_kinds import AcpHarness, Channel, ChannelSink, ProcessSpawner
@@ -42,9 +47,19 @@ HOSTS = ("network",)
 WORDS = ("sandboxed_scripts", "only_skills")
 
 #: The keys a request may have: one it does not declare is refused, never dropped.
-START_KEYS = {"environment", "working_roots", "requirements"}
+START_KEYS = {"environment", "working_roots", "requirements", "account"}
 IMPORT_KEYS = {"session_id", "working_directory", "history", "environment"}
 EXPORT_KEYS = {"session_id", "working_directory", "environment", "after", "max_bytes"}
+QUERY_KEYS = {"environment", "account"}
+
+#: The usage extension's names, as `coqui_acp_api::usage` spells them.
+USAGE_CAPABILITY = "dev.boriken.coqui.acp/usage"
+USAGE_METHOD = "_coqui_acp/usage"
+USAGE_NOTIFICATION = "_coqui_acp/usage_update"
+LIMIT_META_KEY = "dev.boriken.coqui.acp/limit"
+
+#: The tokens every turn of a scripted echo spends: input, output, cache read, cache write.
+SPENT = (100, 40, 20, 10)
 
 #: How many bytes a page holds when the host gives no bound.
 DEFAULT_PAGE_BYTES = 1 << 20
@@ -131,6 +146,141 @@ def _new_session(session: str, lines: List[Dict[str, Any]]) -> None:
     """Keeps `session`, mapped to an id of the echo's own; the caller holds the lock."""
     _SESSIONS[session] = {"own": f"python-echo-{_NEXT[0]}", "lines": lines}
     _NEXT[0] += 1
+
+
+class _Reports:
+    """The newest report a connection of one instance made, by the account it ran on ("" for none)."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.held: Dict[str, Dict[str, Any]] = {}
+
+
+def _bucket(id: str, **fields: Any) -> Dict[str, Any]:
+    """A bucket with every key the model has, `fields` over nothing known."""
+    bucket: Dict[str, Any] = {
+        "id": id,
+        "label": None,
+        "models": {"kind": "unknown"},
+        "unit": "permille",
+        "used": None,
+        "limit": None,
+        "remaining": None,
+        "refill": {"kind": "unknown"},
+        "status": "unknown",
+        "observed_at": 0,
+        "source": "reported",
+        "evidence": None,
+    }
+    bucket.update(fields)
+    return bucket
+
+
+class _Usage:
+    """The usage of one connection of a scripted echo."""
+
+    def __init__(self, account: Optional[str], reports: "_Reports") -> None:
+        self.reports = reports
+        self.report: Dict[str, Any] = {
+            "supported": True,
+            "unsupported_because": None,
+            "sources": ["reported"],
+            "account": account,
+            "revision": 0,
+            "observed_at": 0,
+            "buckets": [],
+            "limit": None,
+            "spend": None,
+        }
+        self.spends: Dict[str, Dict[str, Any]] = {}
+        #: Whether the client asked for `_coqui_acp/usage_update`.
+        self.notify = False
+
+    def snapshot(self, session: Optional[str]) -> Dict[str, Any]:
+        """The report, with `session`'s spend when one is named."""
+        report = dict(self.report)
+        report["buckets"] = [dict(bucket) for bucket in self.report["buckets"]]
+        report["spend"] = dict(self.spends[session]) if session in self.spends else None
+        return report
+
+    def changed(self, session: Optional[str]) -> List[Dict[str, Any]]:
+        """Something changed: a new revision, kept for the kind's `usage`, and the notification when the
+        client asked."""
+        self.report["revision"] += 1
+        self.report["observed_at"] = max((b["observed_at"] for b in self.report["buckets"]), default=0)
+        with self.reports.lock:
+            self.reports.held[self.report["account"] or ""] = self.snapshot(None)
+        if not self.notify:
+            return []
+        return [{
+            "jsonrpc": "2.0",
+            "method": USAGE_NOTIFICATION,
+            "params": {"sessionId": session, "report": self.snapshot(session)},
+        }]
+
+    def quota(self, permille: int, session: str) -> List[Dict[str, Any]]:
+        """`quota P`: the five-hour window used `P` thousandths, and a request bucket that refills
+        continuously."""
+        at = int(time.time())
+        five = _bucket(
+            "five_hour",
+            label="5 hours",
+            models={"kind": "all"},
+            used=permille,
+            limit=1000,
+            refill={"kind": "fixed_window", "length": [5 * 3600, 0], "resets_at": at + 5 * 3600},
+            status="exhausted" if permille >= 1000 else "ok",
+            observed_at=at,
+        )
+        rpm = _bucket(
+            "rpm",
+            models={"kind": "all"},
+            unit="requests",
+            limit=60,
+            remaining=60,
+            refill={"kind": "token_bucket", "amount": 60, "per": [60, 0], "max": 60},
+            status="ok",
+            observed_at=at,
+        )
+        self.report["buckets"] = [five, rpm]
+        self.report["limit"] = None
+        return self.changed(session)
+
+    def limit(self, session: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """`limit`: the five-hour window is used up and the turn is refused."""
+        at = int(time.time())
+        hit = {
+            "bucket": "five_hour",
+            "resets_at": at + 3600,
+            "retry_after": [60, 0],
+            "source": "reported",
+            "text": "usage limit reached",
+            "observed_at": at,
+        }
+        for bucket in self.report["buckets"]:
+            if bucket["id"] == "five_hour":
+                bucket.update(status="exhausted", used=1000, observed_at=at)
+                break
+        else:
+            self.report["buckets"].append(_bucket("five_hour", used=1000, limit=1000, status="exhausted", observed_at=at))
+        self.report["limit"] = hit
+        return self.changed(session), hit
+
+    def spent(self, session: str) -> List[Dict[str, Any]]:
+        """A turn ended: its fixed spend is added to the session's totals."""
+        spend = self.spends.setdefault(session, {
+            "session_id": session,
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "reasoning": None,
+            "cost_micro_usd": None,
+            "by_model": [],
+        })
+        for key, amount in zip(("input", "output", "cache_read", "cache_write"), SPENT):
+            spend[key] += amount
+        return self.changed(session)
 
 
 def _parts(path: str, windows: bool) -> Optional[List[str]]:
@@ -302,7 +452,9 @@ def _error(id: Any, code: int, message: str) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}
 
 
-def _finish(session: str, prompt: Any, said: Optional[str], stop: str) -> List[Dict[str, Any]]:
+def _finish(
+    session: str, prompt: Any, said: Optional[str], stop: str, meta: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
     """A turn's end: what the agent says, if anything, kept in the session's history, then the
     prompt's answer."""
     messages: List[Dict[str, Any]] = []
@@ -319,7 +471,10 @@ def _finish(session: str, prompt: Any, said: Optional[str], stop: str) -> List[D
                 "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": said}},
             },
         })
-    messages.append(_result(prompt, {"stopReason": stop}))
+    answer: Dict[str, Any] = {"stopReason": stop}
+    if meta is not None:
+        answer["_meta"] = meta
+    messages.append(_result(prompt, answer))
     return messages
 
 
@@ -330,8 +485,9 @@ class _Refused(Exception):
 class _Agent:
     """The ACP side of one connection: what each message from the client is answered with."""
 
-    def __init__(self, roots: List[str]) -> None:
+    def __init__(self, roots: List[str], usage: Optional[_Usage] = None) -> None:
         self.roots = roots
+        self.usage = usage
         self.open: List[str] = []
         self.reads_files = False
         #: The turn running in each session: (kind, prompt id, the agent's own request id).
@@ -373,13 +529,24 @@ class _Agent:
             capabilities = params.get("clientCapabilities")
             fs = capabilities.get("fs") if isinstance(capabilities, dict) else None
             self.reads_files = isinstance(fs, dict) and fs.get("readTextFile") is True
+            agent_capabilities: Dict[str, Any] = {
+                "loadSession": True,
+                "promptCapabilities": {},
+                "mcpCapabilities": {"http": False, "sse": False},
+            }
+            if self.usage is not None:
+                meta = capabilities.get("_meta") if isinstance(capabilities, dict) else None
+                asked = meta.get(USAGE_CAPABILITY) if isinstance(meta, dict) else None
+                asked = asked if isinstance(asked, dict) else {}
+                self.usage.notify = asked.get("notify") is True
+                if self.usage.report["account"] is None and isinstance(asked.get("account"), str):
+                    self.usage.report["account"] = asked["account"]
+                agent_capabilities["_meta"] = {
+                    USAGE_CAPABILITY: {"version": 1, "sources": ["reported"], "spend": True}
+                }
             return [_result(id, {
                 "protocolVersion": 1,
-                "agentCapabilities": {
-                    "loadSession": True,
-                    "promptCapabilities": {},
-                    "mcpCapabilities": {"http": False, "sse": False},
-                },
+                "agentCapabilities": agent_capabilities,
                 "authMethods": [],
                 "agentInfo": {"name": "acp_echo_harness", "title": "Echo, in Python", "version": __version__},
             })], False
@@ -420,6 +587,11 @@ class _Agent:
             _keep(session, {"method": "session/prompt", "params": {"prompt": blocks}})
             said = "".join(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str))
             return self.prompted(id, session, said)
+        if method == USAGE_METHOD and self.usage is not None:
+            session = params.get("sessionId")
+            if session is not None and (not isinstance(session, str) or session not in self.open):
+                raise _Refused("no such session is open here")
+            return [_result(id, self.usage.snapshot(session))], False
         return [_error(id, -32601, "method not found")], False
 
     def admit(self, cwd: str, params: Dict[str, Any]) -> None:
@@ -456,7 +628,7 @@ class _Agent:
             }], False
         if said.startswith("read "):
             if not self.reads_files:
-                return _finish(session, id, "echo: no fs", "end_turn"), False
+                return self.finish(session, id, "echo: no fs", "end_turn"), False
             self.asked += 1
             request = f"python-echo-read-{self.asked}"
             self.turns[session] = ("read", id, request)
@@ -466,14 +638,28 @@ class _Agent:
                 "method": "fs/read_text_file",
                 "params": {"sessionId": session, "path": said[len("read "):]},
             }], False
-        return _finish(session, id, f"echo: {said}", "end_turn"), said == "close"
+        if self.usage is not None:
+            if said.startswith("quota ") and said[6:].strip().isdigit():
+                answers = self.usage.quota(int(said[6:].strip()), session)
+                return answers + self.finish(session, id, f"echo: {said}", "end_turn"), False
+            if said == "limit":
+                answers, hit = self.usage.limit(session)
+                return answers + self.finish(session, id, "echo: limit", "refusal", {LIMIT_META_KEY: hit}), False
+        return self.finish(session, id, f"echo: {said}", "end_turn"), said == "close"
+
+    def finish(
+        self, session: str, prompt: Any, said: Optional[str], stop: str, meta: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """A turn's end; a scripted echo spends its fixed tokens first when the turn ran."""
+        spent = self.usage.spent(session) if self.usage is not None and stop in ("end_turn", "refusal") else []
+        return spent + _finish(session, prompt, said, stop, meta)
 
     def notified(self, method: str, params: Any) -> List[Dict[str, Any]]:
         if method != "session/cancel" or not isinstance(params, dict):
             return []
         session = params.get("sessionId")
         turn = self.turns.pop(session, None) if isinstance(session, str) else None
-        return _finish(session, turn[1], None, "cancelled") if turn else []
+        return self.finish(session, turn[1], None, "cancelled") if turn else []
 
     def answered(self, message: Dict[str, Any]) -> List[Dict[str, Any]]:
         """The client's answer to one of the agent's own requests."""
@@ -488,17 +674,17 @@ class _Agent:
             outcome = result.get("outcome")
             outcome = outcome if isinstance(outcome, dict) else {}
             if outcome.get("outcome") == "cancelled":
-                return _finish(session, prompt, None, "cancelled")
+                return self.finish(session, prompt, None, "cancelled")
             allowed = outcome.get("outcome") == "selected" and outcome.get("optionId") == "allow"
-            return _finish(session, prompt, "echo: allowed" if allowed else "echo: refused", "end_turn")
+            return self.finish(session, prompt, "echo: allowed" if allowed else "echo: refused", "end_turn")
         content = result.get("content")
         said = f"echo: {content}" if isinstance(content, str) else "echo: refused"
-        return _finish(session, prompt, said, "end_turn")
+        return self.finish(session, prompt, said, "end_turn")
 
     def end_every_turn(self) -> List[Dict[str, Any]]:
         """Ends every turn still running, as cancelled: the connection is ending."""
         turns, self.turns = self.turns, {}
-        return [m for session, (_, prompt, _) in turns.items() for m in _finish(session, prompt, None, "cancelled")]
+        return [m for session, (_, prompt, _) in turns.items() for m in self.finish(session, prompt, None, "cancelled")]
 
 
 def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agent) -> None:
@@ -555,15 +741,32 @@ def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agen
             sink.destroy()
 
 
-class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in Python"):
+@dataclass(frozen=True)
+class EchoConfig:
+    """How an echo is configured."""
+
+    #: `none`, which reports no usage, or `scripted`, which reports what its prompts script.
+    usage: str = "none"
+
+
+class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in Python", default=True):
     """Starts an echoing ACP connection per call."""
 
+    def __init__(self, config: EchoConfig = EchoConfig()) -> None:
+        if config.usage not in ("none", "scripted"):
+            raise BadValue("`usage` is `none` or `scripted`")
+        self.scripted = config.usage == "scripted"
+        self.reports = _Reports()
+
     def describe(self) -> Dict[str, Any]:
-        return {
+        info: Dict[str, Any] = {
             "title": "Echo, in Python",
             "versions": [1],
             "takes": {"load": True, "resume": True, "additional_directories": True},
         }
+        if self.scripted:
+            info["usage"] = {"sources": ["reported"], "spend": True}
+        return info
 
     def start(self, request: Ref, spawner: ProcessSpawner, sink: ChannelSink) -> Channel:
         # A refusal raises: the binding then destroys the spawner and the sink it was handed.
@@ -576,10 +779,14 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         roots = asked.get("working_roots", [])
         if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
             raise BadValue("the working roots are not a list of texts")
+        account = asked.get("account")
+        if account is not None and not isinstance(account, str):
+            raise BadValue("the account is not text")
         q = _Queue()
+        usage = _Usage(account, self.reports) if self.scripted else None
         threading.Thread(
             target=_deliver,
-            args=(sink, spawner, q, _Agent(list(roots))),
+            args=(sink, spawner, q, _Agent(list(roots), usage)),
             name="acp_echo_harness",
             daemon=True,
         ).start()
@@ -651,3 +858,37 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
 
     def models(self, environment: Ref) -> Dict[str, Any]:
         return {"known": True, "models": [{"id": "echo"}]}
+
+    def usage(self, query: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
+        spawner.destroy()
+        asked = query.to_python()
+        if not isinstance(asked, dict) or not set(asked) <= QUERY_KEYS:
+            raise BadValue("the query has a key the echo does not know")
+        if not self.scripted:
+            return {
+                "supported": False,
+                "unsupported_because": "this echo reports no usage",
+                "sources": [],
+                "account": None,
+                "revision": 0,
+                "observed_at": 0,
+                "buckets": [],
+                "limit": None,
+                "spend": None,
+            }
+        account = asked.get("account")
+        with self.reports.lock:
+            held = self.reports.held.get(account or "")
+        if held is not None:
+            return dict(held)
+        return {
+            "supported": True,
+            "unsupported_because": None,
+            "sources": ["reported"],
+            "account": account,
+            "revision": 0,
+            "observed_at": 0,
+            "buckets": [],
+            "limit": None,
+            "spend": None,
+        }

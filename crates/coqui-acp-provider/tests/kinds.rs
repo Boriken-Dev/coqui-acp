@@ -9,12 +9,13 @@
 
 use std::path::PathBuf;
 
+use coqui_acp_api::{Bucket, LimitHit, Spend, Status, UsageReport};
 use coqui_acp_provider::guatiao::{FromValue, ToValue};
 use coqui_acp_provider::{
     AgentEvent, AgentMessage, AgentProviderVtable, AgentSessionVtable, BLOCKED_EVENT,
     CANCELLED_EVENT, COMPLETED_EVENT, DENIED_EVENT, EVENT_NOTIFICATION, EVENTS_CAPABILITY,
-    FAILED_EVENT, LAUNCH_META_KEY, LIMIT_EVENT, QuotaReport, ResumeRequest, StartRequest,
-    TEXT_EVENT, TOOL_EVENT, TURN_CANCELLED, TokenUsage, UsageLimit,
+    FAILED_EVENT, LAUNCH_META_KEY, LIMIT_EVENT, ResumeRequest, StartRequest, TEXT_EVENT,
+    TOOL_EVENT, TURN_CANCELLED,
 };
 use serde_json::{Value, json};
 
@@ -105,26 +106,31 @@ fn full_event() -> AgentEvent {
         kind: "limit".to_owned(),
         text: Some("stopped".to_owned()),
         data: Some(vec![1, 2]),
-        limit: Some(UsageLimit {
-            resets_at: Some(5),
-            window: Some("weekly".to_owned()),
-        }),
-        usage: Some(TokenUsage {
-            input: 1,
-            output: 2,
-            cache_read: 3,
-            cache_write: 4,
-            cost_micro_usd: 5,
-            cumulative: true,
-        }),
+        limit: Some(hit()),
         tools: vec!["WebFetch".to_owned()],
-        quota: vec![QuotaReport {
-            window: "weekly".to_owned(),
-            used_permille: Some(10),
-            resets_at: None,
-            status: Some("allowed".to_owned()),
-        }],
+        report: Some(report()),
     }
+}
+
+fn hit() -> LimitHit {
+    let mut hit = LimitHit::new(7);
+    hit.bucket = Some("seven_day".to_owned());
+    hit.resets_at = Some(5);
+    hit
+}
+
+fn report() -> UsageReport {
+    let mut bucket = Bucket::new("seven_day");
+    bucket.used = Some(10);
+    bucket.limit = Some(1000);
+    bucket.status = Status::Ok;
+    let mut spend = Spend::new("s");
+    spend.input = 1;
+    let mut report = UsageReport::new();
+    report.revision = 3;
+    report.buckets = vec![bucket];
+    report.spend = Some(spend);
+    report
 }
 
 #[test]
@@ -132,8 +138,7 @@ fn an_events_json_shape_is_exact() {
     let bare = AgentEvent::new("text", Some("hi".to_owned()));
     assert_eq!(
         serde_json::to_string(&bare).unwrap(),
-        r#"{"kind":"text","text":"hi","data":null,"limit":null,"usage":null,"tools":[]}"#,
-        "no quota key when there is none"
+        r#"{"kind":"text","text":"hi","data":null,"limit":null,"tools":[],"report":null}"#,
     );
     assert_eq!(
         serde_json::to_value(full_event()).unwrap(),
@@ -141,22 +146,15 @@ fn an_events_json_shape_is_exact() {
             "kind": "limit",
             "text": "stopped",
             "data": [1, 2],
-            "limit": {"resets_at": 5, "window": "weekly"},
-            "usage": {
-                "input": 1, "output": 2, "cache_read": 3, "cache_write": 4,
-                "cost_micro_usd": 5, "cumulative": true,
-            },
+            "limit": serde_json::to_value(hit()).unwrap(),
             "tools": ["WebFetch"],
-            "quota": [{
-                "window": "weekly", "used_permille": 10, "resets_at": null, "status": "allowed",
-            }],
+            "report": serde_json::to_value(report()).unwrap(),
         })
     );
-    let read: AgentEvent = serde_json::from_str(
-        r#"{"kind":"text","text":"hi","data":null,"limit":null,"usage":null,"tools":[]}"#,
-    )
-    .unwrap();
-    assert_eq!(read, bare, "an absent quota reads as none");
+    let read: AgentEvent =
+        serde_json::from_str(r#"{"kind":"text","text":"hi","data":null,"limit":null,"tools":[]}"#)
+            .unwrap();
+    assert_eq!(read, bare, "an absent report reads as none");
     assert!(
         serde_json::from_str::<AgentEvent>(r#"{"kind":"text"}"#).is_err(),
         "tools is required in JSON"
@@ -182,10 +180,10 @@ fn an_event_crosses_as_a_value_and_back() {
         AgentEvent::from_value(&event.to_value().unwrap()).unwrap(),
         event
     );
-    let usage = TokenUsage::default();
+    let report = report();
     assert_eq!(
-        TokenUsage::from_value(&usage.to_value().unwrap()).unwrap(),
-        usage
+        UsageReport::from_value(&report.to_value().unwrap()).unwrap(),
+        report
     );
 }
 

@@ -20,6 +20,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 agent-client-protocol.workspace = true
+coqui-acp-api = { path = "../coqui-acp-api" }
 futures.workspace = true
 guatiao = { workspace = true, features = ["provider"] }
 guatiao-serde.workspace = true

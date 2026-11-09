@@ -172,15 +172,11 @@ fn every_line_fits_the_update_limit_whatever_the_provider_names() {
     probe.script(|_| {
         let mut odd = AgentEvent::new("k".repeat(100_000), Some("\u{1}".repeat(5000)));
         odd.tools = vec!["t".repeat(1000); 1000];
-        odd.quota = vec![
-            coqui_acp_provider::QuotaReport {
-                window: "w".repeat(100_000),
-                used_permille: None,
-                resets_at: None,
-                status: Some("s".repeat(100_000)),
-            };
-            50
-        ];
+        let mut bucket = coqui_acp_api::Bucket::new("w".repeat(100_000));
+        bucket.evidence = Some("s".repeat(100_000));
+        let mut report = coqui_acp_api::UsageReport::new();
+        report.buckets = vec![bucket; 50];
+        odd.report = Some(report);
         let mut tool = AgentEvent::new(TOOL_EVENT, Some("\"".repeat(100_000)));
         tool.tools = vec!["\\".repeat(100_000)];
         vec![odd, tool, AgentEvent::new(COMPLETED_EVENT, None)]

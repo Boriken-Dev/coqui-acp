@@ -34,9 +34,10 @@ class Conversation(AgentSession):
             self.events.put({"kind": "completed"})
         elif text == "tool":
             self.events.put({"kind": "tool", "text": "Read a file", "tools": ["Read"]})
-            self.events.put({"kind": "usage", "usage": {
-                "input": 1, "output": 2, "cache_read": 0, "cache_write": 0,
-                "cost_micro_usd": 1500000, "cumulative": True,
+            self.events.put({"kind": "usage", "report": {
+                "supported": True, "revision": 1, "observed_at": 0,
+                "spend": {"session_id": "s", "input": 1, "output": 2, "cache_read": 0, "cache_write": 0,
+                          "cost_micro_usd": 1500000},
             }})
             self.events.put({"kind": "completed"})
         elif text == "wait":
