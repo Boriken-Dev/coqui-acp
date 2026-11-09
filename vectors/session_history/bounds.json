@@ -1,0 +1,161 @@
+{
+  "why": "Documents read under limits (max_line_bytes, max_lines, max_total_bytes, max_depth; one not named is its default).",
+  "cases": [
+    {
+      "name": "line_at_limit",
+      "why": "A line exactly at the limit is read.",
+      "limits": {
+        "max_line_bytes": 125
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "line_over_limit",
+      "why": "One byte over, without the line feed.",
+      "limits": {
+        "max_line_bytes": 124
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "code": "too_long",
+        "line": 3
+      }
+    },
+    {
+      "name": "lines_at_limit",
+      "why": "As many lines as the limit, the header counting.",
+      "limits": {
+        "max_lines": 4
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "lines_over_limit",
+      "why": "One line more than the limit.",
+      "limits": {
+        "max_lines": 3
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "code": "too_many_lines"
+      }
+    },
+    {
+      "name": "bytes_at_limit",
+      "why": "Line feeds count toward the total.",
+      "limits": {
+        "max_total_bytes": 386
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "bytes_over_limit",
+      "why": "One byte more than the limit.",
+      "limits": {
+        "max_total_bytes": 385
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "code": "too_large"
+      }
+    },
+    {
+      "name": "depth_at_limit",
+      "why": "params(2) update(3) a(4) b(5): five levels of containers.",
+      "limits": {
+        "max_depth": 5
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"a\":{\"b\":{}},\"sessionUpdate\":\"x\"}}}"
+      ],
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "depth_over_limit",
+      "why": "One level deeper than the limit.",
+      "limits": {
+        "max_depth": 4
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"a\":{\"b\":{}},\"sessionUpdate\":\"x\"}}}"
+      ],
+      "expect": {
+        "code": "too_deep",
+        "line": 2
+      }
+    },
+    {
+      "name": "depth_far_over_any_limit",
+      "why": "The parser stops at 128 levels whatever the setting.",
+      "limits": {
+        "max_depth": 100000
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"x\",\"a\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}}"
+      ],
+      "expect": {
+        "code": "too_deep",
+        "line": 2
+      }
+    },
+    {
+      "name": "unbounded_line_is_cut",
+      "why": "A huge line is refused without being held.",
+      "limits": {
+        "max_line_bytes": 64
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ],
+      "expect": {
+        "code": "too_long",
+        "line": 1
+      }
+    }
+  ]
+}

@@ -1,0 +1,696 @@
+{
+  "why": "Documents a reader refuses, with the error code, the line and, for a wrongly shaped line, the JSON pointer. A case with `text` is the file's exact text; one with `lines` is those lines each ended by a line feed. Invalid UTF-8 cannot be written in JSON: a reader must also refuse it with code not_utf8 at its line.",
+  "cases": [
+    {
+      "name": "empty_file",
+      "why": "No bytes at all: there is no header.",
+      "expect": {
+        "code": "empty"
+      },
+      "text": ""
+    },
+    {
+      "name": "header_not_json",
+      "why": "Line 1 must be JSON.",
+      "expect": {
+        "code": "syntax",
+        "line": 1
+      },
+      "lines": [
+        "{not json"
+      ]
+    },
+    {
+      "name": "trailing_garbage",
+      "why": "Anything after the JSON value is a syntax error.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}} x"
+      ]
+    },
+    {
+      "name": "no_final_line_feed",
+      "why": "A file must end in a line feed: otherwise its last line may be cut.",
+      "expect": {
+        "code": "truncated",
+        "line": 3
+      },
+      "text": "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}\n{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}\n{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+    },
+    {
+      "name": "blank_line",
+      "why": "Empty lines are not part of the format.",
+      "expect": {
+        "code": "blank_line",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}"
+      ]
+    },
+    {
+      "name": "crlf_line_ending",
+      "why": "Lines end in LF alone: the header's CR is the first.",
+      "expect": {
+        "code": "line_ending",
+        "line": 1
+      },
+      "text": "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}\r\n{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}\r\n"
+    },
+    {
+      "name": "cr_in_a_body_line",
+      "why": "A carriage return anywhere in the file, here ending line 2.",
+      "expect": {
+        "code": "line_ending",
+        "line": 2
+      },
+      "text": "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}\n{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}\r\n"
+    },
+    {
+      "name": "first_line_is_body",
+      "why": "The first line must be the header.",
+      "expect": {
+        "code": "unknown_format",
+        "line": 1
+      },
+      "lines": [
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ]
+    },
+    {
+      "name": "wrong_format_name",
+      "why": "Another format's first line.",
+      "expect": {
+        "code": "unknown_format",
+        "line": 1
+      },
+      "lines": [
+        "{\"format\": \"other\", \"version\": 1}"
+      ]
+    },
+    {
+      "name": "future_version",
+      "why": "A version this reader does not know is refused whatever else the line holds.",
+      "expect": {
+        "code": "unknown_version",
+        "line": 1
+      },
+      "lines": [
+        "{\"format\": \"coqui-acp-history\", \"version\": 2, \"something\": \"new\"}"
+      ]
+    },
+    {
+      "name": "version_zero",
+      "why": "Version 0 is not a version.",
+      "expect": {
+        "code": "unknown_version",
+        "line": 1
+      },
+      "lines": [
+        "{\"format\": \"coqui-acp-history\", \"version\": 0}"
+      ]
+    },
+    {
+      "name": "version_as_text",
+      "why": "The version is a number.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/version"
+      },
+      "lines": [
+        "{\"format\": \"coqui-acp-history\", \"version\": \"1\", \"id\": \"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\", \"origin\": {\"harness\": \"x\"}}"
+      ]
+    },
+    {
+      "name": "version_missing",
+      "why": "The version is required.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/version"
+      },
+      "lines": [
+        "{\"format\": \"coqui-acp-history\", \"id\": \"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\", \"origin\": {\"harness\": \"x\"}}"
+      ]
+    },
+    {
+      "name": "header_array",
+      "why": "The header is an object.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": ""
+      },
+      "lines": [
+        "[1]"
+      ]
+    },
+    {
+      "name": "id_missing",
+      "why": "The host's session UUID is required.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/id"
+      },
+      "lines": [
+        "{\"format\": \"coqui-acp-history\", \"version\": 1, \"origin\": {\"harness\": \"x\"}}"
+      ]
+    },
+    {
+      "name": "id_upper_case",
+      "why": "A UUID is canonical lower case.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/id"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5F0F6D6E-3F3C-4F1A-8A52-1C1E6F0B9A77\",\"origin\":{\"harness\":\"claude\"}}"
+      ]
+    },
+    {
+      "name": "id_not_uuid",
+      "why": "The id is a UUID.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/id"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"session-1\",\"origin\":{\"harness\":\"claude\"}}"
+      ]
+    },
+    {
+      "name": "origin_missing",
+      "why": "The origin harness is required.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/origin"
+      },
+      "lines": [
+        "{\"format\": \"coqui-acp-history\", \"version\": 1, \"id\": \"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\"}"
+      ]
+    },
+    {
+      "name": "harness_name_invalid",
+      "why": "A harness name is lower-case letters, digits and . _ - : only.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/origin/harness"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"Claude Code\"}}"
+      ]
+    },
+    {
+      "name": "header_unknown_field",
+      "why": "An unknown header field is refused: use _meta.",
+      "expect": {
+        "code": "unknown_field",
+        "line": 1,
+        "pointer": ""
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"extra\":1}"
+      ]
+    },
+    {
+      "name": "origin_unknown_field",
+      "why": "An unknown origin field is refused.",
+      "expect": {
+        "code": "unknown_field",
+        "line": 1,
+        "pointer": "/origin"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\",\"pid\":4}}"
+      ]
+    },
+    {
+      "name": "digest_malformed",
+      "why": "A digest is sha256: and 64 hex digits.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/digest"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"digest\":\"sha256:abc\"}"
+      ]
+    },
+    {
+      "name": "created_at_malformed",
+      "why": "Times are RFC 3339.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/createdAt"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"createdAt\":\"yesterday\"}"
+      ]
+    },
+    {
+      "name": "acp_version_zero",
+      "why": "An ACP version is 1 or more.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/acpVersion"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"acpVersion\":0}"
+      ]
+    },
+    {
+      "name": "meta_not_object",
+      "why": "_meta is an object.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/_meta"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"_meta\":3}"
+      ]
+    },
+    {
+      "name": "header_repeated",
+      "why": "A second header, anywhere after line 1.",
+      "expect": {
+        "code": "order",
+        "line": 3
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ]
+    },
+    {
+      "name": "unknown_method",
+      "why": "A line kind the format does not define.",
+      "expect": {
+        "code": "unknown_line",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/new\",\"params\":{}}"
+      ]
+    },
+    {
+      "name": "no_method",
+      "why": "A body line without a method.",
+      "expect": {
+        "code": "unknown_line",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"params\":{}}"
+      ]
+    },
+    {
+      "name": "body_is_array",
+      "why": "A body line is an object.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": ""
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "[]"
+      ]
+    },
+    {
+      "name": "line_unknown_field",
+      "why": "A body line has method, params, at and _meta only.",
+      "expect": {
+        "code": "unknown_field",
+        "line": 2,
+        "pointer": ""
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/cancel\",\"extra\":1}"
+      ]
+    },
+    {
+      "name": "params_unknown_field",
+      "why": "A prompt's params hold the prompt only: the session is the header's.",
+      "expect": {
+        "code": "unknown_field",
+        "line": 2,
+        "pointer": "/params"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"type\":\"text\"}],\"sessionId\":\"x\"}}"
+      ]
+    },
+    {
+      "name": "duplicate_key",
+      "why": "Two readers would disagree about a repeated key, so none is accepted.",
+      "expect": {
+        "code": "duplicate_key",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"method\":\"session/cancel\"}"
+      ]
+    },
+    {
+      "name": "duplicate_key_nested",
+      "why": "Nested objects too.",
+      "expect": {
+        "code": "duplicate_key",
+        "line": 3
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"a\",\"sessionUpdate\":\"b\"}}}"
+      ]
+    },
+    {
+      "name": "prompt_without_params",
+      "why": "A prompt has params.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/params"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\"}"
+      ]
+    },
+    {
+      "name": "prompt_empty",
+      "why": "A prompt holds at least one block.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/params/prompt"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[]}}"
+      ]
+    },
+    {
+      "name": "prompt_block_without_type",
+      "why": "A content block has a type.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/params/prompt/0/type"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"x\"}]}}"
+      ]
+    },
+    {
+      "name": "update_without_session_update",
+      "why": "An update has a sessionUpdate.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/params/update/sessionUpdate"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{}}}}"
+      ]
+    },
+    {
+      "name": "cancel_with_params",
+      "why": "A cancel has no params.",
+      "expect": {
+        "code": "unknown_field",
+        "line": 3,
+        "pointer": ""
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/cancel\",\"params\":{}}"
+      ]
+    },
+    {
+      "name": "stop_reason_unknown",
+      "why": "A stop reason ACP and the format define.",
+      "expect": {
+        "code": "shape",
+        "line": 3,
+        "pointer": "/params/stopReason"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"because\"}}"
+      ]
+    },
+    {
+      "name": "compaction_trigger_unknown",
+      "why": "auto or manual.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/params/trigger"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"summary\":\"s\",\"trigger\":\"sometimes\"}}"
+      ]
+    },
+    {
+      "name": "compaction_summary_empty",
+      "why": "No summary is written as no summary field.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/params/summary"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"summary\":\"\"}}"
+      ]
+    },
+    {
+      "name": "compaction_tokens_negative",
+      "why": "preTokens is an unsigned integer.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/params/preTokens"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"preTokens\":-1,\"summary\":\"s\"}}"
+      ]
+    },
+    {
+      "name": "line_time_malformed",
+      "why": "Times are RFC 3339.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/at"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]},\"at\":\"noon\"}"
+      ]
+    },
+    {
+      "name": "line_meta_not_object",
+      "why": "_meta is an object.",
+      "expect": {
+        "code": "shape",
+        "line": 2,
+        "pointer": "/_meta"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/cancel\",\"_meta\":[]}"
+      ]
+    },
+    {
+      "name": "answer_outcome_unknown",
+      "why": "selected or cancelled.",
+      "expect": {
+        "code": "shape",
+        "line": 4,
+        "pointer": "/params/outcome/outcome"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"t\"}}}",
+        "{\"method\":\"history/permission_answer\",\"params\":{\"outcome\":{\"outcome\":\"maybe\"},\"toolCallId\":\"t\"}}"
+      ]
+    },
+    {
+      "name": "answer_selected_without_option",
+      "why": "A selected outcome names its option.",
+      "expect": {
+        "code": "shape",
+        "line": 4,
+        "pointer": "/params/outcome/optionId"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"t\"}}}",
+        "{\"method\":\"history/permission_answer\",\"params\":{\"outcome\":{\"outcome\":\"selected\"},\"toolCallId\":\"t\"}}"
+      ]
+    },
+    {
+      "name": "request_without_options",
+      "why": "A request offers at least one option.",
+      "expect": {
+        "code": "shape",
+        "line": 3,
+        "pointer": "/params/options"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[],\"toolCall\":{\"toolCallId\":\"t\"}}}"
+      ]
+    },
+    {
+      "name": "prompt_inside_turn",
+      "why": "A turn ends before the next prompt.",
+      "expect": {
+        "code": "order",
+        "line": 3
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"a\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"b\",\"type\":\"text\"}]}}"
+      ]
+    },
+    {
+      "name": "turn_end_outside_turn",
+      "why": "A turn end closes an open turn.",
+      "expect": {
+        "code": "order",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ]
+    },
+    {
+      "name": "cancel_outside_turn",
+      "why": "A cancel is inside a turn.",
+      "expect": {
+        "code": "order",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/cancel\"}"
+      ]
+    },
+    {
+      "name": "request_outside_turn",
+      "why": "A permission request is inside a turn.",
+      "expect": {
+        "code": "order",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"t\"}}}"
+      ]
+    },
+    {
+      "name": "answer_without_request",
+      "why": "An answer needs a request waiting on that call.",
+      "expect": {
+        "code": "order",
+        "line": 3
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/permission_answer\",\"params\":{\"outcome\":{\"outcome\":\"cancelled\"},\"toolCallId\":\"t\"}}"
+      ]
+    },
+    {
+      "name": "answer_twice",
+      "why": "One answer for one request.",
+      "expect": {
+        "code": "order",
+        "line": 5
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"t\"}}}",
+        "{\"method\":\"history/permission_answer\",\"params\":{\"outcome\":{\"outcome\":\"cancelled\"},\"toolCallId\":\"t\"}}",
+        "{\"method\":\"history/permission_answer\",\"params\":{\"outcome\":{\"outcome\":\"cancelled\"},\"toolCallId\":\"t\"}}"
+      ]
+    },
+    {
+      "name": "request_repeated",
+      "why": "One request waiting at a time for a call.",
+      "expect": {
+        "code": "order",
+        "line": 4
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"t\"}}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"t\"}}}"
+      ]
+    },
+    {
+      "name": "digest_mismatch",
+      "why": "The header's digest is not the body's.",
+      "expect": {
+        "code": "digest_mismatch"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"digest\":\"sha256:a1621be95040239ee14362c16e20510ddc20f527d772d823b2a1679b33f5cd74\"}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ]
+    },
+    {
+      "name": "digest_after_edit",
+      "why": "A body changed after sealing.",
+      "expect": {
+        "code": "digest_mismatch"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"digest\":\"sha256:f8a3769c316adbd434d59ad409ee1e40e92ce0ef3853f6622120347f71591ea8\"}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"changed\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ]
+    }
+  ]
+}

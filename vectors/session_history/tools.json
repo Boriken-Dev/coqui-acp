@@ -1,0 +1,331 @@
+{
+  "why": "The normalised tool table: native name and input keys to the tool, ACP kind and normalised keys, and back.",
+  "tools": [
+    "read",
+    "write",
+    "edit",
+    "patch",
+    "shell",
+    "grep",
+    "glob",
+    "fetch"
+  ],
+  "kinds": {
+    "read": "read",
+    "write": "edit",
+    "edit": "edit",
+    "patch": "edit",
+    "shell": "execute",
+    "grep": "search",
+    "glob": "search",
+    "fetch": "fetch"
+  },
+  "normalise": [
+    {
+      "harness": "claude",
+      "name": "Read",
+      "input": {
+        "file_path": "/a",
+        "offset": 3,
+        "limit": 9
+      },
+      "expect": {
+        "tool": "read",
+        "input": {
+          "path": "/a",
+          "offset": 3,
+          "limit": 9
+        }
+      }
+    },
+    {
+      "harness": "claude",
+      "name": "Write",
+      "input": {
+        "file_path": "/a",
+        "content": "x"
+      },
+      "expect": {
+        "tool": "write",
+        "input": {
+          "path": "/a",
+          "content": "x"
+        }
+      }
+    },
+    {
+      "harness": "claude",
+      "name": "Edit",
+      "input": {
+        "file_path": "/a",
+        "old_string": "o",
+        "new_string": "n",
+        "replace_all": true
+      },
+      "expect": {
+        "tool": "edit",
+        "input": {
+          "path": "/a",
+          "old": "o",
+          "new": "n",
+          "replace_all": true
+        }
+      }
+    },
+    {
+      "harness": "claude",
+      "name": "Bash",
+      "input": {
+        "command": "ls",
+        "timeout": 5000,
+        "description": "list"
+      },
+      "expect": {
+        "tool": "shell",
+        "input": {
+          "command": "ls",
+          "timeout_ms": 5000,
+          "description": "list"
+        }
+      }
+    },
+    {
+      "harness": "claude",
+      "name": "Grep",
+      "input": {
+        "pattern": "x",
+        "path": "/w"
+      },
+      "expect": {
+        "tool": "grep",
+        "input": {
+          "pattern": "x",
+          "path": "/w"
+        }
+      }
+    },
+    {
+      "harness": "claude",
+      "name": "Glob",
+      "input": {
+        "pattern": "*.rs"
+      },
+      "expect": {
+        "tool": "glob",
+        "input": {
+          "pattern": "*.rs"
+        }
+      }
+    },
+    {
+      "harness": "claude",
+      "name": "WebFetch",
+      "input": {
+        "url": "https://example.com"
+      },
+      "expect": {
+        "tool": "fetch",
+        "input": {
+          "url": "https://example.com"
+        }
+      }
+    },
+    {
+      "harness": "codex",
+      "name": "shell",
+      "input": {
+        "command": [
+          "ls"
+        ],
+        "workdir": "/w",
+        "timeout_ms": 10
+      },
+      "expect": {
+        "tool": "shell",
+        "input": {
+          "command": [
+            "ls"
+          ],
+          "cwd": "/w",
+          "timeout_ms": 10
+        }
+      }
+    },
+    {
+      "harness": "codex",
+      "name": "shell_command",
+      "input": {
+        "command": "ls",
+        "workdir": "/w"
+      },
+      "expect": {
+        "tool": "shell",
+        "input": {
+          "command": "ls",
+          "cwd": "/w"
+        }
+      }
+    },
+    {
+      "harness": "codex",
+      "name": "apply_patch",
+      "input": {
+        "input": "*** Begin Patch"
+      },
+      "expect": {
+        "tool": "patch",
+        "input": {
+          "patch": "*** Begin Patch"
+        }
+      }
+    },
+    {
+      "harness": "agy",
+      "name": "read_file",
+      "input": {
+        "path": "/a"
+      },
+      "expect": {
+        "tool": "read",
+        "input": {
+          "path": "/a"
+        }
+      }
+    },
+    {
+      "harness": "agy",
+      "name": "edit_file",
+      "input": {
+        "path": "/a"
+      },
+      "expect": {
+        "tool": "edit",
+        "input": {
+          "path": "/a"
+        }
+      }
+    },
+    {
+      "harness": "agy",
+      "name": "run_command",
+      "input": {
+        "command": "ls"
+      },
+      "expect": {
+        "tool": "shell",
+        "input": {
+          "command": "ls"
+        }
+      }
+    }
+  ],
+  "denormalise": [
+    {
+      "tool": "read",
+      "harness": "claude",
+      "input": {
+        "path": "/a"
+      },
+      "expect": {
+        "name": "Read",
+        "input": {
+          "file_path": "/a"
+        }
+      }
+    },
+    {
+      "tool": "edit",
+      "harness": "claude",
+      "input": {
+        "path": "/a",
+        "old": "o",
+        "new": "n"
+      },
+      "expect": {
+        "name": "Edit",
+        "input": {
+          "file_path": "/a",
+          "old_string": "o",
+          "new_string": "n"
+        }
+      }
+    },
+    {
+      "tool": "shell",
+      "harness": "codex",
+      "input": {
+        "command": [
+          "ls"
+        ],
+        "cwd": "/w"
+      },
+      "expect": {
+        "name": "shell",
+        "input": {
+          "command": [
+            "ls"
+          ],
+          "workdir": "/w"
+        }
+      }
+    },
+    {
+      "tool": "patch",
+      "harness": "codex",
+      "input": {
+        "patch": "p"
+      },
+      "expect": {
+        "name": "apply_patch",
+        "input": {
+          "input": "p"
+        }
+      }
+    },
+    {
+      "tool": "shell",
+      "harness": "agy",
+      "input": {
+        "command": "ls"
+      },
+      "expect": {
+        "name": "run_command",
+        "input": {
+          "command": "ls"
+        }
+      }
+    }
+  ],
+  "unknown_native": [
+    {
+      "harness": "claude",
+      "name": "NotATool"
+    },
+    {
+      "harness": "claude",
+      "name": "apply_patch"
+    },
+    {
+      "harness": "codex",
+      "name": "Read"
+    },
+    {
+      "harness": "other",
+      "name": "Read"
+    }
+  ],
+  "no_native": [
+    {
+      "tool": "patch",
+      "harness": "claude"
+    },
+    {
+      "tool": "grep",
+      "harness": "codex"
+    },
+    {
+      "tool": "fetch",
+      "harness": "agy"
+    }
+  ]
+}

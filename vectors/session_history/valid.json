@@ -1,0 +1,958 @@
+{
+  "why": "Documents a reader accepts, with what it reports. A line is the text of one line, without its line feed.",
+  "cases": [
+    {
+      "name": "header_only",
+      "why": "A history with no body is valid: line 1 is the whole file.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 1,
+          "turns": 0,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": null
+        },
+        "methods": [],
+        "seed": {
+          "line": null,
+          "digest": null,
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 0
+        }
+      }
+    },
+    {
+      "name": "one_turn",
+      "why": "The smallest useful history.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 4,
+          "turns": 1,
+          "updates": 1,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "header_every_field",
+      "why": "Every optional header field, with the origin harness's own session id beside the host's id.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\",\"sessionId\":\"native-7\",\"version\":\"2.1.318\"},\"createdAt\":\"2026-11-09T12:00:00Z\",\"model\":\"claude-opus\",\"mode\":\"default\",\"effort\":\"high\",\"cwd\":\"/w\",\"acpVersion\":1,\"_meta\":{\"anything\":[1,2]}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude",
+          "harness_version": "2.1.318",
+          "harness_session_id": "native-7",
+          "model": "claude-opus",
+          "cwd": "/w"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "tool_call_and_result",
+      "why": "A tool call with ACP's kind, rawInput, rawOutput and a native _meta namespaced key.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"read it\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"_meta\":{\"dev.boriken.history/native\":{\"id\":\"toolu_01\"}},\"kind\":\"read\",\"rawInput\":{\"file_path\":\"/w/a.txt\"},\"sessionUpdate\":\"tool_call\",\"status\":\"pending\",\"title\":\"Read a.txt\",\"toolCallId\":\"tc1\"}}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":{\"text\":\"hello\"},\"sessionUpdate\":\"tool_call_update\",\"status\":\"completed\",\"toolCallId\":\"tc1\"}}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 6,
+          "turns": 1,
+          "updates": 3,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "session/update",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:63f13bdb9e726ff8665f6d2283124f66d8e2d5109fecfd9aa67d95f444da564b",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "two_turns",
+      "why": "Turns in order; the last stop reason is the second turn's.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"a\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"b\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"max_tokens\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 7,
+          "turns": 2,
+          "updates": 2,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "max_tokens"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "history/turn_end",
+          "session/prompt",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:4080de190a171aac845bf75b31a1205127f43e030fd2a3bfefaa30d4854e30fc",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 2
+        }
+      }
+    },
+    {
+      "name": "cancelled_turn",
+      "why": "A cancel inside a turn, then the turn ends with the cancelled stop reason.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"session/cancel\"}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"cancelled\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 6,
+          "turns": 1,
+          "updates": 2,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "cancelled"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "session/cancel",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "permission_round_trip",
+      "why": "A permission request and the answer that names the same call.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"kind\":\"allow_once\",\"name\":\"Allow\",\"optionId\":\"allow\"},{\"kind\":\"reject_once\",\"name\":\"Deny\",\"optionId\":\"deny\"}],\"toolCall\":{\"title\":\"Run ls\",\"toolCallId\":\"tc9\"}}}",
+        "{\"method\":\"history/permission_answer\",\"params\":{\"outcome\":{\"optionId\":\"allow\",\"outcome\":\"selected\"},\"toolCallId\":\"tc9\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 6,
+          "turns": 1,
+          "updates": 1,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "session/request_permission",
+          "history/permission_answer",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "permission_cancelled_answer",
+      "why": "An answer of cancelled needs no optionId.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"tc9\"}}}",
+        "{\"method\":\"history/permission_answer\",\"params\":{\"outcome\":{\"outcome\":\"cancelled\"},\"toolCallId\":\"tc9\"}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"cancelled\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 5,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "cancelled"
+        },
+        "methods": [
+          "session/prompt",
+          "session/request_permission",
+          "history/permission_answer",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "permission_left_unanswered",
+      "why": "A turn may end with a request unanswered; a reader treats it as cancelled.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/request_permission\",\"params\":{\"options\":[{\"optionId\":\"o\"}],\"toolCall\":{\"toolCallId\":\"tc9\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"cancelled\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 4,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "cancelled"
+        },
+        "methods": [
+          "session/prompt",
+          "session/request_permission",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "update_between_turns",
+      "why": "Updates outside a turn are allowed: ACP sends some between prompts.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"availableCommands\":[],\"sessionUpdate\":\"available_commands_update\"}}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 4,
+          "turns": 1,
+          "updates": 1,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/update",
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:c2bd32cd86be5eff4f561e07d9d58a01592be11b1abd5588337cd3156d06e375",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "compaction_with_summary",
+      "why": "A session seeds from the latest boundary's summary, then the turns after it.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"one\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"two\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"preTokens\":120000,\"summary\":\"Summary of one and two.\",\"trigger\":\"auto\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"three\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 10,
+          "turns": 3,
+          "updates": 2,
+          "compactions": 1,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "history/turn_end",
+          "session/prompt",
+          "history/turn_end",
+          "history/compaction",
+          "session/prompt",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 7,
+          "digest": "sha256:1e8a5232c81648b9438acd31c13ac9fa8220c6a2f2c9f60e0c9804a8201b675a",
+          "summary": "Summary of one and two.",
+          "first_line": 8,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "two_compactions_latest_wins",
+      "why": "The seed starts at the latest boundary that has a summary.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"one\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"summary\":\"First summary.\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"two\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"summary\":\"Second summary.\",\"trigger\":\"manual\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"three\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 9,
+          "turns": 3,
+          "updates": 0,
+          "compactions": 2,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end",
+          "history/compaction",
+          "session/prompt",
+          "history/turn_end",
+          "history/compaction",
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 7,
+          "digest": "sha256:fb0e26d3bee851f1bfad7bc950b5a70bcd88735ae088d4cf2dede1a376bc8f94",
+          "summary": "Second summary.",
+          "first_line": 8,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "compaction_without_summary",
+      "why": "A boundary with no summary (Codex does not expose one) is not a seed point: the seed is the whole history.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"one\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"two\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 6,
+          "turns": 2,
+          "updates": 0,
+          "compactions": 1,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end",
+          "history/compaction",
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:6fa9aab36e04a8a09cd0d57191d132143d1b21220c5caa35e005f90715546295",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 2
+        }
+      }
+    },
+    {
+      "name": "compaction_without_summary_after_one_with",
+      "why": "A later boundary without a summary does not displace an earlier one with a summary.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"one\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"summary\":\"Kept.\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"two\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}",
+        "{\"method\":\"history/compaction\",\"params\":{}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"three\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 9,
+          "turns": 3,
+          "updates": 0,
+          "compactions": 2,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end",
+          "history/compaction",
+          "session/prompt",
+          "history/turn_end",
+          "history/compaction",
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 4,
+          "digest": "sha256:e601a244684936214115b46184836278aba6a7b5fe117b4cdacb544f2779a137",
+          "summary": "Kept.",
+          "first_line": 5,
+          "mid_turn": false,
+          "turns": 2
+        }
+      }
+    },
+    {
+      "name": "compaction_inside_a_turn",
+      "why": "A harness may compact in the middle of a turn: the seed's first lines are the rest of that turn.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"long\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/compaction\",\"params\":{\"summary\":\"Mid-turn summary.\",\"trigger\":\"auto\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 6,
+          "turns": 1,
+          "updates": 2,
+          "compactions": 1,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "history/compaction",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 4,
+          "digest": "sha256:6d0760049569d56bee66ecebda9075cecdb9ea58a832085429436b193071fbe8",
+          "summary": "Mid-turn summary.",
+          "first_line": 5,
+          "mid_turn": true,
+          "turns": 0
+        }
+      }
+    },
+    {
+      "name": "open_turn_at_end",
+      "why": "A recording cut short ends inside a turn; that is valid and reported.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 1,
+          "compactions": 0,
+          "open_turn": true,
+          "last_stop": null
+        },
+        "methods": [
+          "session/prompt",
+          "session/update"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "turn_ended_by_error",
+      "why": "A failed turn: the stop reason error, with a message.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"error\":\"the harness exited\",\"stopReason\":\"error\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "error"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "timestamps",
+      "why": "RFC 3339 times on the header and lines, with a fraction and a numeric offset.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"createdAt\":\"2026-11-09T12:00:00.123+02:00\"}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]},\"at\":\"2026-11-09T12:00:00Z\"}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"},\"at\":\"2026-11-09T12:00:05Z\"}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 4,
+          "turns": 1,
+          "updates": 1,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:aabade68ab4e803fcd0090f74f04b6179601747e6c8e053da2e2a59c43ab31de",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "line_meta",
+      "why": "A line's _meta is kept and not read.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]},\"_meta\":{\"dev.boriken.history/native\":{\"uuid\":\"u1\"},\"other\":null}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:278c159e97aeae2423068c262c2af1419e59b9f76ba0f6375afe8720a6f91b3a",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "attachment_by_digest",
+      "why": "A block whose bytes were left out is known by its digest and size.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"see\",\"type\":\"text\"},{\"_meta\":{\"dev.boriken.history/attachment\":{\"bytes\":1234,\"sha256\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}},\"data\":\"\",\"mimeType\":\"image/png\",\"type\":\"image\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:9b9d31b9ab22ce2088da778dd552d116625389cc22d1803babcbf5422eaf7e8c",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "non_ascii_text",
+      "why": "UTF-8 text, an astral character and escapes survive unchanged.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"café 日本語 🛶 \\\"quoted\\\" \\\\ back\\nline\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:2382957ed76f678abc64ef30dd48f5c850065001403cfedd30d9722a550ee573",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "byte_order_mark",
+      "why": "One leading byte-order mark on line 1 is ignored.",
+      "canonical": false,
+      "lines": [
+        "﻿{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "spaced_and_reordered",
+      "why": "Another producer's spelling: spaces and any key order are read.",
+      "canonical": false,
+      "lines": [
+        "{ \"version\": 1, \"format\": \"coqui-acp-history\", \"origin\": {\"harness\": \"codex\"}, \"id\": \"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\" }",
+        "{\"params\": {\"prompt\": [{\"text\": \"hi\", \"type\": \"text\"}]}, \"method\": \"session/prompt\"}",
+        "{\"method\": \"history/turn_end\", \"params\": {\"stopReason\": \"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "codex"
+        },
+        "summary": {
+          "lines": 3,
+          "turns": 1,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    },
+    {
+      "name": "digest_matches",
+      "why": "A header digest is the SHA-256 of every byte after the header line, line feeds included.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"digest\":\"sha256:f8a3769c316adbd434d59ad409ee1e40e92ce0ef3853f6622120347f71591ea8\"}",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"hi\",\"type\":\"text\"}]}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
+        "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 4,
+          "turns": 1,
+          "updates": 1,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": "end_turn"
+        },
+        "methods": [
+          "session/prompt",
+          "session/update",
+          "history/turn_end"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:0467261e0e73e729f02c52a5306bf2d30ced53a2a30f155283d2a7c355a1b0b0",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 1
+        }
+      }
+    }
+  ]
+}
