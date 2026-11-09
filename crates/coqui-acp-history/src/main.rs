@@ -1,19 +1,23 @@
 //! The `coqui-acp-history` command: look at histories and move them between files.
 //!
 //! `export` and `import` need a harness's codec, which lives in that harness's crate; here they
-//! say so and fail. `convert` rewrites a history in this format into another file of the same
-//! format, unaltered unless redaction is asked for.
+//! say so and fail. `convert` writes a history in this format to another file of the same format:
+//! its lines as they are, unless redaction that removes something or a digest is asked for.
+//!
+//! Everything a history says is printed with the characters a terminal acts on written as
+//! `\u{..}`: a history comes from elsewhere.
 
-use std::fs::{self, File};
+use core::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand};
 
 use coqui_acp_history::{
-    Body, Bounds, Document, HistoryError, Reader, ReaderSettings, RedactionSettings, Redactor,
-    non_defaults,
+    Body, Document, HistoryError, Reader, ReaderSettings, RedactionSettings, Redactor, non_defaults,
 };
 
 #[derive(Parser)]
@@ -39,20 +43,29 @@ struct Limits {
     /// The most bytes in all.
     #[arg(long)]
     max_total_bytes: Option<u64>,
-    /// The deepest nesting in a line.
+    /// The deepest nesting in a line (the parser stops at 127 whatever this says).
     #[arg(long)]
     max_depth: Option<u64>,
+    /// The most values in a line.
+    #[arg(long)]
+    max_values: Option<u64>,
 }
 
 impl Limits {
-    fn settings(&self) -> ReaderSettings {
-        let mut settings = ReaderSettings::default();
-        let mut bounds = Bounds::default();
+    /// The settings to read with. A history held in memory as a whole starts from a smaller
+    /// `max_total_bytes` than one that is only streamed through.
+    fn settings(&self, in_memory: bool) -> ReaderSettings {
+        let mut settings = if in_memory {
+            ReaderSettings::for_document()
+        } else {
+            ReaderSettings::default()
+        };
+        let bounds = &mut settings.bounds;
         bounds.max_line_bytes = self.max_line_bytes.unwrap_or(bounds.max_line_bytes);
         bounds.max_lines = self.max_lines.unwrap_or(bounds.max_lines);
         bounds.max_total_bytes = self.max_total_bytes.unwrap_or(bounds.max_total_bytes);
         bounds.max_depth = self.max_depth.unwrap_or(bounds.max_depth);
-        settings.bounds = bounds;
+        bounds.max_values = self.max_values.unwrap_or(bounds.max_values);
         for setting in non_defaults(&settings) {
             eprintln!(
                 "setting {} is {} (default {})",
@@ -98,8 +111,9 @@ enum Command {
         /// The history file.
         file: PathBuf,
     },
-    /// Write a history to another file of the same format: checked, and unaltered unless
-    /// redaction is asked for.
+    /// Write a history to another file of the same format. Its lines are copied as they are, after
+    /// the whole history has been checked, unless redaction that removes something or --seal is
+    /// asked for: then the history is rewritten in canonical spelling.
     Convert {
         /// The history to read.
         input: PathBuf,
@@ -116,8 +130,8 @@ enum Command {
         /// What replaces each removal.
         #[arg(long)]
         replacement: Option<String>,
-        /// Put a digest of the body in the header of what is written (a redacted history loses
-        /// its digest otherwise).
+        /// Rewrite the history in canonical spelling with a digest of its body in the header
+        /// (a history that redaction changed loses its digest otherwise).
         #[arg(long)]
         seal: bool,
         #[command(flatten)]
@@ -137,10 +151,11 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode, HistoryError> {
     match cli.command {
-        Command::List { dir, limits } => {
-            list(dir.as_deref().unwrap_or(Path::new(".")), &limits.settings())
-        }
-        Command::Show { file, limits } => show(&file, &limits.settings()),
+        Command::List { dir, limits } => list(
+            dir.as_deref().unwrap_or(Path::new(".")),
+            &limits.settings(false),
+        ),
+        Command::Show { file, limits } => show(&file, &limits.settings(true)),
         Command::Export { harness, .. } | Command::Import { harness, .. } => {
             eprintln!(
                 "no codec for {harness} is built in: a harness's export and import live in its \
@@ -175,9 +190,37 @@ fn run(cli: Cli) -> Result<ExitCode, HistoryError> {
                 }
                 Some(settings)
             };
-            convert(&input, &output, redaction, seal, &limits.settings())
+            convert(&input, &output, redaction, seal, &limits)
         }
     }
+}
+
+/// `text` with each character a terminal acts on, or that could move or hide text in a listing,
+/// written as `\u{..}`: the controls (C0, DEL, C1), the line and paragraph separators and the
+/// bidirectional controls.
+fn safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let hidden = c.is_control()
+            || matches!(
+                c,
+                '\u{61c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{2028}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            );
+        if hidden {
+            let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn shown(path: &Path) -> String {
+    safe(&path.to_string_lossy())
 }
 
 fn open(path: &Path, settings: &ReaderSettings) -> Result<Reader<File>, HistoryError> {
@@ -201,15 +244,15 @@ fn list(dir: &Path, settings: &ReaderSettings) -> Result<ExitCode, HistoryError>
                     "{}  {}  {}  {}  {}",
                     header.id,
                     header.origin.harness,
-                    header.model.as_deref().unwrap_or("-"),
-                    header.cwd.as_deref().unwrap_or("-"),
-                    path.display()
+                    safe(header.model.as_deref().unwrap_or("-")),
+                    safe(header.cwd.as_deref().unwrap_or("-")),
+                    shown(&path)
                 );
             }
             Err(error) => println!(
                 "-  not a history ({}: {error})  {}",
                 error.code(),
-                path.display()
+                shown(&path)
             ),
         }
     }
@@ -223,7 +266,7 @@ fn show(path: &Path, settings: &ReaderSettings) -> Result<ExitCode, HistoryError
     println!(
         "origin    {} {}",
         header.origin.harness,
-        header.origin.version.as_deref().unwrap_or("")
+        safe(header.origin.version.as_deref().unwrap_or(""))
     );
     for (name, value) in [
         ("origin id", &header.origin.session_id),
@@ -234,7 +277,7 @@ fn show(path: &Path, settings: &ReaderSettings) -> Result<ExitCode, HistoryError
         ("created", &header.created_at),
     ] {
         if let Some(value) = value {
-            println!("{name:<9} {value}");
+            println!("{name:<9} {}", safe(value));
         }
     }
     if let Some(redacted) = header.redacted {
@@ -284,11 +327,11 @@ fn show(path: &Path, settings: &ReaderSettings) -> Result<ExitCode, HistoryError
                     .iter()
                     .find_map(|block| block.get("text").and_then(|t| t.as_str()))
                     .unwrap_or("(no text)");
-                let shown: String = text.chars().take(72).collect();
+                let excerpt: String = text.chars().take(72).collect();
                 println!(
                     "turn {turn:<4} line {:<6} {}",
                     at + 2,
-                    shown.replace('\n', " ")
+                    safe(&excerpt.replace('\n', " "))
                 );
             }
             Body::TurnEnd { stop, .. } => {
@@ -314,18 +357,23 @@ fn convert(
     output: &Path,
     redaction: Option<RedactionSettings>,
     seal: bool,
-    settings: &ReaderSettings,
+    limits: &Limits,
 ) -> Result<ExitCode, HistoryError> {
-    let reader = open(input, settings)?;
     let mut bytes = Vec::new();
-    if redaction.is_none() && !seal {
-        let summary = reader.copy_to(&mut bytes)?;
+    let copy = |bytes: &mut Vec<u8>| -> Result<(), HistoryError> {
+        let summary = open(input, &limits.settings(false))?.copy_to(bytes)?;
         eprintln!("copied {} lines unaltered", summary.lines);
+        Ok(())
+    };
+    if redaction.is_none() && !seal {
+        copy(&mut bytes)?;
     } else {
-        let mut document = Document::from_reader(reader)?;
+        let mut document = Document::from_reader(open(input, &limits.settings(true))?)?;
+        let mut removed = 0;
         if let Some(redaction) = redaction {
             let mut redactor = Redactor::try_new(&redaction)?;
             let report = redactor.document(&mut document)?;
+            removed = report.replaced;
             eprintln!(
                 "redacted {} removals in {} lines",
                 report.replaced, report.lines
@@ -337,28 +385,51 @@ fn convert(
                 );
             }
         }
-        if seal {
-            document.seal()?;
+        if removed == 0 && !seal {
+            copy(&mut bytes)?;
+        } else {
+            if seal {
+                document.seal()?;
+            }
+            document.to_writer(&mut bytes)?;
         }
-        document.to_writer(&mut bytes)?;
     }
     write_whole(output, &bytes)?;
     Ok(ExitCode::SUCCESS)
 }
 
-/// Writes `bytes` to `output` whole or not at all: beside it first, then renamed over it.
+/// Writes `bytes` to `output` whole or not at all: to a new file beside it that no one else could
+/// have named first, then renamed over it.
 fn write_whole(output: &Path, bytes: &[u8]) -> io::Result<()> {
     if output == Path::new("-") {
         return io::stdout().lock().write_all(bytes);
     }
-    let mut temporary = output.as_os_str().to_owned();
-    temporary.push(".part");
-    let temporary = PathBuf::from(temporary);
-    let written = File::create(&temporary).and_then(|file| {
+    let directory = output.parent().filter(|d| !d.as_os_str().is_empty());
+    let name = output.file_name().unwrap_or_default().to_string_lossy();
+    let mut attempt = 0_u32;
+    let (temporary, file) = loop {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let candidate = format!(".{name}.{}.{stamp:x}.{attempt}.part", std::process::id());
+        let candidate = directory.map_or_else(|| PathBuf::from(&candidate), |d| d.join(&candidate));
+        // `create_new` fails on any existing name, a link included, and follows none.
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt < 16 => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let written = {
         let mut file = BufWriter::new(file);
-        file.write_all(bytes)?;
-        file.flush()
-    });
+        file.write_all(bytes).and_then(|()| file.flush())
+    };
     match written.and_then(|()| fs::rename(&temporary, output)) {
         Ok(()) => Ok(()),
         Err(error) => {
