@@ -637,7 +637,9 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         while end < len(lines):
             line = lines[end] + "\n"
             width = len(line.encode("utf-8"))
-            if end > start and size + width > limit:
+            if size + width > limit:
+                if end == start:
+                    raise BadValue(f"line too large: {width} bytes, more than max_bytes {limit}")
                 break
             text += line
             size += width

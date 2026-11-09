@@ -118,7 +118,7 @@
           "answer": {
             "type": "value"
           },
-          "doc": "One page of the history of the session `export` names (by its UUID), in the standard\nsession-history format, as it is: whole lines, at most `max_bytes` unless one line alone is\nlonger, the header on the first page only. The pages, joined, are the export of one page as\nlarge as the whole. `spawner` is handed over as `import_session`'s is. Refuses\n`GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_BAD_VALUE` for\nan `after` it did not give or that the session has changed since, `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when it cannot export."
+          "doc": "One page of the history of the session `export` names (by its UUID), in the standard\nsession-history format, as it is: whole lines, never more than `max_bytes`, the header on\nthe first page only. The pages, joined, are the export of one page as\nlarge as the whole. `spawner` is handed over as `import_session`'s is. Refuses\n`GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_BAD_VALUE` for\nan `after` it did not give or that the session has changed since, and for a next line longer\nthan `max_bytes`, as [`LINE_TOO_LARGE`](crate::LINE_TOO_LARGE) says, `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when it cannot export."
         },
         {
           "name": "models",

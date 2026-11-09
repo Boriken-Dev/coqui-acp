@@ -20,9 +20,9 @@ pub use guatiao_channel::{Channel, ChannelSink, ChannelSinkVtable, ChannelVtable
 pub use environment::Environment;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{
-    DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo, HistoryLoss, ImportReport, ModelInfo,
-    ModelListing, NonDefault, SeedPoint, SessionExport, SessionImport, SessionQuery,
-    SessionRecordFile, StartRequest, StartRequestBuilder, Takes,
+    DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo, HistoryLoss, ImportReport, LINE_TOO_LARGE,
+    ModelInfo, ModelListing, NonDefault, SeedPoint, SessionExport, SessionImport, SessionQuery,
+    SessionRecordFile, StartRequest, StartRequestBuilder, Takes, line_too_large,
 };
 pub use requirement::{
     ANSWER_ONLY, DENIED_PATHS, FILES_UNDER, NAMES, NETWORK, NO_COMMANDS, NO_PROJECT_MCP,

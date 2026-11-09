@@ -255,3 +255,12 @@ fn a_root_that_is_a_link_admits_where_it_leads() {
         .or_else(|_| std::fs::remove_file(scratch.0.join("alias")))
         .expect("the link goes");
 }
+
+#[test]
+fn a_line_too_large_refusal_says_the_lines_size() {
+    use coqui_acp_api::{LINE_TOO_LARGE, line_too_large};
+    let message = format!("{LINE_TOO_LARGE}2048 bytes, more than max_bytes 1024");
+    assert_eq!(line_too_large(&message), Some(2048));
+    assert_eq!(line_too_large("line too large: many bytes"), None);
+    assert_eq!(line_too_large("the session has changed"), None);
+}

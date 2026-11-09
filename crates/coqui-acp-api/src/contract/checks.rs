@@ -551,7 +551,7 @@ fn export(
             );
             Ok(page.text)
         }
-        Err(code) => Err(code),
+        Err((code, _)) => Err(code),
     })
 }
 
@@ -562,7 +562,7 @@ fn export_page(
     cwd: &str,
     after: Option<&str>,
     max_bytes: u64,
-) -> Result<Result<ExportPage, u32>, String> {
+) -> Result<Result<ExportPage, (u32, String)>, String> {
     let (watch, spawner) = host::spawner();
     let mut asked = SessionExport::new(session, cwd).max_bytes(max_bytes);
     if let Some(after) = after {
@@ -573,7 +573,7 @@ fn export_page(
         watch.destroyed(),
         "export_session answered with the spawner it was handed alive"
     );
-    Ok(answer.map_err(|e| status(&e)))
+    Ok(answer.map_err(|e| (status(&e), e.message().to_owned())))
 }
 
 /// Whether `line` is a history's header: an object naming the format and its version.
@@ -592,8 +592,9 @@ fn pages(
     let mut pages: Vec<ExportPage> = Vec::new();
     loop {
         let after = pages.last().and_then(|page| page.next.clone());
-        let page = export_page(harness, session, cwd, after.as_deref(), max_bytes)?
-            .map_err(|code| format!("page {} was refused with {code}", pages.len() + 1))?;
+        let page = export_page(harness, session, cwd, after.as_deref(), max_bytes)?.map_err(
+            |(code, why)| format!("page {} was refused with {code}: {why}", pages.len() + 1),
+        )?;
         ensure!(
             !page.text.is_empty() && page.text.ends_with('\n'),
             "page {} is not whole lines",
@@ -741,11 +742,17 @@ fn sessions(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
     );
 
     // Paged: the pages join to the whole, only the first starts with the header, which carries a
-    // digest of the whole; a page too small for one line holds that line alone.
-    let paged = pages(harness, &moved, &place.root, 64)?;
+    // digest of the whole; a page too small for its next line is refused, saying the line's size.
+    // Pages as small as the longest line allows, so the history comes in several.
+    let bound = again
+        .lines()
+        .map(|line| line.len() as u64 + 1)
+        .max()
+        .unwrap_or(1);
+    let paged = pages(harness, &moved, &place.root, bound)?;
     ensure!(
         paged.len() > 1,
-        "64-byte pages of a history of two turns came as one"
+        "pages of {bound} bytes, its longest line, of a history of two turns came as one"
     );
     let joined: String = paged.iter().map(|page| page.text.as_str()).collect();
     ensure!(joined == again, "the pages do not join to the whole export");
@@ -765,12 +772,32 @@ fn sessions(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
             .all(|page| !page.text.lines().any(is_header)),
         "a page after the first carries a header"
     );
-    let tiny = export_page(harness, &moved, &place.root, None, 1)?
-        .map_err(|code| format!("a one-byte page was refused with {code}"))?;
-    ensure!(
-        tiny.text.lines().count() == 1 && tiny.next.is_some(),
-        "a page too small for a line did not hold one line alone"
-    );
+    let header_bytes = again.lines().next().map_or(0, |line| line.len() as u64 + 1);
+    match export_page(harness, &moved, &place.root, None, header_bytes - 1)? {
+        Err((BAD_VALUE, why)) => ensure!(
+            crate::line_too_large(&why) == Some(header_bytes),
+            "a page too small for its first line ({header_bytes} bytes) was refused saying {why:?}"
+        ),
+        Err((code, why)) => {
+            return Err(format!(
+                "a page too small for its first line was refused with {code} ({why}), not BAD_VALUE"
+            ));
+        }
+        Ok(page) => {
+            return Err(format!(
+                "a page of {} bytes came, over a bound of {}",
+                page.text.len(),
+                header_bytes - 1
+            ));
+        }
+    }
+    for page in &paged {
+        ensure!(
+            page.text.len() as u64 <= bound,
+            "a page bound to {bound} bytes held {}",
+            page.text.len()
+        );
+    }
 
     // An `after` the provider never gave, or one the session has moved past, is refused.
     let unknown = export_page(
@@ -778,10 +805,10 @@ fn sessions(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
         &moved,
         &place.root,
         Some("not a position it gave"),
-        64,
+        bound,
     )?;
     ensure!(
-        unknown.as_ref().err() == Some(&BAD_VALUE),
+        unknown.as_ref().err().map(|(code, _)| *code) == Some(BAD_VALUE),
         "an unknown `after` was answered {:?}",
         unknown.map(|page| page.next)
     );
@@ -794,9 +821,9 @@ fn sessions(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
     conn.send(&prompt(2, &moved, "third"))?;
     turn(&mut conn, 2)?;
     conn.close_with(OK)?;
-    let changed = export_page(harness, &moved, &place.root, Some(&stale), 64)?;
+    let changed = export_page(harness, &moved, &place.root, Some(&stale), bound)?;
     ensure!(
-        changed.as_ref().err() == Some(&BAD_VALUE),
+        changed.as_ref().err().map(|(code, _)| *code) == Some(BAD_VALUE),
         "an `after` from before the session changed was answered {:?}",
         changed.map(|page| page.next)
     );

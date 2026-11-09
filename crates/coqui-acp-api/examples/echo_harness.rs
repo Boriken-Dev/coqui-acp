@@ -20,8 +20,9 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
 use coqui_acp_api::{
     AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport,
-    ModelInfo, ModelListing, NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement,
-    SeedPoint, SessionExport, SessionImport, StartRequest, WorkingRoots, is_session_id,
+    LINE_TOO_LARGE, ModelInfo, ModelListing, NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY,
+    Requirement, SeedPoint, SessionExport, SessionImport, StartRequest, WorkingRoots,
+    is_session_id,
 };
 use serde_json::{Value, json};
 
@@ -336,7 +337,14 @@ impl AcpHarness for EchoHarness {
         let mut text = String::new();
         let mut end = start;
         while let Some(line) = lines.get(end) {
-            if end > start && text.len().saturating_add(line.len() + 1) > limit {
+            let width = line.len() + 1;
+            if text.len().saturating_add(width) > limit {
+                if end == start {
+                    return Err(ProviderError::new(
+                        Status::GUATIAO_ERR_BAD_VALUE,
+                        &format!("{LINE_TOO_LARGE}{width} bytes, more than max_bytes {limit}"),
+                    ));
+                }
                 break;
             }
             text.push_str(line);

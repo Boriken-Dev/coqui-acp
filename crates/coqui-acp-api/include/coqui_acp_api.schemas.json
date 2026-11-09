@@ -158,7 +158,7 @@
         "type": "integer",
         "minimum": 0,
         "maximum": 18446744073709551615,
-        "description": "The most bytes a page holds. A page is whole lines only, so one that would hold none holds the one line that does not fit, alone.",
+        "description": "The most bytes a page holds: the caller's memory bound, never exceeded. A next line longer than it, line feed included, is refused, saying how long it is (see [`LINE_TOO_LARGE`](crate::LINE_TOO_LARGE)).",
         "default": 1048576
       }
     },

@@ -256,11 +256,12 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=25774531
     @fallible
     def export_session(self, export: Ref, spawner: Taken[ProcessSpawner]) -> ValueAnswer:
         """One page of the history of the session `export` names (by its UUID), in the standard
-        session-history format, as it is: whole lines, at most `max_bytes` unless one line alone is
-        longer, the header on the first page only. The pages, joined, are the export of one page as
+        session-history format, as it is: whole lines, never more than `max_bytes`, the header on
+        the first page only. The pages, joined, are the export of one page as
         large as the whole. `spawner` is handed over as `import_session`'s is. Refuses
         `GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_BAD_VALUE` for
-        an `after` it did not give or that the session has changed since, `GUATIAO_ERR_UNSUPPORTED`,
+        an `after` it did not give or that the session has changed since, and for a next line longer
+        than `max_bytes`, as [`LINE_TOO_LARGE`](crate::LINE_TOO_LARGE) says, `GUATIAO_ERR_UNSUPPORTED`,
         with the reason, when it cannot export.
         """
         ...

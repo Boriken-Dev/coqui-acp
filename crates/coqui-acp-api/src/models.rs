@@ -314,14 +314,29 @@ pub struct SessionExport {
     /// Where to go on from: the `next` of the page before, as the provider gave it; absent for the
     /// first page.
     pub after: Option<String>,
-    /// The most bytes a page holds. A page is whole lines only, so one that would hold none holds
-    /// the one line that does not fit, alone.
+    /// The most bytes a page holds: the caller's memory bound, never exceeded. A next line longer
+    /// than it, line feed included, is refused, saying how long it is (see
+    /// [`LINE_TOO_LARGE`](crate::LINE_TOO_LARGE)).
     #[map(default = DEFAULT_PAGE_BYTES)]
     pub max_bytes: u64,
 }
 
 /// [`SessionExport::max_bytes`] when a host gives none: 1 MiB.
 pub const DEFAULT_PAGE_BYTES: u64 = 1 << 20;
+
+/// How the refusal of a page too small for its next line begins: `GUATIAO_ERR_BAD_VALUE` with the
+/// message `line too large: <N> bytes`, N being the line's length with its line feed, so a host
+/// can ask again with a `max_bytes` of at least N, or stop and say why.
+pub const LINE_TOO_LARGE: &str = "line too large: ";
+
+/// The size a [`LINE_TOO_LARGE`] refusal names, in bytes; `None` for any other message.
+#[must_use]
+pub fn line_too_large(message: &str) -> Option<u64> {
+    message
+        .strip_prefix(LINE_TOO_LARGE)?
+        .split_once(" bytes")
+        .and_then(|(size, _)| size.parse().ok())
+}
 
 impl SessionExport {
     /// The first page of the history of `session_id`, which worked in `working_directory`, at most
