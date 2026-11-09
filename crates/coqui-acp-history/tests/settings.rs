@@ -1,13 +1,13 @@
 //! Settings as guatiao values: defaults, refusals, and what is reported when one is not default.
 
-use guatiao::Schema;
+use guatiao::{FromValue, Schema, ToValue};
 use guatiao_serde::Presentation;
 use guatiao_serde::text::json;
 
 use coqui_acp_history::{
-    Bounds, DEFAULT_MAX_DEPTH, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_LINES, DEFAULT_MAX_TOTAL_BYTES,
-    DEFAULT_REPLACEMENT, Document, Reader, ReaderSettings, RedactionSettings, WriterSettings,
-    non_defaults,
+    Bounds, DEFAULT_DOCUMENT_MAX_TOTAL_BYTES, DEFAULT_MAX_DEPTH, DEFAULT_MAX_LINE_BYTES,
+    DEFAULT_MAX_LINES, DEFAULT_MAX_TOTAL_BYTES, DEFAULT_MAX_VALUES, DEFAULT_REPLACEMENT, Document,
+    PARSER_DEPTH, Reader, ReaderSettings, RedactionSettings, WriterSettings, non_defaults,
 };
 
 fn read<T: guatiao::FromWalk>(text: &str) -> Result<T, guatiao_serde::Error> {
@@ -41,6 +41,16 @@ fn the_defaults_are_the_documented_ones() {
     assert_eq!(bounds.max_total_bytes, DEFAULT_MAX_TOTAL_BYTES);
     assert_eq!(bounds.max_total_bytes, 4 * 1024 * 1024 * 1024);
     assert_eq!(bounds.max_depth, DEFAULT_MAX_DEPTH);
+    assert_eq!(bounds.max_values, DEFAULT_MAX_VALUES);
+    assert_eq!(bounds.max_values, 500_000);
+    assert_eq!(DEFAULT_DOCUMENT_MAX_TOTAL_BYTES, 16 * 1024 * 1024);
+    assert_eq!(PARSER_DEPTH, 127);
+    let document = ReaderSettings::for_document();
+    assert_eq!(
+        document.bounds.max_total_bytes,
+        DEFAULT_DOCUMENT_MAX_TOTAL_BYTES
+    );
+    assert_eq!(document.bounds.max_line_bytes, DEFAULT_MAX_LINE_BYTES);
     assert!(ReaderSettings::default().verify_digest);
     assert_eq!(
         RedactionSettings::default().replacement,
@@ -106,8 +116,59 @@ fn redaction_values_are_named_as_non_default_and_never_shown() {
     assert!(found.iter().all(|n| !n.value.contains("hunter2")));
     assert_eq!(
         found.iter().find(|n| n.setting == "values").unwrap().value,
-        "[not shown]"
+        r#""[not shown]""#
     );
+}
+
+/// A caller's own settings holding a redaction.
+#[derive(ToValue, FromValue, Schema, serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[map(crate = ::guatiao, deny_unknown_fields)]
+struct Mine {
+    #[map(default)]
+    name: String,
+    #[map(default)]
+    redaction: RedactionSettings,
+    #[map(default)]
+    inner: Inner,
+}
+
+#[derive(ToValue, FromValue, Schema, serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[map(crate = ::guatiao, deny_unknown_fields)]
+struct Inner {
+    #[map(default)]
+    redaction: RedactionSettings,
+}
+
+#[test]
+fn a_redaction_nested_in_a_callers_settings_still_hides_its_values() {
+    let mut mine = Mine {
+        name: "x".into(),
+        ..Mine::default()
+    };
+    mine.redaction.values = vec!["hunter2".into()];
+    mine.redaction.patterns = vec!["p+".into()];
+    mine.inner.redaction.values = vec!["swordfish".into()];
+    let found = non_defaults(&mine);
+    let all = format!("{found:?}");
+    assert!(
+        !all.contains("hunter2") && !all.contains("swordfish"),
+        "{all}"
+    );
+    let names: Vec<&str> = found.iter().map(|n| n.setting.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "inner.redaction.values",
+            "name",
+            "redaction.patterns",
+            "redaction.values"
+        ]
+    );
+    let patterns = found
+        .iter()
+        .find(|n| n.setting == "redaction.patterns")
+        .unwrap();
+    assert_eq!(patterns.value, r#"["p+"]"#, "a pattern is not sensitive");
 }
 
 #[test]
@@ -153,9 +214,11 @@ fn each_builder_setter_reaches_the_reader() {
             .code(),
         "too_long"
     );
-    let mut sealed = doc.clone();
-    sealed.header.digest = Some(format!("sha256:{}", "0".repeat(64)));
-    let bytes = sealed.to_vec().unwrap();
+    let mut bogus = doc.header.clone();
+    bogus.digest = Some(format!("sha256:{}", "0".repeat(64)));
+    let mut bytes = bogus.to_line().unwrap().into_bytes();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(&doc.to_vec().unwrap()[doc.header.to_line().unwrap().len() + 1..]);
     let mut strict = Reader::builder(bytes.as_slice()).open().unwrap();
     strict.next_entry().unwrap();
     assert_eq!(strict.next_entry().unwrap_err().code(), "digest_mismatch");

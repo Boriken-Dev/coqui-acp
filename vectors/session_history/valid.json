@@ -953,6 +953,169 @@
           "turns": 1
         }
       }
+    },
+    {
+      "name": "escapes_and_surrogate_pairs",
+      "why": "A surrogate pair escape is one character; NUL and the line separator, escaped, are content. The canonical spelling writes the characters themselves, except where JSON requires an escape.",
+      "canonical": false,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"\\ud83d\\ude00\\u00e9\\u0000\\u2028\"}}}}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude"
+        },
+        "summary": {
+          "lines": 2,
+          "turns": 0,
+          "updates": 1,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": null
+        },
+        "methods": [
+          "session/update"
+        ],
+        "seed": {
+          "line": 2,
+          "digest": "sha256:7f958220fcd32b2cc682c2b07c26127cceb0dbe80e7d9240d2855e2dcf9363a3",
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 0
+        }
+      }
+    },
+    {
+      "name": "working_directory_windows",
+      "why": "A Windows drive path is absolute.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"C:\\\\Work\\\\a\"}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude",
+          "cwd": "C:\\Work\\a"
+        },
+        "summary": {
+          "lines": 1,
+          "turns": 0,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": null
+        },
+        "methods": [],
+        "seed": {
+          "line": null,
+          "digest": null,
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 0
+        }
+      }
+    },
+    {
+      "name": "working_directory_windows_slashes",
+      "why": "A drive path with forward slashes is absolute.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"C:/Work/a\"}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude",
+          "cwd": "C:/Work/a"
+        },
+        "summary": {
+          "lines": 1,
+          "turns": 0,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": null
+        },
+        "methods": [],
+        "seed": {
+          "line": null,
+          "digest": null,
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 0
+        }
+      }
+    },
+    {
+      "name": "working_directory_unc",
+      "why": "A UNC path is absolute.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"\\\\\\\\server\\\\share\\\\w\"}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude",
+          "cwd": "\\\\server\\share\\w"
+        },
+        "summary": {
+          "lines": 1,
+          "turns": 0,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": null
+        },
+        "methods": [],
+        "seed": {
+          "line": null,
+          "digest": null,
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 0
+        }
+      }
+    },
+    {
+      "name": "origin_session_id_is_opaque",
+      "why": "The harness's own session id is any text with no control character, a path traversal included: a reader accepts it and an importer never builds a path from it.",
+      "canonical": true,
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\",\"sessionId\":\"../../../../evil\"},\"model\":\"m\u202eodel\"}"
+      ],
+      "expect": {
+        "header": {
+          "id": "5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77",
+          "harness": "claude",
+          "harness_session_id": "../../../../evil",
+          "model": "m\u202eodel"
+        },
+        "summary": {
+          "lines": 1,
+          "turns": 0,
+          "updates": 0,
+          "compactions": 0,
+          "open_turn": false,
+          "last_stop": null
+        },
+        "methods": [],
+        "seed": {
+          "line": null,
+          "digest": null,
+          "summary": null,
+          "first_line": 2,
+          "mid_turn": false,
+          "turns": 0
+        }
+      }
     }
   ]
 }

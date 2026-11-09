@@ -2,7 +2,10 @@
 
 use serde::Serialize;
 
+use guatiao::schema::{self, SchemaRef};
 use guatiao::{FromValue, Schema, ToValue};
+use guatiao_serde::Presentation;
+use guatiao_serde::text::json;
 
 /// The longest line a reader takes by default, in bytes.
 pub const DEFAULT_MAX_LINE_BYTES: u64 = 16 << 20;
@@ -12,11 +15,25 @@ pub const DEFAULT_MAX_LINES: u64 = 5_000_000;
 pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 4 << 30;
 /// The deepest nesting a reader takes by default.
 pub const DEFAULT_MAX_DEPTH: u64 = 64;
+/// The most JSON values a reader takes in one line by default.
+pub const DEFAULT_MAX_VALUES: u64 = 500_000;
+/// The most bytes a history read into memory as a whole takes by default.
+pub const DEFAULT_DOCUMENT_MAX_TOTAL_BYTES: u64 = 16 << 20;
+/// The deepest nesting the JSON parser reads, whatever `max_depth` says.
+pub const PARSER_DEPTH: u64 = 127;
 
 /// The sizes a reader and a writer hold a history to. Every one is a setting with no floor and no
 /// ceiling the crate adds; a looser value is reported by [`non_defaults`].
 ///
-/// Nesting is also bounded by the JSON parser, which stops at 128 levels whatever is set here.
+/// Nesting is also bounded by the JSON parser, which stops at [`PARSER_DEPTH`] levels whatever
+/// `max_depth` is: a `max_depth` above it changes nothing, and a line nested past it is refused as
+/// too deep naming that limit.
+///
+/// A parsed line holds a multiple of its bytes in memory: 3 or 4 times for ordinary text, and up
+/// to about 60 times for a line of tiny objects (`{"a":0}` costs about 430 bytes). `max_values`
+/// bounds one line's tree to roughly 150 bytes a value. A history read as a whole
+/// ([`Document`](crate::Document)) holds every line at once, so [`ReaderSettings::for_document`]
+/// starts from a smaller `max_total_bytes`.
 #[derive(ToValue, FromValue, Schema, Serialize, Debug, Clone, PartialEq, Eq)]
 #[map(crate = ::guatiao, deny_unknown_fields)]
 #[non_exhaustive]
@@ -33,6 +50,9 @@ pub struct Bounds {
     /// The deepest nesting of arrays and objects in a line.
     #[map(default = DEFAULT_MAX_DEPTH)]
     pub max_depth: u64,
+    /// The most values in a line: every scalar, array and object, and every key of an object.
+    #[map(default = DEFAULT_MAX_VALUES)]
+    pub max_values: u64,
 }
 
 impl Default for Bounds {
@@ -42,7 +62,36 @@ impl Default for Bounds {
             max_lines: DEFAULT_MAX_LINES,
             max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
             max_depth: DEFAULT_MAX_DEPTH,
+            max_values: DEFAULT_MAX_VALUES,
         }
+    }
+}
+
+impl Bounds {
+    /// The bounds a history must keep to be read as a whole in memory: the defaults with
+    /// `max_total_bytes` at [`DEFAULT_DOCUMENT_MAX_TOTAL_BYTES`].
+    #[must_use]
+    pub fn for_document() -> Self {
+        Self {
+            max_total_bytes: DEFAULT_DOCUMENT_MAX_TOTAL_BYTES,
+            ..Self::default()
+        }
+    }
+
+    /// No bound but the parser's own nesting limit, for a check of text this crate wrote itself.
+    pub(crate) fn unbounded() -> Self {
+        Self {
+            max_line_bytes: u64::MAX,
+            max_lines: u64::MAX,
+            max_total_bytes: u64::MAX,
+            max_depth: PARSER_DEPTH,
+            max_values: u64::MAX,
+        }
+    }
+
+    /// The nesting a line may reach: `max_depth`, or the parser's limit when that is lower.
+    pub(crate) fn depth_limit(&self) -> u64 {
+        self.max_depth.min(PARSER_DEPTH)
     }
 }
 
@@ -64,6 +113,18 @@ impl Default for ReaderSettings {
     fn default() -> Self {
         Self {
             bounds: Bounds::default(),
+            verify_digest: true,
+        }
+    }
+}
+
+impl ReaderSettings {
+    /// The settings [`Document::from_slice`](crate::Document::from_slice) and
+    /// [`str::parse`] read with: [`Bounds::for_document`], the digest checked.
+    #[must_use]
+    pub fn for_document() -> Self {
+        Self {
+            bounds: Bounds::for_document(),
             verify_digest: true,
         }
     }
@@ -117,61 +178,47 @@ impl Default for RedactionSettings {
 pub struct NonDefault {
     /// The setting's key path (`bounds.max_line_bytes`).
     pub setting: String,
-    /// Its value, as JSON text; a [`RedactionSettings::values`] entry is never shown.
+    /// Its value, as JSON text; a field the schema marks sensitive (a redaction's `values`) is
+    /// shown as `"[not shown]"`.
     pub value: String,
     /// The default, as JSON text.
     pub default: String,
 }
 
+/// The text a sensitive setting is reported as.
+const NOT_SHOWN: &str = "[not shown]";
+
 /// Every setting of `settings` that is not at its default, by key path, in key order.
 ///
-/// A list is one setting; the values of [`RedactionSettings`] are named and not shown.
+/// The list comes from the settings' schema: a list is one setting, and a field the schema marks
+/// sensitive is named and not shown, wherever the settings are nested in a caller's own.
 #[must_use]
-pub fn non_defaults<T: Serialize + Default>(settings: &T) -> Vec<NonDefault> {
-    let (Ok(now), Ok(base)) = (
-        serde_json::to_value(settings),
-        serde_json::to_value(T::default()),
-    ) else {
+pub fn non_defaults<T: ToValue + Schema + Default>(settings: &T) -> Vec<NonDefault> {
+    let (Ok(schema), Ok(now), Ok(base)) =
+        (T::schema(), settings.to_value(), T::default().to_value())
+    else {
         return Vec::new();
     };
-    let mut found = Vec::new();
-    compare("", &now, &base, &mut found);
+    let Ok(schema) = schema::inline_refs(&schema) else {
+        return Vec::new();
+    };
+    let Some(root) = SchemaRef::new(&schema) else {
+        return Vec::new();
+    };
+    let Ok(found) = schema::differences(root, &now, Some(&base), NOT_SHOWN) else {
+        return Vec::new();
+    };
+    let render = |value: Option<&guatiao::Value>| {
+        value
+            .and_then(|v| json::to_string_of(v, Presentation::new()).ok())
+            .unwrap_or_else(|| String::from("null"))
+    };
     found
-}
-
-fn compare(
-    path: &str,
-    now: &serde_json::Value,
-    base: &serde_json::Value,
-    out: &mut Vec<NonDefault>,
-) {
-    use serde_json::Value;
-    if let (Value::Object(now), Value::Object(base)) = (now, base) {
-        for (key, value) in now {
-            let at = if path.is_empty() {
-                key.clone()
-            } else {
-                format!("{path}.{key}")
-            };
-            match base.get(key) {
-                Some(default) => compare(&at, value, default, out),
-                None => out.push(NonDefault {
-                    setting: at,
-                    value: value.to_string(),
-                    default: String::from("null"),
-                }),
-            }
-        }
-    } else if now != base {
-        let hidden = path == "values";
-        out.push(NonDefault {
-            setting: path.to_owned(),
-            value: if hidden {
-                String::from("[not shown]")
-            } else {
-                now.to_string()
-            },
-            default: base.to_string(),
-        });
-    }
+        .iter()
+        .map(|difference| NonDefault {
+            setting: difference.key(),
+            value: render(difference.value.as_ref()),
+            default: render(difference.baseline.as_ref()),
+        })
+        .collect()
 }

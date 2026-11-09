@@ -49,6 +49,7 @@ pub fn case_bounds(case: &Value) -> Bounds {
                 "max_lines" => bounds.max_lines = value,
                 "max_total_bytes" => bounds.max_total_bytes = value,
                 "max_depth" => bounds.max_depth = value,
+                "max_values" => bounds.max_values = value,
                 other => panic!("unknown limit {other}"),
             }
         }

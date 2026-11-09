@@ -34,15 +34,17 @@ impl<W: Write> WriterBuilder<W> {
 
     /// Writes the header line and returns the writer for the body.
     ///
-    /// A header that carries a digest is written as it is: the writer cannot know the body that
-    /// is still to come, so [`Document::seal`](crate::Document::seal) is how a digest is made.
+    /// A header that carries a digest is written as it is, and [`Writer::finish`] fails with
+    /// [`HistoryError::DigestMismatch`] if the body written is not the one the digest names: the
+    /// writer cannot know the body that is still to come, so [`Writer::body_digest`] or
+    /// [`Document::seal`](crate::Document::seal) is how a digest is made.
     ///
     /// # Errors
     ///
-    /// The header's refusals, [`HistoryError::TooLong`] when it passes the bound, or the sink's
-    /// error.
+    /// The header's refusals under the writer's bounds (nesting and values included),
+    /// [`HistoryError::TooLong`] when it passes the line bound, or the sink's error.
     pub fn start(mut self, header: &Header) -> Result<Writer<W>, HistoryError> {
-        let text = header.to_line()?;
+        let text = header.to_line_within(&self.settings.bounds)?;
         let limit = self.settings.bounds.max_line_bytes;
         if text.len() as u64 > limit {
             return Err(HistoryError::TooLong { line: 1, limit });
@@ -56,6 +58,7 @@ impl<W: Write> WriterBuilder<W> {
             settings: self.settings,
             sequencer,
             hasher: Sha256::new(),
+            declared: header.digest.clone(),
             failed: false,
         })
     }
@@ -68,6 +71,7 @@ pub struct Writer<W> {
     settings: WriterSettings,
     sequencer: Sequencer,
     hasher: Sha256,
+    declared: Option<String>,
     failed: bool,
 }
 
@@ -96,10 +100,19 @@ impl<W: Write> Writer<W> {
         }
         let bounds = &self.settings.bounds;
         let number = self.sequencer.summary().lines + 1;
-        let text = line.to_json().map_err(|_| HistoryError::Shape {
-            line: number,
-            pointer: String::new(),
-            expected: "a line that serialises",
+        let text = line.to_json().map_err(|error| match error {
+            HistoryError::TooDeep {
+                limit, by_parser, ..
+            } => HistoryError::TooDeep {
+                line: number,
+                limit,
+                by_parser,
+            },
+            _ => HistoryError::Shape {
+                line: number,
+                pointer: String::new(),
+                expected: "a line that serialises",
+            },
         })?;
         if text.len() as u64 > bounds.max_line_bytes {
             return Err(HistoryError::TooLong {
@@ -118,8 +131,8 @@ impl<W: Write> Writer<W> {
                 limit: bounds.max_total_bytes,
             });
         }
-        let value = strict::parse(&text, number, bounds.max_depth)?;
-        let checked = Line::from_value(&value, number)?;
+        let value = strict::parse(&text, number, bounds)?;
+        let checked = Line::from_value(value, number)?;
         self.sequencer.accept(number, bytes, &checked.body)?;
         self.failed = true;
         self.sink.write_all(text.as_bytes())?;
@@ -146,9 +159,18 @@ impl<W: Write> Writer<W> {
     ///
     /// # Errors
     ///
-    /// The sink's error.
+    /// The sink's error, or [`HistoryError::DigestMismatch`] when the header carried a digest and
+    /// the body written is not the one it names (the sink then holds the whole file, which a
+    /// reader refuses).
     pub fn finish(mut self) -> Result<(W, Summary), HistoryError> {
         self.sink.flush()?;
+        if self
+            .declared
+            .as_deref()
+            .is_some_and(|declared| declared != body_digest(&self.hasher))
+        {
+            return Err(HistoryError::DigestMismatch);
+        }
         Ok((self.sink, self.sequencer.summary().clone()))
     }
 }

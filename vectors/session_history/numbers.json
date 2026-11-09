@@ -1,0 +1,287 @@
+{
+  "why": "Numbers: each case's `number` is a JSON number token placed as the `rawOutput` of the update {\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":NUMBER,\"sessionUpdate\":\"x\"}}} on line 2 of a history. A reader that accepts it writes it back as `canonical`; one that refuses it gives the code in `refused`. An integer that fits a signed or unsigned 64-bit integer is its digits; every other number is a double, spelled by the rule in the format document.",
+  "cases": [
+    {
+      "name": "zero",
+      "why": "an integer",
+      "number": "0",
+      "canonical": "0"
+    },
+    {
+      "name": "negative_integer",
+      "why": "an integer",
+      "number": "-17",
+      "canonical": "-17"
+    },
+    {
+      "name": "u64_max",
+      "why": "the largest integer that is kept exactly",
+      "number": "18446744073709551615",
+      "canonical": "18446744073709551615"
+    },
+    {
+      "name": "i64_min",
+      "why": "the smallest integer that is kept exactly",
+      "number": "-9223372036854775808",
+      "canonical": "-9223372036854775808"
+    },
+    {
+      "name": "past_u64",
+      "why": "an integer past 64 bits is the nearest double",
+      "number": "18446744073709551616",
+      "canonical": "1.8446744073709552e19"
+    },
+    {
+      "name": "past_i64",
+      "why": "an integer past 64 bits is the nearest double",
+      "number": "-9223372036854775809",
+      "canonical": "-9.223372036854776e18"
+    },
+    {
+      "name": "very_large_integer",
+      "why": "an integer far past 64 bits",
+      "number": "123456789012345678901234567890",
+      "canonical": "1.2345678901234568e29"
+    },
+    {
+      "name": "negative_zero_integer",
+      "why": "a minus sign on a zero is the double negative zero, whatever the spelling",
+      "number": "-0",
+      "canonical": "-0.0"
+    },
+    {
+      "name": "negative_zero_double",
+      "why": "negative zero as a double",
+      "number": "-0.0",
+      "canonical": "-0.0"
+    },
+    {
+      "name": "negative_zero_exponent",
+      "why": "negative zero with an exponent",
+      "number": "-0e5",
+      "canonical": "-0.0"
+    },
+    {
+      "name": "zero_double",
+      "why": "a double zero keeps its point",
+      "number": "0.0",
+      "canonical": "0.0"
+    },
+    {
+      "name": "zero_exponent",
+      "why": "zero with an exponent is a double zero",
+      "number": "0e5",
+      "canonical": "0.0"
+    },
+    {
+      "name": "one_point_zero",
+      "why": "an integral double is written with .0",
+      "number": "1.0",
+      "canonical": "1.0"
+    },
+    {
+      "name": "exponent_is_a_double",
+      "why": "an exponent makes a double: 100.0",
+      "number": "1e2",
+      "canonical": "100.0"
+    },
+    {
+      "name": "exponent_capital",
+      "why": "E is e",
+      "number": "1E2",
+      "canonical": "100.0"
+    },
+    {
+      "name": "exponent_plus",
+      "why": "a plus sign in the exponent is dropped",
+      "number": "1e+2",
+      "canonical": "100.0"
+    },
+    {
+      "name": "fraction",
+      "why": "the shortest digits that read back",
+      "number": "0.1",
+      "canonical": "0.1"
+    },
+    {
+      "name": "fraction_plain",
+      "why": "a plain decimal",
+      "number": "123.456",
+      "canonical": "123.456"
+    },
+    {
+      "name": "trailing_zeros",
+      "why": "trailing zeros are dropped",
+      "number": "1.50",
+      "canonical": "1.5"
+    },
+    {
+      "name": "scaled_to_one",
+      "why": "100e-2 is 1.0",
+      "number": "100e-2",
+      "canonical": "1.0"
+    },
+    {
+      "name": "smallest_plain",
+      "why": "decimal exponent -5 is still plain",
+      "number": "0.00001",
+      "canonical": "0.00001"
+    },
+    {
+      "name": "past_smallest_plain",
+      "why": "decimal exponent -6 is written with an exponent",
+      "number": "0.000001",
+      "canonical": "1e-6"
+    },
+    {
+      "name": "small_exponent",
+      "why": "a small double with an exponent",
+      "number": "1.5e-7",
+      "canonical": "1.5e-7"
+    },
+    {
+      "name": "largest_plain",
+      "why": "decimal exponent 15 is still plain",
+      "number": "1e15",
+      "canonical": "1000000000000000.0"
+    },
+    {
+      "name": "past_largest_plain",
+      "why": "decimal exponent 16 is written with an exponent",
+      "number": "1e16",
+      "canonical": "1e16"
+    },
+    {
+      "name": "large_exponent",
+      "why": "a large double with an exponent",
+      "number": "1.2345e20",
+      "canonical": "1.2345e20"
+    },
+    {
+      "name": "large_integer_digits",
+      "why": "past 64 bits, so a double",
+      "number": "123456789012345680000",
+      "canonical": "1.2345678901234568e20"
+    },
+    {
+      "name": "shortest_digits_misread",
+      "why": "a shortest-form double a lossy parser reads one unit away",
+      "number": "1.947700395895162e-169",
+      "canonical": "1.947700395895162e-169"
+    },
+    {
+      "name": "shortest_digits_misread_two",
+      "why": "the smallest normal double",
+      "number": "2.2250738585072014e-308",
+      "canonical": "2.2250738585072014e-308"
+    },
+    {
+      "name": "smallest_subnormal",
+      "why": "the smallest double",
+      "number": "5e-324",
+      "canonical": "5e-324"
+    },
+    {
+      "name": "largest_double",
+      "why": "the largest double",
+      "number": "1.7976931348623157e308",
+      "canonical": "1.7976931348623157e308"
+    },
+    {
+      "name": "underflow",
+      "why": "a magnitude too small for a double is zero",
+      "number": "1e-400",
+      "canonical": "0.0"
+    },
+    {
+      "name": "negative_underflow",
+      "why": "and keeps its sign",
+      "number": "-1e-400",
+      "canonical": "-0.0"
+    },
+    {
+      "name": "pi",
+      "why": "seventeen significant digits",
+      "number": "3.141592653589793",
+      "canonical": "3.141592653589793"
+    },
+    {
+      "name": "long_digits",
+      "why": "the sum of 0.1 and 0.2",
+      "number": "0.30000000000000004",
+      "canonical": "0.30000000000000004"
+    },
+    {
+      "name": "overflow",
+      "why": "a magnitude too large for a double has no spelling",
+      "number": "1e400",
+      "refused": "syntax"
+    },
+    {
+      "name": "negative_overflow",
+      "why": "a magnitude too large for a double has no spelling",
+      "number": "-1e400",
+      "refused": "syntax"
+    },
+    {
+      "name": "nan",
+      "why": "not JSON",
+      "number": "NaN",
+      "refused": "syntax"
+    },
+    {
+      "name": "infinity",
+      "why": "not JSON",
+      "number": "Infinity",
+      "refused": "syntax"
+    },
+    {
+      "name": "negative_infinity",
+      "why": "not JSON",
+      "number": "-Infinity",
+      "refused": "syntax"
+    },
+    {
+      "name": "leading_zero",
+      "why": "JSON allows no leading zero",
+      "number": "01",
+      "refused": "syntax"
+    },
+    {
+      "name": "plus_sign",
+      "why": "JSON allows no plus sign",
+      "number": "+1",
+      "refused": "syntax"
+    },
+    {
+      "name": "bare_fraction",
+      "why": "JSON needs a digit before the point",
+      "number": ".5",
+      "refused": "syntax"
+    },
+    {
+      "name": "trailing_point",
+      "why": "JSON needs a digit after the point",
+      "number": "1.",
+      "refused": "syntax"
+    },
+    {
+      "name": "hexadecimal",
+      "why": "not JSON",
+      "number": "0x10",
+      "refused": "syntax"
+    },
+    {
+      "name": "empty_exponent",
+      "why": "an exponent needs digits",
+      "number": "1e",
+      "refused": "syntax"
+    },
+    {
+      "name": "double_minus",
+      "why": "not JSON",
+      "number": "--1",
+      "refused": "syntax"
+    }
+  ]
+}

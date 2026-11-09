@@ -691,6 +691,306 @@
         "{\"method\":\"session/update\",\"params\":{\"update\":{\"content\":{\"text\":\"ok\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
         "{\"method\":\"history/turn_end\",\"params\":{\"stopReason\":\"end_turn\"}}"
       ]
+    },
+    {
+      "name": "lone_high_surrogate",
+      "why": "A high surrogate escape with no low one after it is not a character; some parsers keep it, so it is refused.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":\"\\ud800\",\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "lone_low_surrogate",
+      "why": "A low surrogate escape with no high one before it.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":\"\\udc00\",\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "high_surrogate_then_letter",
+      "why": "A high surrogate must be followed by a low one.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":\"\\ud800\\u0041\",\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "low_surrogate_then_high",
+      "why": "The pair is in the wrong order.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":\"\\udc00\\ud800\",\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "nan_literal",
+      "why": "NaN is not JSON, though some parsers read it.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":NaN,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "infinity_literal",
+      "why": "Infinity is not JSON, though some parsers read it.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":Infinity,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "negative_infinity_literal",
+      "why": "-Infinity is not JSON, though some parsers read it.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":-Infinity,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "number_overflows_a_double",
+      "why": "A number no double holds has no spelling; some parsers read it as infinity.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":1e400,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "leading_zero_number",
+      "why": "JSON allows no leading zero.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":01,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "plus_sign_number",
+      "why": "JSON allows no plus sign.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":+1,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "bare_fraction_number",
+      "why": "JSON needs a digit before the point.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":.5,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "raw_tab_in_string",
+      "why": "A raw control character inside a string is not JSON.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":\"a\tb\",\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "byte_order_mark_on_line_two",
+      "why": "Only line 1 may start with a byte-order mark.",
+      "expect": {
+        "code": "syntax",
+        "line": 2
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"}}",
+        "\ufeff{\"method\":\"session/update\",\"params\":{\"update\":{\"rawOutput\":1,\"sessionUpdate\":\"x\"}}}"
+      ]
+    },
+    {
+      "name": "cwd_relative",
+      "why": "The working directory is absolute in the Unix or the Windows style.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/cwd"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"relative/dir\"}"
+      ]
+    },
+    {
+      "name": "cwd_parent_traversal",
+      "why": "A relative path with parent segments is not absolute.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/cwd"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"..\\\\..\\\\Windows\"}"
+      ]
+    },
+    {
+      "name": "cwd_drive_relative",
+      "why": "A drive letter with no separator is relative to the drive's own directory.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/cwd"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"C:dir\"}"
+      ]
+    },
+    {
+      "name": "cwd_nul",
+      "why": "A header string holds no control character: NUL ends a path in C.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/cwd"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"/w\\u0000\"}"
+      ]
+    },
+    {
+      "name": "cwd_newline",
+      "why": "A newline would forge a row of a listing.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/cwd"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"/w\\nforged\"}"
+      ]
+    },
+    {
+      "name": "cwd_c1_control",
+      "why": "C1 controls act on a terminal too.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/cwd"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"/w\\u009b31m\"}"
+      ]
+    },
+    {
+      "name": "cwd_delete",
+      "why": "DEL is a control character.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/cwd"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"cwd\":\"/w\\u007f\"}"
+      ]
+    },
+    {
+      "name": "model_escape_sequence",
+      "why": "ESC starts a terminal sequence.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/model"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"model\":\"m\\u001b]52;c;QUJD\\u0007\"}"
+      ]
+    },
+    {
+      "name": "mode_control",
+      "why": "A header string holds no control character.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/mode"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"mode\":\"a\\u0001b\"}"
+      ]
+    },
+    {
+      "name": "effort_control",
+      "why": "A header string holds no control character.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/effort"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\"},\"effort\":\"a\\tb\"}"
+      ]
+    },
+    {
+      "name": "origin_version_control",
+      "why": "A header string holds no control character.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/origin/version"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\",\"version\":\"1\\u001b[2K\"}}"
+      ]
+    },
+    {
+      "name": "origin_session_id_control",
+      "why": "A header string holds no control character.",
+      "expect": {
+        "code": "shape",
+        "line": 1,
+        "pointer": "/origin/sessionId"
+      },
+      "lines": [
+        "{\"format\":\"coqui-acp-history\",\"version\":1,\"id\":\"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77\",\"origin\":{\"harness\":\"claude\",\"sessionId\":\"a\\u0000b\"}}"
+      ]
     }
   ]
 }

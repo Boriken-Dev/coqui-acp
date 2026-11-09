@@ -33,13 +33,12 @@ agent-client-protocol.workspace = true
 clap = { workspace = true, optional = true }
 data-encoding.workspace = true
 guatiao = { workspace = true, features = ["derive"] }
+guatiao-serde = { workspace = true, features = ["json"] }
 regex.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `float_roundtrip` makes a double read back to the double it spells.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
-
-[dev-dependencies]
-guatiao-serde = { workspace = true, features = ["json"] }
 
 [lints]
 workspace = true

@@ -4,7 +4,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::HistoryError;
-use crate::shape::{Fields, is_harness_name, is_timestamp, is_uuid};
+use crate::settings::{Bounds, PARSER_DEPTH};
+use crate::shape::{Fields, is_absolute_path, is_harness_name, is_timestamp, is_uuid};
 
 /// The `format` of a header.
 pub const FORMAT: &str = "coqui-acp-history";
@@ -91,7 +92,8 @@ pub struct Header {
     pub mode: Option<String>,
     /// The reasoning effort.
     pub effort: Option<String>,
-    /// The absolute working directory of the session.
+    /// The absolute working directory of the session, in the path style of the machine it was
+    /// recorded on. It is a description: an importer never builds a path from it.
     pub cwd: Option<String>,
     /// The ACP version the updates are in (1 or 2).
     pub acp_version: Option<u64>,
@@ -169,36 +171,53 @@ impl Header {
         }
     }
 
-    /// The header as its one line, with no line feed.
+    /// The header as its one line, with no line feed, under the default bounds.
     ///
     /// # Errors
     ///
-    /// [`HistoryError::Shape`] when a field is not what the format allows, the same refusals
-    /// reading makes.
+    /// [`HistoryError::Shape`] when a field is not what the format allows, [`HistoryError::TooDeep`]
+    /// or [`HistoryError::TooManyValues`] past the default bounds: the refusals reading makes.
     pub fn to_line(&self) -> Result<String, HistoryError> {
+        self.to_line_within(&Bounds::default())
+    }
+
+    /// The header as its one line, held to `bounds` as a reader holding them would.
+    pub(crate) fn to_line_within(&self, bounds: &Bounds) -> Result<String, HistoryError> {
         let shape = HistoryError::Shape {
             line: 1,
             pointer: String::new(),
-            expected: "a header nested no deeper than 128 levels",
+            expected: "a header that serialises",
         };
+        // The header is one level of nesting itself.
         if self
             .meta
             .as_ref()
-            .is_some_and(|meta| crate::strict::depth(meta) > 126)
+            .is_some_and(|meta| crate::strict::depth(meta) >= PARSER_DEPTH)
         {
-            return Err(shape);
+            return Err(HistoryError::too_deep(1, PARSER_DEPTH));
         }
         let Ok(value) = serde_json::to_value(self) else {
             return Err(shape);
         };
-        let text = crate::canon::to_string(&value, &ORDER).ok_or(shape)?;
-        let value = crate::strict::parse(&text, 1, u64::MAX)?;
-        Self::from_value(&value)?;
+        let text = crate::canon::to_string(&value, &ORDER)
+            .ok_or_else(|| HistoryError::too_deep(1, PARSER_DEPTH))?;
+        let value = crate::strict::parse(&text, 1, bounds)?;
+        Self::from_value(value)?;
         Ok(text)
     }
 
-    /// Checks a parsed first line: `format`, then `version`, then every field.
-    pub(crate) fn from_value(value: &Value) -> Result<Self, HistoryError> {
+    /// Checks a parsed first line (`format`, then `version`, then every field) and takes its
+    /// `_meta` out of it rather than copying it.
+    pub(crate) fn from_value(mut value: Value) -> Result<Self, HistoryError> {
+        let mut header = Self::check(&value)?;
+        if let Value::Object(map) = &mut value {
+            header.meta = map.remove("_meta");
+        }
+        Ok(header)
+    }
+
+    /// Checks a parsed first line, with `meta` left unset.
+    fn check(value: &Value) -> Result<Self, HistoryError> {
         let root = Fields::root(value, 1)?;
         if root.raw("format").and_then(Value::as_str) != Some(FORMAT) {
             return Err(HistoryError::UnknownFormat);
@@ -269,29 +288,35 @@ impl Header {
                 })
             }
         };
-        let meta = match root.raw("_meta") {
-            None => None,
-            Some(v @ Value::Object(_)) => Some(v.clone()),
-            Some(_) => return Err(root.shape("_meta", "an object")),
-        };
+        if root.raw("_meta").is_some_and(|meta| !meta.is_object()) {
+            return Err(root.shape("_meta", "an object"));
+        }
 
+        let cwd = root.plain("cwd", 4096, "an absolute path")?;
+        if cwd.is_some_and(|path| !is_absolute_path(path)) {
+            return Err(root.shape("cwd", "an absolute path"));
+        }
         let owned = |value: Option<&str>| value.map(str::to_owned);
         Ok(Self {
             id: id.to_owned(),
             origin: Origin {
                 harness: harness.to_owned(),
-                version: owned(origin.string("version", 128, "a string")?),
-                session_id: owned(origin.string("sessionId", 256, "a string")?),
+                version: owned(origin.plain("version", 128, "text with no control character")?),
+                session_id: owned(origin.plain(
+                    "sessionId",
+                    256,
+                    "text with no control character",
+                )?),
             },
             created_at: owned(created_at),
-            model: owned(root.string("model", 256, "a string")?),
-            mode: owned(root.string("mode", 256, "a string")?),
-            effort: owned(root.string("effort", 256, "a string")?),
-            cwd: owned(root.string("cwd", 4096, "a string")?),
+            model: owned(root.plain("model", 256, "text with no control character")?),
+            mode: owned(root.plain("mode", 256, "text with no control character")?),
+            effort: owned(root.plain("effort", 256, "text with no control character")?),
+            cwd: owned(cwd),
             acp_version,
             digest: owned(digest),
             redacted,
-            meta,
+            meta: None,
         })
     }
 }

@@ -71,8 +71,8 @@ impl<R: Read> ReaderBuilder<R> {
         let Some((_, text)) = reader.next_text()? else {
             return Err(HistoryError::Empty);
         };
-        let value = strict::parse(&text, 1, reader.settings.bounds.max_depth)?;
-        reader.header = Some(Header::from_value(&value)?);
+        let value = strict::parse(&text, 1, &reader.settings.bounds)?;
+        reader.header = Some(Header::from_value(value)?);
         reader.sequencer.header(text.len() as u64 + 1);
         reader.header_raw = text;
         Ok(reader)
@@ -83,6 +83,14 @@ impl<R: Read> ReaderBuilder<R> {
 ///
 /// It reads no more than one line ahead of the caller and keeps no line past the one it returns.
 /// After an error it returns nothing more.
+///
+/// **A line is handed over before the digest is checked.** Each [`Entry`] is checked for shape,
+/// order and bounds, but the header's digest, which says whether the body is the one that was
+/// written, is compared only when [`next_entry`](Self::next_entry) reaches the end, and a
+/// mismatch is the error it returns there. A consumer that acts on entries as they come acts on
+/// content that may not have been verified. To act only on a verified history, read it whole with
+/// [`Document::from_reader`](crate::Document::from_reader) (it returns once the digest is
+/// checked), or make one pass with [`check`](Self::check) over a source it can read again.
 #[derive(Debug)]
 pub struct Reader<R> {
     input: BufReader<R>,
@@ -127,7 +135,8 @@ impl<R: Read> Reader<R> {
     }
 
     /// The next body line, or `None` at the end, after the digest (when the header has one and the
-    /// settings verify it) has been checked.
+    /// settings verify it) has been checked. A line returned before the end is not yet verified
+    /// against the digest: see the type's documentation.
     ///
     /// # Errors
     ///
@@ -149,8 +158,8 @@ impl<R: Read> Reader<R> {
         };
         self.hasher.update(text.as_bytes());
         self.hasher.update(b"\n");
-        let value = strict::parse(&text, number, self.settings.bounds.max_depth)?;
-        let line = Line::from_value(&value, number)?;
+        let value = strict::parse(&text, number, &self.settings.bounds)?;
+        let line = Line::from_value(value, number)?;
         self.sequencer
             .accept(number, text.len() as u64 + 1, &line.body)?;
         Ok(Some(Entry {
@@ -171,31 +180,41 @@ impl<R: Read> Reader<R> {
         Ok(())
     }
 
-    /// The next line's text, checked for size, encoding and line ending.
+    /// Reads to the end, checking every line and the digest, and returns what was counted.
+    /// Nothing is kept: the memory held is one line. A source that can be read again is then read
+    /// a second time by the consumer that needs verified content before it acts.
+    ///
+    /// # Errors
+    ///
+    /// The first refusal of the reader, or [`HistoryError::DigestMismatch`] at the end.
+    pub fn check(mut self) -> Result<Summary, HistoryError> {
+        while self.next_entry()?.is_some() {}
+        Ok(self.sequencer.summary().clone())
+    }
+
     /// Writes the header and every line exactly as the file has them, line feeds included, and
-    /// returns what was counted. The file is read to its end first line by line, so a history the
-    /// format refuses stops the copy at the line it refuses.
+    /// returns what was counted. Each line is checked before it is written, and the digest at the
+    /// end, so a history the format refuses stops the copy at the line it refuses.
+    ///
+    /// **The sink holds the lines written before an error.** A digest mismatch is found only
+    /// after every line has been written, so a sink that must never hold unverified content gets
+    /// a buffer, released when this returns `Ok`.
     ///
     /// # Errors
     ///
     /// The first refusal of the reader, or the sink's error.
     pub fn copy_to<W: std::io::Write>(mut self, mut sink: W) -> Result<Summary, HistoryError> {
         sink.write_all(self.header_raw.as_bytes())?;
-        sink.write_all(
-            b"
-",
-        )?;
+        sink.write_all(b"\n")?;
         while let Some(entry) = self.next_entry()? {
             sink.write_all(entry.raw.as_bytes())?;
-            sink.write_all(
-                b"
-",
-            )?;
+            sink.write_all(b"\n")?;
         }
         sink.flush()?;
         Ok(self.sequencer.summary().clone())
     }
 
+    /// The next line's text, checked for size, encoding and line ending.
     fn next_text(&mut self) -> Result<Option<(u64, String)>, HistoryError> {
         let bounds = self.settings.bounds.clone();
         let number = self.number + 1;
@@ -222,19 +241,18 @@ impl<R: Read> Reader<R> {
             });
         }
         self.number = number;
-        let bytes = match (number, self.buffer.strip_prefix(b"\xEF\xBB\xBF")) {
-            (1, Some(rest)) => rest,
-            _ => &self.buffer[..],
-        };
+        let mut bytes = core::mem::take(&mut self.buffer);
+        if number == 1 && bytes.starts_with(b"\xEF\xBB\xBF") {
+            bytes.drain(..3);
+        }
         if bytes.is_empty() {
             return Err(HistoryError::BlankLine { line: number });
         }
         if bytes.contains(&b'\r') {
             return Err(HistoryError::LineEnding { line: number });
         }
-        let text =
-            core::str::from_utf8(bytes).map_err(|_| HistoryError::NotUtf8 { line: number })?;
-        Ok(Some((number, text.to_owned())))
+        let text = String::from_utf8(bytes).map_err(|_| HistoryError::NotUtf8 { line: number })?;
+        Ok(Some((number, text)))
     }
 }
 

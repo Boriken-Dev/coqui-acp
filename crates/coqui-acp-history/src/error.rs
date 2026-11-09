@@ -103,6 +103,17 @@ pub enum HistoryError {
     TooDeep {
         /// The line.
         line: u64,
+        /// The nesting that was allowed: the `max_depth` setting, or the parser's own limit
+        /// ([`PARSER_DEPTH`](crate::PARSER_DEPTH)) when the setting is higher.
+        limit: u64,
+        /// Whether `limit` is the parser's and not the setting's: `max_depth` is higher than the
+        /// parser reads, so raising it further changes nothing.
+        by_parser: bool,
+    },
+    /// A line holds more values than the bound.
+    TooManyValues {
+        /// The line.
+        line: u64,
         /// The bound.
         limit: u64,
     },
@@ -146,6 +157,16 @@ impl OrderRule {
 }
 
 impl HistoryError {
+    /// A line nested past what `max_depth` allows, which the parser caps at
+    /// [`PARSER_DEPTH`](crate::PARSER_DEPTH).
+    pub(crate) fn too_deep(line: u64, max_depth: u64) -> Self {
+        Self::TooDeep {
+            line,
+            limit: max_depth.min(crate::PARSER_DEPTH),
+            by_parser: max_depth > crate::PARSER_DEPTH,
+        }
+    }
+
     /// The stable name of the kind of failure, as the shared vectors spell it.
     #[must_use]
     pub fn code(&self) -> &'static str {
@@ -168,6 +189,7 @@ impl HistoryError {
             Self::TooManyLines { .. } => "too_many_lines",
             Self::TooLarge { .. } => "too_large",
             Self::TooDeep { .. } => "too_deep",
+            Self::TooManyValues { .. } => "too_many_values",
             Self::DigestMismatch => "digest_mismatch",
             Self::Pattern { .. } => "pattern",
         }
@@ -197,7 +219,8 @@ impl HistoryError {
             | Self::UnknownLine { line }
             | Self::Order { line, .. }
             | Self::TooLong { line, .. }
-            | Self::TooDeep { line, .. } => Some(*line),
+            | Self::TooDeep { line, .. }
+            | Self::TooManyValues { line, .. } => Some(*line),
             Self::UnknownFormat | Self::UnknownVersion { .. } => Some(1),
             _ => None,
         }
@@ -253,8 +276,22 @@ impl fmt::Display for HistoryError {
             }
             Self::TooManyLines { limit } => write!(f, "the history has more than {limit} lines"),
             Self::TooLarge { limit } => write!(f, "the history is larger than {limit} bytes"),
-            Self::TooDeep { line, limit } => {
-                write!(f, "line {line} nests deeper than {limit} levels")
+            Self::TooDeep {
+                line,
+                limit,
+                by_parser: false,
+            } => write!(f, "line {line} nests deeper than {limit} levels"),
+            Self::TooDeep {
+                line,
+                limit,
+                by_parser: true,
+            } => write!(
+                f,
+                "line {line} nests deeper than {limit} levels, the parser's own limit, which \
+                 max_depth cannot raise"
+            ),
+            Self::TooManyValues { line, limit } => {
+                write!(f, "line {line} holds more than {limit} values")
             }
             Self::DigestMismatch => f.write_str("the header's digest is not the body's"),
             Self::Pattern { index } => {

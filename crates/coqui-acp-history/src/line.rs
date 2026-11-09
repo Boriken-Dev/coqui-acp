@@ -4,10 +4,8 @@ use agent_client_protocol::schema::v1::StopReason;
 use serde_json::{Map, Value, json};
 
 use crate::HistoryError;
+use crate::settings::PARSER_DEPTH;
 use crate::shape::{Fields, is_timestamp};
-
-/// The deepest value written, which is what the parser reads back.
-const MAX_WRITE_DEPTH: u64 = 128;
 
 /// The `_meta` key under which a codec keeps what only a resume by the same harness needs: the
 /// native tool-use ids paired with ACP's, and the exact native input. Opaque to this crate, and
@@ -213,12 +211,8 @@ impl Line {
     pub fn to_json(&self) -> Result<String, HistoryError> {
         // Measure before copying anything: a value nested deeper than the parser reads is refused
         // here, so no walk of the line recurses on it.
-        if self.payload_depth() > MAX_WRITE_DEPTH {
-            return Err(HistoryError::Shape {
-                line: 0,
-                pointer: String::new(),
-                expected: "a line nested no deeper than 128 levels",
-            });
+        if self.payload_depth() > PARSER_DEPTH {
+            return Err(HistoryError::too_deep(0, PARSER_DEPTH));
         }
         let mut envelope = Map::new();
         envelope.insert("method".into(), Value::String(self.body.method().into()));
@@ -235,30 +229,82 @@ impl Line {
             &Value::Object(envelope),
             &["method", "params", "at", "_meta"],
         )
-        .ok_or(HistoryError::Shape {
-            line: 0,
-            pointer: String::new(),
-            expected: "a line nested no deeper than 128 levels",
-        })
+        .ok_or(HistoryError::too_deep(0, PARSER_DEPTH))
     }
 
+    /// How deep the line nests as written: the line is one level, `params` a second, and the
+    /// payload below them.
     pub(crate) fn payload_depth(&self) -> u64 {
-        let deepest = |values: &[Value]| values.iter().map(crate::strict::depth).max().unwrap_or(0);
-        let body = match &self.body {
-            Body::Prompt { prompt } => deepest(prompt),
-            Body::Update { update } => crate::strict::depth(update),
+        use crate::strict::depth;
+        let deepest = |values: &[Value]| values.iter().map(depth).max().unwrap_or(0);
+        let params = match &self.body {
+            Body::Prompt { prompt } => 3 + deepest(prompt),
+            Body::Update { update } => 2 + depth(update),
             Body::PermissionRequest { tool_call, options } => {
-                crate::strict::depth(tool_call).max(deepest(options))
+                (2 + depth(tool_call)).max(3 + deepest(options))
             }
-            Body::PermissionAnswer { outcome, .. } => crate::strict::depth(outcome),
-            _ => 0,
+            Body::PermissionAnswer { outcome, .. } => 2 + depth(outcome),
+            Body::TurnEnd { .. } | Body::Compaction { .. } => 2,
+            Body::Cancel => 1,
         };
-        let meta = self.meta.as_ref().map_or(0, crate::strict::depth);
-        body.max(meta) + 2
+        params.max(self.meta.as_ref().map_or(1, |meta| 1 + depth(meta)))
     }
 
-    /// Checks a parsed body line.
-    pub(crate) fn from_value(value: &Value, line: u64) -> Result<Self, HistoryError> {
+    /// Checks a parsed body line and takes its parts out of it, copying only what is small.
+    pub(crate) fn from_value(mut value: Value, line: u64) -> Result<Self, HistoryError> {
+        let method = Self::check(&value, line)?;
+        let Value::Object(root) = &mut value else {
+            return Err(HistoryError::UnknownLine { line });
+        };
+        let at = match root.remove("at") {
+            Some(Value::String(at)) => Some(at),
+            _ => None,
+        };
+        let meta = root.remove("_meta");
+        let mut params = match root.remove("params") {
+            Some(Value::Object(params)) => params,
+            _ => Map::new(),
+        };
+        let body = match method {
+            Method::Cancel => Body::Cancel,
+            Method::Prompt => Body::Prompt {
+                prompt: take_array(&mut params, "prompt"),
+            },
+            Method::Update => Body::Update {
+                update: take(&mut params, "update"),
+            },
+            Method::PermissionRequest => Body::PermissionRequest {
+                tool_call: take(&mut params, "toolCall"),
+                options: take_array(&mut params, "options"),
+            },
+            Method::PermissionAnswer => Body::PermissionAnswer {
+                tool_call_id: take_string(&mut params, "toolCallId").unwrap_or_default(),
+                outcome: take(&mut params, "outcome"),
+            },
+            Method::TurnEnd => Body::TurnEnd {
+                stop: take_string(&mut params, "stopReason")
+                    .and_then(|name| Stop::from_name(&name))
+                    .unwrap_or(Stop::Error),
+                error: take_string(&mut params, "error"),
+            },
+            Method::Compaction => Body::Compaction {
+                summary: take_string(&mut params, "summary"),
+                trigger: match take_string(&mut params, "trigger").as_deref() {
+                    Some("auto") => Some(Trigger::Auto),
+                    Some("manual") => Some(Trigger::Manual),
+                    _ => None,
+                },
+                pre_tokens: match params.remove("preTokens") {
+                    Some(Value::Number(n)) => n.as_u64(),
+                    _ => None,
+                },
+            },
+        };
+        Ok(Self { at, meta, body })
+    }
+
+    /// Checks a parsed body line without taking anything from it.
+    fn check(value: &Value, line: u64) -> Result<Method, HistoryError> {
         let root = Fields::root(value, line)?;
         if root.has("format") {
             return Err(HistoryError::Order {
@@ -269,81 +315,91 @@ impl Line {
         let Some(Value::String(method)) = root.raw("method") else {
             return Err(HistoryError::UnknownLine { line });
         };
-        let method = method.as_str();
-        if !matches!(
-            method,
-            "session/prompt"
-                | "session/update"
-                | "session/cancel"
-                | "session/request_permission"
-                | "history/permission_answer"
-                | "history/turn_end"
-                | "history/compaction"
-        ) {
-            return Err(HistoryError::UnknownLine { line });
-        }
+        let method = match method.as_str() {
+            "session/prompt" => Method::Prompt,
+            "session/update" => Method::Update,
+            "session/cancel" => Method::Cancel,
+            "session/request_permission" => Method::PermissionRequest,
+            "history/permission_answer" => Method::PermissionAnswer,
+            "history/turn_end" => Method::TurnEnd,
+            "history/compaction" => Method::Compaction,
+            _ => return Err(HistoryError::UnknownLine { line }),
+        };
         root.only(&["method", "params", "at", "_meta"])?;
 
         let at = root.string("at", 40, "an RFC 3339 timestamp")?;
         if at.is_some_and(|t| !is_timestamp(t)) {
             return Err(root.shape("at", "an RFC 3339 timestamp"));
         }
-        let meta = match root.raw("_meta") {
-            None => None,
-            Some(v @ Value::Object(_)) => Some(v.clone()),
-            Some(_) => return Err(root.shape("_meta", "an object")),
-        };
+        if root.raw("_meta").is_some_and(|meta| !meta.is_object()) {
+            return Err(root.shape("_meta", "an object"));
+        }
 
-        let body = if method == "session/cancel" {
+        if method == Method::Cancel {
             if root.has("params") {
                 return Err(HistoryError::UnknownField {
                     line,
                     pointer: String::new(),
                 });
             }
-            Body::Cancel
         } else {
             let params = root.require_object("params")?;
-            body_of(method, &params)?
-        };
-        Ok(Self {
-            at: at.map(str::to_owned),
-            meta,
-            body,
-        })
+            check_params(method, &params)?;
+        }
+        Ok(method)
     }
 }
 
-fn body_of(method: &str, params: &Fields<'_>) -> Result<Body, HistoryError> {
-    Ok(match method {
-        "session/prompt" => {
+/// The kinds of body line, by `method`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Method {
+    Prompt,
+    Update,
+    Cancel,
+    PermissionRequest,
+    PermissionAnswer,
+    TurnEnd,
+    Compaction,
+}
+
+fn take(map: &mut Map<String, Value>, key: &str) -> Value {
+    map.remove(key).unwrap_or(Value::Null)
+}
+
+fn take_array(map: &mut Map<String, Value>, key: &str) -> Vec<Value> {
+    match map.remove(key) {
+        Some(Value::Array(items)) => items,
+        _ => Vec::new(),
+    }
+}
+
+fn take_string(map: &mut Map<String, Value>, key: &str) -> Option<String> {
+    match map.remove(key) {
+        Some(Value::String(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn check_params(method: Method, params: &Fields<'_>) -> Result<(), HistoryError> {
+    match method {
+        Method::Prompt => {
             params.only(&["prompt"])?;
-            let blocks = params.tagged_array("prompt", "type", true)?;
-            Body::Prompt {
-                prompt: blocks.clone(),
-            }
+            params.tagged_array("prompt", "type", true)?;
         }
-        "session/update" => {
+        Method::Update => {
             params.only(&["update"])?;
             let update = params.require_object("update")?;
             update.require_string("sessionUpdate", 64, "a non-empty string")?;
-            Body::Update {
-                update: params.raw("update").cloned().unwrap_or(Value::Null),
-            }
         }
-        "session/request_permission" => {
+        Method::PermissionRequest => {
             params.only(&["toolCall", "options"])?;
             let call = params.require_object("toolCall")?;
             call.require_string("toolCallId", 512, "a non-empty string")?;
-            let options = params.tagged_array("options", "optionId", true)?;
-            Body::PermissionRequest {
-                tool_call: params.raw("toolCall").cloned().unwrap_or(Value::Null),
-                options: options.clone(),
-            }
+            params.tagged_array("options", "optionId", true)?;
         }
-        "history/permission_answer" => {
+        Method::PermissionAnswer => {
             params.only(&["toolCallId", "outcome"])?;
-            let id = params.require_string("toolCallId", 512, "a non-empty string")?;
+            params.require_string("toolCallId", 512, "a non-empty string")?;
             let outcome = params.require_object("outcome")?;
             match outcome.require_string("outcome", 16, "selected or cancelled")? {
                 "selected" => {
@@ -352,45 +408,29 @@ fn body_of(method: &str, params: &Fields<'_>) -> Result<Body, HistoryError> {
                 "cancelled" => {}
                 _ => return Err(outcome.shape("outcome", "selected or cancelled")),
             }
-            Body::PermissionAnswer {
-                tool_call_id: id.to_owned(),
-                outcome: params.raw("outcome").cloned().unwrap_or(Value::Null),
-            }
         }
-        "history/turn_end" => {
+        Method::TurnEnd => {
             params.only(&["stopReason", "error"])?;
             let name = params.require_string("stopReason", 32, "a stop reason")?;
-            let stop =
-                Stop::from_name(name).ok_or_else(|| params.shape("stopReason", "a stop reason"))?;
-            Body::TurnEnd {
-                stop,
-                error: params
-                    .string("error", 65_536, "a non-empty string")?
-                    .map(str::to_owned),
+            if Stop::from_name(name).is_none() {
+                return Err(params.shape("stopReason", "a stop reason"));
             }
+            params.string("error", 65_536, "a non-empty string")?;
         }
-        "history/compaction" => {
+        Method::Compaction => {
             params.only(&["summary", "trigger", "preTokens"])?;
-            let trigger = match params.string("trigger", 16, "auto or manual")? {
-                None => None,
-                Some("auto") => Some(Trigger::Auto),
-                Some("manual") => Some(Trigger::Manual),
-                Some(_) => return Err(params.shape("trigger", "auto or manual")),
-            };
-            Body::Compaction {
-                summary: params
-                    .string("summary", usize::MAX, "a non-empty string")?
-                    .map(str::to_owned),
-                trigger,
-                pre_tokens: params.unsigned("preTokens")?,
+            if !matches!(
+                params.string("trigger", 16, "auto or manual")?,
+                None | Some("auto" | "manual")
+            ) {
+                return Err(params.shape("trigger", "auto or manual"));
             }
+            params.string("summary", usize::MAX, "a non-empty string")?;
+            params.unsigned("preTokens")?;
         }
-        _ => {
-            return Err(HistoryError::UnknownLine {
-                line: params.line(),
-            });
-        }
-    })
+        Method::Cancel => {}
+    }
+    Ok(())
 }
 
 /// The `params` a body is written with; `None` for a line that has none.

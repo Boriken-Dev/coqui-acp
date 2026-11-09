@@ -29,10 +29,6 @@ impl<'a> Fields<'a> {
         }
     }
 
-    pub(crate) fn line(&self) -> u64 {
-        self.line
-    }
-
     fn at(&self, key: &str) -> String {
         format!("{}/{}", self.pointer, key)
     }
@@ -76,6 +72,20 @@ impl<'a> Fields<'a> {
             None => Ok(None),
             Some(Value::String(text)) if !text.is_empty() && text.len() <= max => Ok(Some(text)),
             Some(_) => Err(self.shape(key, expected)),
+        }
+    }
+
+    /// A string field like [`string`](Self::string) that holds no control character: NUL, the
+    /// C0 and C1 controls and DEL. For text a person or a program will print or use as a name.
+    pub(crate) fn plain(
+        &self,
+        key: &str,
+        max: usize,
+        expected: &'static str,
+    ) -> Result<Option<&'a str>, HistoryError> {
+        match self.string(key, max, expected)? {
+            Some(text) if text.chars().any(char::is_control) => Err(self.shape(key, expected)),
+            found => Ok(found),
         }
     }
 
@@ -189,6 +199,17 @@ pub(crate) fn is_timestamp(text: &str) -> bool {
                 && number(text.len() - 5, text.len() - 3) < 24
                 && number(text.len() - 2, text.len()) < 60
         }
+        _ => false,
+    }
+}
+
+/// Whether `text` is an absolute path in the Unix style (`/dir`) or the Windows style (`C:\dir`,
+/// `C:/dir`, `\\server\share`, `\\?\C:\dir`).
+pub(crate) fn is_absolute_path(text: &str) -> bool {
+    let b = text.as_bytes();
+    match b {
+        [b'/', ..] | [b'\\', b'\\', ..] => true,
+        [drive, b':', b'\\' | b'/', ..] => drive.is_ascii_alphabetic(),
         _ => false,
     }
 }

@@ -9,14 +9,22 @@ use crate::header::Header;
 use crate::order::Summary;
 use crate::reader::{Reader, body_digest};
 use crate::seed::Seed;
+use crate::settings::ReaderSettings;
 use crate::{HistoryError, Line, Writer};
 
-/// A header and the lines after it.
+/// A header and the lines after it, all in memory.
 ///
 /// Reading then writing a document gives the same lines in this crate's canonical spelling: keys
-/// sorted inside ACP payloads, numbers past the range of `i64` and `u64` as `f64`. A file that must
-/// stay byte for byte as it is goes through [`Reader`] and [`Entry::raw`](crate::Entry::raw)
-/// instead.
+/// sorted inside ACP payloads, numbers spelled as the format document says. A file that must stay
+/// byte for byte as it is goes through [`Reader`] and [`Entry::raw`](crate::Entry::raw) instead.
+///
+/// A document is returned only once the digest in its header, if any, has been checked, and it is
+/// written with a digest that names the body as written: a header's digest is made again when the
+/// spelling changes it.
+///
+/// It holds every line at once, a small multiple of the bytes read. [`from_slice`](Self::from_slice)
+/// and [`str::parse`] hold the history to [`ReaderSettings::for_document`]; a larger history is
+/// read with a [`Reader`], or with [`from_reader`](Self::from_reader) under bounds the caller chose.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Document {
@@ -36,7 +44,8 @@ impl Document {
         }
     }
 
-    /// Reads every line `reader` has.
+    /// Reads every line `reader` has, under the reader's own settings, and returns only once its
+    /// digest has been checked.
     ///
     /// # Errors
     ///
@@ -52,13 +61,17 @@ impl Document {
         })
     }
 
-    /// Reads a history held in bytes, with the default settings.
+    /// Reads a history held in bytes, under [`ReaderSettings::for_document`].
     ///
     /// # Errors
     ///
     /// The first refusal the reader makes.
     pub fn from_slice(bytes: &[u8]) -> Result<Self, HistoryError> {
-        Self::from_reader(Reader::builder(bytes).open()?)
+        Self::from_reader(
+            Reader::builder(bytes)
+                .settings(ReaderSettings::for_document())
+                .open()?,
+        )
     }
 
     /// Checks the lines against the order rules and counts them.
@@ -67,21 +80,28 @@ impl Document {
     ///
     /// The first line out of order, as the writer would refuse it.
     pub fn check(&self) -> Result<Summary, HistoryError> {
-        let mut writer = Writer::builder(std::io::sink()).start(&self.header)?;
+        let mut header = self.header.clone();
+        header.digest = None;
+        let mut writer = Writer::builder(std::io::sink()).start(&header)?;
         for line in &self.lines {
             writer.write(line)?;
         }
         Ok(writer.finish()?.1)
     }
 
-    /// Writes the document, checking each line as the writer does.
+    /// Writes the document, checking each line as the writer does. A header that has a digest is
+    /// written with the digest of the body as it is written here.
     ///
     /// # Errors
     ///
     /// The first line the format refuses, or the sink's error. The sink may hold the lines before
     /// it; write to memory first where that matters.
     pub fn to_writer<W: Write>(&self, sink: W) -> Result<(), HistoryError> {
-        let mut writer = Writer::builder(sink).start(&self.header)?;
+        let mut header = self.header.clone();
+        if header.digest.is_some() {
+            header.digest = Some(self.body_digest()?);
+        }
+        let mut writer = Writer::builder(sink).start(&header)?;
         for line in &self.lines {
             writer.write(line)?;
         }
@@ -118,13 +138,18 @@ impl Document {
     ///
     /// The first line the format refuses.
     pub fn seal(&mut self) -> Result<(), HistoryError> {
+        self.header.digest = Some(self.body_digest()?);
+        Ok(())
+    }
+
+    /// The digest of the body as it is written.
+    fn body_digest(&self) -> Result<String, HistoryError> {
         let mut hasher = Sha256::new();
         for line in &self.lines {
             hasher.update(line.to_json()?.as_bytes());
             hasher.update(b"\n");
         }
-        self.header.digest = Some(body_digest(&hasher));
-        Ok(())
+        Ok(body_digest(&hasher))
     }
 
     /// What a new session is seeded from: the latest compaction summary and the lines after it.
@@ -137,7 +162,7 @@ impl Document {
 impl FromStr for Document {
     type Err = HistoryError;
 
-    /// Reads a history held in text, with the default settings.
+    /// Reads a history held in text, under [`ReaderSettings::for_document`].
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::from_slice(text.as_bytes())
     }

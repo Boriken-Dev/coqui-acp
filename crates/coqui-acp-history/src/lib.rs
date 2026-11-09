@@ -60,9 +60,9 @@ pub use reader::{Entry, Reader, ReaderBuilder};
 pub use redact::{RedactionReport, Redactor, RuleKind, RuleReport};
 pub use seed::{Fit, Seed, SeedPoint};
 pub use settings::{
-    Bounds, DEFAULT_MAX_DEPTH, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_LINES, DEFAULT_MAX_TOTAL_BYTES,
-    DEFAULT_REPLACEMENT, NonDefault, ReaderSettings, RedactionSettings, WriterSettings,
-    non_defaults,
+    Bounds, DEFAULT_DOCUMENT_MAX_TOTAL_BYTES, DEFAULT_MAX_DEPTH, DEFAULT_MAX_LINE_BYTES,
+    DEFAULT_MAX_LINES, DEFAULT_MAX_TOTAL_BYTES, DEFAULT_MAX_VALUES, DEFAULT_REPLACEMENT,
+    NonDefault, PARSER_DEPTH, ReaderSettings, RedactionSettings, WriterSettings, non_defaults,
 };
 pub use tools::Tool;
 pub use writer::{Writer, WriterBuilder};

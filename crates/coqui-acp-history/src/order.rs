@@ -1,5 +1,7 @@
 //! The order rules, and what a pass over a history counts.
 
+use std::collections::HashSet;
+
 use serde_json::Value;
 
 use crate::{Body, HistoryError, OrderRule, Stop};
@@ -42,7 +44,8 @@ pub struct Summary {
 #[derive(Debug, Default)]
 pub(crate) struct Sequencer {
     summary: Summary,
-    pending: Vec<String>,
+    /// The calls with a permission request waiting; a set, since a turn may hold millions.
+    pending: HashSet<String>,
 }
 
 impl Sequencer {
@@ -83,19 +86,17 @@ impl Sequencer {
                     .get("toolCallId")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if self.pending.iter().any(|p| p == id) {
+                if !self.pending.insert(id.to_owned()) {
                     return order(OrderRule::RequestRepeated);
                 }
-                self.pending.push(id.to_owned());
             }
             Body::PermissionAnswer { tool_call_id, .. } => {
                 if !in_turn {
                     return order(OrderRule::OutsideTurn);
                 }
-                let Some(at) = self.pending.iter().position(|p| p == tool_call_id) else {
+                if !self.pending.remove(tool_call_id) {
                     return order(OrderRule::AnswerWithoutRequest);
-                };
-                self.pending.swap_remove(at);
+                }
             }
             Body::TurnEnd { stop, .. } => {
                 if !in_turn {
