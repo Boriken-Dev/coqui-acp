@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `coqui-acp-harness-kind`: the `acp_harness` Guatiao kind, so an ACP agent driver can be written in any language Guatiao hosts. `AcpHarness::start(StartRequest, ChannelSink) -> Channel` is one ACP connection over Guatiao's channel kinds, one JSON-RPC message per channel message; `describe`, and `refusal`, `models`, `program` and `session_record` with defaults. `StartRequest` carries the environment, working roots and requirements (`read_only`, `no_commands`, `resume_wider`, `only_skills`, `sandboxed_scripts`), which only narrow, and a harness refuses a requirement it does not know. The kinds ship as data and as a Python module, with one contract suite every provider passes; an echo in Rust and one in Python (`examples/provider-python/harness`) pass it.
 - `coqui-acp-harness`: `Event::Options`, told to the client as a `config_option_update`, so a translator can say its choices changed by themselves; `mode::up_to`, `named` and `custom_option`.
 - `coqui_acp_harness::mode`: `Mode` (Manual, Accept edits, Auto, Plan, Bypass) and the `mode` config option every translator offers, so a client shows one control over every harness. `coqui-acp-claude` switches it with `set_permission_mode` and offers Bypass only with `ClaudeLaunch::allow_bypass`; `coqui-acp-codex` switches it at the next turn.
 

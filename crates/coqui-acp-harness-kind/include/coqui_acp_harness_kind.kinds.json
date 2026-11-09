@@ -1,0 +1,172 @@
+{
+  "kinds": [
+    {
+      "name": "acp_harness",
+      "floor_hash": 2194037834,
+      "object": false,
+      "doc": "Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.\n\nThe host is the ACP client and the provider the agent: each message on the channel, either way,\nis one whole JSON-RPC 2.0 message as UTF-8 JSON text. The kind never models ACP itself, so a\nprovider in any language implements ACP as the protocol defines it, and the version is agreed by\n`initialize` on the channel.\n\nEvery method is synchronous; a host calls them from a thread of its own.",
+      "slots": [
+        {
+          "name": "describe",
+          "required": true,
+          "fallible": true,
+          "args": [],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Who the harness is and what its `initialize` will advertise, with nothing started: for a host\nlisting its harnesses. Cheap, and the same on every call."
+        },
+        {
+          "name": "start",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "request",
+              "type": "value",
+              "pass": "borrowed"
+            },
+            {
+              "name": "sink",
+              "type": "object",
+              "kind": "channel_sink",
+              "pass": "taken"
+            }
+          ],
+          "answer": {
+            "type": "object",
+            "kind": "channel"
+          },
+          "doc": "Starts one ACP connection: messages the host sends are the client's, and the agent's come back\nthrough `sink`.\n\nThe sink is handed over: the provider destroys it, even when it refuses. It returns once the\nchannel takes messages; the program it drives may start later, at `initialize` or\n`session/new`, and a failure then is answered in ACP before the provider closes.\n\nIt refuses with `GUATIAO_ERR_UNSUPPORTED` when it would refuse any of the request's\nrequirements ([`refusal`](Self::refusal)), and with `GUATIAO_ERR_BAD_VALUE` a request it cannot\nread; it never starts with a requirement left out."
+        },
+        {
+          "name": "refusal",
+          "required": false,
+          "fallible": true,
+          "args": [
+            {
+              "name": "requirement",
+              "type": "value",
+              "pass": "borrowed"
+            },
+            {
+              "name": "environment",
+              "type": "value",
+              "pass": "borrowed"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Why the harness could not hold a connection to `requirement`, started with `environment`, in a\nsentence; `None` when it can. A host asks before it starts one, and passes over a harness\nthat would refuse. The default refuses every requirement, known or not."
+        },
+        {
+          "name": "models",
+          "required": false,
+          "fallible": true,
+          "args": [
+            {
+              "name": "environment",
+              "type": "value",
+              "pass": "borrowed"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "The models the account behind `environment` may use, when the harness can say without a model\nturn. Never carries a value from `environment`. The default: unknown, and says so."
+        },
+        {
+          "name": "program",
+          "required": false,
+          "fallible": true,
+          "args": [],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "The program the harness starts, a name looked up on `PATH` or a path, so a host can say it\ncannot be found before it starts a connection. The default: `None`, and the host does not look."
+        },
+        {
+          "name": "session_record",
+          "required": false,
+          "fallible": true,
+          "args": [
+            {
+              "name": "query",
+              "type": "value",
+              "pass": "borrowed"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Where the harness keeps its own record of the session `query` names, when it keeps one and the\nfile is there. The default: none."
+        }
+      ]
+    },
+    {
+      "name": "channel",
+      "floor_hash": 2843269355,
+      "object": true,
+      "doc": "What the host writes on, handed back by the provider that started it.\n\nThe provider implements it and the host holds the channel object,\nwhich may be shared between threads: `send` may be called from several\nat once, each thread's messages kept in its own order. Dropping the\nchannel is `close(GUATIAO_OK)`.",
+      "slots": [
+        {
+          "name": "send",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "bytes",
+              "type": "bytes"
+            }
+          ],
+          "doc": "One message to the provider, lent for the call. Returns once the\nprovider has taken it, which may wait on the provider; answers\n`GUATIAO_ERR_GONE` once either side has closed, and a `send` that\nwas waiting when the host closed answers it too."
+        },
+        {
+          "name": "close",
+          "required": true,
+          "fallible": false,
+          "args": [
+            {
+              "name": "status",
+              "type": "u32"
+            }
+          ],
+          "doc": "Ends the stream from the host's side, with a `guatiao_status` the\nprovider hands to the sink's `closed`: `GUATIAO_OK` (0) for a plain\nend, an error status otherwise. Called once, and returns without\nwaiting for a `receive` still running; `send` answers\n`GUATIAO_ERR_GONE` after it. Cannot fail."
+        }
+      ]
+    },
+    {
+      "name": "channel_sink",
+      "floor_hash": 3528315804,
+      "object": true,
+      "doc": "What the provider writes back on, handed in by the host.\n\nThe host implements it and hands it over with the call that starts\nthe channel; the provider owns it from then on, makes every call on it\nfrom one thread at a time, and destroys it when done.",
+      "slots": [
+        {
+          "name": "receive",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "bytes",
+              "type": "bytes"
+            }
+          ],
+          "doc": "One message to the host, lent for the call. Returns once the host\nhas taken it, and a host never waits in it for its own `send`.\n`GUATIAO_ERR_GONE` says the host takes nothing more; any error\nends the stream, and the provider then calls `closed` with that\nstatus and delivers nothing still queued."
+        },
+        {
+          "name": "closed",
+          "required": true,
+          "fallible": false,
+          "args": [
+            {
+              "name": "status",
+              "type": "u32"
+            }
+          ],
+          "doc": "The stream has ended, from either side: with the host's status from\nthe channel's `close`, or the provider's own, a `guatiao_status`\n(`GUATIAO_OK` is the normal end). Called exactly once, and nothing\nbut `destroy` follows it. Cannot fail."
+        }
+      ]
+    }
+  ]
+}

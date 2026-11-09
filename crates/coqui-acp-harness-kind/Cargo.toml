@@ -1,0 +1,36 @@
+[package]
+name = "coqui-acp-harness-kind"
+description = "The acp_harness Guatiao kind: an Agent Client Protocol agent driver written in any language Guatiao hosts, started over a channel of ACP messages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["acp", "agent", "harness", "guatiao", "plugin"]
+categories = ["network-programming"]
+exclude = [".*", "*.local.*", "__pycache__"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+guatiao = { workspace = true, features = ["provider"] }
+guatiao-channel.workspace = true
+
+[dev-dependencies]
+coqui-acp = { path = "../coqui-acp" }
+guatiao = { workspace = true, features = ["provider", "load"] }
+serde_json.workspace = true
+
+# A real library the tests load: `cargo test` builds it into target/<profile>/examples.
+[[example]]
+name = "echo_harness"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true

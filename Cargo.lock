@@ -479,6 +479,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-acp-harness-kind"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "coqui-acp",
+ "guatiao",
+ "guatiao-channel",
+ "serde_json",
+]
+
+[[package]]
 name = "coqui-acp-page"
 version = "0.0.0-alpha.0"
 dependencies = [
@@ -1198,6 +1208,14 @@ dependencies = [
  "object",
  "sha2 0.10.9",
  "winapi-util",
+]
+
+[[package]]
+name = "guatiao-channel"
+version = "0.0.0-alpha.1"
+source = "git+https://github.com/Boriken-Dev/guatiao?rev=03e1cac8be06715a8037f45f1610c5894eea0b5b#03e1cac8be06715a8037f45f1610c5894eea0b5b"
+dependencies = [
+ "guatiao",
 ]
 
 [[package]]
