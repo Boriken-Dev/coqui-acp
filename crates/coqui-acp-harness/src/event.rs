@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use std::io;
 
+use coqui_acp_api::usage::{Bucket, LimitHit, Spend};
 use serde_json::Value;
 
 /// A block of a prompt, or of a message replayed from history.
@@ -340,45 +341,9 @@ pub struct Usage {
     pub context_used: Option<u64>,
     /// The size of the model's context, in tokens.
     pub context_size: Option<u64>,
-}
-
-/// A refusal to work until a quota resets.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Limit {
-    /// When it resets, in Unix seconds, when the harness said.
-    pub resets_at: Option<i64>,
-    /// Which window, such as `five_hour` or `weekly`.
-    pub window: Option<String>,
-    /// The harness's own words.
-    pub text: Option<String>,
-}
-
-/// One quota window the account reported.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Quota {
-    /// The window, such as `five_hour`.
-    pub window: String,
-    /// How much of it is used, in thousandths, when the harness gave a fraction.
-    pub used_permille: Option<u16>,
-    /// When it resets, in Unix seconds.
-    pub resets_at: Option<i64>,
-    /// The harness's status word, such as `allowed` or `rejected`.
-    pub status: Option<String>,
-}
-
-impl Quota {
-    /// A window with nothing known of it.
-    #[must_use]
-    pub fn new(window: impl Into<String>) -> Self {
-        Self {
-            window: window.into(),
-            used_permille: None,
-            resets_at: None,
-            status: None,
-        }
-    }
+    /// What the session has spent so far, as running totals; the session's id is filled in by the
+    /// connection, so a harness leaves it empty.
+    pub spend: Option<Spend>,
 }
 
 /// A command the person can give the agent by name.
@@ -477,7 +442,7 @@ pub enum TurnEnd {
     /// It failed, and why, in the harness's words.
     Failed(String),
     /// A quota refused it.
-    Limited(Limit),
+    Limited(LimitHit),
 }
 
 impl TurnEnd {
@@ -702,8 +667,9 @@ pub enum Event {
     Permission(PermissionRequest),
     /// Tokens, cost and context.
     Usage(Usage),
-    /// The account's quota windows.
-    Quota(Vec<Quota>),
+    /// The account's allowances, each a bucket named by its id: one replaces the earlier of its id,
+    /// and a field it leaves unknown keeps what was known.
+    Buckets(Vec<Bucket>),
     /// The commands the person can give.
     Commands(Vec<Command>),
     /// The session's choices as they stand now: a client is told of every change not its own.

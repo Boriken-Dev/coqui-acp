@@ -6,11 +6,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use base64::Engine as _;
+use coqui_acp_api::LimitHit;
 use serde_json::{Map, Value, json};
 
 use super::{ConfigOption, LIMIT_META_KEY, PLAN_ID};
 use crate::event::{
-    Command, Content, Diff, Event, FileChange, Limit, PlanEntry, Terminal, ToolCall, ToolContent,
+    Command, Content, Diff, Event, FileChange, PlanEntry, Terminal, ToolCall, ToolContent,
     ToolStatus, Usage,
 };
 
@@ -399,18 +400,8 @@ pub(crate) fn turn_usage(usage: &Usage) -> Value {
 }
 
 /// The `_meta` that says a quota refused a turn.
-pub(crate) fn limit_meta(limit: &Limit) -> Value {
-    let mut said = Map::new();
-    if let Some(resets_at) = limit.resets_at {
-        said.insert("resetsAt".into(), json!(resets_at));
-    }
-    if let Some(window) = &limit.window {
-        said.insert("window".into(), json!(window));
-    }
-    if let Some(text) = &limit.text {
-        said.insert("text".into(), json!(text));
-    }
-    json!({ LIMIT_META_KEY: said })
+pub(crate) fn limit_meta(limit: &LimitHit) -> Value {
+    json!({ LIMIT_META_KEY: serde_json::to_value(limit).unwrap_or(Value::Null) })
 }
 
 /// Options as ACP selects: `id` in version 1, `configId` in version 2.

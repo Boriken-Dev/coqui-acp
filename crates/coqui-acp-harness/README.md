@@ -21,7 +21,7 @@ and [`coqui-acp-codex`](https://github.com/Boriken-Dev/coqui-acp/tree/main/crate
   host's spawner.
 - `lines`: a harness's output, one JSON value per line, with a limit on a line, and the last lines that were not protocol.
 - `event`: messages and thoughts, tool calls with diffs, locations and terminals, plans, permission requests with a responder, usage
-  and context, quota and limits, commands, notices, compaction, and how a turn ended.
+  and context, usage buckets and limits, commands, notices, compaction, and how a turn ended.
 - `acp::serve`: a `Harness` as an ACP agent over any reader and writer, in version 1's shapes or version 2's. Every limit is a
   `Settings` field with a default.
 - `version::untested`: the warning for a harness version a driver was not tested with. Nothing is refused for it.

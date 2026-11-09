@@ -4,7 +4,8 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use coqui_acp_harness::event::{Limit, Quota, Usage};
+use coqui_acp_api::usage::{Bucket, LimitHit, Refill, Source, Status, Unit};
+use coqui_acp_harness::event::Usage;
 use serde_json::Value;
 
 /// A Unix timestamp that may be in seconds or milliseconds, in seconds.
@@ -20,19 +21,19 @@ pub(crate) const fn unix_seconds(value: i64) -> i64 {
 /// `result` whose text names a limit (`usage limit`, `limit reached`, `hit your limit`) or whose `api_error_status`
 /// is 429. A reset time comes from `resetsAt`, or from the number after a trailing `|` of the text; one given only
 /// as a local clock time is left unset rather than guessed.
-pub(crate) fn limit(value: &Value) -> Option<Limit> {
+pub(crate) fn limit(value: &Value) -> Option<LimitHit> {
     match value.get("type").and_then(Value::as_str)? {
         "rate_limit_event" => {
             let info = value.get("rate_limit_info")?;
             if info.get("status").and_then(Value::as_str) != Some("rejected") {
                 return None;
             }
-            let mut limit = Limit::default();
+            let mut limit = LimitHit::new(0);
             limit.resets_at = info
                 .get("resetsAt")
                 .and_then(Value::as_i64)
                 .map(unix_seconds);
-            limit.window = info
+            limit.bucket = info
                 .get("rateLimitType")
                 .and_then(Value::as_str)
                 .map(str::to_string);
@@ -52,16 +53,17 @@ pub(crate) fn limit(value: &Value) -> Option<Limit> {
                 .rsplit_once('|')
                 .and_then(|(_, tail)| tail.trim().parse::<i64>().ok())
                 .map(unix_seconds);
-            let window = if lower.contains("5-hour") || lower.contains("five-hour") {
+            let bucket = if lower.contains("5-hour") || lower.contains("five-hour") {
                 Some("five_hour".to_string())
             } else if lower.contains("weekly") || lower.contains("7-day") {
-                Some("weekly".to_string())
+                Some("seven_day".to_string())
             } else {
                 None
             };
-            let mut limit = Limit::default();
+            let mut limit = LimitHit::new(0);
             limit.resets_at = resets_at;
-            limit.window = window;
+            limit.bucket = bucket;
+            limit.source = Source::Inferred;
             limit.text = Some(text.to_string());
             Some(limit)
         }
@@ -69,9 +71,9 @@ pub(crate) fn limit(value: &Value) -> Option<Limit> {
     }
 }
 
-/// The quota windows a `rate_limit_event` reports, whatever its status: each of `unifiedWindows`, or else the one it
+/// The buckets a `rate_limit_event` reports, whatever its status: each of `unifiedWindows`, or else the one it
 /// names. `utilization` is thousandths only when it is a fraction between 0 and 1, since its scale is not documented.
-pub(crate) fn quota(value: &Value) -> Vec<Quota> {
+pub(crate) fn buckets(value: &Value) -> Vec<Bucket> {
     if value.get("type").and_then(Value::as_str) != Some("rate_limit_event") {
         return Vec::new();
     }
@@ -79,21 +81,31 @@ pub(crate) fn quota(value: &Value) -> Vec<Quota> {
         return Vec::new();
     };
     let window = |name: &str, fields: &Value| {
-        let mut quota = Quota::new(name);
-        quota.used_permille = fields
+        let mut bucket = Bucket::new(name);
+        bucket.unit = Unit::Permille;
+        if let Some(thousandths) = fields
             .get("utilization")
             .and_then(Value::as_f64)
             .filter(|fraction| (0.0..=1.0).contains(fraction))
-            .map(|fraction| permille(fraction * 1000.0));
-        quota.resets_at = fields
-            .get("resetsAt")
-            .and_then(Value::as_i64)
-            .map(unix_seconds);
-        quota.status = fields
-            .get("status")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        quota
+            .map(|fraction| permille(fraction * 1000.0))
+        {
+            bucket.used = Some(u64::from(thousandths));
+            bucket.limit = Some(1000);
+        }
+        bucket.refill = Refill::FixedWindow {
+            length: None,
+            resets_at: fields
+                .get("resetsAt")
+                .and_then(Value::as_i64)
+                .map(unix_seconds),
+        };
+        bucket.status = match fields.get("status").and_then(Value::as_str) {
+            Some("allowed") => Status::Ok,
+            Some("allowed_warning") => Status::Warning,
+            Some("rejected") => Status::Exhausted,
+            _ => Status::Unknown,
+        };
+        bucket
     };
     if let Some(windows) = info
         .get("unifiedWindows")
@@ -114,15 +126,15 @@ pub(crate) fn quota(value: &Value) -> Vec<Quota> {
 }
 
 /// The limit an `error` line says, by the same words as a result's; a reset time follows a trailing `|`.
-pub(crate) fn limit_of_text(text: &str) -> Option<Limit> {
+pub(crate) fn limit_of_text(text: &str) -> Option<LimitHit> {
     limit(&serde_json::json!({"type": "result", "is_error": true, "result": text}))
 }
 
 /// `limit`, with what `hint`, the rejected event before it, knows and it does not.
-pub(crate) fn with_hint(mut limit: Limit, hint: Option<Limit>) -> Limit {
+pub(crate) fn with_hint(mut limit: LimitHit, hint: Option<LimitHit>) -> LimitHit {
     if let Some(hint) = hint {
         limit.resets_at = limit.resets_at.or(hint.resets_at);
-        limit.window = limit.window.or(hint.window);
+        limit.bucket = limit.bucket.or(hint.bucket);
     }
     limit
 }

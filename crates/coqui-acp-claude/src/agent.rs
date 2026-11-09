@@ -9,6 +9,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use coqui_acp_api::{Source, UsageSupport};
 use coqui_acp_harness::acp::absolute_path;
 use coqui_acp_harness::{
     AgentInfo, ConfigOption, Conversation, Event, EventSink, Harness, HarnessError, Launch, Open,
@@ -226,6 +227,10 @@ impl Harness for ClaudeAgent {
             None => "Claude Code".to_string(),
         };
         AgentInfo::new("coqui-acp-claude", title, env!("CARGO_PKG_VERSION"))
+    }
+
+    fn usage(&self) -> UsageSupport {
+        UsageSupport::new(alloc::vec![Source::Reported, Source::Inferred], false)
     }
 
     fn takes(&self) -> Takes {

@@ -14,9 +14,12 @@ use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 
+use coqui_acp_api::usage::{Bucket, LimitHit, Spend};
+use coqui_acp_api::{USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION};
 use serde_json::{Value, json};
 
 use super::session::{Item, Session};
+use super::usage::{Tracker, now};
 use super::{EventSink, Harness, HarnessError, Open, OpenRequest, Settings, parse, shape};
 use crate::lines::{self, Line};
 
@@ -41,9 +44,11 @@ pub fn serve(
     input: impl Read,
     output: impl Write + Send + 'static,
 ) -> io::Result<()> {
+    let usage = Tracker::new(harness.usage(), settings.account.clone());
     let shared = Arc::new(Shared {
         harness,
         settings,
+        usage: Mutex::new(usage),
         out: Mutex::new(Box::new(output)),
         version: Mutex::new(None),
         sessions: Mutex::new(Sessions::default()),
@@ -104,6 +109,7 @@ pub(crate) struct Shared {
     pub(crate) settings: Settings,
     out: Mutex<Box<dyn Write + Send>>,
     version: Mutex<Option<u8>>,
+    usage: Mutex<Tracker>,
     sessions: Mutex<Sessions>,
     pending: Mutex<Pending>,
     next_id: AtomicU64,
@@ -262,6 +268,7 @@ impl Shared {
             | "session/load"
             | "session/resume"
             | "session/set_config_option"
+            | USAGE_METHOD
             | "session/close" => {
                 self.work(id, method, params, None);
             }
@@ -281,6 +288,94 @@ impl Shared {
             1
         };
         *locked(&self.version) = Some(version);
+        // Version 2 names the client's capabilities as version 1 names the agent's, without the prefix.
+        let asked = ["clientCapabilities", "capabilities"]
+            .iter()
+            .find_map(|key| params.get(*key))
+            .and_then(|capabilities| capabilities.get("_meta"))
+            .and_then(|meta| meta.get(USAGE_CAPABILITY));
+        if let Some(asked) = asked {
+            let account = asked
+                .get("account")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let notify = asked.get("notify").and_then(Value::as_bool) == Some(true);
+            locked(&self.usage).client(notify, account);
+        }
+    }
+
+    /// What `initialize` says of the usage extension: nothing for a harness that reports none.
+    fn usage_capability(&self) -> Option<Value> {
+        let support = self.harness.usage();
+        support.reports().then(|| {
+            json!({
+                "version": USAGE_VERSION,
+                "sources": support.sources.iter().map(coqui_acp_api::Source::as_str).collect::<Vec<_>>(),
+                "spend": support.spend,
+            })
+        })
+    }
+
+    /// Applies `change` to the connection's report and, when it changed one, tells a client that asked
+    /// to be told: the whole report, for `session` when the change came from one.
+    pub(crate) fn usage_changed(
+        &self,
+        session: Option<&str>,
+        change: impl FnOnce(&mut Tracker, i64) -> bool,
+    ) {
+        let at = now();
+        let told = {
+            let mut usage = locked(&self.usage);
+            if !usage.reports() || !change(&mut usage, at) {
+                return;
+            }
+            usage.notify.then(|| usage.snapshot(session, at))
+        };
+        if let Some(report) = told
+            && let Ok(report) = serde_json::to_value(&report)
+        {
+            self.notify(
+                USAGE_NOTIFICATION,
+                json!({"sessionId": session, "report": report}),
+            );
+        }
+    }
+
+    pub(crate) fn usage_buckets(&self, session: &str, buckets: Vec<Bucket>) {
+        self.usage_changed(Some(session), |usage, at| usage.buckets(buckets, at));
+    }
+
+    pub(crate) fn usage_spend(&self, session: &str, spend: Spend) {
+        self.usage_changed(Some(session), |usage, _| usage.spend(session, spend));
+    }
+
+    pub(crate) fn usage_limit(&self, session: &str, hit: LimitHit) {
+        self.usage_changed(Some(session), |usage, at| usage.limit(hit, at));
+    }
+
+    /// `_coqui_acp/usage`: the report, with a session's spend when one is named.
+    fn usage_report(&self, id: &Value, params: &Value) {
+        if !locked(&self.usage).reports() {
+            return self.respond_error(id, METHOD_NOT_FOUND, "method not found");
+        }
+        let session = match params.get("sessionId").filter(|named| !named.is_null()) {
+            None => None,
+            Some(named) => match named.as_str() {
+                Some(named) if self.sessions().open.contains_key(named) => Some(named.to_string()),
+                _ => {
+                    return self.respond_error(
+                        id,
+                        INVALID_PARAMS,
+                        "no such session is open on this connection",
+                    );
+                }
+            },
+        };
+        let report = locked(&self.usage).snapshot(session.as_deref(), now());
+        match serde_json::to_value(&report) {
+            Ok(report) => self.respond(id, report),
+            Err(error) => self.respond_error(id, INTERNAL_ERROR, &error.to_string()),
+        }
     }
 
     fn initialize(&self, id: &Value) {
@@ -308,7 +403,11 @@ impl Shared {
                     session[key] = value;
                 }
             }
-            self.respond(id, json!({"protocolVersion": 2, "info": info, "capabilities": {"session": session}, "authMethods": []}));
+            let mut capabilities = json!({"session": session});
+            if let Some(usage) = self.usage_capability() {
+                capabilities["_meta"] = json!({ USAGE_CAPABILITY: usage });
+            }
+            self.respond(id, json!({"protocolVersion": 2, "info": info, "capabilities": capabilities, "authMethods": []}));
             return;
         }
         let mut sessions = json!({"resume": {}, "close": {}});
@@ -320,16 +419,20 @@ impl Shared {
                 sessions[key] = value;
             }
         }
+        let mut capabilities = json!({
+            "loadSession": takes.load,
+            "promptCapabilities": {"image": takes.images, "audio": false, "embeddedContext": takes.embedded_context},
+            "mcpCapabilities": {"http": takes.mcp_http, "sse": takes.mcp_sse},
+            "sessionCapabilities": sessions,
+        });
+        if let Some(usage) = self.usage_capability() {
+            capabilities["_meta"] = json!({ USAGE_CAPABILITY: usage });
+        }
         self.respond(
             id,
             json!({
                 "protocolVersion": 1,
-                "agentCapabilities": {
-                    "loadSession": takes.load,
-                    "promptCapabilities": {"image": takes.images, "audio": false, "embeddedContext": takes.embedded_context},
-                    "mcpCapabilities": {"http": takes.mcp_http, "sse": takes.mcp_sse},
-                    "sessionCapabilities": sessions,
-                },
+                "agentCapabilities": capabilities,
                 "agentInfo": info,
                 "authMethods": [],
             }),
@@ -406,6 +509,7 @@ impl Shared {
         let version = self.version().unwrap_or(1);
         match method {
             "initialize" => self.initialize(id),
+            USAGE_METHOD => self.usage_report(id, params),
             "session/new" => self.open(id, params, Open::New, version),
             "session/load" => match parse::session_id(params) {
                 Ok(session) => self.open(id, params, Open::Load(session), version),

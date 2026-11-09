@@ -211,9 +211,15 @@ impl Session {
                 self.finish(shared, TurnEnd::Failed(reason));
             }
             Event::Output(_) | Event::SessionId(_) => {}
+            Event::Buckets(buckets) => shared.usage_buckets(self.id(), buckets),
             other => {
                 if let Event::Notice { title, .. } = &other {
                     shared.note(title);
+                }
+                if let Event::Usage(usage) = &other
+                    && let Some(spend) = &usage.spend
+                {
+                    shared.usage_spend(self.id(), spend.clone());
                 }
                 let updates = self.state().shapes.updates(&other);
                 for update in updates {
@@ -442,6 +448,19 @@ impl Session {
     }
 
     fn finish(&self, shared: &Shared, end: TurnEnd) {
+        // A hit nobody dated is dated when the connection hears it, in the report and in the answer alike.
+        let end = match end {
+            TurnEnd::Limited(mut hit) => {
+                if hit.observed_at == 0 {
+                    hit.observed_at = super::usage::now();
+                }
+                TurnEnd::Limited(hit)
+            }
+            other => other,
+        };
+        if let TurnEnd::Limited(hit) = &end {
+            shared.usage_limit(self.id(), hit.clone());
+        }
         let mut state = self.state();
         let asking = core::mem::take(&mut state.asking);
         if state.stale_ends > 0 && state.turn.is_none() {

@@ -8,6 +8,7 @@
 
 mod support;
 
+use coqui_acp_api::usage::{Bucket, Refill};
 use coqui_acp_codex::harness::event::{
     Content, Event, FileChange, OptionKind, Outcome, Stop, ToolContent, ToolKind, ToolStatus,
     TurnEnd,
@@ -399,7 +400,7 @@ fn a_failed_turn_with_a_usage_limit_uses_the_exhausted_window_for_the_reset() {
         panic!()
     };
     assert_eq!(limit.resets_at, Some(1_790_000_000));
-    assert_eq!(limit.window.as_deref(), Some("five_hour"));
+    assert_eq!(limit.bucket.as_deref(), Some("five_hour"));
     let TurnEnd::Limited(alone) = end_of(&events_of(&[failed])).clone() else {
         panic!()
     };
@@ -407,15 +408,19 @@ fn a_failed_turn_with_a_usage_limit_uses_the_exhausted_window_for_the_reset() {
 }
 
 #[test]
-fn every_rate_limit_snapshot_reports_its_windows_as_quota() {
+fn every_rate_limit_snapshot_reports_its_windows_as_buckets() {
     let quota = |line: Value| {
         events_of(&[line])
             .into_iter()
             .find_map(|event| match event {
-                Event::Quota(quota) => Some(quota),
+                Event::Buckets(buckets) => Some(buckets),
                 _ => None,
             })
             .unwrap_or_default()
+    };
+    let resets = |bucket: &Bucket| match bucket.refill {
+        Refill::FixedWindow { resets_at, .. } => resets_at,
+        _ => None,
     };
     let both = quota(
         json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
@@ -423,26 +428,19 @@ fn every_rate_limit_snapshot_reports_its_windows_as_quota() {
         "secondary": {"usedPercent": 40.0, "windowDurationMins": 10_080, "resetsAt": 1_790_500_000}}}}),
     );
     assert_eq!(
-        (
-            both[0].window.as_str(),
-            both[0].used_permille,
-            both[0].resets_at
-        ),
+        (both[0].id.as_str(), both[0].used, resets(&both[0])),
         ("five_hour", Some(425), Some(1_790_000_000))
     );
-    assert_eq!(
-        (both[1].window.as_str(), both[1].used_permille),
-        ("weekly", Some(400))
-    );
+    assert_eq!((both[1].id.as_str(), both[1].used), ("weekly", Some(400)));
+    assert!(matches!(
+        both[0].refill,
+        Refill::FixedWindow { length: Some(length), .. } if length.as_secs() == 18_000
+    ));
     let partial = quota(
         json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {"primary": {"usedPercent": 99.0, "resetsAt": 1}}}}),
     );
     assert_eq!(
-        (
-            partial.len(),
-            partial[0].window.as_str(),
-            partial[0].used_permille
-        ),
+        (partial.len(), partial[0].id.as_str(), partial[0].used),
         (1, "primary", Some(990)),
         "an unnamed window keeps its position"
     );

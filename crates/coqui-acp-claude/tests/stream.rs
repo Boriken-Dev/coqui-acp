@@ -10,6 +10,7 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
+use coqui_acp_api::usage::{Bucket, Refill, Status, Unit};
 use coqui_acp_claude::harness::event::{
     Content, Event, FileChange, OptionKind, Outcome, Stop, ToolContent, ToolKind, ToolStatus,
     TurnEnd, Usage,
@@ -437,42 +438,53 @@ fn a_rejected_rate_limit_event_becomes_a_limit_with_its_reset_time() {
 }
 
 #[test]
-fn every_rate_limit_event_reports_its_window_as_quota() {
+fn every_rate_limit_event_reports_its_window_as_a_bucket() {
     let quota = |line: Value| {
         events_of(&[line])
             .into_iter()
             .find_map(|event| match event {
-                Event::Quota(quota) => Some(quota),
+                Event::Buckets(buckets) => Some(buckets),
                 _ => None,
             })
             .unwrap_or_default()
+    };
+    let resets = |bucket: &Bucket| match bucket.refill {
+        Refill::FixedWindow { resets_at, .. } => resets_at,
+        _ => None,
     };
     let rejected = quota(
         json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_000_000, "rateLimitType": "five_hour"}}),
     );
     assert_eq!(
         (
-            rejected[0].window.as_str(),
-            rejected[0].resets_at,
-            rejected[0].status.as_deref()
+            rejected[0].id.as_str(),
+            resets(&rejected[0]),
+            rejected[0].status.clone()
         ),
-        ("five_hour", Some(1_790_000_000), Some("rejected"))
+        ("five_hour", Some(1_790_000_000), Status::Exhausted)
     );
     let warning = quota(
         json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1_790_000_000}}),
     );
     assert_eq!(
-        (warning[0].window.as_str(), warning[0].status.as_deref()),
-        ("unknown", Some("allowed_warning"))
+        (warning[0].id.as_str(), warning[0].status.clone()),
+        ("unknown", Status::Warning)
     );
     let measured = quota(
         json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "rateLimitType": "seven_day", "utilization": 0.25}}),
     );
-    assert_eq!(measured[0].used_permille, Some(250));
+    assert_eq!(
+        (
+            measured[0].used,
+            measured[0].limit,
+            measured[0].unit.clone()
+        ),
+        (Some(250), Some(1000), Unit::Permille)
+    );
     let percent = quota(
         json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "utilization": 25}}),
     );
-    assert_eq!(percent[0].used_permille, None, "only a fraction is taken");
+    assert_eq!(percent[0].used, None, "only a fraction is taken");
     assert!(quota(json!({"type": "result", "result": "done"})).is_empty());
 }
 
@@ -517,7 +529,7 @@ fn a_limit_without_a_parsable_reset_time_still_parks_the_session() {
         panic!()
     };
     assert_eq!(limit.resets_at, None);
-    assert_eq!(limit.window.as_deref(), Some("five_hour"));
+    assert_eq!(limit.bucket.as_deref(), Some("five_hour"));
 }
 
 /// As Claude Code 2.1.316 reports a 429 from a gateway, past its retries.
@@ -853,7 +865,7 @@ fn a_recorded_rejection_gives_the_refused_turn_its_reset_and_window() {
         panic!("{:?}", ends[1])
     };
     assert_eq!(limit.resets_at, Some(reset));
-    assert_eq!(limit.window.as_deref(), Some("five_hour"));
+    assert_eq!(limit.bucket.as_deref(), Some("five_hour"));
     assert!(
         limit.text.as_deref().unwrap().contains("limit"),
         "{limit:?}"
@@ -872,15 +884,15 @@ fn recorded_windows_report_how_much_is_used() {
     let quotas: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            Event::Quota(windows) => Some(windows),
+            Event::Buckets(windows) => Some(windows),
             _ => None,
         })
         .collect();
-    assert_eq!(quotas[0][0].window, "five_hour");
-    assert_eq!(quotas[0][0].used_permille, Some(500));
-    assert_eq!(quotas[0][0].status.as_deref(), Some("allowed"));
-    assert_eq!(quotas[1][0].used_permille, Some(1000));
-    assert_eq!(quotas[1][0].status.as_deref(), Some("rejected"));
+    assert_eq!(quotas[0][0].id, "five_hour");
+    assert_eq!(quotas[0][0].used, Some(500));
+    assert_eq!(quotas[0][0].status, Status::Ok);
+    assert_eq!(quotas[1][0].used, Some(1000));
+    assert_eq!(quotas[1][0].status, Status::Exhausted);
 }
 
 /// No recording holds one: Claude Code 2.1.318 said nothing of the kind to any stand-in.

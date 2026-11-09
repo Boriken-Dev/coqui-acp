@@ -106,7 +106,7 @@ pub fn git_patch(path: &str, change: FileChange, hunks: &str) -> String
 | `webSearch`, `imageView` | `Tool` |
 | `turn/plan/updated` | `Plan` |
 | `thread/tokenUsage/updated` | `Usage` of `last`: cached input split out, not cumulative, no cost, context used and `modelContextWindow` |
-| `account/rateLimits/updated` | `Quota` per window (`five_hour`, `weekly`, else its position; `usedPercent` as thousandths), and the exhausted window kept |
+| `account/rateLimits/updated` | `Buckets`, one per window (`five_hour`, `weekly`, else its position; `usedPercent` as permille, a fixed window with its length and `resetsAt`, `exhausted` from 100), and the exhausted window kept |
 | `turn/completed`, `turn/failed` | `TurnEnd`: a limit (`codexErrorInfo` naming a usage or rate limit, or a failed connection with HTTP 429; reset from `resetsAt` else the exhausted window) is `Limited`; `interrupted`, or `failed` after `interrupting`, is `Stopped(Cancelled)`; `failed` is `Failed` with the error's message; else `Stopped(EndTurn)` |
 | `error` | kept for the running turn's end, unless Codex will retry or it names another turn |
 | `thread/compacted`, `contextCompaction` items | `Compaction` |

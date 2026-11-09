@@ -12,12 +12,15 @@ use std::sync::mpsc;
 
 use serde_json::{Map, Value};
 
+use coqui_acp_api::UsageSupport;
+
 use crate::event::{Content, Event};
 
 mod connection;
 mod parse;
 mod session;
 mod shape;
+mod usage;
 
 pub use connection::serve;
 
@@ -82,9 +85,9 @@ pub fn path_admitted(path: &Path, roots: &[PathBuf], network_paths: bool) -> Res
     Ok(())
 }
 
-/// The `_meta` key of a turn's answer, or of a version 2 `idle`, that says a quota refused the turn:
-/// `{"resetsAt": seconds, "window": text, "text": text}`, each when known.
-pub const LIMIT_META_KEY: &str = "dev.boriken.coqui.acp/limit";
+/// The `_meta` key of a turn's answer, or of a version 2 `idle`, that says a quota refused the turn: a
+/// [`LimitHit`](coqui_acp_api::LimitHit) as JSON.
+pub use coqui_acp_api::LIMIT_META_KEY;
 
 /// The id of the plan of a session in version 2, where plans have ids; a harness has one plan per session.
 pub const PLAN_ID: &str = "plan";
@@ -502,6 +505,14 @@ pub trait Harness: Send + Sync + 'static {
     /// What it takes.
     fn takes(&self) -> Takes;
 
+    /// What usage it reports. When it reports any, `initialize` advertises the usage extension and
+    /// `_coqui_acp/usage` is answered from the [`Event::Buckets`], [`Event::Usage`]'s spend and
+    /// [`TurnEnd::Limited`](crate::event::TurnEnd::Limited) it sends. The default, for a harness
+    /// that reports none: none, which is a true answer.
+    fn usage(&self) -> UsageSupport {
+        UsageSupport::none()
+    }
+
     /// Opens a session, sending what it reports to `events`. For [`Open::Load`] the history is sent before this
     /// returns. It returns once the harness's session id is known.
     ///
@@ -595,6 +606,9 @@ pub struct Settings {
     pub network_paths: bool,
     /// Called with each notice the harness gives, such as a warning about its version, for a host that logs them.
     pub on_notice: Option<NoticeHook>,
+    /// The host's id for the account the connection runs on, echoed into every usage report and never
+    /// interpreted; over the one the client names in its capabilities. Default none.
+    pub account: Option<String>,
 }
 
 impl Settings {
@@ -618,6 +632,7 @@ impl Settings {
             working_roots: Vec::new(),
             network_paths: false,
             on_notice: None,
+            account: None,
         }
     }
 }
@@ -647,6 +662,7 @@ impl fmt::Debug for Settings {
             .field("working_roots", &self.working_roots)
             .field("network_paths", &self.network_paths)
             .field("on_notice", &self.on_notice.is_some())
+            .field("account", &self.account)
             .finish()
     }
 }

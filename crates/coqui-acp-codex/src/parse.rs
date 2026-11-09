@@ -8,8 +8,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::io;
 
+use coqui_acp_api::usage::LimitHit;
 use coqui_acp_harness::event::{
-    Content, Diff, Event, FileChange, Limit, Location, OptionKind, Outcome, PermissionOption,
+    Content, Diff, Event, FileChange, Location, OptionKind, Outcome, PermissionOption,
     PermissionRequest, PlanEntry, PlanStatus, Responder, Severity, Stop, Terminal, ToolCall,
     ToolContent, ToolKind, ToolStatus, TurnEnd,
 };
@@ -113,7 +114,7 @@ pub struct Parser {
     ended: Option<String>,
     interrupted: bool,
     /// The latest window the account reported as used up.
-    exhausted: Option<Limit>,
+    exhausted: Option<LimitHit>,
     /// The error the running turn reported before its end.
     error: Option<Value>,
     answers: Vec<Answer>,
@@ -425,11 +426,11 @@ impl Parser {
                 .map(|usage| vec![Event::Usage(usage)])
                 .unwrap_or_default(),
             "account/rateLimits/updated" => {
-                let quota = limits::quota(message);
-                if quota.is_empty() {
+                let buckets = limits::buckets(message);
+                if buckets.is_empty() {
                     Vec::new()
                 } else {
-                    vec![Event::Quota(quota)]
+                    vec![Event::Buckets(buckets)]
                 }
             }
             "error" => {

@@ -1,0 +1,315 @@
+//! What one connection knows of its account's usage: the report a client reads with
+//! `_coqui_acp/usage`, kept up to date from the harness's events.
+
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use coqui_acp_api::usage::{Bucket, LimitHit, Refill, Spend, Status};
+use coqui_acp_api::{Coverage, UsageReport, UsageSupport};
+
+/// Unix seconds now.
+pub(crate) fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// The report of a connection, and what a client asked of it.
+#[derive(Debug)]
+pub(crate) struct Tracker {
+    support: UsageSupport,
+    /// Whether the client asked for `_coqui_acp/usage_update`.
+    pub(crate) notify: bool,
+    report: UsageReport,
+    spends: BTreeMap<String, Spend>,
+}
+
+impl Tracker {
+    pub(crate) fn new(support: UsageSupport, account: Option<String>) -> Self {
+        let mut report = UsageReport::new();
+        report.sources.clone_from(&support.sources);
+        report.account = account;
+        Self {
+            support,
+            notify: false,
+            report,
+            spends: BTreeMap::new(),
+        }
+    }
+
+    /// Whether the harness reports usage at all.
+    pub(crate) fn reports(&self) -> bool {
+        self.support.reports()
+    }
+
+    /// What the client said at `initialize`. A host's own account, set in the settings, stays.
+    pub(crate) fn client(&mut self, notify: bool, account: Option<String>) {
+        self.notify = notify;
+        if self.report.account.is_none() {
+            self.report.account = account;
+        }
+    }
+
+    /// The report as of `now`, for `session` when one is named: with that session's spend, and
+    /// without a limit whose reset has passed.
+    pub(crate) fn snapshot(&self, session: Option<&str>, now: i64) -> UsageReport {
+        let mut report = self.report.clone();
+        if report
+            .limit
+            .as_ref()
+            .is_some_and(|hit| hit.resets_at.is_some_and(|at| at <= now))
+        {
+            report.limit = None;
+        }
+        if self.support.spend {
+            report.spend = session.and_then(|session| self.spends.get(session).cloned());
+        }
+        report
+    }
+
+    /// Takes the buckets a harness reported: one replaces the earlier of its id, keeping what the
+    /// new one leaves unknown. Answers whether the report changed, other than in when it was read.
+    pub(crate) fn buckets(&mut self, incoming: Vec<Bucket>, now: i64) -> bool {
+        let mut changed = false;
+        for mut bucket in incoming {
+            if bucket.observed_at == 0 {
+                bucket.observed_at = now;
+            }
+            let id = bucket.id.clone();
+            let room = matches!(bucket.status, Status::Ok | Status::Warning);
+            match self.report.buckets.iter_mut().find(|held| held.id == id) {
+                Some(held) => {
+                    let merged = merge(held, bucket);
+                    let mut probe = merged.clone();
+                    probe.observed_at = held.observed_at;
+                    changed |= probe != *held;
+                    *held = merged;
+                }
+                None => {
+                    self.report.buckets.push(bucket);
+                    changed = true;
+                }
+            }
+            if room
+                && self
+                    .report
+                    .limit
+                    .as_ref()
+                    .is_some_and(|hit| hit.bucket.as_deref() == Some(id.as_str()))
+            {
+                self.report.limit = None;
+                changed = true;
+            }
+        }
+        self.settle(changed)
+    }
+
+    /// Takes a session's spend, as running totals.
+    pub(crate) fn spend(&mut self, session: &str, mut spend: Spend) -> bool {
+        if !self.support.spend {
+            return false;
+        }
+        session.clone_into(&mut spend.session_id);
+        if self.spends.get(session) == Some(&spend) {
+            return false;
+        }
+        self.spends.insert(session.into(), spend);
+        self.settle(true)
+    }
+
+    /// Takes a refusal: it is the report's limit, and the bucket it names is exhausted.
+    pub(crate) fn limit(&mut self, mut hit: LimitHit, now: i64) -> bool {
+        if hit.observed_at == 0 {
+            hit.observed_at = now;
+        }
+        if self.report.limit.as_ref() == Some(&hit) {
+            return false;
+        }
+        if let Some(id) = &hit.bucket {
+            match self.report.buckets.iter_mut().find(|held| &held.id == id) {
+                Some(held) => {
+                    held.status = Status::Exhausted;
+                    held.observed_at = held.observed_at.max(hit.observed_at);
+                }
+                None => {
+                    let mut bucket = Bucket::new(id.clone());
+                    bucket.status = Status::Exhausted;
+                    bucket.source = hit.source.clone();
+                    bucket.observed_at = if hit.observed_at == 0 {
+                        now
+                    } else {
+                        hit.observed_at
+                    };
+                    bucket.refill = Refill::FixedWindow {
+                        length: None,
+                        resets_at: hit.resets_at,
+                    };
+                    self.report.buckets.push(bucket);
+                }
+            }
+        }
+        self.report.limit = Some(hit);
+        self.settle(true)
+    }
+
+    /// Bumps the revision when something changed, and keeps `observed_at` the newest bucket's.
+    fn settle(&mut self, changed: bool) -> bool {
+        self.report.observed_at = self
+            .report
+            .buckets
+            .iter()
+            .map(|bucket| bucket.observed_at)
+            .max()
+            .unwrap_or(0);
+        if changed {
+            self.report.revision += 1;
+        }
+        changed
+    }
+}
+
+/// `new` over `old`: what `new` leaves unknown, `old` keeps.
+fn merge(old: &Bucket, new: Bucket) -> Bucket {
+    let mut merged = new;
+    if merged.label.is_none() {
+        merged.label.clone_from(&old.label);
+    }
+    if merged.models == Coverage::Unknown {
+        merged.models = old.models.clone();
+    }
+    merged.used = merged.used.or(old.used);
+    merged.limit = merged.limit.or(old.limit);
+    merged.remaining = merged.remaining.or(old.remaining);
+    merged.refill = match (merged.refill, &old.refill) {
+        (Refill::Unknown, kept) => kept.clone(),
+        (
+            Refill::FixedWindow { length, resets_at },
+            Refill::FixedWindow {
+                length: old_length,
+                resets_at: old_resets,
+            },
+        ) => Refill::FixedWindow {
+            length: length.or(*old_length),
+            resets_at: resets_at.or(*old_resets),
+        },
+        (other, _) => other,
+    };
+    if merged.status == Status::Unknown {
+        merged.status = old.status.clone();
+    }
+    merged.observed_at = merged.observed_at.max(old.observed_at);
+    if merged.evidence.is_none() {
+        merged.evidence.clone_from(&old.evidence);
+    }
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use coqui_acp_api::Source;
+
+    use super::*;
+
+    fn support() -> UsageSupport {
+        UsageSupport::new(alloc::vec![Source::Reported], true)
+    }
+
+    fn five_hour(used: u64) -> Bucket {
+        let mut bucket = Bucket::new("five_hour");
+        bucket.limit = Some(1000);
+        bucket.used = Some(used);
+        bucket.status = Status::Ok;
+        bucket.refill = Refill::FixedWindow {
+            length: Some(core::time::Duration::from_secs(18_000)),
+            resets_at: Some(1_000_000),
+        };
+        bucket.observed_at = 100;
+        bucket
+    }
+
+    #[test]
+    fn a_change_bumps_the_revision_and_a_repeat_does_not() {
+        let mut tracker = Tracker::new(support(), None);
+        assert!(tracker.buckets(alloc::vec![five_hour(620)], 100));
+        assert_eq!(tracker.snapshot(None, 100).revision, 1);
+        let mut again = five_hour(620);
+        again.observed_at = 200;
+        assert!(!tracker.buckets(alloc::vec![again], 200));
+        let report = tracker.snapshot(None, 200);
+        assert_eq!((report.revision, report.observed_at), (1, 200));
+        assert!(tracker.buckets(alloc::vec![five_hour(700)], 300));
+        assert_eq!(tracker.snapshot(None, 300).revision, 2);
+    }
+
+    #[test]
+    fn a_sparse_update_keeps_the_fields_it_lacks() {
+        let mut tracker = Tracker::new(support(), None);
+        tracker.buckets(alloc::vec![five_hour(620)], 100);
+        let mut sparse = Bucket::new("five_hour");
+        sparse.used = Some(640);
+        sparse.status = Status::Warning;
+        sparse.observed_at = 150;
+        tracker.buckets(alloc::vec![sparse], 150);
+        let report = tracker.snapshot(None, 150);
+        let held = &report.buckets[0];
+        assert_eq!((held.used, held.limit), (Some(640), Some(1000)));
+        assert_eq!(held.status, Status::Warning);
+        assert!(matches!(
+            held.refill,
+            Refill::FixedWindow {
+                resets_at: Some(1_000_000),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_limit_exhausts_its_bucket_until_room_or_its_reset() {
+        let mut tracker = Tracker::new(support(), Some("a".into()));
+        tracker.buckets(alloc::vec![five_hour(620)], 100);
+        let mut hit = LimitHit::new(200);
+        hit.bucket = Some("five_hour".into());
+        hit.resets_at = Some(900);
+        assert!(tracker.limit(hit.clone(), 200));
+        assert!(!tracker.limit(hit, 200), "the same refusal changes nothing");
+        let report = tracker.snapshot(None, 200);
+        assert_eq!(report.buckets[0].status, Status::Exhausted);
+        assert!(report.limit.is_some());
+        assert!(
+            tracker.snapshot(None, 900).limit.is_none(),
+            "its reset passed"
+        );
+        tracker.buckets(alloc::vec![five_hour(10)], 950);
+        assert!(
+            tracker.snapshot(None, 800).limit.is_none(),
+            "room was reported"
+        );
+    }
+
+    #[test]
+    fn spend_is_kept_per_session_and_only_for_a_harness_that_reports_it() {
+        let mut tracker = Tracker::new(support(), None);
+        let mut spend = Spend::new("");
+        spend.input = 5;
+        assert!(tracker.spend("s1", spend.clone()));
+        assert!(!tracker.spend("s1", spend));
+        assert_eq!(
+            tracker
+                .snapshot(Some("s1"), 0)
+                .spend
+                .map(|s| (s.session_id, s.input)),
+            Some(("s1".into(), 5))
+        );
+        assert!(tracker.snapshot(Some("s2"), 0).spend.is_none());
+        assert!(tracker.snapshot(None, 0).spend.is_none());
+        let mut bare = Tracker::new(
+            UsageSupport::new(alloc::vec![Source::Reported], false),
+            None,
+        );
+        assert!(!bare.spend("s1", Spend::new("")));
+    }
+}

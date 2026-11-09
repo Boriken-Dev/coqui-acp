@@ -20,10 +20,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 # The acp_harness kind's spawner on this machine, and Spawn through any host's spawner.
-kind = ["dep:coqui-acp-api"]
+kind = []
 
 [dependencies]
-coqui-acp-api = { path = "../coqui-acp-api", optional = true }
+coqui-acp-api = { path = "../coqui-acp-api" }
 base64.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

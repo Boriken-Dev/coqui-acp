@@ -8,10 +8,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::io;
 
+use coqui_acp_api::usage::LimitHit;
 use coqui_acp_harness::event::{
-    Command, Content, Event, Limit, OptionKind, Outcome, PermissionOption, PermissionRequest,
-    PlanEntry, PlanStatus, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolStatus,
-    TurnEnd,
+    Command, Content, Event, OptionKind, Outcome, PermissionOption, PermissionRequest, PlanEntry,
+    PlanStatus, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolStatus, TurnEnd,
 };
 use serde_json::{Map, Value, json};
 
@@ -87,7 +87,7 @@ pub struct Parser {
     /// Whether a prompt has been written whose result has not come.
     running: bool,
     /// The last rejected `rate_limit_event`: the only place that says when the limit resets.
-    rejected: Option<Limit>,
+    rejected: Option<LimitHit>,
     /// A turn an `error` line has ended: the `result` that may follow it is not a second end.
     ended_by_error: bool,
     limits: ParserLimits,
@@ -251,9 +251,9 @@ impl Parser {
             "error" => events.extend(self.error_line(value)),
             "rate_limit_event" => {
                 self.rejected = limits::limit(value);
-                let quota = limits::quota(value);
-                if !quota.is_empty() {
-                    events.push(Event::Quota(quota));
+                let buckets = limits::buckets(value);
+                if !buckets.is_empty() {
+                    events.push(Event::Buckets(buckets));
                 }
             }
             _ => {}

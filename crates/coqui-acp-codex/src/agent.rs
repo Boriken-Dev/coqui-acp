@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use std::io::Read;
 use std::sync::OnceLock;
 
+use coqui_acp_api::{Source, UsageSupport};
 use coqui_acp_harness::{
     AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, Launch, McpTransport,
     Open, OpenRequest, OptionValue, PlainSpawn, Spawn, Takes,
@@ -168,6 +169,10 @@ impl Harness for CodexAgent {
             None => "Codex".to_string(),
         };
         AgentInfo::new("coqui-acp-codex", title, env!("CARGO_PKG_VERSION"))
+    }
+
+    fn usage(&self) -> UsageSupport {
+        UsageSupport::new(alloc::vec![Source::Reported, Source::Inferred], false)
     }
 
     fn takes(&self) -> Takes {
