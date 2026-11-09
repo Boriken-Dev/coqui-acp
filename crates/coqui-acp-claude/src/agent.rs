@@ -230,7 +230,7 @@ impl Harness for ClaudeAgent {
     }
 
     fn usage(&self) -> UsageSupport {
-        UsageSupport::new(alloc::vec![Source::Reported, Source::Inferred], false)
+        UsageSupport::new(alloc::vec![Source::Reported, Source::Inferred], true).needs_turn(true)
     }
 
     fn takes(&self) -> Takes {

@@ -10,7 +10,9 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
-use coqui_acp_api::usage::{Bucket, Refill, Status, Unit};
+use std::time::Duration;
+
+use coqui_acp_api::usage::{Bucket, Coverage, Refill, Source, Spend, Status, Unit};
 use coqui_acp_claude::harness::event::{
     Content, Event, FileChange, OptionKind, Outcome, Stop, ToolContent, ToolKind, ToolStatus,
     TurnEnd, Usage,
@@ -1256,4 +1258,237 @@ fn an_always_allow_leaves_out_a_set_mode_beyond_what_may_be_chosen() {
         .answer(Outcome::Selected("allow_always".into()))
         .unwrap();
     assert_eq!(*told.lock().unwrap(), ["plan"]);
+}
+
+fn buckets_of(events: &[Event]) -> Vec<Bucket> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Buckets(buckets) => Some(buckets.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn spends_of(events: &[Event]) -> Vec<Spend> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Usage(usage) => usage.spend.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn recorded_rate_limit_events_are_a_five_hour_window_that_is_allowed_then_rejected() {
+    let (events, _) = parsed("rate_limit");
+    let buckets = buckets_of(&events);
+    assert_eq!(buckets.len(), 2, "{buckets:?}");
+    let mut allowed = Bucket::new("five_hour");
+    allowed.unit = Unit::Permille;
+    allowed.used = Some(500);
+    allowed.limit = Some(1000);
+    allowed.refill = Refill::FixedWindow {
+        length: Some(Duration::from_secs(5 * 3600)),
+        resets_at: Some(1_793_875_411),
+    };
+    allowed.status = Status::Ok;
+    assert_eq!(buckets[0], allowed, "utilization 0.5 is 500 of 1000");
+    allowed.used = Some(1000);
+    allowed.status = Status::Exhausted;
+    assert_eq!(buckets[1], allowed);
+    assert_eq!(
+        buckets[0].models,
+        Coverage::Unknown,
+        "a window says no model"
+    );
+}
+
+#[test]
+fn recorded_results_are_the_sessions_spend_with_cost_in_micro_usd() {
+    let (events, _) = parsed("rate_limit");
+    let spends = spends_of(&events);
+    assert!(spends.len() >= 2, "{spends:?}");
+    let first = &spends[0];
+    assert_eq!(
+        (
+            first.input,
+            first.output,
+            first.cache_read,
+            first.cache_write
+        ),
+        (11, 7, 0, 0)
+    );
+    assert_eq!(first.reasoning, Some(0));
+    assert_eq!(
+        first.cost_micro_usd,
+        Some(5),
+        "0.0000046 dollars, rounded to the nearest millionth"
+    );
+    assert_eq!(first.by_model.len(), 1);
+    let row = &first.by_model[0];
+    assert_eq!(
+        (
+            row.model.as_str(),
+            row.input,
+            row.output,
+            row.cost_micro_usd
+        ),
+        ("claude-haiku-5-5", 11, 7, Some(5))
+    );
+}
+
+#[test]
+fn a_recorded_result_totals_every_model_that_spent_with_its_own_cost() {
+    let (events, _) = parsed("turn");
+    let last = spends_of(&events).pop().expect("a result");
+    // modelUsage and total_cost_usd are the session's running totals; the `usage` beside them is the last turn's.
+    assert_eq!((last.input, last.output), (88, 56));
+    assert_eq!(last.cost_micro_usd, Some(124), "0.0001242 dollars");
+    let rows: Vec<_> = last
+        .by_model
+        .iter()
+        .map(|row| {
+            (
+                row.model.as_str(),
+                row.input,
+                row.output,
+                row.cost_micro_usd,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("claude-haiku-5-5", 77, 49, Some(32)),
+            ("claude-sonnet-5-5", 11, 7, Some(92))
+        ]
+    );
+}
+
+#[test]
+fn a_result_without_a_cost_has_no_cost_and_not_zero() {
+    let events = events_of(&[
+        json!({"type": "result", "result": "ok", "usage": {"input_tokens": 3, "output_tokens": 4}}),
+    ]);
+    let spend = &spends_of(&events)[0];
+    assert_eq!((spend.input, spend.output), (3, 4));
+    assert_eq!(spend.cost_micro_usd, None);
+    assert_eq!(spend.reasoning, None);
+    assert!(spend.by_model.is_empty());
+    let free = events_of(&[json!({"type": "result", "result": "ok", "total_cost_usd": 0.0})]);
+    assert_eq!(
+        spends_of(&free)[0].cost_micro_usd,
+        Some(0),
+        "a reported zero is zero"
+    );
+}
+
+#[test]
+fn weekly_windows_are_a_week_long_and_the_model_specific_ones_cover_their_model() {
+    let event = json!({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed_warning", "resetsAt": 1_790_100_000, "rateLimitType": "seven_day_opus",
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0.1, "resetsAt": 1_790_000_000, "status": "allowed"},
+            "seven_day": {"utilization": 0.4, "resetsAt": 1_790_500_000, "status": "allowed"},
+            "seven_day_opus": {"utilization": 0.85, "resetsAt": 1_790_600_000, "status": "allowed_warning"},
+            "seven_day_sonnet": {"utilization": 0.2, "resetsAt": 1_790_700_000, "status": "allowed"}}}});
+    let buckets = buckets_of(&events_of(&[event]));
+    let ids: Vec<_> = buckets.iter().map(|bucket| bucket.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "five_hour",
+            "seven_day",
+            "seven_day_opus",
+            "seven_day_sonnet"
+        ]
+    );
+    let week = Duration::from_secs(7 * 24 * 3600);
+    let length = |bucket: &Bucket| match bucket.refill {
+        Refill::FixedWindow { length, .. } => length,
+        _ => None,
+    };
+    assert_eq!(length(&buckets[0]), Some(Duration::from_secs(5 * 3600)));
+    assert!(
+        buckets[1..]
+            .iter()
+            .all(|bucket| length(bucket) == Some(week))
+    );
+    assert_eq!(buckets[0].models, Coverage::Unknown);
+    assert_eq!(buckets[1].models, Coverage::Unknown);
+    assert_eq!(
+        buckets[2].models,
+        Coverage::Only {
+            models: vec!["opus".into()]
+        }
+    );
+    assert_eq!(
+        buckets[3].models,
+        Coverage::Only {
+            models: vec!["sonnet".into()]
+        }
+    );
+    // A warning is Claude's own word, and only that.
+    assert_eq!(
+        buckets
+            .iter()
+            .map(|bucket| bucket.status.clone())
+            .collect::<Vec<_>>(),
+        [Status::Ok, Status::Ok, Status::Warning, Status::Ok]
+    );
+    assert_eq!((buckets[2].used, buckets[2].limit), (Some(850), Some(1000)));
+}
+
+#[test]
+fn a_window_not_named_by_model_says_no_model_and_an_unnamed_warning_is_the_unknown_bucket() {
+    let named = buckets_of(&events_of(&[
+        json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "rateLimitType": "seven_day_cowork", "utilization": 0.1}}),
+    ]));
+    assert_eq!(named[0].id, "seven_day_cowork");
+    assert_eq!(named[0].models, Coverage::Unknown);
+    let unnamed = buckets_of(&events_of(&[
+        json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1_790_000_000}}),
+    ]));
+    assert_eq!(unnamed[0].id, "unknown");
+    assert_eq!(unnamed[0].status, Status::Warning);
+    assert_eq!(
+        unnamed[0].refill,
+        Refill::FixedWindow {
+            length: None,
+            resets_at: Some(1_790_000_000)
+        }
+    );
+}
+
+#[test]
+fn a_usage_limit_result_is_an_inferred_hit_with_the_reset_after_the_pipe_and_its_window() {
+    let events = events_of(&[
+        json!({"type": "result", "is_error": true, "result": "Claude AI usage limit reached for your 5-hour window|1790000000"}),
+    ]);
+    let TurnEnd::Limited(hit) = end_of(&events) else {
+        panic!("{:?}", end_of(&events))
+    };
+    assert_eq!(hit.source, Source::Inferred);
+    assert_eq!(hit.resets_at, Some(1_790_000_000));
+    assert_eq!(hit.bucket.as_deref(), Some("five_hour"));
+    assert!(hit.text.as_deref().unwrap().contains("usage limit reached"));
+}
+
+#[test]
+fn a_rejected_event_is_a_reported_hit() {
+    let events = events_of(&[
+        json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_000_000, "rateLimitType": "seven_day"}}),
+        json!({"type": "result", "is_error": true, "subtype": "success", "result": "you are out of extra usage"}),
+    ]);
+    let TurnEnd::Limited(hit) = end_of(&events) else {
+        panic!("{:?}", end_of(&events))
+    };
+    assert_eq!(hit.source, Source::Reported);
+    assert_eq!(
+        (hit.resets_at, hit.bucket.as_deref()),
+        (Some(1_790_000_000), Some("seven_day"))
+    );
 }

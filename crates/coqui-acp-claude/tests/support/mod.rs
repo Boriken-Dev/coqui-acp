@@ -109,6 +109,8 @@ pub struct Peer {
     next: u64,
     /// Every `session/update` seen, in order.
     pub updates: Vec<Value>,
+    /// Every `_coqui_acp/usage_update` seen, in order: its params.
+    pub usage_updates: Vec<Value>,
     /// The answers to permission requests, in order: an option kind to choose, or `cancel`.
     pub answers: VecDeque<String>,
     /// Every permission request seen.
@@ -145,6 +147,7 @@ impl Peer {
             from_agent: Arc::new(Mutex::new(receiver)),
             next: 0,
             updates: Vec::new(),
+            usage_updates: Vec::new(),
             answers: VecDeque::new(),
             asked: Vec::new(),
         }
@@ -159,6 +162,10 @@ impl Peer {
 
     fn take(&mut self, message: Value) -> Option<Value> {
         match message.get("method").and_then(Value::as_str) {
+            Some("_coqui_acp/usage_update") => {
+                self.usage_updates.push(message["params"].clone());
+                None
+            }
             Some("session/update") => {
                 self.updates.push(message["params"]["update"].clone());
                 None

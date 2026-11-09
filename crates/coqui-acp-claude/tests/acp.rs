@@ -825,3 +825,88 @@ fn the_mode_follows_what_claude_code_reports() {
         "accept_edits"
     );
 }
+
+const USAGE: &str = "dev.boriken.coqui.acp/usage";
+
+#[test]
+fn a_client_that_asked_is_told_the_usage_after_each_recorded_rate_limit_event_and_the_agent_says_it_needs_a_turn()
+ {
+    let scratch = Scratch::new("usage");
+    let mut peer = Peer::serve(agent(Some("rate_limit"), None), Settings::new());
+    let initialized = peer.request(
+        "initialize",
+        json!({"protocolVersion": 2, "capabilities": {"_meta": {USAGE: {"notify": true, "account": "pool/claude"}}},
+               "info": {"name": "test", "version": "0"}}),
+    );
+    let advertised = &initialized["result"]["capabilities"]["_meta"][USAGE];
+    assert_eq!(
+        advertised,
+        &json!({"version": 1, "sources": ["reported", "inferred"], "spend": true, "needs_turn": true}),
+        "{initialized}"
+    );
+    let opened = peer.request("session/new", json!({"cwd": scratch.0.to_string_lossy()}));
+    let session = opened["result"]["sessionId"]
+        .as_str()
+        .expect("a session")
+        .to_string();
+
+    // Before a turn Claude Code has said nothing, and a poll cannot make it: supported, nothing yet.
+    let before = peer.request(USAGE_METHOD, json!({}));
+    assert_eq!(before["result"]["supported"], true, "{before}");
+    assert!(before["result"]["buckets"].as_array().unwrap().is_empty());
+
+    let idle = v2_turn(&mut peer, &session, "First.");
+    assert_eq!(idle["stopReason"], "end_turn");
+    peer.request(USAGE_METHOD, json!({}));
+    let report = peer.usage_updates.last().expect("a usage_update").clone();
+    let five = report["report"]["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bucket| bucket["id"] == "five_hour")
+        .unwrap_or_else(|| panic!("{report}"))
+        .clone();
+    assert_eq!(
+        (&five["used"], &five["limit"], &five["status"]),
+        (&json!(500), &json!(1000), &json!("ok"))
+    );
+    assert_eq!(five["refill"]["resets_at"], 1_793_875_411);
+    assert_eq!(five["refill"]["length"], json!([18_000, 0]));
+    assert_eq!(report["report"]["account"], "pool/claude");
+
+    // The session's spend rides the same report.
+    let polled = peer.request(USAGE_METHOD, json!({"sessionId": session}));
+    assert_eq!(polled["result"]["spend"]["input"], 11, "{polled}");
+    assert_eq!(polled["result"]["spend"]["cost_micro_usd"], 5);
+    assert_eq!(polled["result"]["buckets"][0]["id"], "five_hour");
+}
+
+#[test]
+fn a_recorded_rejection_ends_the_turn_refused_with_the_hit_and_exhausts_the_window() {
+    let scratch = Scratch::new("usage-limit");
+    let mut peer = Peer::serve(agent(Some("rate_limit"), None), Settings::new());
+    peer.request(
+        "initialize",
+        json!({"protocolVersion": 2, "capabilities": {"_meta": {USAGE: {"notify": true}}},
+               "info": {"name": "test", "version": "0"}}),
+    );
+    let opened = peer.request("session/new", json!({"cwd": scratch.0.to_string_lossy()}));
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_string();
+    v2_turn(&mut peer, &session, "First.");
+    let refused = v2_turn(&mut peer, &session, "Second.");
+    assert_eq!(refused["stopReason"], "refusal", "{refused}");
+    let hit = &refused["_meta"]["dev.boriken.coqui.acp/limit"];
+    assert_eq!(hit["bucket"], "five_hour");
+    assert_eq!(hit["resets_at"], 1_793_875_411);
+    assert_eq!(hit["source"], "reported");
+    assert!(hit["observed_at"].as_i64().unwrap() > 0);
+    let polled = peer.request(USAGE_METHOD, json!({}));
+    assert_eq!(
+        polled["result"]["buckets"][0]["status"], "exhausted",
+        "{polled}"
+    );
+    // The recorded reset has long passed, so the report no longer carries the hit; the bucket stays as it was told.
+    assert!(polled["result"]["limit"].is_null(), "{polled}");
+}
+
+const USAGE_METHOD: &str = "_coqui_acp/usage";
