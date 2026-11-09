@@ -1,16 +1,20 @@
 //! Redaction: removing named values and patterns from a history, only when asked, and saying what
 //! was removed.
 
-use regex::{NoExpand, Regex, RegexBuilder};
+use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::header::{Header, Redacted};
-use crate::settings::RedactionSettings;
+use crate::settings::{Bounds, PARSER_DEPTH, RedactionSettings};
 use crate::{Body, Document, HistoryError, Line, strict};
 
-/// Keys whose strings are identifiers the format pairs lines by, so they stay as they are.
-const KEPT_KEYS: [&str; 3] = ["sessionUpdate", "toolCallId", "optionId"];
+/// The keys of an update that the format pairs lines by.
+const UPDATE_KEPT: [&str; 2] = ["sessionUpdate", "toolCallId"];
+/// The key of a permission request's call that the format pairs lines by.
+const CALL_KEPT: [&str; 1] = ["toolCallId"];
+/// The key of a permission option, and of an answer's outcome, that the format pairs lines by.
+const OPTION_KEPT: [&str; 1] = ["optionId"];
 
 /// The largest compiled pattern, in bytes.
 const PATTERN_SIZE_LIMIT: usize = 1 << 20;
@@ -54,10 +58,17 @@ pub struct RedactionReport {
 /// Removes what [`RedactionSettings`] names from a header and its lines. Its `Debug` output shows
 /// how many rules it holds and none of their text.
 ///
-/// Strings are changed wherever they are in a payload, except the three identifiers the format
-/// pairs lines by. A removal that leaves a line the format refuses (a pattern that matches
-/// `end_turn`, say) is an error and changes nothing in that line. Keys, the `method` and the time
-/// of a line are never touched.
+/// Strings are changed wherever they are in a payload, except the identifiers the format pairs
+/// lines by, and those only in the place that pairs them: an update's `sessionUpdate` and
+/// `toolCallId`, a permission request's `toolCall.toolCallId` and each option's `optionId`, an
+/// answer's `outcome.optionId`. The same key anywhere else (inside `rawInput`, in `_meta`) is
+/// changed like any text.
+///
+/// Every occurrence of a value or a match of a pattern is found in the original text, and the
+/// stretches they cover are replaced once, so a value inside a longer one, or one that cuts a
+/// pattern's match, leaves none of the longer text behind. A removal that leaves a line the
+/// format refuses (a pattern that matches `end_turn`, say) is an error and changes nothing in
+/// that line. Keys, the `method` and the time of a line are never touched.
 pub struct Redactor {
     values: Vec<String>,
     value_slots: Vec<usize>,
@@ -65,7 +76,10 @@ pub struct Redactor {
     pattern_slots: Vec<usize>,
     replacement: String,
     report: RedactionReport,
+    /// Matches each rule found since the last commit to the report.
     hits: Vec<u64>,
+    /// Replacements made since the last commit: matches that overlap are replaced once.
+    replaced: u64,
 }
 
 impl core::fmt::Debug for Redactor {
@@ -131,6 +145,7 @@ impl Redactor {
             replacement: settings.replacement.clone(),
             report,
             hits,
+            replaced: 0,
         })
     }
 
@@ -146,47 +161,68 @@ impl Redactor {
         Redacted::new(self.report.rules.len() as u64, self.report.replaced)
     }
 
+    /// `text` with every stretch a value or a pattern matches replaced, or `None` when none is.
     fn text(&mut self, text: &str) -> Option<String> {
-        let mut current: Option<String> = None;
+        let mut spans: Vec<(usize, usize)> = Vec::new();
         for (rule, value) in self.values.iter().enumerate() {
             let slot = self.value_slots[rule];
-            let haystack = current.as_deref().unwrap_or(text);
-            let count = haystack.matches(value.as_str()).count() as u64;
-            if count > 0 {
-                current = Some(haystack.replace(value.as_str(), &self.replacement));
-                self.hits[slot] += count;
+            let mut from = 0;
+            while let Some(at) = text[from..].find(value.as_str()) {
+                let start = from + at;
+                spans.push((start, start + value.len()));
+                self.hits[slot] += 1;
+                // One character on, so an occurrence that overlaps this one is found too.
+                from = start + text[start..].chars().next().map_or(1, char::len_utf8);
             }
         }
         for (rule, regex) in self.patterns.iter().enumerate() {
             let slot = self.pattern_slots[rule];
-            let haystack = current.as_deref().unwrap_or(text);
-            let count = regex.find_iter(haystack).count() as u64;
-            if count > 0 {
-                current = Some(
-                    regex
-                        .replace_all(haystack, NoExpand(&self.replacement))
-                        .into_owned(),
-                );
-                self.hits[slot] += count;
+            for found in regex.find_iter(text) {
+                spans.push((found.start(), found.end()));
+                self.hits[slot] += 1;
             }
         }
-        current
+        if spans.is_empty() {
+            return None;
+        }
+        spans.sort_unstable();
+        let mut out = String::with_capacity(text.len());
+        let mut copied = 0;
+        let (mut start, mut end) = spans[0];
+        for &(next_start, next_end) in &spans[1..] {
+            if next_start < end {
+                end = end.max(next_end);
+                continue;
+            }
+            out.push_str(&text[copied..start]);
+            out.push_str(&self.replacement);
+            self.replaced += 1;
+            copied = end;
+            (start, end) = (next_start, next_end);
+        }
+        out.push_str(&text[copied..start]);
+        out.push_str(&self.replacement);
+        self.replaced += 1;
+        out.push_str(&text[end..]);
+        Some(out)
     }
 
-    fn walk(&mut self, root: &mut Value) {
-        let mut stack = vec![root];
-        while let Some(value) = stack.pop() {
+    /// Redacts the strings under `root`; the keys `kept` of `root` itself, when their values are
+    /// strings, stay as they are.
+    fn walk(&mut self, root: &mut Value, kept: &[&str]) {
+        let mut stack = vec![(root, true)];
+        while let Some((value, top)) = stack.pop() {
             match value {
                 Value::String(text) => {
                     if let Some(changed) = self.text(text) {
                         *text = changed;
                     }
                 }
-                Value::Array(items) => stack.extend(items.iter_mut()),
+                Value::Array(items) => stack.extend(items.iter_mut().map(|item| (item, false))),
                 Value::Object(map) => {
                     for (key, item) in map.iter_mut() {
-                        if !(KEPT_KEYS.contains(&key.as_str()) && item.is_string()) {
-                            stack.push(item);
+                        if !(top && kept.contains(&key.as_str()) && item.is_string()) {
+                            stack.push((item, false));
                         }
                     }
                 }
@@ -203,11 +239,12 @@ impl Redactor {
                 let rule = &mut self.report.rules[slot];
                 rule.replaced += *hits;
                 rule.lines += 1;
-                self.report.replaced += *hits;
                 *hits = 0;
                 changed = true;
             }
         }
+        self.report.replaced += self.replaced;
+        self.replaced = 0;
         if changed {
             self.report.lines += 1;
         }
@@ -216,10 +253,11 @@ impl Redactor {
     /// Drops the removals counted since the last commit.
     fn forget(&mut self) {
         self.hits.iter_mut().for_each(|hits| *hits = 0);
+        self.replaced = 0;
     }
 
     fn touched(&self) -> bool {
-        self.hits.iter().any(|hits| *hits > 0)
+        self.replaced > 0
     }
 
     /// Redacts the header's text fields (not its `format`, `id`, time, digest or harness name).
@@ -250,11 +288,11 @@ impl Redactor {
                 if let (true, Value::Object(origin)) = (key == "origin", &mut *item) {
                     for (field, text) in origin.iter_mut() {
                         if field != "harness" {
-                            self.walk(text);
+                            self.walk(text, &[]);
                         }
                     }
                 } else {
-                    self.walk(item);
+                    self.walk(item, &[]);
                 }
             }
         }
@@ -262,7 +300,7 @@ impl Redactor {
             return Ok(());
         }
         let checked =
-            strict::parse(&whole.to_string(), 1, u64::MAX).and_then(|v| Header::from_value(&v));
+            strict::parse(&whole.to_string(), 1, &Bounds::unbounded()).and_then(Header::from_value);
         match checked {
             Ok(mut changed) => {
                 changed.digest = None;
@@ -284,18 +322,20 @@ impl Redactor {
     /// The refusal a reader would give the line as redacted; the line is left as it was and its
     /// removals are not counted.
     pub fn line(&mut self, number: u64, line: &mut Line) -> Result<(), HistoryError> {
-        if line.payload_depth() > 128 {
+        if line.payload_depth() > PARSER_DEPTH {
             return line.to_json().map(|_| ());
         }
         let mut copy = line.clone();
         match &mut copy.body {
-            Body::Prompt { prompt } => prompt.iter_mut().for_each(|block| self.walk(block)),
-            Body::Update { update } => self.walk(update),
+            Body::Prompt { prompt } => prompt.iter_mut().for_each(|block| self.walk(block, &[])),
+            Body::Update { update } => self.walk(update, &UPDATE_KEPT),
             Body::PermissionRequest { tool_call, options } => {
-                self.walk(tool_call);
-                options.iter_mut().for_each(|option| self.walk(option));
+                self.walk(tool_call, &CALL_KEPT);
+                options
+                    .iter_mut()
+                    .for_each(|option| self.walk(option, &OPTION_KEPT));
             }
-            Body::PermissionAnswer { outcome, .. } => self.walk(outcome),
+            Body::PermissionAnswer { outcome, .. } => self.walk(outcome, &OPTION_KEPT),
             Body::TurnEnd {
                 error: Some(text), ..
             }
@@ -310,15 +350,15 @@ impl Redactor {
             _ => {}
         }
         if let Some(meta) = &mut copy.meta {
-            self.walk(meta);
+            self.walk(meta, &[]);
         }
         if !self.touched() {
             return Ok(());
         }
         let checked = copy
             .to_json()
-            .and_then(|text| strict::parse(&text, number, u64::MAX))
-            .and_then(|value| Line::from_value(&value, number));
+            .and_then(|text| strict::parse(&text, number, &Bounds::unbounded()))
+            .and_then(|value| Line::from_value(value, number));
         match checked {
             Ok(_) => {
                 *line = copy;
@@ -332,24 +372,28 @@ impl Redactor {
         }
     }
 
-    /// Redacts a whole document: its header, then each line, and marks the header with what was
-    /// removed. The digest is dropped; [`Document::seal`] makes a new one. On an error the
+    /// Redacts a whole document: its header, then each line, and when anything was removed marks
+    /// the header with what was removed and drops its digest ([`Document::seal`] makes a new
+    /// one). A document with nothing to remove is left exactly as it was. On an error the
     /// document is left as it was.
     ///
     /// # Errors
     ///
     /// The first line whose redaction the format refuses.
     pub fn document(&mut self, document: &mut Document) -> Result<RedactionReport, HistoryError> {
+        let before = self.report.replaced;
         let mut header = document.header.clone();
         self.header(&mut header)?;
         let mut lines = document.lines.clone();
         for (at, line) in lines.iter_mut().enumerate() {
             self.line(at as u64 + 2, line)?;
         }
-        header.digest = None;
-        header.redacted = Some(self.mark());
-        document.header = header;
-        document.lines = lines;
+        if self.report.replaced > before {
+            header.digest = None;
+            header.redacted = Some(self.mark());
+            document.header = header;
+            document.lines = lines;
+        }
         Ok(self.report.clone())
     }
 }

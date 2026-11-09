@@ -122,7 +122,10 @@ fn a_redactor_with_nothing_to_remove_removes_nothing_and_says_so() {
         .unwrap();
     assert_eq!(report.replaced, 0);
     assert_eq!(doc.lines, before);
-    assert_eq!(doc.header.redacted.unwrap().replaced, 0);
+    assert!(
+        doc.header.redacted.is_none(),
+        "nothing changed, so nothing is marked"
+    );
 }
 
 #[test]
@@ -199,4 +202,109 @@ fn the_text_of_a_summary_and_an_error_is_redacted() {
         .document(&mut doc)
         .unwrap();
     assert!(!doc.to_string().unwrap().contains(SECRET));
+}
+
+fn text_of(doc: &Document) -> String {
+    doc.to_string().unwrap()
+}
+
+fn one_prompt(text: &str) -> Document {
+    let mut doc = document(0);
+    doc.lines.push(Line::text_prompt(text));
+    doc.lines
+        .push(Line::turn_end(Stop::Acp(StopReason::EndTurn)));
+    doc
+}
+
+#[test]
+fn a_value_inside_another_value_leaves_none_of_the_longer_one() {
+    for order in [["sk-", "sk-SECRET123"], ["sk-SECRET123", "sk-"]] {
+        let mut doc = one_prompt("token sk-SECRET123 end");
+        let mut redactor = Redactor::try_new(&values(&order)).unwrap();
+        let report = redactor.document(&mut doc).unwrap();
+        let text = text_of(&doc);
+        assert!(!text.contains("SECRET123"), "{order:?}: {text}");
+        assert!(text.contains("token [redacted] end"), "{order:?}: {text}");
+        assert_eq!(report.replaced, 1, "one span was replaced");
+        assert!(
+            report.rules.iter().all(|rule| rule.replaced == 1),
+            "each rule found its match: {report:?}"
+        );
+    }
+}
+
+#[test]
+fn overlapping_occurrences_of_one_value_are_removed_whole() {
+    let mut doc = one_prompt("x ababab y");
+    Redactor::try_new(&values(&["abab"]))
+        .unwrap()
+        .document(&mut doc)
+        .unwrap();
+    assert!(text_of(&doc).contains("x [redacted] y"));
+}
+
+#[test]
+fn a_value_cannot_split_a_pattern_match() {
+    let mut doc = one_prompt("xabcdx");
+    let mut settings = values(&["bc"]);
+    settings.patterns = vec!["abcd".into()];
+    Redactor::try_new(&settings)
+        .unwrap()
+        .document(&mut doc)
+        .unwrap();
+    assert!(text_of(&doc).contains("x[redacted]x"), "{}", text_of(&doc));
+}
+
+#[test]
+fn an_identifier_key_is_kept_only_where_the_format_pairs_lines_by_it() {
+    let mut doc = document(1);
+    doc.lines.insert(
+        1,
+        Line::update(json!({
+            "sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute",
+            "rawInput": {"toolCallId": SECRET, "optionId": SECRET, "sessionUpdate": SECRET},
+            "_meta": {"toolCallId": SECRET},
+        })),
+    );
+    doc.lines.insert(
+        2,
+        Line::new(coqui_acp_history::Body::PermissionRequest {
+            tool_call: json!({"toolCallId": "t1", "rawInput": {"toolCallId": SECRET}}),
+            options: vec![
+                json!({"optionId": "allow", "name": "Allow", "_meta": {"optionId": SECRET}}),
+            ],
+        }),
+    );
+    doc.lines.insert(
+        3,
+        Line::new(coqui_acp_history::Body::PermissionAnswer {
+            tool_call_id: "t1".into(),
+            outcome: json!({"outcome": "selected", "optionId": "allow", "_meta": {"optionId": SECRET}}),
+        }),
+    );
+    Redactor::try_new(&values(&[SECRET]))
+        .unwrap()
+        .document(&mut doc)
+        .unwrap();
+    let text = text_of(&doc);
+    assert!(!text.contains(SECRET), "{text}");
+    assert!(text.contains(r#""toolCallId":"t1""#));
+    assert!(text.contains(r#""optionId":"allow""#));
+    let read: Document = text.parse().expect("the pairing survives");
+    assert_eq!(read.lines, doc.lines);
+}
+
+#[test]
+fn a_redaction_that_found_nothing_leaves_the_header_and_its_digest() {
+    let mut doc = one_prompt("nothing secret here");
+    doc.seal().unwrap();
+    let before = doc.clone();
+    let report = Redactor::try_new(&values(&[SECRET]))
+        .unwrap()
+        .document(&mut doc)
+        .unwrap();
+    assert_eq!(report.replaced, 0);
+    assert_eq!(doc, before);
+    assert!(doc.header.redacted.is_none());
+    assert!(doc.header.digest.is_some());
 }
