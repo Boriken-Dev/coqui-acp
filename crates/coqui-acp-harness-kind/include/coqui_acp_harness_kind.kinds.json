@@ -2,9 +2,9 @@
   "kinds": [
     {
       "name": "acp_harness",
-      "floor_hash": 2194037834,
+      "floor_hash": 165281080,
       "object": false,
-      "doc": "Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.\n\nThe host is the ACP client and the provider the agent: each message on the channel, either way,\nis one whole JSON-RPC 2.0 message as UTF-8 JSON text. The kind never models ACP itself, so a\nprovider in any language implements ACP as the protocol defines it, and the version is agreed by\n`initialize` on the channel.\n\nEvery method is synchronous; a host calls them from a thread of its own.",
+      "doc": "Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.\n\nThe host is the ACP client and the provider the agent: each message on the channel, either way,\nis one whole JSON-RPC 2.0 message as UTF-8 JSON text. The kind never models ACP itself, so a\nprovider in any language implements ACP as the protocol defines it, and the version is agreed by\n`initialize` on the channel.\n\nEvery method answers for the provider as configured: a host builds an instance from the\nprovider's settings and asks it. Every method is synchronous; a host calls them from a thread\nof its own. The methods without a default are the ones a host acts on for every harness; a\ndefault is kept only where it is a true answer for a harness that has nothing to say.",
       "slots": [
         {
           "name": "describe",
@@ -27,6 +27,12 @@
               "pass": "borrowed"
             },
             {
+              "name": "spawner",
+              "type": "object",
+              "kind": "process_spawner",
+              "pass": "taken"
+            },
+            {
               "name": "sink",
               "type": "object",
               "kind": "channel_sink",
@@ -37,15 +43,15 @@
             "type": "object",
             "kind": "channel"
           },
-          "doc": "Starts one ACP connection: messages the host sends are the client's, and the agent's come back\nthrough `sink`.\n\nThe sink is handed over: the provider destroys it, even when it refuses. It returns once the\nchannel takes messages; the program it drives may start later, at `initialize` or\n`session/new`, and a failure then is answered in ACP before the provider closes.\n\nIt refuses with `GUATIAO_ERR_UNSUPPORTED` when it would refuse any of the request's\nrequirements ([`refusal`](Self::refusal)), and with `GUATIAO_ERR_BAD_VALUE` a request it cannot\nread; it never starts with a requirement left out."
+          "doc": "Starts one ACP connection: messages the host sends are the client's, and the agent's come back\nthrough `sink`. The programs it drives start through `spawner`, or the provider ignores it.\n\n`spawner` and `sink` are handed over: the provider destroys both, even when it refuses, and\nthe spawner by the time it calls `closed`. It returns once the channel takes messages; the\nprogram may start later, at `initialize` or `session/new`, and a failure then is answered in\nACP before the provider closes.\n\nIt refuses exactly when [`refusal`](Self::refusal) would for the request's requirements and\nenvironment, with the same status: `GUATIAO_ERR_UNSUPPORTED` for a requirement it cannot\nhold, `GUATIAO_ERR_BAD_VALUE` for a request it cannot read (a key it does not know, a\nsession id that is not a UUID, a requirement's value). It never starts with a requirement\nleft out."
         },
         {
           "name": "refusal",
-          "required": false,
+          "required": true,
           "fallible": true,
           "args": [
             {
-              "name": "requirement",
+              "name": "requirements",
               "type": "value",
               "pass": "borrowed"
             },
@@ -58,7 +64,17 @@
           "answer": {
             "type": "value"
           },
-          "doc": "Why the harness could not hold a connection to `requirement`, started with `environment`, in a\nsentence; `None` when it can. A host asks before it starts one, and passes over a harness\nthat would refuse. The default refuses every requirement, known or not."
+          "doc": "Why the harness could not hold a connection to all of `requirements` together, started with\n`environment`, in a sentence; `None` when it can. An empty `environment` asks about the\nharness's configuration alone, and is answered. A host asks before it starts a connection,\nand passes over a harness that would refuse.\n\n`GUATIAO_ERR_BAD_VALUE` for requirements `start` would refuse as unreadable: a name given\ntwice, or a value its name does not take. A name the harness does not know is answered with\na refusal, never `None`."
+        },
+        {
+          "name": "program",
+          "required": true,
+          "fallible": true,
+          "args": [],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "The program the harness starts through the spawner (a path, or a name looked up on the\n`PATH` where it runs, the start's environment's `PATH` when that sets one), so a host can say\nit cannot be found before it starts a connection; `None` for a harness that starts none."
         },
         {
           "name": "models",
@@ -74,17 +90,7 @@
           "answer": {
             "type": "value"
           },
-          "doc": "The models the account behind `environment` may use, when the harness can say without a model\nturn. Never carries a value from `environment`. The default: unknown, and says so."
-        },
-        {
-          "name": "program",
-          "required": false,
-          "fallible": true,
-          "args": [],
-          "answer": {
-            "type": "value"
-          },
-          "doc": "The program the harness starts, a name looked up on `PATH` or a path, so a host can say it\ncannot be found before it starts a connection. The default: `None`, and the host does not look."
+          "doc": "The models the account behind `environment` may use, when the harness can say without a\nmodel turn. Never carries a value from `environment`. The default, for a harness with no\nway to list them: unknown, and says so."
         },
         {
           "name": "session_record",
@@ -100,7 +106,17 @@
           "answer": {
             "type": "value"
           },
-          "doc": "Where the harness keeps its own record of the session `query` names, when it keeps one and the\nfile is there. The default: none."
+          "doc": "Where the harness keeps its own record of the session `query` names (by the session id it\nreported, a UUID), when it keeps one and the file is there. The default, for a harness that\nkeeps none: none."
+        },
+        {
+          "name": "non_defaults",
+          "required": false,
+          "fallible": true,
+          "args": [],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Each way this configured harness departs from its defaults that its settings' schema cannot\nshow (the detail of a rule a setting holds as text), for the host to report beside the\ndifferences it reads from the schema itself. The default, for settings the schema shows in\nfull: none."
         }
       ]
     },
@@ -165,6 +181,151 @@
             }
           ],
           "doc": "The stream has ended, from either side: with the host's status from\nthe channel's `close`, or the provider's own, a `guatiao_status`\n(`GUATIAO_OK` is the normal end). Called exactly once, and nothing\nbut `destroy` follows it. Cannot fail."
+        }
+      ]
+    },
+    {
+      "name": "process_spawner",
+      "floor_hash": 1466370631,
+      "object": true,
+      "doc": "Starts programs where the host chooses: on this machine, on another over SSH, in a container or\na virtual machine. The host implements it and hands one to every\n[`AcpHarness::start`](crate::AcpHarness::start); the provider owns it from then on, starts its\nprograms through it, or never calls it, and destroys it by the time it calls the sink's\n`closed`.\n\nEvery slot takes `&self`, so a provider may call it from several threads at once.",
+      "slots": [
+        {
+          "name": "describe",
+          "required": true,
+          "fallible": true,
+          "args": [],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Where its programs run and what it can give them; the same on every call."
+        },
+        {
+          "name": "spawn",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "spec",
+              "type": "value",
+              "pass": "borrowed"
+            }
+          ],
+          "answer": {
+            "type": "object",
+            "kind": "spawned_process"
+          },
+          "doc": "Starts `spec` and hands over the process. Refuses `GUATIAO_ERR_UNSUPPORTED` a spec asking\nwhat [`describe`](Self::describe) says it cannot give, `GUATIAO_ERR_NOT_FOUND` a program\nthat is not there, `GUATIAO_ERR_BAD_VALUE` a spec it cannot read."
+        }
+      ]
+    },
+    {
+      "name": "spawned_process",
+      "floor_hash": 3306532587,
+      "object": true,
+      "doc": "One program a spawner started, and everything it starts in turn.\n\nEvery slot takes `&self`, so one thread may write or kill while another waits in `read`.\nDestroying it kills the whole tree, as [`kill`](Self::kill) does.",
+      "slots": [
+        {
+          "name": "write",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "bytes",
+              "type": "bytes"
+            }
+          ],
+          "doc": "Writes all of `bytes` to its standard input (its terminal's, with a terminal).\n`GUATIAO_ERR_GONE` once the input is closed or the process has ended."
+        },
+        {
+          "name": "close_input",
+          "required": true,
+          "fallible": true,
+          "args": [],
+          "doc": "Closes its standard input: the program reads the end. Closing it twice is no error."
+        },
+        {
+          "name": "read",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "dst",
+              "type": "bytes_mut"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "u64"
+            }
+          ],
+          "answer": {
+            "type": "i64"
+          },
+          "doc": "Copies standard output (a terminal's whole output, with one) into `dst`: the byte count;\n`0` once no more can ever come; [`READ_TIMED_OUT`] after `timeout_ms` with nothing (`0`\npolls); [`READ_LINK_DOWN`] while the link is down. Never skips or repeats a byte, a link\nthat dropped and came back included."
+        },
+        {
+          "name": "read_error",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "dst",
+              "type": "bytes_mut"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "u64"
+            }
+          ],
+          "answer": {
+            "type": "i64"
+          },
+          "doc": "The same for standard error, when the spec kept it [`ErrorOutput::Separate`]; `0` at once\notherwise."
+        },
+        {
+          "name": "resize",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "size",
+              "type": "value",
+              "pass": "borrowed"
+            }
+          ],
+          "doc": "Resizes its terminal. `GUATIAO_ERR_UNSUPPORTED` for a process started without one."
+        },
+        {
+          "name": "wait",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "timeout_ms",
+              "type": "u64"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Waits up to `timeout_ms` (`0` polls) for it to end, and answers how it stands."
+        },
+        {
+          "name": "kill",
+          "required": true,
+          "fallible": true,
+          "args": [],
+          "doc": "Ends it and every process it started: its process group or job, and those that left it\nwhen [`SpawnerInfo::kills_escaped`] says so. Killing an ended process is no error."
+        },
+        {
+          "name": "link",
+          "required": true,
+          "fallible": true,
+          "args": [],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Whether the link to where it runs is up, and how often it has dropped."
         }
       ]
     }

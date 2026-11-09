@@ -1,6 +1,6 @@
 //! The `acp_harness` provider written in Python, `harness/acp_echo_harness.py`, loaded in this process
-//! through Guatiao's source of Python libraries and called as the Rust-declared kind, holds to the same
-//! contract as the Rust echo.
+//! through Guatiao's source of Python libraries and called as the Rust-declared kind, holds to the
+//! contract `coqui_acp_harness_kind::contract` ships, as the Rust echo does.
 //!
 //! Where build.rs found no Python the one test left is ignored, and a run counts it as not run.
 #![allow(
@@ -21,20 +21,16 @@ fn the_python_harness_needs_a_python() {
 mod support;
 
 #[cfg(python_ready)]
-#[path = "../../../crates/coqui-acp-harness-kind/tests/contract/mod.rs"]
-mod contract;
-
-#[cfg(python_ready)]
 mod with_python {
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::Arc;
 
+    use coqui_acp_harness_kind::contract::Contract;
     use coqui_acp_harness_kind::guatiao::library::Registry;
-    use coqui_acp_harness_kind::guatiao::{List, Map};
+    use coqui_acp_harness_kind::guatiao::{List, Map, Secret};
     use coqui_acp_harness_kind::{AcpHarness, SessionRecordQuery};
 
-    use super::contract;
     use super::support::{guatiao, manifest_dir, python, source};
 
     fn kinds_crate() -> PathBuf {
@@ -85,15 +81,24 @@ mod with_python {
     #[test]
     fn the_python_echo_holds_to_the_contract_and_leaves_the_rest_to_the_defaults() {
         let (_registry, harness) = loaded();
-        contract::hold_the_contract("the Python echo", &*harness);
+        if let Err(failures) = Contract::new("the Python echo")
+            .message_limit(1 << 20)
+            .run(&*harness)
+        {
+            panic!("{failures}");
+        }
         assert_eq!(harness.program().expect("answered"), None);
+        assert_eq!(harness.non_defaults().expect("answered"), Vec::new());
         assert_eq!(
             harness
-                .session_record(SessionRecordQuery::new("python-echo-1", "/"))
+                .session_record(SessionRecordQuery::new(
+                    "0f8fad5b-d9cb-469f-a165-70867728950e",
+                    "/"
+                ))
                 .expect("answered"),
             None
         );
-        let models = harness.models(Default::default()).expect("answered");
+        let models = harness.models(Secret::default()).expect("answered");
         assert!(models.known);
         assert_eq!(models.models[0].id, "echo");
     }

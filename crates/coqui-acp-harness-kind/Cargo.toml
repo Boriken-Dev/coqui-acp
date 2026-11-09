@@ -18,19 +18,39 @@ publish = false
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+# The suite every provider of the kind is held to, as a module and as `acp-harness-check`, which runs it
+# on a library file or a source file in any language.
+contract = ["dep:serde_json", "dep:coqui-acp", "guatiao/load"]
+
 [dependencies]
 guatiao = { workspace = true, features = ["provider"] }
 guatiao-channel.workspace = true
+coqui-acp = { path = "../coqui-acp", optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
-coqui-acp = { path = "../coqui-acp" }
 guatiao = { workspace = true, features = ["provider", "load"] }
+guatiao-serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "acp-harness-check"
+required-features = ["contract"]
 
 # A real library the tests load: `cargo test` builds it into target/<profile>/examples.
 [[example]]
 name = "echo_harness"
 crate-type = ["cdylib"]
+
+[[test]]
+name = "echo"
+required-features = ["contract"]
+
+[[test]]
+name = "check"
+required-features = ["contract"]
 
 [lints]
 workspace = true

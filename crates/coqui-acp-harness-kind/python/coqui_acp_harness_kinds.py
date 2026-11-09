@@ -8,7 +8,99 @@ from __future__ import annotations
 from typing import Protocol
 
 from guatiao import Ref
-from guatiao.kinds import U32, KindProtocol, Taken, ValueAnswer, fallible, required
+from guatiao.kinds import I64, U32, U64, KindProtocol, Taken, ValueAnswer, fallible, required
+
+
+class SpawnedProcess(KindProtocol, Protocol, kind="spawned_process", floor_hash=3306532587, is_object=True):
+    """One program a spawner started, and everything it starts in turn.
+
+    Every slot takes `&self`, so one thread may write or kill while another waits in `read`.
+    Destroying it kills the whole tree, as [`kill`](Self::kill) does.
+    """
+
+    @required
+    @fallible
+    def write(self, bytes: bytes) -> None:
+        """Writes all of `bytes` to its standard input (its terminal's, with a terminal).
+        `GUATIAO_ERR_GONE` once the input is closed or the process has ended.
+        """
+        ...
+
+    @required
+    @fallible
+    def close_input(self) -> None:
+        """Closes its standard input: the program reads the end. Closing it twice is no error."""
+        ...
+
+    @required
+    @fallible
+    def read(self, dst: bytearray, timeout_ms: U64) -> I64:
+        """Copies standard output (a terminal's whole output, with one) into `dst`: the byte count;
+        `0` once no more can ever come; [`READ_TIMED_OUT`] after `timeout_ms` with nothing (`0`
+        polls); [`READ_LINK_DOWN`] while the link is down. Never skips or repeats a byte, a link
+        that dropped and came back included.
+        """
+        ...
+
+    @required
+    @fallible
+    def read_error(self, dst: bytearray, timeout_ms: U64) -> I64:
+        """The same for standard error, when the spec kept it [`ErrorOutput::Separate`]; `0` at once
+        otherwise.
+        """
+        ...
+
+    @required
+    @fallible
+    def resize(self, size: Ref) -> None:
+        """Resizes its terminal. `GUATIAO_ERR_UNSUPPORTED` for a process started without one."""
+        ...
+
+    @required
+    @fallible
+    def wait(self, timeout_ms: U64) -> ValueAnswer:
+        """Waits up to `timeout_ms` (`0` polls) for it to end, and answers how it stands."""
+        ...
+
+    @required
+    @fallible
+    def kill(self) -> None:
+        """Ends it and every process it started: its process group or job, and those that left it
+        when [`SpawnerInfo::kills_escaped`] says so. Killing an ended process is no error.
+        """
+        ...
+
+    @required
+    @fallible
+    def link(self) -> ValueAnswer:
+        """Whether the link to where it runs is up, and how often it has dropped."""
+        ...
+
+
+class ProcessSpawner(KindProtocol, Protocol, kind="process_spawner", floor_hash=1466370631, is_object=True):
+    """Starts programs where the host chooses: on this machine, on another over SSH, in a container or
+    a virtual machine. The host implements it and hands one to every
+    [`AcpHarness::start`](crate::AcpHarness::start); the provider owns it from then on, starts its
+    programs through it, or never calls it, and destroys it by the time it calls the sink's
+    `closed`.
+
+    Every slot takes `&self`, so a provider may call it from several threads at once.
+    """
+
+    @required
+    @fallible
+    def describe(self) -> ValueAnswer:
+        """Where its programs run and what it can give them; the same on every call."""
+        ...
+
+    @required
+    @fallible
+    def spawn(self, spec: Ref) -> SpawnedProcess:
+        """Starts `spec` and hands over the process. Refuses `GUATIAO_ERR_UNSUPPORTED` a spec asking
+        what [`describe`](Self::describe) says it cannot give, `GUATIAO_ERR_NOT_FOUND` a program
+        that is not there, `GUATIAO_ERR_BAD_VALUE` a spec it cannot read.
+        """
+        ...
 
 
 class ChannelSink(KindProtocol, Protocol, kind="channel_sink", floor_hash=3528315804, is_object=True):
@@ -70,7 +162,7 @@ class Channel(KindProtocol, Protocol, kind="channel", floor_hash=2843269355, is_
         ...
 
 
-class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=2194037834):
+class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=165281080):
     """Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.
 
     The host is the ACP client and the provider the agent: each message on the channel, either way,
@@ -78,7 +170,10 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=21940378
     provider in any language implements ACP as the protocol defines it, and the version is agreed by
     `initialize` on the channel.
 
-    Every method is synchronous; a host calls them from a thread of its own.
+    Every method answers for the provider as configured: a host builds an instance from the
+    provider's settings and asks it. Every method is synchronous; a host calls them from a thread
+    of its own. The methods without a default are the ones a host acts on for every harness; a
+    default is kept only where it is a true answer for a harness that has nothing to say.
     """
 
     @required
@@ -91,48 +186,70 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=21940378
 
     @required
     @fallible
-    def start(self, request: Ref, sink: Taken[ChannelSink]) -> Channel:
+    def start(self, request: Ref, spawner: Taken[ProcessSpawner], sink: Taken[ChannelSink]) -> Channel:
         """Starts one ACP connection: messages the host sends are the client's, and the agent's come back
-        through `sink`.
+        through `sink`. The programs it drives start through `spawner`, or the provider ignores it.
 
-        The sink is handed over: the provider destroys it, even when it refuses. It returns once the
-        channel takes messages; the program it drives may start later, at `initialize` or
-        `session/new`, and a failure then is answered in ACP before the provider closes.
+        `spawner` and `sink` are handed over: the provider destroys both, even when it refuses, and
+        the spawner by the time it calls `closed`. It returns once the channel takes messages; the
+        program may start later, at `initialize` or `session/new`, and a failure then is answered in
+        ACP before the provider closes.
 
-        It refuses with `GUATIAO_ERR_UNSUPPORTED` when it would refuse any of the request's
-        requirements ([`refusal`](Self::refusal)), and with `GUATIAO_ERR_BAD_VALUE` a request it cannot
-        read; it never starts with a requirement left out.
+        It refuses exactly when [`refusal`](Self::refusal) would for the request's requirements and
+        environment, with the same status: `GUATIAO_ERR_UNSUPPORTED` for a requirement it cannot
+        hold, `GUATIAO_ERR_BAD_VALUE` for a request it cannot read (a key it does not know, a
+        session id that is not a UUID, a requirement's value). It never starts with a requirement
+        left out.
         """
         ...
 
+    @required
     @fallible
-    def refusal(self, requirement: Ref, environment: Ref) -> ValueAnswer:
-        """Why the harness could not hold a connection to `requirement`, started with `environment`, in a
-        sentence; `None` when it can. A host asks before it starts one, and passes over a harness
-        that would refuse. The default refuses every requirement, known or not.
+    def refusal(self, requirements: Ref, environment: Ref) -> ValueAnswer:
+        """Why the harness could not hold a connection to all of `requirements` together, started with
+        `environment`, in a sentence; `None` when it can. An empty `environment` asks about the
+        harness's configuration alone, and is answered. A host asks before it starts a connection,
+        and passes over a harness that would refuse.
+
+        `GUATIAO_ERR_BAD_VALUE` for requirements `start` would refuse as unreadable: a name given
+        twice, or a value its name does not take. A name the harness does not know is answered with
+        a refusal, never `None`.
+        """
+        ...
+
+    @required
+    @fallible
+    def program(self) -> ValueAnswer:
+        """The program the harness starts through the spawner (a path, or a name looked up on the
+        `PATH` where it runs, the start's environment's `PATH` when that sets one), so a host can say
+        it cannot be found before it starts a connection; `None` for a harness that starts none.
         """
         ...
 
     @fallible
     def models(self, environment: Ref) -> ValueAnswer:
-        """The models the account behind `environment` may use, when the harness can say without a model
-        turn. Never carries a value from `environment`. The default: unknown, and says so.
-        """
-        ...
-
-    @fallible
-    def program(self) -> ValueAnswer:
-        """The program the harness starts, a name looked up on `PATH` or a path, so a host can say it
-        cannot be found before it starts a connection. The default: `None`, and the host does not look.
+        """The models the account behind `environment` may use, when the harness can say without a
+        model turn. Never carries a value from `environment`. The default, for a harness with no
+        way to list them: unknown, and says so.
         """
         ...
 
     @fallible
     def session_record(self, query: Ref) -> ValueAnswer:
-        """Where the harness keeps its own record of the session `query` names, when it keeps one and the
-        file is there. The default: none.
+        """Where the harness keeps its own record of the session `query` names (by the session id it
+        reported, a UUID), when it keeps one and the file is there. The default, for a harness that
+        keeps none: none.
+        """
+        ...
+
+    @fallible
+    def non_defaults(self) -> ValueAnswer:
+        """Each way this configured harness departs from its defaults that its settings' schema cannot
+        show (the detail of a rule a setting holds as text), for the host to report beside the
+        differences it reads from the schema itself. The default, for settings the schema shows in
+        full: none.
         """
         ...
 
 
-__all__ = ["ChannelSink", "Channel", "AcpHarness"]
+__all__ = ["SpawnedProcess", "ProcessSpawner", "ChannelSink", "Channel", "AcpHarness"]

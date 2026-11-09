@@ -1,0 +1,602 @@
+{
+  "StartRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "environment": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "writeOnly": true,
+        "x-sensitive": true,
+        "description": "Variables for what the harness runs, over its configuration's. A provider shows none of them in an answer, a refusal, an error or a log.",
+        "default": {}
+      },
+      "working_roots": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The directories every session's `cwd` and additional directories must lie in, compared as [`WorkingRoots`](crate::WorkingRoots) says; empty adds none.",
+        "default": []
+      },
+      "requirements": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "What is required: one of [`NAMES`], or a name a harness may not know."
+            },
+            "value": {
+              "description": "What it is held to, for a name that takes a value; absent for one that takes none."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ]
+        },
+        "description": "What the connection is held to. A name may come once.",
+        "default": []
+      },
+      "session_id": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The id the connection's first `session/new` creates its session under, chosen by the host: a UUID as [`is_session_id`](crate::is_session_id) spells it."
+      }
+    },
+    "additionalProperties": false
+  },
+  "Requirement": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "What is required: one of [`NAMES`], or a name a harness may not know."
+      },
+      "value": {
+        "description": "What it is held to, for a name that takes a value; absent for one that takes none."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "name"
+    ]
+  },
+  "SessionRecordQuery": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "session_id": {
+        "type": "string",
+        "description": "The session's id as the provider reported it: a UUID."
+      },
+      "working_directory": {
+        "type": "string",
+        "description": "The directory the session worked in."
+      },
+      "environment": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "writeOnly": true,
+        "x-sensitive": true,
+        "description": "The variables its connection was started with.",
+        "default": {}
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "session_id",
+      "working_directory"
+    ]
+  },
+  "SpawnSpec": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "program": {
+        "type": "string",
+        "description": "The program: a path, or a name looked up on the `PATH` where it runs, the spec's own `PATH` when its environment sets one."
+      },
+      "args": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Its arguments, one element each, never re-split by a shell.",
+        "default": []
+      },
+      "cwd": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Its working directory, by the rules of where it runs; the spawner's choice when absent."
+      },
+      "environment": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "writeOnly": true,
+        "x-sensitive": true,
+        "description": "Variables set over the spawner's own environment, or over none with `clear_environment`.",
+        "default": {}
+      },
+      "clear_environment": {
+        "type": "boolean",
+        "description": "Starts from no variables at all rather than the spawner's own.",
+        "default": false
+      },
+      "remove_environment": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Variables taken out of the spawner's own environment before `environment` is set.",
+        "default": []
+      },
+      "terminal": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "rows": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "Rows."
+          },
+          "cols": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "Columns."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "rows",
+          "cols"
+        ],
+        "description": "A terminal of this size for its input and output, standard error included; plain pipes when absent."
+      },
+      "error_output": {
+        "type": "string",
+        "enum": [
+          "separate",
+          "merged",
+          "discarded"
+        ],
+        "x-enum-labels": {
+          "separate": "Its own stream, read with [`SpawnedProcess::read_error`]: standard output then carries only what the program wrote there, as a JSON-lines harness needs.",
+          "merged": "Into standard output.",
+          "discarded": "Nowhere."
+        },
+        "description": "Where standard error goes, with pipes.",
+        "default": "separate"
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "program"
+    ]
+  },
+  "TerminalSize": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "rows": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535,
+        "description": "Rows."
+      },
+      "cols": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535,
+        "description": "Columns."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "rows",
+      "cols"
+    ]
+  },
+  "HarnessInfo": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "Its name for people, such as `Claude Code`."
+      },
+      "versions": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "description": "The ACP versions its `initialize` answers, lowest first."
+      },
+      "takes": {
+        "type": "object",
+        "properties": {
+          "images": {
+            "type": "boolean",
+            "description": "Images in a prompt.",
+            "default": false
+          },
+          "audio": {
+            "type": "boolean",
+            "description": "Audio in a prompt.",
+            "default": false
+          },
+          "embedded_context": {
+            "type": "boolean",
+            "description": "Resources' content in a prompt.",
+            "default": false
+          },
+          "mcp_http": {
+            "type": "boolean",
+            "description": "MCP servers reached over HTTP.",
+            "default": false
+          },
+          "mcp_sse": {
+            "type": "boolean",
+            "description": "MCP servers reached over server-sent events.",
+            "default": false
+          },
+          "load": {
+            "type": "boolean",
+            "description": "`session/load`: a session reopened with its history replayed.",
+            "default": false
+          },
+          "resume": {
+            "type": "boolean",
+            "description": "`session/resume`: a session reopened without its history replayed.",
+            "default": false
+          },
+          "additional_directories": {
+            "type": "boolean",
+            "description": "More directories than the working one.",
+            "default": false
+          },
+          "system_prompt": {
+            "type": "boolean",
+            "description": "A system prompt appended to the harness's own.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "description": "What its `initialize` will advertise.",
+        "default": {
+          "images": false,
+          "audio": false,
+          "embedded_context": false,
+          "mcp_http": false,
+          "mcp_sse": false,
+          "load": false,
+          "resume": false,
+          "additional_directories": false,
+          "system_prompt": false
+        }
+      },
+      "resumes_wider": {
+        "type": "boolean",
+        "description": "Whether a session held to requirements can be reopened (`session/load` or `session/resume`) on a later connection started with fewer, and then have what that connection allows.",
+        "default": false
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "title",
+      "versions"
+    ]
+  },
+  "Takes": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "images": {
+        "type": "boolean",
+        "description": "Images in a prompt.",
+        "default": false
+      },
+      "audio": {
+        "type": "boolean",
+        "description": "Audio in a prompt.",
+        "default": false
+      },
+      "embedded_context": {
+        "type": "boolean",
+        "description": "Resources' content in a prompt.",
+        "default": false
+      },
+      "mcp_http": {
+        "type": "boolean",
+        "description": "MCP servers reached over HTTP.",
+        "default": false
+      },
+      "mcp_sse": {
+        "type": "boolean",
+        "description": "MCP servers reached over server-sent events.",
+        "default": false
+      },
+      "load": {
+        "type": "boolean",
+        "description": "`session/load`: a session reopened with its history replayed.",
+        "default": false
+      },
+      "resume": {
+        "type": "boolean",
+        "description": "`session/resume`: a session reopened without its history replayed.",
+        "default": false
+      },
+      "additional_directories": {
+        "type": "boolean",
+        "description": "More directories than the working one.",
+        "default": false
+      },
+      "system_prompt": {
+        "type": "boolean",
+        "description": "A system prompt appended to the harness's own.",
+        "default": false
+      }
+    },
+    "additionalProperties": false
+  },
+  "ModelListing": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "known": {
+        "type": "boolean",
+        "description": "Whether the harness listed them; when not, `models` is empty."
+      },
+      "unknown_because": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Why it could not, when `known` is false."
+      },
+      "models": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The harness's own identifier or alias for it."
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What the harness shows a person, when it has a name apart from the identifier."
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The harness's one-line description, when it gives one."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id"
+          ]
+        },
+        "description": "The models, in the harness's order.",
+        "default": []
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "known"
+    ]
+  },
+  "ModelInfo": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "The harness's own identifier or alias for it."
+      },
+      "name": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "What the harness shows a person, when it has a name apart from the identifier."
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The harness's one-line description, when it gives one."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "id"
+    ]
+  },
+  "SessionRecordFile": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "The file's absolute path, where the harness's agent runs."
+      },
+      "format": {
+        "type": "string",
+        "description": "What the file holds, as a short name a reader knows (`claude-code-jsonl`, `codex-rollout-jsonl`)."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "path",
+      "format"
+    ]
+  },
+  "NonDefault": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "setting": {
+        "type": "string",
+        "description": "The setting's name, as the provider spells it (`allowed_tools[2]`)."
+      },
+      "value": {
+        "type": "string",
+        "description": "Its value, as text; never a credential."
+      },
+      "default": {
+        "type": "string",
+        "description": "The default value, as text."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "setting",
+      "value",
+      "default"
+    ]
+  },
+  "SpawnerInfo": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "os": {
+        "type": "string",
+        "description": "The operating system they run on, spelled as Rust's `std::env::consts::OS` spells it (`windows`, `linux`, `macos`, `android`): which rules their paths follow."
+      },
+      "arch": {
+        "type": "string",
+        "description": "Their processor, spelled as `std::env::consts::ARCH` spells it."
+      },
+      "local": {
+        "type": "boolean",
+        "description": "Whether they run on the host's own machine, sharing its files and paths."
+      },
+      "terminal": {
+        "type": "boolean",
+        "description": "Whether a spec may ask for a terminal.",
+        "default": false
+      },
+      "separate_error": {
+        "type": "boolean",
+        "description": "Whether a spec may keep standard error apart from standard output.",
+        "default": false
+      },
+      "survives_link_loss": {
+        "type": "boolean",
+        "description": "Whether a process keeps running while the link to it is down, its output kept for when it comes back.",
+        "default": false
+      },
+      "kills_escaped": {
+        "type": "boolean",
+        "description": "Whether [`SpawnedProcess::kill`] also reaches the processes that left the program's process group or session; when not, those escape it.",
+        "default": false
+      },
+      "ends_with_host": {
+        "type": "boolean",
+        "description": "Whether a process's tree ends when the host dies without killing it (its group or job, at least); when not, it outlives the host.",
+        "default": false
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "os",
+      "arch",
+      "local"
+    ]
+  },
+  "ProcessExit": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "running": {
+        "type": "boolean",
+        "description": "Whether it still runs; neither `code` nor `signal` is set while it does."
+      },
+      "code": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": -9223372036854775808,
+        "maximum": 9223372036854775807,
+        "description": "Its exit code, when it exited by itself."
+      },
+      "signal": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": -9223372036854775808,
+        "maximum": 9223372036854775807,
+        "description": "The signal that ended it, on Unix."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "running"
+    ]
+  },
+  "LinkState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "up": {
+        "type": "boolean",
+        "description": "Whether it is up now. A local process's link is always up."
+      },
+      "drops": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "How many times it has gone down since the process started: a reader that sees the count grow knows its output paused."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "up",
+      "drops"
+    ]
+  },
+  "ErrorOutput": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "string",
+    "enum": [
+      "separate",
+      "merged",
+      "discarded"
+    ],
+    "x-enum-labels": {
+      "separate": "Its own stream, read with [`SpawnedProcess::read_error`]: standard output then carries only what the program wrote there, as a JSON-lines harness needs.",
+      "merged": "Into standard output.",
+      "discarded": "Nowhere."
+    },
+    "properties": {}
+  }
+}

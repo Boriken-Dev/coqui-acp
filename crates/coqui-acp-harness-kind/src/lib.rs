@@ -4,13 +4,32 @@
 
 extern crate alloc;
 
+#[cfg(feature = "contract")]
+#[cfg_attr(docsrs, doc(cfg(feature = "contract")))]
+pub mod contract;
+mod environment;
 mod kind;
 mod models;
+mod requirement;
+mod roots;
+mod spawner;
 
 pub use guatiao;
 pub use guatiao_channel::{Channel, ChannelSink, ChannelSinkVtable, ChannelVtable};
+
+pub use environment::Environment;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{
-    HarnessInfo, ModelInfo, ModelListing, NO_COMMANDS, ONLY_SKILLS, READ_ONLY, RESUME_WIDER,
-    Requirement, SANDBOXED_SCRIPTS, SessionRecordFile, SessionRecordQuery, StartRequest, Takes,
+    HarnessInfo, ModelInfo, ModelListing, NonDefault, SessionRecordFile, SessionRecordQuery,
+    StartRequest, StartRequestBuilder, Takes,
+};
+pub use requirement::{
+    ANSWER_ONLY, DENIED_PATHS, FILES_UNDER, NAMES, NETWORK, NO_COMMANDS, NO_PROJECT_MCP,
+    NO_PROJECT_SETTINGS, Narrowing, ONLY_SKILLS, READ_ONLY, READ_ONLY_PATHS, Requirement,
+    RequirementError, SANDBOXED_SCRIPTS,
+};
+pub use roots::{PathRefusal, PathStyle, WorkingRoots, is_plain_absolute, is_session_id};
+pub use spawner::{
+    ErrorOutput, LinkState, ProcessExit, ProcessSpawner, ProcessSpawnerVtable, READ_LINK_DOWN,
+    READ_TIMED_OUT, SpawnSpec, SpawnedProcess, SpawnedProcessVtable, SpawnerInfo, TerminalSize,
 };

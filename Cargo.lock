@@ -485,7 +485,9 @@ dependencies = [
  "coqui-acp",
  "guatiao",
  "guatiao-channel",
+ "guatiao-serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

@@ -1,16 +1,19 @@
 //! The `acp_harness` kind: a provider that drives an ACP agent and speaks ACP itself, one JSON-RPC
 //! message per channel message.
 
-use alloc::borrow::ToOwned;
-use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 
+use guatiao::Secret;
 use guatiao::library::{Object, ProviderError};
 use guatiao_channel::{Channel, ChannelSink};
 
+use crate::environment::Environment;
 use crate::models::{
-    HarnessInfo, ModelListing, Requirement, SessionRecordFile, SessionRecordQuery, StartRequest,
+    HarnessInfo, ModelListing, NonDefault, SessionRecordFile, SessionRecordQuery, StartRequest,
 };
+use crate::requirement::Requirement;
+use crate::spawner::ProcessSpawner;
 
 /// Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.
 ///
@@ -19,7 +22,10 @@ use crate::models::{
 /// provider in any language implements ACP as the protocol defines it, and the version is agreed by
 /// `initialize` on the channel.
 ///
-/// Every method is synchronous; a host calls them from a thread of its own.
+/// Every method answers for the provider as configured: a host builds an instance from the
+/// provider's settings and asks it. Every method is synchronous; a host calls them from a thread
+/// of its own. The methods without a default are the ones a host acts on for every harness; a
+/// default is kept only where it is a true answer for a harness that has nothing to say.
 #[guatiao::kind(name = "acp_harness")]
 pub trait AcpHarness: Send + Sync {
     /// Who the harness is and what its `initialize` will advertise, with nothing started: for a host
@@ -27,57 +33,70 @@ pub trait AcpHarness: Send + Sync {
     fn describe(&self) -> Result<HarnessInfo, ProviderError>;
 
     /// Starts one ACP connection: messages the host sends are the client's, and the agent's come back
-    /// through `sink`.
+    /// through `sink`. The programs it drives start through `spawner`, or the provider ignores it.
     ///
-    /// The sink is handed over: the provider destroys it, even when it refuses. It returns once the
-    /// channel takes messages; the program it drives may start later, at `initialize` or
-    /// `session/new`, and a failure then is answered in ACP before the provider closes.
+    /// `spawner` and `sink` are handed over: the provider destroys both, even when it refuses, and
+    /// the spawner by the time it calls `closed`. It returns once the channel takes messages; the
+    /// program may start later, at `initialize` or `session/new`, and a failure then is answered in
+    /// ACP before the provider closes.
     ///
-    /// It refuses with `GUATIAO_ERR_UNSUPPORTED` when it would refuse any of the request's
-    /// requirements ([`refusal`](Self::refusal)), and with `GUATIAO_ERR_BAD_VALUE` a request it cannot
-    /// read; it never starts with a requirement left out.
+    /// It refuses exactly when [`refusal`](Self::refusal) would for the request's requirements and
+    /// environment, with the same status: `GUATIAO_ERR_UNSUPPORTED` for a requirement it cannot
+    /// hold, `GUATIAO_ERR_BAD_VALUE` for a request it cannot read (a key it does not know, a
+    /// session id that is not a UUID, a requirement's value). It never starts with a requirement
+    /// left out.
     fn start(
         &self,
         request: StartRequest,
+        spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
     ) -> Result<Object<dyn Channel>, ProviderError>;
 
-    /// Why the harness could not hold a connection to `requirement`, started with `environment`, in a
-    /// sentence; `None` when it can. A host asks before it starts one, and passes over a harness
-    /// that would refuse. The default refuses every requirement, known or not.
+    /// Why the harness could not hold a connection to all of `requirements` together, started with
+    /// `environment`, in a sentence; `None` when it can. An empty `environment` asks about the
+    /// harness's configuration alone, and is answered. A host asks before it starts a connection,
+    /// and passes over a harness that would refuse.
+    ///
+    /// `GUATIAO_ERR_BAD_VALUE` for requirements `start` would refuse as unreadable: a name given
+    /// twice, or a value its name does not take. A name the harness does not know is answered with
+    /// a refusal, never `None`.
     fn refusal(
         &self,
-        requirement: Requirement,
-        environment: BTreeMap<String, String>,
-    ) -> Result<Option<String>, ProviderError> {
-        drop((requirement, environment));
-        Ok(Some(
-            "this harness holds a connection to no requirement".to_owned(),
-        ))
-    }
+        requirements: Vec<Requirement>,
+        environment: Secret<Environment>,
+    ) -> Result<Option<String>, ProviderError>;
 
-    /// The models the account behind `environment` may use, when the harness can say without a model
-    /// turn. Never carries a value from `environment`. The default: unknown, and says so.
-    fn models(&self, environment: BTreeMap<String, String>) -> Result<ModelListing, ProviderError> {
+    /// The program the harness starts through the spawner (a path, or a name looked up on the
+    /// `PATH` where it runs, the start's environment's `PATH` when that sets one), so a host can say
+    /// it cannot be found before it starts a connection; `None` for a harness that starts none.
+    fn program(&self) -> Result<Option<String>, ProviderError>;
+
+    /// The models the account behind `environment` may use, when the harness can say without a
+    /// model turn. Never carries a value from `environment`. The default, for a harness with no
+    /// way to list them: unknown, and says so.
+    fn models(&self, environment: Secret<Environment>) -> Result<ModelListing, ProviderError> {
         drop(environment);
         Ok(ModelListing::unknown(
             "this harness has no way to list models",
         ))
     }
 
-    /// The program the harness starts, a name looked up on `PATH` or a path, so a host can say it
-    /// cannot be found before it starts a connection. The default: `None`, and the host does not look.
-    fn program(&self) -> Result<Option<String>, ProviderError> {
-        Ok(None)
-    }
-
-    /// Where the harness keeps its own record of the session `query` names, when it keeps one and the
-    /// file is there. The default: none.
+    /// Where the harness keeps its own record of the session `query` names (by the session id it
+    /// reported, a UUID), when it keeps one and the file is there. The default, for a harness that
+    /// keeps none: none.
     fn session_record(
         &self,
         query: SessionRecordQuery,
     ) -> Result<Option<SessionRecordFile>, ProviderError> {
         drop(query);
         Ok(None)
+    }
+
+    /// Each way this configured harness departs from its defaults that its settings' schema cannot
+    /// show (the detail of a rule a setting holds as text), for the host to report beside the
+    /// differences it reads from the schema itself. The default, for settings the schema shows in
+    /// full: none.
+    fn non_defaults(&self) -> Result<Vec<NonDefault>, ProviderError> {
+        Ok(Vec::new())
     }
 }

@@ -1,10 +1,10 @@
 //! An ACP agent that answers each prompt with its text, as an `acp_harness` library any Guatiao host
-//! can load. This file is a `cdylib` and nothing else, as a crate calling `providers!` has to be.
+//! can load: the contract agent of `coqui_acp_harness_kind::contract`. This file is a `cdylib` and
+//! nothing else, as a crate calling `providers!` has to be.
 //!
 //! It keeps every rule of the channel: `send` waits for room in a queue of a few messages and `close`
 //! wakes it; one thread of its own answers, in order, and is the only caller of the sink; a sink
-//! that refuses ends the stream. A prompt of `close` is answered, then the provider ends the
-//! connection itself.
+//! that refuses ends the stream. It starts no program, so it lets go of the spawner unused.
 #![allow(
     clippy::std_instead_of_core,
     clippy::std_instead_of_alloc,
@@ -12,14 +12,16 @@
 )]
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
 use coqui_acp_harness_kind::guatiao::library::{Object, ProviderError};
-use coqui_acp_harness_kind::guatiao::{self, Provider, Status};
+use coqui_acp_harness_kind::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
 use coqui_acp_harness_kind::{
-    AcpHarness, Channel, ChannelSink, HarnessInfo, ModelInfo, ModelListing, NO_COMMANDS, READ_ONLY,
-    Requirement, StartRequest,
+    AcpHarness, Channel, ChannelSink, Environment, HarnessInfo, ModelInfo, ModelListing,
+    NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement, StartRequest, WorkingRoots,
+    is_session_id,
 };
 use serde_json::{Value, json};
 
@@ -44,36 +46,119 @@ extern "C" fn threads_done() -> Status {
     Status::GUATIAO_OK
 }
 
-#[derive(Default, Provider)]
-#[provider(AcpHarness, id = "echo_harness", crate = ::coqui_acp_harness_kind::guatiao)]
-struct EchoHarness;
+/// How an echo is configured.
+#[derive(FromValue, Schema, Debug, Clone)]
+#[map(crate = ::coqui_acp_harness_kind::guatiao)]
+struct EchoSettings {
+    /// Its name for people.
+    #[map(default = String::from("Echo"))]
+    title: String,
+    /// The largest message it takes, in bytes.
+    #[map(default = 1 << 20)]
+    max_message_bytes: u64,
+}
+
+#[derive(Provider)]
+#[provider(
+    AcpHarness,
+    id = "echo_harness",
+    config = EchoSettings,
+    new = EchoHarness::unconfigured,
+    crate = ::coqui_acp_harness_kind::guatiao
+)]
+struct EchoHarness {
+    settings: EchoSettings,
+    /// Every session any of its connections created: the id it reported, a UUID, against its own.
+    sessions: Arc<Mutex<BTreeMap<String, String>>>,
+    /// The next of its own ids.
+    next: Arc<AtomicU64>,
+}
+
+impl EchoHarness {
+    fn configured(settings: EchoSettings) -> Self {
+        Self {
+            settings,
+            sessions: Arc::default(),
+            next: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    fn unconfigured() -> Self {
+        Self::configured(EchoSettings {
+            title: "Echo".into(),
+            max_message_bytes: 1 << 20,
+        })
+    }
+}
+
+impl TryFrom<EchoSettings> for EchoHarness {
+    type Error = ProviderError;
+
+    fn try_from(settings: EchoSettings) -> Result<Self, ProviderError> {
+        Ok(Self::configured(settings))
+    }
+}
+
+/// Why the echo would refuse `requirements`, after reading them.
+fn refusal_of(requirements: &[Requirement]) -> Result<Option<String>, ProviderError> {
+    match Narrowing::read_all(requirements) {
+        Ok(_) => Ok(requirements
+            .iter()
+            .find(|r| !HOLDS.contains(&r.name.as_str()))
+            .map(|r| format!("the echo cannot hold `{}`", r.name))),
+        Err(error) if error.status() == Status::GUATIAO_ERR_UNSUPPORTED => {
+            Ok(Some(error.to_string()))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 impl AcpHarness for EchoHarness {
     fn describe(&self) -> Result<HarnessInfo, ProviderError> {
-        Ok(HarnessInfo::new("Echo", vec![1]))
+        let mut info = HarnessInfo::new(self.settings.title.clone(), vec![1]);
+        info.takes.load = true;
+        info.takes.resume = true;
+        info.takes.additional_directories = true;
+        Ok(info)
     }
 
     fn start(
         &self,
         request: StartRequest,
+        spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
+        // The echo starts nothing.
+        drop(spawner);
+        if let Some(why) = refusal_of(&request.requirements)? {
+            return Err(ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, &why));
+        }
         if request
-            .requirements
-            .iter()
-            .any(|r| !HOLDS.contains(&r.name.as_str()))
+            .session_id
+            .as_deref()
+            .is_some_and(|id| !is_session_id(id))
         {
             return Err(ProviderError::new(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "the echo cannot hold every requirement asked",
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the session id is not a UUID",
             ));
         }
         let queue = Arc::new(Queue::default());
+        let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
+        let agent = Agent {
+            roots: WorkingRoots::new(request.working_roots),
+            first: request.session_id,
+            sessions: Arc::clone(&self.sessions),
+            next: Arc::clone(&self.next),
+            open: Vec::new(),
+            reads_files: false,
+            turns: BTreeMap::new(),
+            asked: 0,
+        };
         let thread_queue = Arc::clone(&queue);
-        let roots = request.working_roots;
         let thread = std::thread::Builder::new()
             .name("echo_harness".into())
-            .spawn(move || deliver(sink, &thread_queue, &roots))
+            .spawn(move || deliver(sink, &thread_queue, agent))
             .map_err(|_| {
                 ProviderError::new(Status::GUATIAO_ERR_INTERNAL, "no thread to answer on")
             })?;
@@ -84,22 +169,22 @@ impl AcpHarness for EchoHarness {
             let _ = finished.join();
         }
         threads.push(thread);
-        Ok(Connection { queue }.into_object())
+        Ok(Connection { queue, limit }.into_object())
     }
 
     fn refusal(
         &self,
-        requirement: Requirement,
-        _environment: BTreeMap<String, String>,
+        requirements: Vec<Requirement>,
+        _environment: Secret<Environment>,
     ) -> Result<Option<String>, ProviderError> {
-        Ok((!HOLDS.contains(&requirement.name.as_str()))
-            .then(|| "the echo does not know this requirement".to_owned()))
+        refusal_of(&requirements)
     }
 
-    fn models(
-        &self,
-        _environment: BTreeMap<String, String>,
-    ) -> Result<ModelListing, ProviderError> {
+    fn program(&self) -> Result<Option<String>, ProviderError> {
+        Ok(None)
+    }
+
+    fn models(&self, _environment: Secret<Environment>) -> Result<ModelListing, ProviderError> {
         Ok(ModelListing::of(vec![ModelInfo::new("echo")]))
     }
 }
@@ -109,8 +194,8 @@ struct Inner {
     items: VecDeque<Vec<u8>>,
     /// Either side has ended the connection: `send` answers GONE from here on.
     closed: bool,
-    /// The status the host closed with, when it was the host.
-    host_status: Option<u32>,
+    /// The status it ends with, once one side has given it.
+    status: Option<u32>,
 }
 
 #[derive(Default)]
@@ -118,7 +203,7 @@ struct Queue {
     inner: Mutex<Inner>,
     /// A message was taken or the connection ended: `send` waits on it.
     space: Condvar,
-    /// A message arrived or the host closed: the thread waits on it.
+    /// A message arrived or the connection ended: the thread waits on it.
     arrived: Condvar,
 }
 
@@ -127,23 +212,33 @@ impl Queue {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Ends the connection from the provider's side, dropping what is still queued.
-    fn end(&self) {
+    /// Ends the connection with `status`, unless it has ended, dropping what is still queued.
+    fn end(&self, status: u32) {
         let mut inner = self.lock();
         inner.closed = true;
+        inner.status.get_or_insert(status);
         inner.items.clear();
         drop(inner);
         self.space.notify_all();
+        self.arrived.notify_all();
     }
 }
 
 /// The host's end of one connection.
 struct Connection {
     queue: Arc<Queue>,
+    limit: usize,
 }
 
 impl Channel for Connection {
     fn send(&self, bytes: &[u8]) -> Result<(), ProviderError> {
+        if bytes.len() > self.limit {
+            self.queue.end(Status::GUATIAO_ERR_BAD_VALUE.into());
+            return Err(ProviderError::new(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the message is larger than the echo takes",
+            ));
+        }
         let mut inner = self.queue.lock();
         loop {
             if inner.closed {
@@ -173,7 +268,7 @@ impl Channel for Connection {
             return;
         }
         inner.closed = true;
-        inner.host_status = Some(status);
+        inner.status = Some(status);
         drop(inner);
         self.queue.space.notify_all();
         self.queue.arrived.notify_all();
@@ -187,9 +282,15 @@ impl Drop for Connection {
 }
 
 /// The connection's thread, and the only caller of the sink.
-fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, roots: &[String]) {
-    let mut agent = Agent::default();
-    let status = 'connection: loop {
+fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, mut agent: Agent) {
+    let send = |sink: &mut Object<dyn ChannelSink>, answers: Vec<Value>| {
+        for answer in answers {
+            sink.receive(answer.to_string().as_bytes())
+                .map_err(|refused| u32::from(refused.status))?;
+        }
+        Ok::<(), u32>(())
+    };
+    let status = loop {
         let message = {
             let mut inner = queue.lock();
             loop {
@@ -207,115 +308,340 @@ fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, roots: &[String]) {
             }
         };
         let Some(message) = message else {
-            let status = queue.lock().host_status.unwrap_or(0);
-            queue.end();
-            break status;
-        };
-        let (answers, then_close) = agent.answer(&message, roots);
-        for answer in answers {
-            if let Err(refused) = sink.receive(answer.to_string().as_bytes()) {
-                queue.end();
-                break 'connection refused.status.into();
+            // The host closed: every turn still running ends, answered, before `closed`.
+            let status = queue.lock().status.unwrap_or(0);
+            match send(&mut sink, agent.end_every_turn()) {
+                Ok(()) => break status,
+                Err(refused) => break refused,
             }
+        };
+        let (answers, then_close) = agent.answer(&message);
+        if let Err(refused) = send(&mut sink, answers) {
+            queue.end(refused);
+            break refused;
         }
         if then_close {
-            queue.end();
+            queue.end(0);
+            let _ = send(&mut sink, agent.end_every_turn());
             break 0;
         }
     };
     sink.closed(status);
 }
 
-/// The ACP side: what each message from the client is answered with.
-#[derive(Default)]
-struct Agent {
-    sessions: u64,
+/// A turn waiting on something: a cancel, or the client's answer to the agent's own request.
+enum Turn {
+    /// Ends only on `session/cancel`.
+    Waiting { prompt: Value },
+    /// Waits for the answer to `session/request_permission`.
+    Asking { prompt: Value, request: String },
+    /// Waits for the answer to `fs/read_text_file`.
+    Reading { prompt: Value, request: String },
 }
 
-impl Agent {
-    /// The messages to send back, and whether the connection ends after them.
-    fn answer(&mut self, bytes: &[u8], roots: &[String]) -> (Vec<Value>, bool) {
-        let Ok(message) = serde_json::from_slice::<Value>(bytes) else {
-            return (
-                vec![error(&Value::Null, -32700, "not a JSON-RPC message")],
-                false,
-            );
-        };
-        let (Some(method), Some(id)) = (message["method"].as_str(), message.get("id")) else {
-            // A notification (`session/cancel` among them: every turn ends at once) or an answer.
-            return (Vec::new(), false);
-        };
-        let params = &message["params"];
-        match method {
-            "initialize" => (
-                vec![result(
-                    id,
-                    json!({
-                        "protocolVersion": 1,
-                        "agentCapabilities": {
-                            "loadSession": false,
-                            "promptCapabilities": {},
-                            "mcpCapabilities": {"http": false, "sse": false},
-                        },
-                        "authMethods": [],
-                        "agentInfo": {"name": "echo_harness", "title": "Echo", "version": "1.0.0"},
-                    }),
-                )],
-                false,
-            ),
-            "session/new" => {
-                let cwd = params["cwd"].as_str().unwrap_or_default();
-                if !within(cwd, roots) {
-                    return (
-                        vec![error(id, -32602, "the cwd is outside the working roots")],
-                        false,
-                    );
-                }
-                self.sessions += 1;
-                (
-                    vec![result(
-                        id,
-                        json!({"sessionId": format!("echo-{}", self.sessions)}),
-                    )],
-                    false,
-                )
-            }
-            "session/prompt" => {
-                let text: String = params["prompt"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|block| block["text"].as_str())
-                    .collect();
-                let update = json!({
-                    "jsonrpc": "2.0",
-                    "method": "session/update",
-                    "params": {
-                        "sessionId": params["sessionId"],
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": format!("echo: {text}")},
-                        },
-                    },
-                });
-                let end = result(id, json!({"stopReason": "end_turn"}));
-                (vec![update, end], text == "close")
-            }
-            _ => (vec![error(id, -32601, "method not found")], false),
+impl Turn {
+    fn prompt(&self) -> &Value {
+        match self {
+            Self::Waiting { prompt }
+            | Self::Asking { prompt, .. }
+            | Self::Reading { prompt, .. } => prompt,
+        }
+    }
+
+    fn request(&self) -> Option<&str> {
+        match self {
+            Self::Waiting { .. } => None,
+            Self::Asking { request, .. } | Self::Reading { request, .. } => Some(request),
         }
     }
 }
 
-/// Whether `cwd` is one of `roots` or under one; any is, with none given.
-fn within(cwd: &str, roots: &[String]) -> bool {
-    roots.is_empty()
-        || roots.iter().any(|root| {
-            let root = root.trim_end_matches(['/', '\\']);
-            cwd == root
-                || cwd
-                    .strip_prefix(root)
-                    .is_some_and(|rest| rest.starts_with(['/', '\\']))
+/// The ACP side of one connection: what each message from the client is answered with.
+struct Agent {
+    roots: WorkingRoots,
+    /// The host's id for the first new session, until it is used.
+    first: Option<String>,
+    sessions: Arc<Mutex<BTreeMap<String, String>>>,
+    next: Arc<AtomicU64>,
+    /// The sessions open on this connection, by the id reported.
+    open: Vec<String>,
+    /// Whether the client offered `fs/read_text_file`.
+    reads_files: bool,
+    /// The turn running in each session, by its id.
+    turns: BTreeMap<String, Turn>,
+    /// How many requests the agent has made of the client.
+    asked: u64,
+}
+
+impl Agent {
+    /// The messages to send back, and whether the connection ends after them.
+    fn answer(&mut self, bytes: &[u8]) -> (Vec<Value>, bool) {
+        let Ok(message) = serde_json::from_slice::<Value>(bytes) else {
+            return (vec![error(&Value::Null, -32700, "not JSON")], false);
+        };
+        let Some(object) = message.as_object() else {
+            return (
+                vec![error(&Value::Null, -32600, "not one JSON-RPC message")],
+                false,
+            );
+        };
+        let id = object.get("id");
+        let Some(method) = object.get("method") else {
+            return (self.answered(&message), false);
+        };
+        let Some(method) = method.as_str() else {
+            return (
+                vec![error(
+                    id.unwrap_or(&Value::Null),
+                    -32600,
+                    "the method is not text",
+                )],
+                false,
+            );
+        };
+        let params = object.get("params").cloned().unwrap_or(json!({}));
+        let Some(id) = id else {
+            return (self.notified(method, &params), false);
+        };
+        if !params.is_object() {
+            return (
+                vec![error(id, -32602, "the params are not an object")],
+                false,
+            );
+        }
+        match self.requested(method, id, &params) {
+            Ok(answers) => answers,
+            Err(why) => (vec![error(id, -32602, &why)], false),
+        }
+    }
+
+    fn requested(
+        &mut self,
+        method: &str,
+        id: &Value,
+        params: &Value,
+    ) -> Result<(Vec<Value>, bool), String> {
+        let text = |key: &str| {
+            params[key]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("`{key}` is not text"))
+        };
+        Ok(match method {
+            "initialize" => {
+                self.reads_files = params["clientCapabilities"]["fs"]["readTextFile"] == true;
+                let answer = json!({
+                    "protocolVersion": 1,
+                    "agentCapabilities": {
+                        "loadSession": true,
+                        "promptCapabilities": {},
+                        "mcpCapabilities": {"http": false, "sse": false},
+                    },
+                    "authMethods": [],
+                    "agentInfo": {"name": "echo_harness", "title": "Echo", "version": "1.0.0"},
+                });
+                (vec![result(id, answer)], false)
+            }
+            "session/new" => {
+                self.admit(&text("cwd")?, params)?;
+                let session = match self.first.take() {
+                    Some(chosen) => chosen,
+                    None => uuid::Uuid::new_v4().to_string(),
+                };
+                let own = format!("echo-{}", self.next.fetch_add(1, Ordering::SeqCst));
+                let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+                if sessions.contains_key(&session) {
+                    return Err("a session with this id exists".into());
+                }
+                sessions.insert(session.clone(), own);
+                drop(sessions);
+                self.open.push(session.clone());
+                (vec![result(id, json!({"sessionId": session}))], false)
+            }
+            "session/load" | "session/resume" => {
+                self.admit(&text("cwd")?, params)?;
+                let session = text("sessionId")?;
+                let known = self
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains_key(&session);
+                if !known {
+                    return Err("no session has this id".into());
+                }
+                self.open.push(session);
+                (vec![result(id, json!({}))], false)
+            }
+            "session/prompt" => {
+                let session = text("sessionId")?;
+                let blocks = params["prompt"]
+                    .as_array()
+                    .ok_or("`prompt` is not a list")?;
+                if !self.open.contains(&session) {
+                    return Err("no session with this id is open here".into());
+                }
+                let said: String = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+                self.prompted(id, &session, &said)
+            }
+            _ => (vec![error(id, -32601, "method not found")], false),
         })
+    }
+
+    /// Refuses a session whose directories are not all inside the working roots.
+    fn admit(&self, cwd: &str, params: &Value) -> Result<(), String> {
+        let mut directories = vec![cwd.to_owned()];
+        if let Some(more) = params.get("additionalDirectories") {
+            let more = more
+                .as_array()
+                .ok_or("`additionalDirectories` is not a list")?;
+            for dir in more {
+                directories.push(dir.as_str().ok_or("a directory is not text")?.to_owned());
+            }
+        }
+        for dir in &directories {
+            self.roots.admits(dir).map_err(|why| why.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn prompted(&mut self, id: &Value, session: &str, said: &str) -> (Vec<Value>, bool) {
+        if said == "wait" {
+            self.turns
+                .insert(session.into(), Turn::Waiting { prompt: id.clone() });
+            return (Vec::new(), false);
+        }
+        if said == "ask" {
+            self.asked += 1;
+            let request = format!("echo-ask-{}", self.asked);
+            let asked = json!({
+                "jsonrpc": "2.0",
+                "id": request,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": session,
+                    "toolCall": {"toolCallId": request, "title": "Echo asks"},
+                    "options": [
+                        {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                        {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                    ],
+                },
+            });
+            self.turns.insert(
+                session.into(),
+                Turn::Asking {
+                    prompt: id.clone(),
+                    request,
+                },
+            );
+            return (vec![asked], false);
+        }
+        if let Some(path) = said.strip_prefix("read ") {
+            if !self.reads_files {
+                return (finish(session, id, Some("echo: no fs"), "end_turn"), false);
+            }
+            self.asked += 1;
+            let request = format!("echo-read-{}", self.asked);
+            let asked = json!({
+                "jsonrpc": "2.0",
+                "id": request,
+                "method": "fs/read_text_file",
+                "params": {"sessionId": session, "path": path},
+            });
+            self.turns.insert(
+                session.into(),
+                Turn::Reading {
+                    prompt: id.clone(),
+                    request,
+                },
+            );
+            return (vec![asked], false);
+        }
+        (
+            finish(session, id, Some(&format!("echo: {said}")), "end_turn"),
+            said == "close",
+        )
+    }
+
+    fn notified(&mut self, method: &str, params: &Value) -> Vec<Value> {
+        if method != "session/cancel" {
+            return Vec::new();
+        }
+        let Some(session) = params["sessionId"].as_str() else {
+            return Vec::new();
+        };
+        match self.turns.remove(session) {
+            Some(turn) => finish(session, turn.prompt(), None, "cancelled"),
+            None => Vec::new(),
+        }
+    }
+
+    /// The client's answer to one of the agent's own requests.
+    fn answered(&mut self, message: &Value) -> Vec<Value> {
+        let Some(id) = message["id"].as_str() else {
+            return Vec::new();
+        };
+        let Some(session) = self
+            .turns
+            .iter()
+            .find(|(_, turn)| turn.request() == Some(id))
+            .map(|(session, _)| session.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(turn) = self.turns.remove(&session) else {
+            return Vec::new();
+        };
+        let outcome = &message["result"]["outcome"];
+        match turn {
+            Turn::Asking { prompt, .. } if outcome["outcome"] == "cancelled" => {
+                finish(&session, &prompt, None, "cancelled")
+            }
+            Turn::Asking { prompt, .. } => {
+                let allowed = outcome["outcome"] == "selected" && outcome["optionId"] == "allow";
+                let said = if allowed {
+                    "echo: allowed"
+                } else {
+                    "echo: refused"
+                };
+                finish(&session, &prompt, Some(said), "end_turn")
+            }
+            Turn::Reading { prompt, .. } => {
+                let said = message["result"]["content"]
+                    .as_str()
+                    .map_or_else(|| "echo: refused".to_owned(), |c| format!("echo: {c}"));
+                finish(&session, &prompt, Some(&said), "end_turn")
+            }
+            Turn::Waiting { .. } => Vec::new(),
+        }
+    }
+
+    /// Ends every turn still running, as cancelled: the connection is ending.
+    fn end_every_turn(&mut self) -> Vec<Value> {
+        core::mem::take(&mut self.turns)
+            .into_iter()
+            .flat_map(|(session, turn)| finish(&session, turn.prompt(), None, "cancelled"))
+            .collect()
+    }
+}
+
+/// A turn's end: what the agent says, if anything, then the prompt's answer.
+fn finish(session: &str, prompt: &Value, said: Option<&str>, stop: &str) -> Vec<Value> {
+    let mut messages = Vec::new();
+    if let Some(said) = said {
+        messages.push(json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": said},
+                },
+            },
+        }));
+    }
+    messages.push(result(prompt, json!({"stopReason": stop})));
+    messages
 }
 
 fn result(id: &Value, result: Value) -> Value {
