@@ -1,10 +1,10 @@
-# `coqui-acp-harness-kind` — API header
+# `coqui-acp-api` — API header
 
-Header-file-style reference for the `coqui-acp-harness-kind` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
+Header-file-style reference for the `coqui-acp-api` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
 MSRV Rust 1.89. A default build depends on `guatiao` (with `provider`) and `guatiao-channel`, both pinned by one revision: a host and every provider build against the same one, and a library built against another `guatiao::library::ABI_VERSION` is refused at load. Feature `contract` (off by default) adds the contract suite, `contract::Contract`, and the program `acp-harness-check`, with `serde_json`, `coqui-acp` and Guatiao's `load`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
-Imports: everything is at the crate root, but the suite (`contract`). `coqui_acp_harness_kind::guatiao` is Guatiao, so a provider names one version of it (`#[provider(AcpHarness, crate = ::coqui_acp_harness_kind::guatiao)]`).
+Imports: everything is at the crate root, but the suite (`contract`). `coqui_acp_api::guatiao` is Guatiao, so a provider names one version of it (`#[provider(AcpHarness, crate = ::coqui_acp_api::guatiao)]`).
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state.
 
@@ -20,7 +20,7 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 | `process_spawner` | `ProcessSpawnerVtable` | `1466370631` | the host |
 | `spawned_process` | `SpawnedProcessVtable` | `3306532587` | the host |
 
-The package holds all five as data in `include/coqui_acp_harness_kind.kinds.json`, every model's JSON Schema in `include/coqui_acp_harness_kind.schemas.json`, and the kinds for Python in `python/coqui_acp_harness_kinds.py` (written by `python/write_kinds.py`).
+The package holds all five as data in `include/coqui_acp_api.kinds.json`, every model's JSON Schema in `include/coqui_acp_api.schemas.json`, and the kinds for Python in `python/coqui_acp_api_kinds.py` (written by `python/write_kinds.py`).
 
 **How the kind changes.** Until its first release every method a harness has to answer is required, and a method added or changed is a break: every provider rebuilds, and the hash moves. No compatibility code is kept: no default so that an older provider loads, no deprecated alias, no reading of an older request's shape. After its first release the kind grows only by appending, as Guatiao provides for released kinds.
 
@@ -200,7 +200,7 @@ A session's `cwd` and every one of its `additionalDirectories`, on `session/new`
 
 ## A provider in another language
 
-Every method takes and answers plain data; `start` also takes the spawner and the sink and answers the channel, all objects. The Python module is what `python -m guatiao.kinds` writes from the description: a provider subclasses `AcpHarness` and `Channel`, calls the sink it is handed (`receive(bytes)`, `closed(status)`, then `destroy()`), from a `threading.Thread` of its own if it likes, and calls `destroy()` on the spawner it does not keep. A Python `start` that refuses destroys both before it raises: Guatiao's Python binding lets go of a taken argument only when the call never ran. The models' schemas in `include/coqui_acp_harness_kind.schemas.json` say which keys a request may have. A provider in a language whose objects are called on one engine thread (QuickJS, Node, Lua) has no thread of its own: it answers inside the `send` that took the message, so it cannot be told `session/cancel` while a turn runs.
+Every method takes and answers plain data; `start` also takes the spawner and the sink and answers the channel, all objects. The Python module is what `python -m guatiao.kinds` writes from the description: a provider subclasses `AcpHarness` and `Channel`, calls the sink it is handed (`receive(bytes)`, `closed(status)`, then `destroy()`), from a `threading.Thread` of its own if it likes, and calls `destroy()` on the spawner it does not keep. A Python `start` that refuses destroys both before it raises: Guatiao's Python binding lets go of a taken argument only when the call never ran. The models' schemas in `include/coqui_acp_api.schemas.json` say which keys a request may have. A provider in a language whose objects are called on one engine thread (QuickJS, Node, Lua) has no thread of its own: it answers inside the `send` that took the message, so it cannot be told `session/cancel` while a turn runs.
 
 ## The contract suite (feature `contract`)
 

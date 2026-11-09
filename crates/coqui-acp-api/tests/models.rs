@@ -8,8 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use coqui_acp_harness_kind::guatiao::{FromValue, List, Secret, Status, ToValue, Value};
-use coqui_acp_harness_kind::{
+use coqui_acp_api::guatiao::{FromValue, List, Secret, Status, ToValue, Value};
+use coqui_acp_api::{
     ANSWER_ONLY, DENIED_PATHS, Environment, FILES_UNDER, NETWORK, NO_COMMANDS, Narrowing,
     ONLY_SKILLS, PathRefusal, READ_ONLY, Requirement, RequirementError, SANDBOXED_SCRIPTS,
     SessionRecordQuery, SpawnSpec, StartRequest, WorkingRoots,
@@ -147,7 +147,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new(name: &str) -> Self {
         let temp = std::fs::canonicalize(std::env::temp_dir()).expect("a temporary directory");
-        let dir = temp.join(format!("acp-harness-kind-{name}-{}", std::process::id()));
+        let dir = temp.join(format!("acp-api-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("made");
         Self(dir)

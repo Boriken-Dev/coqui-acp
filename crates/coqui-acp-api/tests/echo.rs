@@ -9,10 +9,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use coqui_acp_harness_kind::contract::Contract;
-use coqui_acp_harness_kind::guatiao::library::Registry;
-use coqui_acp_harness_kind::guatiao::{Map, Secret, Value};
-use coqui_acp_harness_kind::{AcpHarness, SessionRecordQuery};
+use coqui_acp_api::contract::Contract;
+use coqui_acp_api::guatiao::library::Registry;
+use coqui_acp_api::guatiao::{Map, Secret, Value};
+use coqui_acp_api::{AcpHarness, SessionRecordQuery};
 
 /// The echo's library file, which `cargo test` builds beside the tests.
 pub fn library() -> PathBuf {
@@ -29,7 +29,7 @@ pub fn library() -> PathBuf {
 }
 
 fn registry() -> Registry {
-    let mut registry = Registry::new("coqui-acp-harness-kind-tests", "1.0");
+    let mut registry = Registry::new("coqui-acp-api-tests", "1.0");
     registry.load_file(&library()).unwrap_or_else(|error| {
         panic!("the library loads, once `cargo test` or `cargo build --examples` built it: {error}")
     });

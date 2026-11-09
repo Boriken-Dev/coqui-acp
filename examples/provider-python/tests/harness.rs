@@ -1,6 +1,6 @@
 //! The `acp_harness` provider written in Python, `harness/acp_echo_harness.py`, loaded in this process
 //! through Guatiao's source of Python libraries and called as the Rust-declared kind, holds to the
-//! contract `coqui_acp_harness_kind::contract` ships, as the Rust echo does.
+//! contract `coqui_acp_api::contract` ships, as the Rust echo does.
 //!
 //! Where build.rs found no Python the one test left is ignored, and a run counts it as not run.
 #![allow(
@@ -26,15 +26,15 @@ mod with_python {
     use std::process::Command;
     use std::sync::Arc;
 
-    use coqui_acp_harness_kind::contract::Contract;
-    use coqui_acp_harness_kind::guatiao::library::Registry;
-    use coqui_acp_harness_kind::guatiao::{List, Map, Secret};
-    use coqui_acp_harness_kind::{AcpHarness, SessionRecordQuery};
+    use coqui_acp_api::contract::Contract;
+    use coqui_acp_api::guatiao::library::Registry;
+    use coqui_acp_api::guatiao::{List, Map, Secret};
+    use coqui_acp_api::{AcpHarness, SessionRecordQuery};
 
     use super::support::{guatiao, manifest_dir, python, source};
 
     fn kinds_crate() -> PathBuf {
-        manifest_dir().join("../../crates/coqui-acp-harness-kind")
+        manifest_dir().join("../../crates/coqui-acp-api")
     }
 
     fn texts(items: &[PathBuf]) -> List {

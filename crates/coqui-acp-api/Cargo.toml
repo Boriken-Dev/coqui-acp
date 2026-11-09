@@ -1,6 +1,6 @@
 [package]
-name = "coqui-acp-harness-kind"
-description = "The acp_harness Guatiao kind: an Agent Client Protocol agent driver written in any language Guatiao hosts, started over a channel of ACP messages"
+name = "coqui-acp-api"
+description = "coqui-acp's Guatiao kinds: acp_harness, an Agent Client Protocol agent driver written in any language Guatiao hosts and started over a channel of ACP messages, and the spawner its programs start through"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

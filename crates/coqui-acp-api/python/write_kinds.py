@@ -1,4 +1,4 @@
-"""Writes `coqui_acp_harness_kinds.py` from the kinds' description, or with `--check` says whether it
+"""Writes `coqui_acp_api_kinds.py` from the kinds' description, or with `--check` says whether it
 is current (exit 1 if not). Needs Guatiao's Python binding on `PYTHONPATH`.
 
 It writes what `python -m guatiao.kinds` writes, with the paths in the module's header relative to the
@@ -13,14 +13,14 @@ import sys
 from guatiao.kinds import generate
 
 HERE = pathlib.Path(__file__).resolve().parent
-DOCUMENT = HERE.parent / "include" / "coqui_acp_harness_kind.kinds.json"
-MODULE = HERE / "coqui_acp_harness_kinds.py"
+DOCUMENT = HERE.parent / "include" / "coqui_acp_api.kinds.json"
+MODULE = HERE / "coqui_acp_api_kinds.py"
 
 
 def written() -> str:
     return generate(
         DOCUMENT.read_text(encoding="utf-8"),
-        source="include/coqui_acp_harness_kind.kinds.json",
+        source="include/coqui_acp_api.kinds.json",
         command="python python/write_kinds.py",
     )
 

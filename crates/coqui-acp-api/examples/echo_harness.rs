@@ -1,5 +1,5 @@
 //! An ACP agent that answers each prompt with its text, as an `acp_harness` library any Guatiao host
-//! can load: the contract agent of `coqui_acp_harness_kind::contract`. This file is a `cdylib` and
+//! can load: the contract agent of `coqui_acp_api::contract`. This file is a `cdylib` and
 //! nothing else, as a crate calling `providers!` has to be.
 //!
 //! It keeps every rule of the channel: `send` waits for room in a queue of a few messages and `close`
@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
-use coqui_acp_harness_kind::guatiao::library::{Object, ProviderError};
-use coqui_acp_harness_kind::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
-use coqui_acp_harness_kind::{
+use coqui_acp_api::guatiao::library::{Object, ProviderError};
+use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
+use coqui_acp_api::{
     AcpHarness, Channel, ChannelSink, Environment, HarnessInfo, ModelInfo, ModelListing,
     NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement, StartRequest, WorkingRoots,
     is_session_id,
@@ -48,7 +48,7 @@ extern "C" fn threads_done() -> Status {
 
 /// How an echo is configured.
 #[derive(FromValue, Schema, Debug, Clone)]
-#[map(crate = ::coqui_acp_harness_kind::guatiao)]
+#[map(crate = ::coqui_acp_api::guatiao)]
 struct EchoSettings {
     /// Its name for people.
     #[map(default = String::from("Echo"))]
@@ -64,7 +64,7 @@ struct EchoSettings {
     id = "echo_harness",
     config = EchoSettings,
     new = EchoHarness::unconfigured,
-    crate = ::coqui_acp_harness_kind::guatiao
+    crate = ::coqui_acp_api::guatiao
 )]
 struct EchoHarness {
     settings: EchoSettings,

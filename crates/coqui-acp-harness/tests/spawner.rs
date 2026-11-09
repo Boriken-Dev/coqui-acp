@@ -12,9 +12,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use coqui_acp_harness::{Launch, LocalSpawner, Spawn, ThroughSpawner};
-use coqui_acp_harness_kind::guatiao::Status;
-use coqui_acp_harness_kind::guatiao::library::Object;
-use coqui_acp_harness_kind::{
+use coqui_acp_api::guatiao::Status;
+use coqui_acp_api::guatiao::library::Object;
+use coqui_acp_api::{
     ErrorOutput, ProcessSpawner, READ_TIMED_OUT, SpawnSpec, TerminalSize,
 };
 

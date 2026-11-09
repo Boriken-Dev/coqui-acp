@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp-harness` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-MSRV Rust 1.89. A default build depends on `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Feature `kind` (off by default) adds `spawner`, the `acp_harness` kind's spawner on this machine and `Spawn` through any host's, with `coqui-acp-harness-kind`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
+MSRV Rust 1.89. A default build depends on `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Feature `kind` (off by default) adds `spawner`, the `acp_harness` kind's spawner on this machine and `Spawn` through any host's, with `coqui-acp-api`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `ending_once`, `exit_text`, `line_writer` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The root also re-exports `mode`'s `Mode`, and with `kind` `spawner`'s `LocalSpawner` and `ThroughSpawner`. The modules `acp`, `event`, `lines`, `mode`, `process`, `stream` and `version` are public, and `spawner` with `kind`.
 
@@ -44,7 +44,7 @@ Implement `Spawn` to run a harness elsewhere: in a container, over SSH, under a 
 pub struct LocalSpawner;                         // Clone, Copy, Debug, Default; #[must_use]
 pub const fn LocalSpawner::new() -> LocalSpawner // 1 MiB of each output stream held unread
 pub const fn buffer(self, bytes: usize) -> Self  // past it the program waits to write
-impl coqui_acp_harness_kind::ProcessSpawner for LocalSpawner
+impl coqui_acp_api::ProcessSpawner for LocalSpawner
 pub struct ThroughSpawner;                       // Debug
 pub fn ThroughSpawner::new(spawner: Object<dyn ProcessSpawner>) -> ThroughSpawner
 impl Spawn for ThroughSpawner

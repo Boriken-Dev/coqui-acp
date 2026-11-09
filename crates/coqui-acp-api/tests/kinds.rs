@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 
-use coqui_acp_harness_kind::guatiao::{FromValue, Map, Schema, Value};
-use coqui_acp_harness_kind::{
+use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
+use coqui_acp_api::{
     AcpHarnessVtable, ChannelSinkVtable, ChannelVtable, ErrorOutput, HarnessInfo, LinkState,
     ModelInfo, ModelListing, NAMES, NonDefault, ProcessExit, ProcessSpawnerVtable, Requirement,
     SessionRecordFile, SessionRecordQuery, SpawnSpec, SpawnedProcessVtable, SpawnerInfo,
@@ -32,7 +32,7 @@ fn pretty(value: &Json) -> String {
 /// Compares `fresh` with the committed file, writing it first when asked to.
 fn committed(path: &str, fresh: &str) {
     let path = file(path);
-    if std::env::var_os("COQUI_ACP_HARNESS_KIND_WRITE_KINDS").is_some() {
+    if std::env::var_os("COQUI_ACP_API_WRITE_KINDS").is_some() {
         std::fs::write(&path, fresh).expect("the file is written");
     }
     let committed = std::fs::read_to_string(&path).expect("the file is committed");
@@ -53,10 +53,10 @@ fn rendered() -> String {
     pretty(&serde_json::from_str(&document).expect("a kind's description is JSON"))
 }
 
-/// Regenerate with `COQUI_ACP_HARNESS_KIND_WRITE_KINDS=1 cargo test -p coqui-acp-harness-kind --test kinds`.
+/// Regenerate with `COQUI_ACP_API_WRITE_KINDS=1 cargo test -p coqui-acp-api --test kinds`.
 #[test]
 fn the_committed_description_is_what_this_build_describes() {
-    committed("include/coqui_acp_harness_kind.kinds.json", &rendered());
+    committed("include/coqui_acp_api.kinds.json", &rendered());
 }
 
 fn schema_of<T: Schema>() -> Json {
@@ -93,7 +93,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
         .map(|(name, schema)| (name.to_owned(), schema))
         .collect();
     committed(
-        "include/coqui_acp_harness_kind.schemas.json",
+        "include/coqui_acp_api.schemas.json",
         &pretty(&Json::Object(document)),
     );
 }
@@ -291,12 +291,12 @@ fn the_api_header_says_those_hashes() {
 
 #[test]
 fn the_python_kinds_carry_those_hashes() {
-    let module = std::fs::read_to_string(file("python/coqui_acp_harness_kinds.py"))
+    let module = std::fs::read_to_string(file("python/coqui_acp_api_kinds.py"))
         .expect("the Python kinds are committed");
     for (kind, hash) in HASHES {
         assert!(
             module.contains(&format!("kind=\"{kind}\", floor_hash={hash}")),
-            "python/coqui_acp_harness_kinds.py lacks {kind} at {hash}: regenerate it"
+            "python/coqui_acp_api_kinds.py lacks {kind} at {hash}: regenerate it"
         );
     }
 }

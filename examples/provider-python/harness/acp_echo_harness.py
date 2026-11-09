@@ -1,7 +1,7 @@
 """An ACP agent that answers each prompt with its text, as an `acp_harness` library written in Python.
 
 The module is the library: its id is its name, its version `__version__`, its providers the classes in
-`__all__`. It is the contract agent of `coqui_acp_harness_kind::contract`, speaking ACP itself, one
+`__all__`. It is the contract agent of `coqui_acp_api::contract`, speaking ACP itself, one
 JSON-RPC message per channel message, and keeps every rule of the channel: `send` waits for room in a
 queue of a few messages and `close` wakes it; one thread of its own answers, in order, and is the only
 caller of the sink; a sink that refuses ends the connection. It starts no program, so it lets go of the
@@ -18,7 +18,7 @@ import uuid
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-from coqui_acp_harness_kinds import AcpHarness, Channel, ChannelSink, ProcessSpawner
+from coqui_acp_api_kinds import AcpHarness, Channel, ChannelSink, ProcessSpawner
 
 from guatiao import Ref, provide
 from guatiao.errors import BadValue, Gone, Unsupported

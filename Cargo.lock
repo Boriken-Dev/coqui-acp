@@ -427,6 +427,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-acp-api"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "coqui-acp",
+ "guatiao",
+ "guatiao-channel",
+ "guatiao-serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "coqui-acp-bridge"
 version = "0.0.0-alpha.0"
 dependencies = [
@@ -472,23 +484,11 @@ version = "0.0.0-alpha.0"
 dependencies = [
  "base64 0.22.1",
  "coqui-acp",
- "coqui-acp-harness-kind",
+ "coqui-acp-api",
  "rustix",
  "serde_json",
  "uuid",
  "win32job",
-]
-
-[[package]]
-name = "coqui-acp-harness-kind"
-version = "0.0.0-alpha.0"
-dependencies = [
- "coqui-acp",
- "guatiao",
- "guatiao-channel",
- "guatiao-serde",
- "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -1945,7 +1945,7 @@ name = "provider-python"
 version = "0.0.0-alpha.0"
 dependencies = [
  "coqui-acp",
- "coqui-acp-harness-kind",
+ "coqui-acp-api",
  "coqui-acp-provider",
  "guatiao",
  "serde_json",

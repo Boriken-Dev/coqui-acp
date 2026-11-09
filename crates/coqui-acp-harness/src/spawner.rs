@@ -12,9 +12,9 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use coqui_acp_harness_kind::guatiao::Status;
-use coqui_acp_harness_kind::guatiao::library::{Object, ProviderError};
-use coqui_acp_harness_kind::{
+use coqui_acp_api::guatiao::Status;
+use coqui_acp_api::guatiao::library::{Object, ProviderError};
+use coqui_acp_api::{
     Environment, ErrorOutput, LinkState, ProcessExit, ProcessSpawner, READ_LINK_DOWN,
     READ_TIMED_OUT, SpawnSpec, SpawnedProcess, SpawnerInfo, TerminalSize,
 };

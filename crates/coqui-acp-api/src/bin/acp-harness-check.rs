@@ -26,10 +26,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use coqui_acp_harness_kind::contract::Contract;
-use coqui_acp_harness_kind::guatiao::library::Registry;
-use coqui_acp_harness_kind::guatiao::{List, Map, Number, Value};
-use coqui_acp_harness_kind::{AcpHarness, Requirement};
+use coqui_acp_api::contract::Contract;
+use coqui_acp_api::guatiao::library::Registry;
+use coqui_acp_api::guatiao::{List, Map, Number, Value};
+use coqui_acp_api::{AcpHarness, Requirement};
 
 #[derive(Default)]
 struct Args {

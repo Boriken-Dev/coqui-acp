@@ -1,4 +1,4 @@
-# coqui-acp-harness-kind
+# coqui-acp-api
 
 [![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](https://github.com/Boriken-Dev/coqui-acp/blob/main/LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Boriken-Dev/coqui-acp/test.yml)](https://github.com/Boriken-Dev/coqui-acp/actions/workflows/test.yml)
@@ -12,7 +12,7 @@
 - `StartRequest`: what a host adds to the provider's own configuration for one connection: a secret environment, working roots, requirements with their values, and the session's UUID.
 - `Requirement` and its vocabulary (`read_only`, `no_commands`, `answer_only`, `no_project_settings`, `no_project_mcp`, `files_under`, `read_only_paths`, `denied_paths`, `network`, `sandboxed_scripts`, `only_skills`), which only narrow: a harness refuses a name it does not know.
 - `WorkingRoots`: the one way a path is compared with the roots (no `..`, case on Windows, links followed).
-- The kinds as data, `include/coqui_acp_harness_kind.kinds.json`, the models' schemas, `include/coqui_acp_harness_kind.schemas.json`, and a Python module, `python/coqui_acp_harness_kinds.py`, for providers with no Rust.
+- The kinds as data, `include/coqui_acp_api.kinds.json`, the models' schemas, `include/coqui_acp_api.schemas.json`, and a Python module, `python/coqui_acp_api_kinds.py`, for providers with no Rust.
 - Feature `contract`: the suite every provider passes, as a module and as `acp-harness-check`, which runs it on a library or a source file in any language.
 - No dependency but Guatiao and its channel kinds by default; no `unsafe`.
 
@@ -21,7 +21,7 @@
 Not on crates.io yet:
 
 ```sh
-cargo add --git https://github.com/Boriken-Dev/coqui-acp coqui-acp-harness-kind
+cargo add --git https://github.com/Boriken-Dev/coqui-acp coqui-acp-api
 ```
 
 `--features contract` adds the suite.
@@ -31,8 +31,8 @@ cargo add --git https://github.com/Boriken-Dev/coqui-acp coqui-acp-harness-kind
 A host starts a connection and speaks ACP over it; `coqui_acp_harness::LocalSpawner` runs programs on this machine:
 
 ```rust,no_run
-use coqui_acp_harness_kind::guatiao::library::{Object, ProviderError};
-use coqui_acp_harness_kind::{AcpHarness, ChannelSink, ProcessSpawner, StartRequest};
+use coqui_acp_api::guatiao::library::{Object, ProviderError};
+use coqui_acp_api::{AcpHarness, ChannelSink, ProcessSpawner, StartRequest};
 
 struct Host;
 
@@ -57,7 +57,7 @@ fn connect(
         .session_id("0f8fad5b-d9cb-469f-a165-70867728950e")
         .build();
     if let Some(why) = harness.refusal(request.requirements.clone(), request.environment.clone())? {
-        return Err(ProviderError::new(coqui_acp_harness_kind::guatiao::Status::GUATIAO_ERR_UNSUPPORTED, &why));
+        return Err(ProviderError::new(coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED, &why));
     }
     let channel = harness.start(request, spawner, Host.into_object())?;
     channel.send(br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}"#)?;

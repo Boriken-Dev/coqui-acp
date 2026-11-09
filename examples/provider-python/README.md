@@ -3,7 +3,7 @@
 Agents written in Python, for the [Agent Client Protocol](https://agentclientprotocol.com):
 
 - `echo/acp_echo.py`, an `agent_provider`: `src/main.rs` is a host that loads it through Guatiao's source of Python libraries and serves it on standard input and output, and `tests/python.rs` drives that host with `coqui_acp::Client`.
-- `harness/acp_echo_harness.py`, an `acp_harness` that speaks ACP itself over a Guatiao channel: `tests/harness.rs` loads it in the test process, as the Rust-declared kind of `coqui-acp-harness-kind`, and holds it to the same contract suite as that crate's Rust echo.
+- `harness/acp_echo_harness.py`, an `acp_harness` that speaks ACP itself over a Guatiao channel: `tests/harness.rs` loads it in the test process, as the Rust-declared kind of `coqui-acp-api`, and holds it to the same contract suite as that crate's Rust echo.
 
 ```sh
 cargo test -p provider-python
