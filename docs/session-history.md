@@ -210,3 +210,9 @@ and, for redaction, `{"values": [], "patterns": [], "replacement": "[redacted]"}
 - `refusals.json`: `cases[]` with `lines`, or `text` where the exact bytes matter (a missing final line feed, a carriage return), and `expect` with the error `code`, the `line` (absent when the error has none) and, for `shape` and `unknown_field`, the JSON `pointer`. A reader must also refuse invalid UTF-8 with `not_utf8` at its line; JSON cannot hold such a case.
 - `bounds.json`: `cases[]` with `limits` (`max_line_bytes`, `max_lines`, `max_total_bytes`, `max_depth`; a limit not named is its default), `lines`, and `expect` either `{"ok": true}` or an error `code` and `line`.
 - `tools.json`: the normalised tool table: each tool's ACP `kind`, `normalise` cases (a harness, a native name and input, the tool and normalised input), `denormalise` cases, and names with no tool.
+
+## Paging and the digest
+
+The header's `digest` is always SHA-256, written `sha256:<hex>`, never a weaker checksum. It covers the body: every byte after the header line, line feeds included, exactly as written. A moved history is trusted whole when the digest of the reassembled body equals it.
+
+A history may travel in pages (the `acp_harness` kind's export does). A page is whole lines, each ending in a line feed, so the concatenation of the pages' bytes is the file. Only the first page carries the header, and with it the digest of the whole body; a reader reassembles the pages, then checks the digest as for any file. A line larger than a caller's page size is refused with its size, never split: splitting a line would break the format.
