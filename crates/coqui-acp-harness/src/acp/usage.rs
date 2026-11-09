@@ -4,6 +4,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coqui_acp_api::usage::{Bucket, LimitHit, Refill, Spend, Status};
@@ -123,9 +124,7 @@ impl Tracker {
 
     /// Takes a refusal: it is the report's limit, and the bucket it names is exhausted.
     pub(crate) fn limit(&mut self, mut hit: LimitHit, now: i64) -> bool {
-        if hit.observed_at == 0 {
-            hit.observed_at = now;
-        }
+        stamp(&mut hit, now);
         if self.report.limit.as_ref() == Some(&hit) {
             return false;
         }
@@ -169,6 +168,23 @@ impl Tracker {
             self.report.revision += 1;
         }
         changed
+    }
+}
+
+/// Dates a refusal that was not dated, and gives it the wait to a reset the harness named and no
+/// wait: `retry_after` is the time from `observed_at` to `resets_at`, left unset when that has
+/// passed.
+pub(crate) fn stamp(hit: &mut LimitHit, now: i64) {
+    if hit.observed_at == 0 {
+        hit.observed_at = now;
+    }
+    if hit.retry_after.is_none()
+        && let Some(at) = hit.resets_at
+        && at > hit.observed_at
+    {
+        hit.retry_after = Some(Duration::from_secs(
+            u64::try_from(at - hit.observed_at).unwrap_or(0),
+        ));
     }
 }
 
@@ -311,5 +327,34 @@ mod tests {
             None,
         );
         assert!(!bare.spend("s1", Spend::new("")));
+    }
+
+    #[test]
+    fn a_reset_with_no_wait_gets_the_wait_to_it_and_a_past_or_given_one_is_left() {
+        let mut hit = LimitHit::new(0);
+        hit.resets_at = Some(1_300);
+        stamp(&mut hit, 1_000);
+        assert_eq!(
+            (hit.observed_at, hit.retry_after),
+            (1_000, Some(Duration::from_secs(300)))
+        );
+
+        let mut told = LimitHit::new(900);
+        told.resets_at = Some(5_000);
+        told.retry_after = Some(Duration::from_secs(7));
+        stamp(&mut told, 1_000);
+        assert_eq!(
+            (told.observed_at, told.retry_after),
+            (900, Some(Duration::from_secs(7)))
+        );
+
+        let mut past = LimitHit::new(0);
+        past.resets_at = Some(500);
+        stamp(&mut past, 1_000);
+        assert_eq!(past.retry_after, None, "a reset that has passed is no wait");
+
+        let mut none = LimitHit::new(0);
+        stamp(&mut none, 1_000);
+        assert_eq!(none.retry_after, None);
     }
 }

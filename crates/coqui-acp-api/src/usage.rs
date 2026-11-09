@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::environment::Environment;
 
 /// The key of `agentCapabilities._meta` (`capabilities._meta` in ACP version 2) in which an agent
-/// that reports usage says so: `{"version": 1, "sources": ["reported", "inferred"], "spend": true}`.
+/// that reports usage says so: `{"version": 1, "sources": ["reported", "inferred"], "spend": true}`,
+/// with `"needs_turn": true` added by an agent that learns its usage only during a turn.
 /// Absent means the agent reports none, and a client does not call [`USAGE_METHOD`].
 pub const USAGE_CAPABILITY: &str = "dev.boriken.coqui.acp/usage";
 
@@ -585,6 +586,12 @@ pub struct UsageSupport {
     #[map(default)]
     #[serde(default)]
     pub spend: bool,
+    /// Whether it learns its usage only during a turn. Then a read with no turn answers what the
+    /// connection last saw, and a host keeps a timed retry instead of polling for fresh figures.
+    /// `false` means [`USAGE_METHOD`] re-reads the account each time, so a host may poll it.
+    #[map(default)]
+    #[serde(default)]
+    pub needs_turn: bool,
 }
 
 impl UsageSupport {
@@ -594,13 +601,25 @@ impl UsageSupport {
         Self {
             sources: Vec::new(),
             spend: false,
+            needs_turn: false,
         }
     }
 
-    /// Reports `sources`, and a session's spend when `spend`.
+    /// Reports `sources`, and a session's spend when `spend`; it can be read with no turn.
     #[must_use]
     pub const fn new(sources: Vec<Source>, spend: bool) -> Self {
-        Self { sources, spend }
+        Self {
+            sources,
+            spend,
+            needs_turn: false,
+        }
+    }
+
+    /// Says whether it learns its usage only during a turn.
+    #[must_use]
+    pub const fn needs_turn(mut self, needs: bool) -> Self {
+        self.needs_turn = needs;
+        self
     }
 
     /// Whether it reports anything.

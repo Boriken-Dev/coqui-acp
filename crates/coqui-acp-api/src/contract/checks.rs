@@ -1186,7 +1186,9 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         .map(crate::Source::as_str)
         .collect();
     ensure!(
-        sources == described && advertised["spend"] == json!(info.usage.spend),
+        sources == described
+            && advertised["spend"] == json!(info.usage.spend)
+            && advertised["needs_turn"].as_bool().unwrap_or(false) == info.usage.needs_turn,
         "initialize advertises {advertised}, describe says {:?}",
         info.usage
     );

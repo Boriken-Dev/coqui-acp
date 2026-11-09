@@ -420,13 +420,19 @@
             "type": "boolean",
             "description": "Whether it reports a session's [`Spend`].",
             "default": false
+          },
+          "needs_turn": {
+            "type": "boolean",
+            "description": "Whether it learns its usage only during a turn. Then a read with no turn answers what the connection last saw, and a host keeps a timed retry instead of polling for fresh figures. `false` means [`USAGE_METHOD`] re-reads the account each time, so a host may poll it.",
+            "default": false
           }
         },
         "additionalProperties": false,
         "description": "What usage it reports, and so whether its `initialize` advertises the usage extension.",
         "default": {
           "sources": [],
-          "spend": false
+          "spend": false,
+          "needs_turn": false
         }
       }
     },
@@ -2006,6 +2012,11 @@
       "spend": {
         "type": "boolean",
         "description": "Whether it reports a session's [`Spend`].",
+        "default": false
+      },
+      "needs_turn": {
+        "type": "boolean",
+        "description": "Whether it learns its usage only during a turn. Then a read with no turn answers what the connection last saw, and a host keeps a timed retry instead of polling for fresh figures. `false` means [`USAGE_METHOD`] re-reads the account each time, so a host may poll it.",
         "default": false
       }
     },

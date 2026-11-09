@@ -204,7 +204,10 @@ impl Session {
                     shared.note(&format!("a permission request could not be asked: {error}"));
                 }
             }
-            Event::TurnEnd(end) => self.finish(shared, end),
+            Event::TurnEnd(end) => {
+                self.finish(shared, end);
+                self.read_usage_after_turn(shared);
+            }
             Event::Exited(reason) => {
                 self.state().gone = Some(reason.clone());
                 shared.note(&reason);
@@ -447,13 +450,34 @@ impl Session {
         }
     }
 
+    /// A harness that can be read with no turn is read once a turn has ended, off the thread that
+    /// delivers its events: what a turn used shows in its buckets without a host's poll.
+    fn read_usage_after_turn(&self, shared: &Arc<Shared>) {
+        let support = shared.usage_support();
+        if !support.reports() || support.needs_turn {
+            return;
+        }
+        let Some(conversation) = self.conversation() else {
+            return;
+        };
+        let (reading, id) = (Arc::clone(shared), self.id().to_string());
+        let spawned = thread::Builder::new()
+            .name("coqui-acp-harness-usage".into())
+            .spawn(move || {
+                if let Some(buckets) = conversation.read_usage() {
+                    reading.usage_buckets(&id, buckets);
+                }
+            });
+        if let Err(error) = spawned {
+            shared.note(&format!("usage could not be read after a turn: {error}"));
+        }
+    }
+
     fn finish(&self, shared: &Shared, end: TurnEnd) {
         // A hit nobody dated is dated when the connection hears it, in the report and in the answer alike.
         let end = match end {
             TurnEnd::Limited(mut hit) => {
-                if hit.observed_at == 0 {
-                    hit.observed_at = super::usage::now();
-                }
+                super::usage::stamp(&mut hit, super::usage::now());
                 TurnEnd::Limited(hit)
             }
             other => other,

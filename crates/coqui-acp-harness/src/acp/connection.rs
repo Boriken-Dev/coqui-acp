@@ -308,11 +308,15 @@ impl Shared {
     fn usage_capability(&self) -> Option<Value> {
         let support = self.harness.usage();
         support.reports().then(|| {
-            json!({
+            let mut capability = json!({
                 "version": USAGE_VERSION,
                 "sources": support.sources.iter().map(coqui_acp_api::Source::as_str).collect::<Vec<_>>(),
                 "spend": support.spend,
-            })
+            });
+            if support.needs_turn {
+                capability["needs_turn"] = json!(true);
+            }
+            capability
         })
     }
 
@@ -353,6 +357,37 @@ impl Shared {
         self.usage_changed(Some(session), |usage, at| usage.limit(hit, at));
     }
 
+    pub(crate) fn usage_support(&self) -> coqui_acp_api::UsageSupport {
+        self.harness.usage()
+    }
+
+    /// Re-reads the account's usage from the harness before an answer, when the harness can without
+    /// a turn: from an open session's running harness, else with none open.
+    fn refresh_usage(&self) {
+        if self.harness.usage().needs_turn {
+            return;
+        }
+        let open: Vec<_> = self
+            .sessions()
+            .open
+            .values()
+            .filter_map(|session| session.conversation())
+            .collect();
+        let read = open
+            .iter()
+            .find_map(|conversation| conversation.read_usage())
+            .or_else(|| {
+                if open.is_empty() {
+                    self.harness.read_usage()
+                } else {
+                    None
+                }
+            });
+        if let Some(buckets) = read {
+            self.usage_changed(None, |usage, at| usage.buckets(buckets, at));
+        }
+    }
+
     /// `_coqui_acp/usage`: the report, with a session's spend when one is named.
     fn usage_report(&self, id: &Value, params: &Value) {
         if !locked(&self.usage).reports() {
@@ -371,6 +406,7 @@ impl Shared {
                 }
             },
         };
+        self.refresh_usage();
         let report = locked(&self.usage).snapshot(session.as_deref(), now());
         match serde_json::to_value(&report) {
             Ok(report) => self.respond(id, report),

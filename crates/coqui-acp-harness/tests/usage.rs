@@ -7,6 +7,7 @@
 )]
 
 use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,10 +29,20 @@ struct Script {
     limit: Option<LimitHit>,
 }
 
+/// What a read with no turn answers, and how often it was asked.
+#[derive(Default)]
+struct Readings {
+    harness: Mutex<Option<Vec<Bucket>>>,
+    session: Mutex<Option<Vec<Bucket>>>,
+    harness_reads: AtomicUsize,
+    session_reads: AtomicUsize,
+}
+
 #[derive(Clone)]
 struct Reports {
     support: UsageSupport,
     script: Arc<Mutex<Script>>,
+    readings: Arc<Readings>,
 }
 
 impl Reports {
@@ -39,6 +50,7 @@ impl Reports {
         Self {
             support,
             script: Arc::default(),
+            readings: Arc::default(),
         }
     }
 
@@ -50,6 +62,7 @@ impl Reports {
 struct Open {
     events: EventSink,
     script: Arc<Mutex<Script>>,
+    readings: Arc<Readings>,
 }
 
 impl Harness for Reports {
@@ -65,6 +78,11 @@ impl Harness for Reports {
         self.support.clone()
     }
 
+    fn read_usage(&self) -> Option<Vec<Bucket>> {
+        self.readings.harness_reads.fetch_add(1, Ordering::SeqCst);
+        self.readings.harness.lock().unwrap().clone()
+    }
+
     fn open(
         &self,
         _request: OpenRequest,
@@ -73,6 +91,7 @@ impl Harness for Reports {
         Ok(Box::new(Open {
             events,
             script: Arc::clone(&self.script),
+            readings: Arc::clone(&self.readings),
         }))
     }
 }
@@ -84,6 +103,11 @@ impl Conversation for Open {
 
     fn options(&self) -> Vec<ConfigOption> {
         Vec::new()
+    }
+
+    fn read_usage(&self) -> Option<Vec<Bucket>> {
+        self.readings.session_reads.fetch_add(1, Ordering::SeqCst);
+        self.readings.session.lock().unwrap().clone()
     }
 
     fn prompt(&self, _content: Vec<coqui_acp_harness::event::Content>) -> Result<(), HarnessError> {
@@ -382,4 +406,107 @@ fn the_hosts_account_is_over_the_clients() {
     let mut wire = Wire::serve(Reports::new(reporting()), settings);
     opted_in(&mut wire, 1, false);
     assert_eq!(wire.report(None).account.as_deref(), Some("pool/bob"));
+}
+
+#[test]
+fn a_harness_that_needs_a_turn_says_so_and_is_never_read_without_one() {
+    let harness = Reports::new(reporting().needs_turn(true));
+    *harness.readings.harness.lock().unwrap() = Some(vec![five_hour(300)]);
+    *harness.readings.session.lock().unwrap() = Some(vec![five_hour(300)]);
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    let initialized = opted_in(&mut wire, 1, false);
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["dev.boriken.coqui.acp/usage"],
+        json!({"version": 1, "sources": ["reported"], "spend": true, "needs_turn": true}),
+        "{initialized}"
+    );
+    let s = session(&mut wire);
+    assert!(wire.report(Some(&s)).buckets.is_empty());
+    prompt(&mut wire, &s);
+    assert!(wire.report(None).buckets.is_empty());
+    assert_eq!(harness.readings.harness_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.readings.session_reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_read_with_no_session_asks_the_harness_each_time_and_an_unchanged_account_costs_nothing() {
+    let harness = Reports::new(reporting());
+    *harness.readings.harness.lock().unwrap() = Some(vec![five_hour(300)]);
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    let initialized = opted_in(&mut wire, 1, true);
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["dev.boriken.coqui.acp/usage"]["needs_turn"],
+        Value::Null,
+        "absent means a host may poll"
+    );
+    let first = wire.report(None);
+    assert_eq!((first.buckets[0].used, first.revision), (Some(300), 1));
+    assert_eq!(wire.told().len(), 1, "the first reading is a change");
+    let again = wire.report(None);
+    assert_eq!(again.revision, 1, "the same figures are no change");
+    assert!(wire.told().is_empty());
+    assert_eq!(harness.readings.harness_reads.load(Ordering::SeqCst), 2);
+
+    *harness.readings.harness.lock().unwrap() = Some(vec![five_hour(600)]);
+    let moved = wire.report(None);
+    assert_eq!((moved.buckets[0].used, moved.revision), (Some(600), 2));
+    let told = wire.told();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0]["params"]["report"]["revision"], 2);
+}
+
+#[test]
+fn an_open_session_is_read_in_place_of_a_second_start() {
+    let harness = Reports::new(reporting());
+    *harness.readings.harness.lock().unwrap() = Some(vec![five_hour(1)]);
+    *harness.readings.session.lock().unwrap() = Some(vec![five_hour(450)]);
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    opted_in(&mut wire, 1, false);
+    let s = session(&mut wire);
+    let report = wire.report(None);
+    assert_eq!(report.buckets[0].used, Some(450));
+    assert_eq!(harness.readings.harness_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(wire.report(Some(&s)).buckets[0].used, Some(450));
+}
+
+#[test]
+fn a_turns_end_reads_the_harness_so_a_client_is_told_without_polling() {
+    let harness = Reports::new(reporting());
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    opted_in(&mut wire, 1, true);
+    let s = session(&mut wire);
+    *harness.readings.session.lock().unwrap() = Some(vec![five_hour(500)]);
+    prompt(&mut wire, &s);
+    let told = wire.told();
+    let used: Vec<_> = told
+        .iter()
+        .map(|message| message["params"]["report"]["buckets"][0]["used"].clone())
+        .collect();
+    assert!(used.contains(&json!(500)), "{told:?}");
+}
+
+#[test]
+fn a_hit_with_a_reset_and_no_wait_is_given_the_wait_to_that_reset() {
+    let harness = Reports::new(reporting());
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    opted_in(&mut wire, 1, false);
+    let s = session(&mut wire);
+    let mut hit = LimitHit::new(0);
+    hit.bucket = Some("five_hour".into());
+    hit.resets_at = Some(4_000_000_000);
+    harness.says(Script {
+        buckets: Vec::new(),
+        spend: false,
+        limit: Some(hit),
+    });
+    let ended = prompt(&mut wire, &s);
+    let told: LimitHit =
+        serde_json::from_value(ended["result"]["_meta"]["dev.boriken.coqui.acp/limit"].clone())
+            .unwrap();
+    let wait = told.retry_after.expect("a wait was given");
+    assert_eq!(
+        i64::try_from(wait.as_secs()).unwrap(),
+        4_000_000_000 - told.observed_at
+    );
+    assert_eq!(wire.report(None).limit.unwrap().retry_after, Some(wait));
 }

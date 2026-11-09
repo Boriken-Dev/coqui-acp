@@ -12,7 +12,7 @@ use std::sync::mpsc;
 
 use serde_json::{Map, Value};
 
-use coqui_acp_api::UsageSupport;
+use coqui_acp_api::{Bucket, UsageSupport};
 
 use crate::event::{Content, Event};
 
@@ -513,6 +513,14 @@ pub trait Harness: Send + Sync + 'static {
         UsageSupport::none()
     }
 
+    /// Reads the account's usage with no session open and no turn, for `_coqui_acp/usage` when
+    /// [`UsageSupport::needs_turn`] is false and no open session could answer. Called on every such
+    /// request, so a host's polling sets how often; it may start the harness for the read. `None`,
+    /// the default, leaves the answer to what the connection has seen.
+    fn read_usage(&self) -> Option<Vec<Bucket>> {
+        None
+    }
+
     /// Opens a session, sending what it reports to `events`. For [`Open::Load`] the history is sent before this
     /// returns. It returns once the harness's session id is known.
     ///
@@ -533,6 +541,12 @@ pub trait Conversation: Send + Sync {
 
     /// The choices the session offers, at their current values.
     fn options(&self) -> Vec<ConfigOption>;
+
+    /// Reads the account's usage from the running harness, with no turn. `None`, the default,
+    /// when it cannot; [`Harness::read_usage`] is then asked.
+    fn read_usage(&self) -> Option<Vec<Bucket>> {
+        None
+    }
 
     /// Starts a turn. Its events and its end go to the session's [`EventSink`].
     ///
