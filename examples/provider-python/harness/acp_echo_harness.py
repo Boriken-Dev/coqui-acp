@@ -21,7 +21,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from coqui_acp_api_kinds import AcpHarness, Channel, ChannelSink, ProcessSpawner
 
 from guatiao import Ref, provide
-from guatiao.errors import BadValue, Gone, Unsupported
+from guatiao.errors import BadValue, Gone, NotFound, Unsupported
 
 __version__ = "1.0.0"
 __all__ = ["EchoHarness"]
@@ -42,7 +42,14 @@ HOSTS = ("network",)
 WORDS = ("sandboxed_scripts", "only_skills")
 
 #: The keys a request may have: one it does not declare is refused, never dropped.
-START_KEYS = {"environment", "working_roots", "requirements", "session_id"}
+START_KEYS = {"environment", "working_roots", "requirements"}
+IMPORT_KEYS = {"session_id", "working_directory", "history", "environment"}
+QUERY_KEYS = {"session_id", "working_directory", "environment"}
+
+#: The header of the history the echo writes and reads: the standard format's name and the one
+#: version the echo knows. A history is this line, then one line per prompt and per update.
+HISTORY_FORMAT = "coqui-acp-history"
+HISTORY_VERSION = 1
 REQUIREMENT_KEYS = {"name", "value"}
 
 #: Statuses, as `guatiao_status` numbers.
@@ -53,9 +60,53 @@ INTERNAL = 100
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 #: Every session any connection created: the id reported, a UUID, against the echo's own.
-_SESSIONS: Dict[str, str] = {}
+_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _SESSIONS_LOCK = threading.Lock()
 _NEXT = [1]
+
+
+def _read_history(history: str) -> List[Dict[str, Any]]:
+    """The lines of `history` after its header; an empty history has none."""
+    lines = [line for line in history.splitlines() if line.strip()]
+    if not lines:
+        return []
+    try:
+        header = json.loads(lines[0])
+    except ValueError:
+        raise BadValue("the history's header is not JSON") from None
+    if (
+        not isinstance(header, dict)
+        or header.get("format") != HISTORY_FORMAT
+        or not isinstance(header.get("version"), int)
+        or isinstance(header.get("version"), bool)
+    ):
+        raise BadValue("the history has no header naming its format and version")
+    if header["version"] != HISTORY_VERSION:
+        raise Unsupported("the echo reads version 1 of the history format only")
+    read = []
+    for line in lines[1:]:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            raise BadValue("a history line is not JSON") from None
+        if not isinstance(value, dict) or value.get("method") not in ("session/prompt", "session/update"):
+            raise BadValue("a history line is neither a prompt nor an update")
+        read.append(value)
+    return read
+
+
+def _keep(session: str, line: Dict[str, Any]) -> None:
+    """Adds one line to the history of `session`, when the echo keeps it."""
+    with _SESSIONS_LOCK:
+        kept = _SESSIONS.get(session)
+        if kept is not None:
+            kept["lines"].append(line)
+
+
+def _new_session(session: str, lines: List[Dict[str, Any]]) -> None:
+    """Keeps `session`, mapped to an id of the echo's own; the caller holds the lock."""
+    _SESSIONS[session] = {"own": f"python-echo-{_NEXT[0]}", "lines": lines}
+    _NEXT[0] += 1
 
 
 def _parts(path: str, windows: bool) -> Optional[List[str]]:
@@ -226,9 +277,14 @@ def _error(id: Any, code: int, message: str) -> Dict[str, Any]:
 
 
 def _finish(session: str, prompt: Any, said: Optional[str], stop: str) -> List[Dict[str, Any]]:
-    """A turn's end: what the agent says, if anything, then the prompt's answer."""
+    """A turn's end: what the agent says, if anything, kept in the session's history, then the
+    prompt's answer."""
     messages: List[Dict[str, Any]] = []
     if said is not None:
+        _keep(session, {
+            "method": "session/update",
+            "params": {"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": said}}},
+        })
         messages.append({
             "jsonrpc": "2.0",
             "method": "session/update",
@@ -248,9 +304,8 @@ class _Refused(Exception):
 class _Agent:
     """The ACP side of one connection: what each message from the client is answered with."""
 
-    def __init__(self, roots: List[str], first: Optional[str]) -> None:
+    def __init__(self, roots: List[str]) -> None:
         self.roots = roots
-        self.first = first
         self.open: List[str] = []
         self.reads_files = False
         #: The turn running in each session: (kind, prompt id, the agent's own request id).
@@ -304,23 +359,31 @@ class _Agent:
             })], False
         if method == "session/new":
             self.admit(text("cwd"), params)
-            session = self.first if self.first is not None else str(uuid.uuid4())
-            self.first = None
+            session = str(uuid.uuid4())
             with _SESSIONS_LOCK:
-                if session in _SESSIONS:
-                    raise _Refused("a session with this id exists")
-                _SESSIONS[session] = f"python-echo-{_NEXT[0]}"
-                _NEXT[0] += 1
+                _new_session(session, [])
             self.open.append(session)
             return [_result(id, {"sessionId": session})], False
         if method in ("session/load", "session/resume"):
             self.admit(text("cwd"), params)
             session = text("sessionId")
             with _SESSIONS_LOCK:
-                if session not in _SESSIONS:
+                kept = _SESSIONS.get(session)
+                if kept is None:
                     raise _Refused("no session has this id")
+                lines = list(kept["lines"])
             self.open.append(session)
-            return [_result(id, {})], False
+            # `session/load` replays what the session said; `session/resume` does not.
+            replay = [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"sessionId": session, "update": line["params"]["update"]},
+                }
+                for line in lines
+                if method == "session/load" and line.get("method") == "session/update"
+            ]
+            return replay + [_result(id, {})], False
         if method == "session/prompt":
             session = text("sessionId")
             blocks = params.get("prompt")
@@ -328,6 +391,7 @@ class _Agent:
                 raise _Refused("`prompt` is not a list")
             if session not in self.open:
                 raise _Refused("no session with this id is open here")
+            _keep(session, {"method": "session/prompt", "params": {"prompt": blocks}})
             said = "".join(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str))
             return self.prompted(id, session, said)
         return [_error(id, -32601, "method not found")], False
@@ -482,9 +546,6 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             refusal = _refusal(asked.get("requirements", []))
             if refusal is not None:
                 raise Unsupported(refusal)
-            session = asked.get("session_id")
-            if session is not None and not (isinstance(session, str) and UUID.fullmatch(session)):
-                raise BadValue("the session id is not a UUID")
             roots = asked.get("working_roots", [])
             if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
                 raise BadValue("the working roots are not a list of texts")
@@ -496,7 +557,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         q = _Queue()
         threading.Thread(
             target=_deliver,
-            args=(sink, spawner, q, _Agent(list(roots), session)),
+            args=(sink, spawner, q, _Agent(list(roots))),
             name="acp_echo_harness",
             daemon=True,
         ).start()
@@ -507,6 +568,40 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
 
     def program(self) -> Optional[str]:
         return None
+
+    def import_session(self, session: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
+        spawner.destroy()
+        asked = session.to_python()
+        if not isinstance(asked, dict) or not set(asked) <= IMPORT_KEYS:
+            raise BadValue("the import has a key the echo does not know")
+        id = asked.get("session_id")
+        if not (isinstance(id, str) and UUID.fullmatch(id)):
+            raise BadValue("the session id is not a UUID")
+        history = asked.get("history", "")
+        if not isinstance(history, str):
+            raise BadValue("the history is not text")
+        lines = _read_history(history)
+        with _SESSIONS_LOCK:
+            if id in _SESSIONS:
+                raise BadValue("the id names a session already")
+            _new_session(id, lines)
+        report: Dict[str, Any] = {"losses": [], "compacted": False}
+        if history.strip():
+            report["seeded_from"] = {"line": 2}
+        return report
+
+    def export_session(self, query: Ref, spawner: ProcessSpawner) -> str:
+        spawner.destroy()
+        asked = query.to_python()
+        if not isinstance(asked, dict) or not set(asked) <= QUERY_KEYS:
+            raise BadValue("the query has a key the echo does not know")
+        with _SESSIONS_LOCK:
+            kept = _SESSIONS.get(asked.get("session_id"))
+            if kept is None:
+                raise NotFound("no session has this id")
+            lines = list(kept["lines"])
+        header = {"format": HISTORY_FORMAT, "version": HISTORY_VERSION}
+        return "".join(json.dumps(line) + "\n" for line in [header] + lines)
 
     def models(self, environment: Ref) -> Dict[str, Any]:
         return {"known": True, "models": [{"id": "echo"}]}

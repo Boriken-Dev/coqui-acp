@@ -11,12 +11,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use coqui_acp_harness::{Launch, LocalSpawner, Spawn, ThroughSpawner};
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::Object;
-use coqui_acp_api::{
-    ErrorOutput, ProcessSpawner, READ_TIMED_OUT, SpawnSpec, TerminalSize,
-};
+use coqui_acp_api::{ErrorOutput, ProcessSpawner, READ_TIMED_OUT, SpawnSpec, TerminalSize};
+use coqui_acp_harness::{Launch, LocalSpawner, Spawn, ThroughSpawner};
 
 #[path = "../examples/spawner_host.rs"]
 #[allow(dead_code, reason = "only its tree is used here")]

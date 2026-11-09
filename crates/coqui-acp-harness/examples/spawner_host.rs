@@ -14,8 +14,8 @@
 
 use std::io::{BufRead, Read, Write};
 
-use coqui_acp_harness::LocalSpawner;
 use coqui_acp_api::{ProcessSpawner, SpawnSpec};
+use coqui_acp_harness::LocalSpawner;
 
 /// A shell that starts a process that outlives it unless its tree is ended, and says its id.
 pub fn tree() -> SpawnSpec {

@@ -8,14 +8,24 @@
 
 use std::process::Command;
 
-#[path = "echo.rs"]
-#[allow(dead_code, reason = "only its library path is used here")]
-mod echo;
+/// The Rust echo's library file, which `cargo test` builds beside the tests.
+fn library() -> std::path::PathBuf {
+    let tests = std::env::current_exe().expect("the test knows where it is");
+    let profile = tests
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("a test binary is in target/<profile>/deps");
+    profile.join("examples").join(format!(
+        "{}echo_harness{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ))
+}
 
 fn check(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_acp-harness-check"))
         .arg("--library")
-        .arg(echo::library())
+        .arg(library())
         .args(args)
         .output()
         .expect("the checker runs")
@@ -47,6 +57,12 @@ fn the_checker_builds_an_instance_from_settings() {
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    let quiet = check(&["--settings", r#"{"imports": false}"#, "--no-imports"]);
+    assert!(
+        quiet.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
     );
     let refused = check(&["--settings", r#"{"titel": "misspelled"}"#]);
     assert_eq!(refused.status.code(), Some(2));

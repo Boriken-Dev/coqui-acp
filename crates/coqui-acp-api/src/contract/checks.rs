@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use super::Contract;
 use super::host::{self, Conn, GRACE, PATIENCE, open, status};
 use crate::{
-    AcpHarness, Environment, FILES_UNDER, Requirement, SessionRecordQuery, StartRequest,
-    is_session_id,
+    AcpHarness, Environment, FILES_UNDER, ImportReport, Requirement, SessionImport, SessionQuery,
+    StartRequest, is_session_id,
 };
 
 // `guatiao_status` numbers, as a channel's `close` and `closed` carry them.
@@ -25,6 +25,7 @@ const OK: u32 = 0;
 const BAD_VALUE: u32 = 7;
 const GONE: u32 = 12;
 const UNSUPPORTED: u32 = 13;
+const NOT_FOUND: u32 = 10;
 
 /// A value that must never come back from a provider: put in an environment, looked for in every
 /// answer.
@@ -55,8 +56,8 @@ pub(super) fn all(contract: &Contract, harness: &dyn AcpHarness) -> Vec<(&'stati
             malformed(contract, harness, &place),
         ),
         (
-            "uses the host's session id",
-            chosen_session_id(contract, harness, &place),
+            "seeds a session at the host's id",
+            sessions(contract, harness, &place),
         ),
         (
             "reopens a session by its id",
@@ -291,7 +292,7 @@ fn describes_itself(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
         .models(Secret::default())
         .map_err(|e| e.message().to_owned())?;
     harness
-        .session_record(SessionRecordQuery::new(fresh_uuid(), "/"))
+        .session_record(SessionQuery::new(fresh_uuid(), "/"))
         .map_err(|e| e.message().to_owned())?;
     harness.non_defaults().map_err(|e| e.message().to_owned())?;
     Ok(())
@@ -382,12 +383,7 @@ fn requirements(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
         refused_with(harness, with(&requirements), BAD_VALUE)
             .map_err(|why| format!("{what}: {why}"))?;
     }
-    refused_with(
-        harness,
-        StartRequest::builder().session_id("not-a-uuid").build(),
-        BAD_VALUE,
-    )
-    .map_err(|why| format!("a session id that is not a UUID: {why}"))
+    Ok(())
 }
 
 fn keeps_secrets(harness: &dyn AcpHarness) -> Outcome {
@@ -400,9 +396,8 @@ fn keeps_secrets(harness: &dyn AcpHarness) -> Outcome {
         "{:?} {:?} {:?}",
         harness.refusal(unknown.clone(), secret()),
         harness.models(secret()),
-        harness.session_record(
-            SessionRecordQuery::new(fresh_uuid(), "/").environment(environment.clone())
-        ),
+        harness
+            .session_record(SessionQuery::new(fresh_uuid(), "/").environment(environment.clone())),
     );
     ensure!(
         !answered.contains(CANARY),
@@ -521,33 +516,218 @@ fn malformed(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Ou
     conn.close_with(OK)
 }
 
-fn chosen_session_id(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
-    let chosen = fresh_uuid();
-    let request = || StartRequest::builder().session_id(chosen.clone()).build();
-    let (mut conn, first) = open_session(contract, harness, request(), &place.root, json!({}))?;
+/// A history in the standard format's shape whose header names `version`.
+fn history_of_version(version: u64) -> String {
+    format!("{{\"format\":\"coqui-acp-history\",\"version\":{version}}}\n")
+}
+
+/// Seeds `session` from `history`, checking the spawner it was handed is gone when it answers.
+fn import(
+    harness: &dyn AcpHarness,
+    session: &str,
+    cwd: &str,
+    history: &str,
+) -> Result<Result<ImportReport, (u32, String)>, String> {
+    let (watch, spawner) = host::spawner();
+    let answer = harness.import_session(SessionImport::new(session, cwd, history), spawner);
     ensure!(
-        first == chosen,
-        "the first session is {first}, not the host's {chosen}"
+        watch.destroyed(),
+        "import_session answered with the spawner it was handed alive"
     );
-    conn.send(&new_session(2, &place.root))?;
-    let answer = conn.answer(2)?;
-    let second = answer["result"]["sessionId"].as_str().unwrap_or_default();
+    Ok(answer.map_err(|e| (status(&e), e.message().to_owned())))
+}
+
+/// The history of `session`, checking the spawner it was handed is gone when it answers.
+fn export(
+    harness: &dyn AcpHarness,
+    session: &str,
+    cwd: &str,
+) -> Result<Result<String, u32>, String> {
+    let (watch, spawner) = host::spawner();
+    let answer = harness.export_session(SessionQuery::new(session, cwd), spawner);
     ensure!(
-        is_session_id(second) && second != chosen,
-        "a second session/new was answered {answer}"
+        watch.destroyed(),
+        "export_session answered with the spawner it was handed alive"
+    );
+    Ok(answer.map_err(|e| status(&e)))
+}
+
+/// The text a reopened session replays, and the answer to the reopening request `id`.
+fn reopened(conn: &mut Conn, id: u64) -> Result<(String, Value), String> {
+    turn(conn, id)
+}
+
+fn sessions(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
+    if !contract.imports {
+        let refused = import(harness, &fresh_uuid(), &place.root, "")?;
+        return match refused {
+            Err((UNSUPPORTED, why)) if !why.trim().is_empty() => Ok(()),
+            Err((code, why)) => Err(format!(
+                "a harness that cannot import refused with {code} ({why:?}), not UNSUPPORTED with a reason"
+            )),
+            Ok(_) => Err("a harness said to import nothing seeded a session".to_owned()),
+        };
+    }
+    let takes = harness
+        .describe()
+        .map_err(|e| e.message().to_owned())?
+        .takes;
+    let method = match (takes.resume, takes.load) {
+        (true, _) => "session/resume",
+        (false, true) => "session/load",
+        (false, false) => {
+            return Err(
+                "a harness that imports takes neither session/resume nor session/load".into(),
+            );
+        }
+    };
+    let reopen = |id: u64, method: &str, session: &str| {
+        request(
+            id,
+            method,
+            json!({"sessionId": session, "cwd": place.root, "mcpServers": []}),
+        )
+    };
+
+    // Seeded empty, then resumed by the host's UUID.
+    let seeded = fresh_uuid();
+    let report = import(harness, &seeded, &place.root, "")?
+        .map_err(|(code, why)| format!("an empty seed was refused with {code}: {why}"))?;
+    ensure!(
+        report.seeded_from.is_none(),
+        "an empty seed said it started at {:?}",
+        report.seeded_from
+    );
+    let mut conn = open(harness, StartRequest::new())?;
+    conn.send(&initialize(0, contract.version, json!({})))?;
+    conn.answer(0)?;
+    conn.send(&reopen(1, method, &seeded))?;
+    let (_, answer) = reopened(&mut conn, 1)?;
+    ensure!(
+        code(&answer).is_none(),
+        "{method} of a seeded session was answered {answer}"
+    );
+    conn.send(&prompt(2, &seeded, "seeded"))?;
+    let (text, _) = turn(&mut conn, 2)?;
+    ensure!(
+        text == "echo: seeded",
+        "the seeded session answered {text:?}"
     );
     conn.close_with(OK)?;
 
-    let mut again = open(harness, request())?;
-    again.send(&initialize(0, contract.version, json!({})))?;
-    again.answer(0)?;
-    again.send(&new_session(1, &place.root))?;
-    let answer = again.answer(1)?;
+    // Turns, exported, imported at another UUID, resumed there with the turns in it.
+    let (mut conn, origin) = open_session(
+        contract,
+        harness,
+        StartRequest::new(),
+        &place.root,
+        json!({}),
+    )?;
+    conn.send(&prompt(2, &origin, "first"))?;
+    turn(&mut conn, 2)?;
+    conn.close_with(OK)?;
+    let history = export(harness, &origin, &place.root)?
+        .map_err(|code| format!("the history of a session it reported was refused with {code}"))?;
+    let header: Value = history
+        .lines()
+        .next()
+        .and_then(|line| serde_json::from_str(line).ok())
+        .unwrap_or(Value::Null);
     ensure!(
-        code(&answer).is_some(),
-        "a session/new under an id that names a session already was answered {answer}"
+        header["version"].is_u64(),
+        "an exported history's first line is no header with a version: {header}"
     );
-    again.close_with(OK)
+    ensure!(
+        history.contains("echo: first"),
+        "the exported history lacks the session's turn"
+    );
+    let moved = fresh_uuid();
+    let report = import(harness, &moved, &place.root, &history)?
+        .map_err(|(code, why)| format!("its own export was refused with {code}: {why}"))?;
+    ensure!(
+        report.seeded_from.is_some(),
+        "a seed from a history said it started nowhere"
+    );
+    let mut conn = open(harness, StartRequest::new())?;
+    conn.send(&initialize(0, contract.version, json!({})))?;
+    conn.answer(0)?;
+    if takes.load {
+        conn.send(&reopen(1, "session/load", &moved))?;
+        let (replayed, answer) = reopened(&mut conn, 1)?;
+        ensure!(
+            code(&answer).is_none(),
+            "session/load of an imported session was answered {answer}"
+        );
+        ensure!(
+            replayed.contains("echo: first"),
+            "session/load of an imported session replayed {replayed:?}"
+        );
+    } else {
+        conn.send(&reopen(1, method, &moved))?;
+        let (_, answer) = reopened(&mut conn, 1)?;
+        ensure!(
+            code(&answer).is_none(),
+            "{method} of an imported session was answered {answer}"
+        );
+    }
+    conn.send(&prompt(2, &moved, "second"))?;
+    let (text, _) = turn(&mut conn, 2)?;
+    ensure!(
+        text == "echo: second",
+        "the imported session answered {text:?}"
+    );
+    conn.close_with(OK)?;
+    let again = export(harness, &moved, &place.root)?
+        .map_err(|code| format!("the history of an imported session was refused with {code}"))?;
+    ensure!(
+        again.contains("echo: first") && again.contains("echo: second"),
+        "an imported session's history lacks a turn"
+    );
+
+    // What an import and an export refuse.
+    let refusals: [(&str, String, String, u32); 4] = [
+        (
+            "an id that names a session",
+            moved.clone(),
+            String::new(),
+            BAD_VALUE,
+        ),
+        (
+            "an id that is not a UUID",
+            "not-a-uuid".into(),
+            String::new(),
+            BAD_VALUE,
+        ),
+        (
+            "a history version it does not read",
+            fresh_uuid(),
+            history_of_version(999),
+            UNSUPPORTED,
+        ),
+        (
+            "a history that is not JSON lines",
+            fresh_uuid(),
+            "not JSON\n".into(),
+            BAD_VALUE,
+        ),
+    ];
+    for (what, session, history, expected) in refusals {
+        match import(harness, &session, &place.root, &history)? {
+            Err((code, _)) if code == expected => {}
+            Err((code, why)) => {
+                return Err(format!(
+                    "{what} was refused with {code} ({why}), not {expected}"
+                ));
+            }
+            Ok(_) => return Err(format!("{what} was seeded")),
+        }
+    }
+    let unknown = export(harness, &fresh_uuid(), &place.root)?;
+    ensure!(
+        unknown == Err(NOT_FOUND),
+        "the history of a session nobody made was answered {unknown:?}"
+    );
+    Ok(())
 }
 
 fn reopens(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
@@ -563,11 +743,10 @@ fn reopens(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
     .filter_map(|(method, taken)| taken.then_some(method))
     .collect();
     for method in methods {
-        let chosen = fresh_uuid();
-        let (conn, _) = open_session(
+        let (conn, chosen) = open_session(
             contract,
             harness,
-            StartRequest::builder().session_id(chosen.clone()).build(),
+            StartRequest::new(),
             &place.root,
             json!({}),
         )?;

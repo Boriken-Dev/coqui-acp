@@ -29,7 +29,7 @@ mod with_python {
     use coqui_acp_api::contract::Contract;
     use coqui_acp_api::guatiao::library::Registry;
     use coqui_acp_api::guatiao::{List, Map, Secret};
-    use coqui_acp_api::{AcpHarness, SessionRecordQuery};
+    use coqui_acp_api::{AcpHarness, SessionQuery};
 
     use super::support::{guatiao, manifest_dir, python, source};
 
@@ -91,7 +91,7 @@ mod with_python {
         assert_eq!(harness.non_defaults().expect("answered"), Vec::new());
         assert_eq!(
             harness
-                .session_record(SessionRecordQuery::new(
+                .session_record(SessionQuery::new(
                     "0f8fad5b-d9cb-469f-a165-70867728950e",
                     "/"
                 ))

@@ -11,10 +11,10 @@ use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
-    AcpHarnessVtable, ChannelSinkVtable, ChannelVtable, ErrorOutput, HarnessInfo, LinkState,
-    ModelInfo, ModelListing, NAMES, NonDefault, ProcessExit, ProcessSpawnerVtable, Requirement,
-    SessionRecordFile, SessionRecordQuery, SpawnSpec, SpawnedProcessVtable, SpawnerInfo,
-    StartRequest, Takes, TerminalSize,
+    AcpHarnessVtable, ChannelSinkVtable, ChannelVtable, ErrorOutput, HarnessInfo, HistoryLoss,
+    ImportReport, LinkState, ModelInfo, ModelListing, NAMES, NonDefault, ProcessExit,
+    ProcessSpawnerVtable, Requirement, SeedPoint, SessionImport, SessionQuery, SessionRecordFile,
+    SpawnSpec, SpawnedProcessVtable, SpawnerInfo, StartRequest, Takes, TerminalSize,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -69,7 +69,8 @@ fn schemas() -> Vec<(&'static str, Json)> {
     vec![
         ("StartRequest", schema_of::<StartRequest>()),
         ("Requirement", schema_of::<Requirement>()),
-        ("SessionRecordQuery", schema_of::<SessionRecordQuery>()),
+        ("SessionQuery", schema_of::<SessionQuery>()),
+        ("SessionImport", schema_of::<SessionImport>()),
         ("SpawnSpec", schema_of::<SpawnSpec>()),
         ("TerminalSize", schema_of::<TerminalSize>()),
         ("HarnessInfo", schema_of::<HarnessInfo>()),
@@ -78,6 +79,9 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("ModelInfo", schema_of::<ModelInfo>()),
         ("SessionRecordFile", schema_of::<SessionRecordFile>()),
         ("NonDefault", schema_of::<NonDefault>()),
+        ("ImportReport", schema_of::<ImportReport>()),
+        ("SeedPoint", schema_of::<SeedPoint>()),
+        ("HistoryLoss", schema_of::<HistoryLoss>()),
         ("SpawnerInfo", schema_of::<SpawnerInfo>()),
         ("ProcessExit", schema_of::<ProcessExit>()),
         ("LinkState", schema_of::<LinkState>()),
@@ -103,17 +107,29 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 14] = [
+    let pinned: [(&str, &[&str], &[&str]); 18] = [
         (
             "StartRequest",
-            &["environment", "requirements", "session_id", "working_roots"],
+            &["environment", "requirements", "working_roots"],
             &[],
         ),
         ("Requirement", &["name", "value"], &["name"]),
         (
-            "SessionRecordQuery",
+            "SessionQuery",
             &["environment", "session_id", "working_directory"],
             &["session_id", "working_directory"],
+        ),
+        (
+            "SessionImport",
+            &["environment", "history", "session_id", "working_directory"],
+            &["session_id", "working_directory"],
+        ),
+        ("ImportReport", &["compacted", "losses", "seeded_from"], &[]),
+        ("SeedPoint", &["digest", "line"], &["line"]),
+        (
+            "HistoryLoss",
+            &["count", "detail", "kind"],
+            &["count", "kind"],
         ),
         (
             "SpawnSpec",
@@ -231,7 +247,12 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     query.set("session_id", "0f8fad5b-d9cb-469f-a165-70867728950e");
     query.set("working_directory", "/");
     query.set("history", true);
-    assert!(SessionRecordQuery::from_value(&Value::from(query)).is_err());
+    assert!(SessionQuery::from_value(&Value::from(query)).is_err());
+    let mut import = Map::new();
+    import.set("session_id", "0f8fad5b-d9cb-469f-a165-70867728950e");
+    import.set("working_directory", "/");
+    import.set("history_format", "another");
+    assert!(SessionImport::from_value(&Value::from(import)).is_err());
     let mut spec = Map::new();
     spec.set("program", "sh");
     spec.set("sandbox", "strict");
@@ -264,7 +285,7 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(SpawnedProcessVtable::FLOOR_HASH, PROCESS_HASH);
 }
 
-const HARNESS_HASH: u32 = 165281080;
+const HARNESS_HASH: u32 = 2565176903;
 const CHANNEL_HASH: u32 = 2843269355;
 const SINK_HASH: u32 = 3528315804;
 const SPAWNER_HASH: u32 = 1466370631;

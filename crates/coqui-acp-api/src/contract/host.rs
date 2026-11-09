@@ -144,6 +144,22 @@ pub(super) fn handed() -> (
     (shared, spawner, sink)
 }
 
+/// Whether a spawner handed over on its own has been destroyed.
+pub(super) struct SpawnerWatch(Arc<Shared>);
+
+impl SpawnerWatch {
+    pub(super) fn destroyed(&self) -> bool {
+        self.0.lock().spawner_destroyed
+    }
+}
+
+/// A spawner to hand to one call, and its watch.
+pub(super) fn spawner() -> (SpawnerWatch, Object<dyn ProcessSpawner>) {
+    let (shared, spawner, sink) = handed();
+    drop(sink);
+    (SpawnerWatch(shared), spawner)
+}
+
 /// Starts a connection, or answers the refusal and whether both handed objects were destroyed.
 pub(super) fn start(
     harness: &dyn AcpHarness,

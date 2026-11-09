@@ -1,7 +1,7 @@
 //! What crosses the `acp_harness` kind besides the channel and the spawner: plain data, the same in
 //! every language.
 //!
-//! What a host sends (`StartRequest`, `Requirement`, `SessionRecordQuery`) refuses a key it does
+//! What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport`) refuses a key it does
 //! not declare, so a field a newer host adds is never silently dropped by an older provider. What
 //! a provider answers is read leniently.
 
@@ -98,7 +98,7 @@ impl HarnessInfo {
 }
 
 /// What a host starts one connection with: what the provider cannot learn from ACP, on top of the
-/// provider's own configuration. Everything in it only narrows, except `session_id`, which names.
+/// provider's own configuration. Everything in it only narrows.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq)]
 #[map(crate = ::guatiao, deny_unknown_fields)]
 #[non_exhaustive]
@@ -114,9 +114,6 @@ pub struct StartRequest {
     /// What the connection is held to. A name may come once.
     #[map(default)]
     pub requirements: Vec<Requirement>,
-    /// The id the connection's first `session/new` creates its session under, chosen by the host:
-    /// a UUID as [`is_session_id`](crate::is_session_id) spells it.
-    pub session_id: Option<String>,
 }
 
 impl StartRequest {
@@ -153,12 +150,6 @@ impl StartRequestBuilder {
     /// Adds a requirement.
     pub fn requirement(mut self, requirement: impl Into<Requirement>) -> Self {
         self.0.requirements.push(requirement.into());
-        self
-    }
-
-    /// The id of the connection's first new session.
-    pub fn session_id(mut self, id: impl Into<String>) -> Self {
-        self.0.session_id = Some(id.into());
         self
     }
 
@@ -231,12 +222,12 @@ impl ModelListing {
     }
 }
 
-/// The session whose record [`AcpHarness::session_record`](crate::AcpHarness::session_record) is
-/// asked for.
+/// One session a harness keeps, for [`AcpHarness::session_record`](crate::AcpHarness::session_record)
+/// and [`AcpHarness::export_session`](crate::AcpHarness::export_session).
 #[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
 #[map(crate = ::guatiao, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct SessionRecordQuery {
+pub struct SessionQuery {
     /// The session's id as the provider reported it: a UUID.
     pub session_id: String,
     /// The directory the session worked in.
@@ -246,7 +237,7 @@ pub struct SessionRecordQuery {
     pub environment: Secret<Environment>,
 }
 
-impl SessionRecordQuery {
+impl SessionQuery {
     /// The session `session_id`, which worked in `working_directory`, with no environment.
     #[must_use]
     pub fn new(session_id: impl Into<String>, working_directory: impl Into<String>) -> Self {
@@ -262,6 +253,122 @@ impl SessionRecordQuery {
     pub fn environment(mut self, environment: Environment) -> Self {
         self.environment = Secret::new(environment);
         self
+    }
+}
+
+/// A session to seed, for [`AcpHarness::import_session`](crate::AcpHarness::import_session): at the
+/// host's UUID, from a history, so a later connection resumes it by that id.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SessionImport {
+    /// The id the session is seeded at, created by the host: a UUID no session of the harness has.
+    pub session_id: String,
+    /// The directory the session will work in.
+    pub working_directory: String,
+    /// The history, as JSON lines in the standard session-history format, whose first line is a
+    /// header carrying its version; empty seeds a session with no history.
+    #[map(default)]
+    pub history: String,
+    /// The variables the session's connections will be started with.
+    #[map(default)]
+    pub environment: Secret<Environment>,
+}
+
+impl SessionImport {
+    /// Seeds `session_id`, to work in `working_directory`, from `history`, with no environment.
+    #[must_use]
+    pub fn new(
+        session_id: impl Into<String>,
+        working_directory: impl Into<String>,
+        history: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            working_directory: working_directory.into(),
+            history: history.into(),
+            environment: Secret::default(),
+        }
+    }
+
+    /// The same import, with the variables the session's connections will be started with.
+    #[must_use]
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environment = Secret::new(environment);
+        self
+    }
+}
+
+/// What a seed was made from and what it left behind, from
+/// [`AcpHarness::import_session`](crate::AcpHarness::import_session), for the host's record of how a
+/// run started.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct ImportReport {
+    /// Where in the history the seed starts (a compaction boundary, or the first line after the
+    /// header); absent for an empty history.
+    pub seeded_from: Option<SeedPoint>,
+    /// What could not be carried into the session.
+    #[map(default)]
+    pub losses: Vec<HistoryLoss>,
+    /// Whether the harness compacted the history to fit its window.
+    #[map(default)]
+    pub compacted: bool,
+}
+
+impl ImportReport {
+    /// A seed with no history: nothing seeded from, nothing lost, nothing compacted.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// A position in a history.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct SeedPoint {
+    /// Its line, counting the header as line 1.
+    pub line: u64,
+    /// The digest the history gives that line, when it gives one.
+    pub digest: Option<String>,
+}
+
+impl SeedPoint {
+    /// Line `line`, with no digest.
+    #[must_use]
+    pub const fn line(line: u64) -> Self {
+        Self { line, digest: None }
+    }
+}
+
+/// One kind of thing an import could not carry, as the standard format's loss report names it.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct HistoryLoss {
+    /// What was lost, in the loss report's vocabulary: `thinking` (signed thinking or encrypted
+    /// reasoning dropped), `tool_as_note` (a tool call with no equivalent, kept as a note),
+    /// `attachment_by_digest` (an attachment carried by its digest only), `replayed_as_prompt` (the
+    /// history given as context in a prompt rather than as the harness's own session).
+    pub kind: String,
+    /// How many times.
+    pub count: u64,
+    /// More, for people, when there is more to say.
+    pub detail: Option<String>,
+}
+
+impl HistoryLoss {
+    /// `count` losses of `kind`.
+    #[must_use]
+    pub fn new(kind: impl Into<String>, count: u64) -> Self {
+        Self {
+            kind: kind.into(),
+            count,
+            detail: None,
+        }
     }
 }
 

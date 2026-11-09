@@ -10,12 +10,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use coqui_acp_api::contract::Contract;
-use coqui_acp_api::guatiao::library::Registry;
-use coqui_acp_api::guatiao::{Map, Secret, Value};
-use coqui_acp_api::{AcpHarness, SessionRecordQuery};
+use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
+use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
+use coqui_acp_api::{
+    AcpHarness, ProcessSpawner, SessionImport, SessionQuery, SpawnSpec, SpawnedProcess, SpawnerInfo,
+};
 
 /// The echo's library file, which `cargo test` builds beside the tests.
-pub fn library() -> PathBuf {
+fn library() -> PathBuf {
     let tests = std::env::current_exe().expect("the test knows where it is");
     let profile = tests
         .parent()
@@ -66,7 +68,7 @@ fn what_a_provider_leaves_out_has_its_default() {
     assert_eq!(harness.non_defaults().expect("answered"), Vec::new());
     assert_eq!(
         harness
-            .session_record(SessionRecordQuery::new(
+            .session_record(SessionQuery::new(
                 "0f8fad5b-d9cb-469f-a165-70867728950e",
                 "/"
             ))
@@ -102,4 +104,99 @@ fn a_configured_echo_describes_itself_as_configured() {
         offer.instantiate(&Value::from(wrong)).is_err(),
         "a key the settings do not declare was taken"
     );
+}
+
+fn instance(registry: &Registry, settings: Map) -> Arc<dyn AcpHarness> {
+    let offer = registry
+        .offer::<dyn AcpHarness>("echo_harness")
+        .expect("the library offers it")
+        .expect("its table is this crate's kind");
+    Arc::new(
+        offer
+            .instantiate(&Value::from(settings))
+            .expect("the settings fit the schema"),
+    )
+}
+
+fn spawner() -> Object<dyn ProcessSpawner> {
+    LocalSpawner.into_object()
+}
+
+/// A spawner nobody uses: the echo starts nothing.
+struct LocalSpawner;
+
+impl ProcessSpawner for LocalSpawner {
+    fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
+        Ok(SpawnerInfo::new(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            true,
+        ))
+    }
+
+    fn spawn(&self, _spec: SpawnSpec) -> Result<Object<dyn SpawnedProcess>, ProviderError> {
+        Err(ProviderError::new(
+            Status::GUATIAO_ERR_UNSUPPORTED,
+            "unused",
+        ))
+    }
+}
+
+/// A history exported from one harness seeds a session in another, which exports it the same.
+#[test]
+fn a_history_moves_between_harnesses() {
+    let registry = registry();
+    let here = instance(&registry, Map::new());
+    let there = instance(&registry, Map::new());
+    let history = concat!(
+        "{\"format\":\"coqui-acp-history\",\"version\":1}\n",
+        "{\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+        "{\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"echo: hi\"}}}}\n",
+    );
+    let first = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let report = here
+        .import_session(SessionImport::new(first, "/", history), spawner())
+        .expect("seeded");
+    assert_eq!(report.seeded_from.map(|point| point.line), Some(2));
+    assert!(report.losses.is_empty() && !report.compacted);
+    let exported = here
+        .export_session(SessionQuery::new(first, "/"), spawner())
+        .expect("exported");
+    let second = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    there
+        .import_session(SessionImport::new(second, "/", exported.clone()), spawner())
+        .expect("seeded elsewhere");
+    assert_eq!(
+        there
+            .export_session(SessionQuery::new(second, "/"), spawner())
+            .expect("exported"),
+        exported
+    );
+    let missing = there
+        .export_session(SessionQuery::new(first, "/"), spawner())
+        .expect_err("another harness's session is not this one's");
+    assert_eq!(missing.status, Status::GUATIAO_ERR_NOT_FOUND);
+}
+
+/// A harness that cannot import says so, with a reason, and holds to the rest of the contract.
+#[test]
+fn a_harness_that_cannot_import_refuses_with_a_reason() {
+    let registry = registry();
+    let mut settings = Map::new();
+    settings.set("imports", false);
+    let harness = instance(&registry, settings);
+    let refused = harness
+        .import_session(
+            SessionImport::new("0f8fad5b-d9cb-469f-a165-70867728950e", "/", ""),
+            spawner(),
+        )
+        .expect_err("it cannot import");
+    assert_eq!(refused.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    assert!(!refused.message().is_empty());
+    if let Err(failures) = Contract::new("an echo that imports nothing")
+        .imports(false)
+        .run(&*harness)
+    {
+        panic!("{failures}");
+    }
 }

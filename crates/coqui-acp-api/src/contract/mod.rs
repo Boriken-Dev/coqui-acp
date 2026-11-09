@@ -17,6 +17,11 @@
 //! [`Contract::holds`] names and refuses every other, and keeps every session inside the working
 //! roots.
 //!
+//! Its sessions are kept: it imports a history at the host's UUID, an empty one seeding a fresh
+//! session, exports what its sessions said in the standard format (a header line with `version`,
+//! then the turns), and `session/load` replays a session's updates. A provider that cannot import
+//! is run with [`Contract::imports`] off and must refuse with a reason.
+//!
 //! The `acp-harness-check` program runs the same suite on a library file or a source file, for a
 //! provider written in any language Guatiao loads.
 
@@ -39,6 +44,7 @@ pub struct Contract {
     version: u16,
     holds: Vec<Requirement>,
     message_limit: Option<usize>,
+    imports: bool,
 }
 
 /// One rule a provider broke.
@@ -86,6 +92,7 @@ impl Contract {
             version: 1,
             holds: alloc::vec![Requirement::new(READ_ONLY), Requirement::new(NO_COMMANDS)],
             message_limit: None,
+            imports: true,
         }
     }
 
@@ -106,6 +113,13 @@ impl Contract {
     /// connection with `GUATIAO_ERR_BAD_VALUE`.
     pub const fn message_limit(mut self, bytes: usize) -> Self {
         self.message_limit = Some(bytes);
+        self
+    }
+
+    /// Whether the provider imports sessions (the default). One that does not must refuse
+    /// `import_session` with `GUATIAO_ERR_UNSUPPORTED` and a reason.
+    pub const fn imports(mut self, imports: bool) -> Self {
+        self.imports = imports;
         self
     }
 

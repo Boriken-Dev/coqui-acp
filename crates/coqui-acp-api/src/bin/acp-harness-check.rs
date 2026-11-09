@@ -11,6 +11,7 @@
 //! --version N           the ACP version initialize asks for (1)
 //! --holds NAME[=JSON]   a requirement it holds, repeated; the default holds read_only and no_commands
 //! --message-limit N     the largest message it takes, when it has a limit
+//! --no-imports          it imports no session, and must refuse import_session with a reason
 //! ```
 //!
 //! Exits 0 when the provider keeps every rule, 1 with each rule it broke, 2 when it could not be
@@ -41,6 +42,7 @@ struct Args {
     version: Option<u16>,
     holds: Vec<Requirement>,
     message_limit: Option<usize>,
+    no_imports: bool,
 }
 
 fn parse() -> Result<Args, String> {
@@ -64,6 +66,7 @@ fn parse() -> Result<Args, String> {
                         .map_err(|_| "--message-limit takes a number")?,
                 );
             }
+            "--no-imports" => args.no_imports = true,
             "--holds" => {
                 let held = value()?;
                 args.holds.push(match held.split_once('=') {
@@ -192,6 +195,9 @@ fn main() -> ExitCode {
     }
     if let Some(limit) = args.message_limit {
         contract = contract.message_limit(limit);
+    }
+    if args.no_imports {
+        contract = contract.imports(false);
     }
     let outcome = contract.run(&*harness);
     drop(harness);

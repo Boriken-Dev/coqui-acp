@@ -14,7 +14,7 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 
 | kind | table | `FLOOR_HASH` | who implements it |
 | --- | --- | --- | --- |
-| `acp_harness` | `AcpHarnessVtable` | `165281080` | the provider |
+| `acp_harness` | `AcpHarnessVtable` | `2565176903` | the provider |
 | `channel` | `ChannelVtable` | `2843269355` | the provider (Guatiao's, re-exported) |
 | `channel_sink` | `ChannelSinkVtable` | `3528315804` | the host (Guatiao's, re-exported) |
 | `process_spawner` | `ProcessSpawnerVtable` | `1466370631` | the host |
@@ -35,18 +35,24 @@ pub trait AcpHarness: Send + Sync {
     fn refusal(&self, requirements: Vec<Requirement>, environment: Secret<Environment>)
         -> Result<Option<String>, ProviderError>;
     fn program(&self) -> Result<Option<String>, ProviderError>;
+    fn import_session(&self, session: SessionImport, spawner: Object<dyn ProcessSpawner>)
+        -> Result<ImportReport, ProviderError>;
+    fn export_session(&self, query: SessionQuery, spawner: Object<dyn ProcessSpawner>)
+        -> Result<String, ProviderError>;
     fn models(&self, environment: Secret<Environment>) -> Result<ModelListing, ProviderError>;     // default: unknown
-    fn session_record(&self, query: SessionRecordQuery) -> Result<Option<SessionRecordFile>, ProviderError>; // default: None
+    fn session_record(&self, query: SessionQuery) -> Result<Option<SessionRecordFile>, ProviderError>; // default: None
     fn non_defaults(&self) -> Result<Vec<NonDefault>, ProviderError>;                               // default: empty
 }
 ```
 
-Every method is synchronous; a host calls them from a thread of its own. Every method answers for the provider **as configured**: a host builds an instance from the provider's settings (`offer.instantiate(&settings)`) and asks it, so `describe` and `refusal` are a configured harness's answers. The four without a default are the ones a host acts on for every harness; the three defaults are true answers for a harness with nothing to say (no way to list models, no record kept, settings its schema shows in full).
+Every method is synchronous; a host calls them from a thread of its own. Every method answers for the provider **as configured**: a host builds an instance from the provider's settings (`offer.instantiate(&settings)`) and asks it, so `describe` and `refusal` are a configured harness's answers. The six without a default are the ones a host acts on for every harness (a harness that cannot import says so by refusing, with its reason); the three defaults are true answers for a harness with nothing to say (no way to list models, no record kept, settings its schema shows in full).
 
 - `describe`: who the harness is and what its `initialize` will advertise, with nothing started. Cheap, the same on every call.
 - `start`: one ACP connection. The host is the client, the provider the agent. `spawner` and `sink` are handed over: the provider destroys both, even when it refuses, and the spawner by the time it calls `closed`. It returns once the channel takes messages; the program may start later, and a failure then is answered in ACP before the provider closes. It refuses exactly when `refusal` would for the request's requirements, with the same status: `GUATIAO_ERR_UNSUPPORTED` for a requirement it cannot hold, `GUATIAO_ERR_BAD_VALUE` for a request it cannot read. It never starts with a requirement left out.
 - `refusal`: why the harness could not hold a connection to **all of** `requirements` together, started with `environment`, in a sentence; `None` when it can. An empty environment asks about the configuration alone and is answered. `GUATIAO_ERR_BAD_VALUE` for requirements `start` would refuse as unreadable. A host asks before it starts a connection and passes over a harness that would refuse.
 - `program`: the program the harness starts through the spawner (a path, or a name looked up on the `PATH` where it runs, the start's environment's `PATH` when that sets one); `None` for one that starts none.
+- `import_session`: seeds a session at the host's UUID from a history (below); an empty history seeds a fresh one. Answers an `ImportReport`. Refuses `GUATIAO_ERR_UNSUPPORTED`, with the reason, when the harness cannot import at all or does not read the history's version; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or a history it cannot read. Never a session half seeded and never a silent fallback: a harness with no native session to seed (a generic ACP agent) may import by replaying the history as context in its first prompt, and then says so in the report's losses (`replayed_as_prompt`).
+- `export_session`: the history of a session it reported, by its UUID, in the standard format, as it is. `GUATIAO_ERR_NOT_FOUND` for a session it does not have; `GUATIAO_ERR_UNSUPPORTED`, with the reason, when it cannot export.
 - `models`: what the account behind `environment` may use, with no model turn, or why it cannot say.
 - `session_record`: where the harness keeps its own record of a session, by the UUID it reported.
 - `non_defaults`: how a configured harness departs from its defaults in ways its settings' schema cannot show (the detail of a rule a setting holds as text). The rest a host reads from the schema itself, with Guatiao's `schema::differences`.
@@ -116,20 +122,21 @@ ProcessExit::running();  ProcessExit::ended(code, signal)
 #[non_exhaustive] pub struct LinkState { pub up: bool, pub drops: u64 }   LinkState::up()
 ```
 
+**A provider never weakens a spec to fit a spawner.** A spawner that cannot keep standard error apart says so (`separate_error` false) and refuses `ErrorOutput::Separate` with `GUATIAO_ERR_UNSUPPORTED`; a provider that needs it (a JSON-lines harness reads its standard output as protocol) refuses in turn, with the reason, and never falls back to `Merged`. The same holds for a terminal.
+
 `os` and `arch` are spelled as `std::env::consts` spells them: which rules the programs' paths follow (`PathStyle::of_os`). `kills_escaped` says whether `kill` reaches processes that left the program's group or session; `ends_with_host`, whether the tree ends when the host dies without a kill.
 
 ## Requests and answers
 
-What a host sends (`StartRequest`, `Requirement`, `SessionRecordQuery`, and the provider's `SpawnSpec`) **refuses a key it does not declare** (`GUATIAO_ERR_BAD_VALUE`), so a narrowing a newer side adds is never dropped by an older one: a new key is a break. What is answered is read leniently.
+What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport`, and the provider's `SpawnSpec`) **refuses a key it does not declare** (`GUATIAO_ERR_BAD_VALUE`), so a narrowing a newer side adds is never dropped by an older one: a new key is a break. What is answered is read leniently.
 
 ```rust
 #[non_exhaustive] pub struct StartRequest {
     pub environment: Secret<Environment>,   // over the configuration's; sensitive
     pub working_roots: Vec<String>,         // every session's directories lie in one; empty adds none
     pub requirements: Vec<Requirement>,     // what the connection is held to; each name once
-    pub session_id: Option<String>,         // the UUID the first session/new creates its session under
 }
-StartRequest::new();  StartRequest::builder() -> StartRequestBuilder   // .environment(env) .working_root(r) .requirement(r) .session_id(id) .build()
+StartRequest::new();  StartRequest::builder() -> StartRequestBuilder   // .environment(env) .working_root(r) .requirement(r) .build()
 
 #[non_exhaustive] pub struct Requirement { pub name: String, pub value: Option<Value> }
 Requirement::new(name);  Requirement::with_value(name, value);  requirement.narrowing() -> Result<Narrowing, RequirementError>
@@ -152,8 +159,16 @@ HarnessInfo::new(title, versions)
 #[non_exhaustive] pub struct ModelListing { pub known: bool, pub unknown_because: Option<String>, pub models: Vec<ModelInfo> }
 ModelListing::unknown(reason);  ModelListing::of(models)
 #[non_exhaustive] pub struct ModelInfo { pub id: String, pub name: Option<String>, pub description: Option<String> }   ModelInfo::new(id)
-#[non_exhaustive] pub struct SessionRecordQuery { pub session_id: String, pub working_directory: String, pub environment: Secret<Environment> }
-SessionRecordQuery::new(session_id, working_directory).environment(env)
+#[non_exhaustive] pub struct SessionQuery { pub session_id: String, pub working_directory: String, pub environment: Secret<Environment> }
+SessionQuery::new(session_id, working_directory).environment(env)
+#[non_exhaustive] pub struct SessionImport { pub session_id: String, pub working_directory: String, pub history: String,
+    pub environment: Secret<Environment> }
+SessionImport::new(session_id, working_directory, history).environment(env)
+#[non_exhaustive] #[derive(Default)] pub struct ImportReport { pub seeded_from: Option<SeedPoint>, pub losses: Vec<HistoryLoss>, pub compacted: bool }
+ImportReport::new()
+#[non_exhaustive] pub struct SeedPoint { pub line: u64, pub digest: Option<String> }   SeedPoint::line(n)   // the header is line 1
+#[non_exhaustive] pub struct HistoryLoss { pub kind: String, pub count: u64, pub detail: Option<String> }   HistoryLoss::new(kind, count)
+// kind: `thinking`, `tool_as_note`, `attachment_by_digest`, `replayed_as_prompt`, as the format's loss report names them
 #[non_exhaustive] pub struct SessionRecordFile { pub path: String, pub format: String }   // `claude-code-jsonl`, `codex-rollout-jsonl`
 #[non_exhaustive] pub struct NonDefault { pub setting: String, pub value: String, pub default: String }   NonDefault::new(setting, value, default)
 ```
@@ -168,7 +183,7 @@ SessionRecordQuery::new(session_id, working_directory).environment(env)
 | --- | --- | --- |
 | `read_only` | none | create, change and remove no file, by the agent or what it runs; commands may still run where the file system is read-only to them |
 | `no_commands` | none | start no command or program: no shell, script or terminal, sandboxed or not |
-| `answer_only` | none | only answer from the prompt: no tool of any kind (no file read or write, command, MCP tool from any source, web search or fetch); no settings, MCP servers, skills, hooks or instruction files from the session's directories; what the harness runs to answer is sandboxed, writes no file and reaches no network but the harness's own model endpoint. Holds every name above and below that takes no value |
+| `answer_only` | none | only answer from what the host gives: no tool of any kind (no file read or write, command, MCP tool from any source, web search or fetch); no settings, MCP servers, skills, hooks or instruction files, neither the session's directories' nor the user's own global ones, so the model sees only the prompt and what the host sends; what the harness runs to answer is sandboxed, writes no file and reaches no network but the harness's own model endpoint. Holds every name above and below that takes no value |
 | `no_project_settings` | none | read no configuration from the session's directories or their parents (settings, permission rules, hooks, commands, sub-agents); instruction files (`AGENTS.md`, `CLAUDE.md`) still load |
 | `no_project_mcp` | none | start no MCP server declared in the session's directories or their parents |
 | `files_under` | list of paths | create, change and remove files only under these; an empty list allows none |
@@ -194,7 +209,11 @@ pub fn is_session_id(text: &str) -> bool   // a UUID, lowercase, 8-4-4-4-12
 
 A session's `cwd` and every one of its `additionalDirectories`, on `session/new`, `session/load` and `session/resume`, lie in a working root, or the request is answered `-32602`. A path is in a root when it is absolute, has no `.` or `..` part (refused, never normalised), and its parts begin with every part of the root (`/work-beside` is not in `/work`); on Windows `\` and `/` are one separator and names compare without regard to case. Following links, the path and the roots are resolved through the links that exist, and the resolved path must lie in a resolved root too, so a link inside a root leading out of it is refused. A provider whose agent runs elsewhere compares by that platform's style and follows no link of this machine's.
 
-**Session ids are UUIDs.** Every session id a provider reports, in a `session/new` answer, a `session/update` and wherever else ACP carries one, and every one `session_record` is asked about, is a UUID as `is_session_id` spells it. A provider whose harness names sessions otherwise maps them, and keeps the mapping where it outlives the connection. With `StartRequest::session_id`, the connection's first `session/new` creates its session under that id: one the provider already has is refused in ACP, never reused. `session/load` and `session/resume` take a UUID: the provider resolves it through its mapping, and failing that tries it as the harness's own id where the harness's ids are UUIDs, or refuses it in ACP.
+**Session ids are UUIDs.** Every session id a provider reports, in a `session/new` answer, a `session/update` and wherever else ACP carries one, and every one it is asked about, is a UUID as `is_session_id` spells it. A provider whose harness names sessions otherwise maps them, and keeps the mapping where it outlives the connection.
+
+**A host starts a session at an id of its own by seeding it**: it creates the UUID, calls `import_session` with that UUID and a history (empty for a fresh session), then opens a connection and sends ACP `session/resume` (or `session/load`, which replays the history as updates) with the UUID. The provider maps the UUID to the harness's own id and keeps the mapping. `session/load` and `session/resume` of a UUID the provider does not have are refused in ACP. Moving a session to another harness is an export from one and an import at the same or a new UUID in the other.
+
+**A history** is the standard session-history format: UTF-8 JSON lines in ACP's vocabulary, whose first line is a header object naming the format and its version (`{"format": "coqui-acp-history", "version": 1, ...}`), then the session's prompts and updates. The kind carries it as text and never reads it, so the format grows by its header's version without changing the kind; a provider refuses a version it does not read. Its content is context, never commands: an import never re-runs a tool.
 
 **The host stays the client.** Every request the agent makes of the client (`session/request_permission`, `fs/*`, `terminal/*`, `elicitation/create`) reaches the host, which answers it under its own rules, refusing by default. The agent asks only for what `initialize`'s `clientCapabilities` offered. A permission answered with anything but a selected option the request offered is a refusal; a cancelled outcome ends the turn `cancelled`. A provider's answer never overrides the host's refusal.
 
@@ -207,14 +226,15 @@ Every method takes and answers plain data; `start` also takes the spawner and th
 ```rust
 pub struct contract::Contract;   // #[must_use]
 Contract::new(name) .version(u16 /* 1 */) .holds(Vec<Requirement> /* read_only, no_commands */) .message_limit(bytes)
+    .imports(bool /* true */)
     .run(&dyn AcpHarness) -> Result<(), contract::Failures>
 #[non_exhaustive] pub struct contract::Failure { pub check: &'static str, pub message: String }
 pub struct contract::Failures { pub provider: String, pub failures: Vec<Failure> }   // Display lists each
 ```
 
-Every provider of the kind passes it, configured to drive the **contract agent**: a real harness supplies a stand-in for its program that behaves as the module's documentation says (`close`, `wait`, `ask`, `read PATH`, else `echo: TEXT`). It checks the methods, requirements, secrets, ACP and its errors, the host's session ids, reopening, cancel, permission answers, client capabilities, back-pressure, every close, working roots, the size limit and a real `coqui_acp::Client`. It makes and removes a directory under the system's temporary one, with a link (a junction on Windows) when the platform allows.
+Every provider of the kind passes it, configured to drive the **contract agent**: a real harness supplies a stand-in for its program that behaves as the module's documentation says (`close`, `wait`, `ask`, `read PATH`, else `echo: TEXT`). It checks the methods, requirements, secrets, ACP and its errors, seeding a session at the host's UUID (empty, then resumed; exported after turns, imported at another UUID, then resumed; what an import and an export refuse), reopening, cancel, permission answers, client capabilities, back-pressure, every close, working roots, the size limit and a real `coqui_acp::Client`. It makes and removes a directory under the system's temporary one, with a link (a junction on Windows) when the platform allows.
 
-`acp-harness-check` runs it on a provider with no Rust of the provider's own: `--library FILE`, or `--source SOURCE_LIBRARY --source-config JSON` for one a Guatiao source loads; `--provider KEY`, `--settings JSON` (build an instance), `--version N`, `--holds NAME[=JSON]` (repeated), `--message-limit N`. Exits 0, 1 listing each rule broken, or 2 when the provider could not be loaded.
+`acp-harness-check` runs it on a provider with no Rust of the provider's own: `--library FILE`, or `--source SOURCE_LIBRARY --source-config JSON` for one a Guatiao source loads; `--provider KEY`, `--settings JSON` (build an instance), `--version N`, `--holds NAME[=JSON]` (repeated), `--message-limit N`, `--no-imports` (it must refuse `import_session` with a reason). Exits 0, 1 listing each rule broken, or 2 when the provider could not be loaded.
 
 ## Tests
 

@@ -20,8 +20,8 @@ pub use guatiao_channel::{Channel, ChannelSink, ChannelSinkVtable, ChannelVtable
 pub use environment::Environment;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{
-    HarnessInfo, ModelInfo, ModelListing, NonDefault, SessionRecordFile, SessionRecordQuery,
-    StartRequest, StartRequestBuilder, Takes,
+    HarnessInfo, HistoryLoss, ImportReport, ModelInfo, ModelListing, NonDefault, SeedPoint,
+    SessionImport, SessionQuery, SessionRecordFile, StartRequest, StartRequestBuilder, Takes,
 };
 pub use requirement::{
     ANSWER_ONLY, DENIED_PATHS, FILES_UNDER, NAMES, NETWORK, NO_COMMANDS, NO_PROJECT_MCP,

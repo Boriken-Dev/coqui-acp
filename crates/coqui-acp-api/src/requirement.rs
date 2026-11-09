@@ -20,10 +20,11 @@ pub const READ_ONLY: &str = "read_only";
 /// terminal. Files may still be written. No value.
 pub const NO_COMMANDS: &str = "no_commands";
 
-/// The agent only answers from what the prompt carries: it calls no tool of any kind (no file read
-/// or write, no command, no MCP tool from any source, no web search or fetch), loads none of the
-/// session directories' settings, MCP servers, skills, hooks or instruction files, and whatever the
-/// harness runs to answer runs sandboxed, writing no file and reaching no network but the
+/// The agent only answers from what the host gives it: it calls no tool of any kind (no file read
+/// or write, no command, no MCP tool from any source, no web search or fetch); loads no settings,
+/// MCP servers, skills, hooks or instruction files, neither the session directories' nor the
+/// user's own global ones, so the model sees only the prompt and what the host sends; and whatever
+/// the harness runs to answer runs sandboxed, writing no file and reaching no network but the
 /// harness's own model endpoint. Holds everything the other names without a value hold. No value.
 pub const ANSWER_ONLY: &str = "answer_only";
 

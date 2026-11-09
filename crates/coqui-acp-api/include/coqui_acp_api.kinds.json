@@ -2,7 +2,7 @@
   "kinds": [
     {
       "name": "acp_harness",
-      "floor_hash": 165281080,
+      "floor_hash": 2565176903,
       "object": false,
       "doc": "Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.\n\nThe host is the ACP client and the provider the agent: each message on the channel, either way,\nis one whole JSON-RPC 2.0 message as UTF-8 JSON text. The kind never models ACP itself, so a\nprovider in any language implements ACP as the protocol defines it, and the version is agreed by\n`initialize` on the channel.\n\nEvery method answers for the provider as configured: a host builds an instance from the\nprovider's settings and asks it. Every method is synchronous; a host calls them from a thread\nof its own. The methods without a default are the ones a host acts on for every harness; a\ndefault is kept only where it is a true answer for a harness that has nothing to say.",
       "slots": [
@@ -75,6 +75,50 @@
             "type": "value"
           },
           "doc": "The program the harness starts through the spawner (a path, or a name looked up on the\n`PATH` where it runs, the start's environment's `PATH` when that sets one), so a host can say\nit cannot be found before it starts a connection; `None` for a harness that starts none."
+        },
+        {
+          "name": "import_session",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "session",
+              "type": "value",
+              "pass": "borrowed"
+            },
+            {
+              "name": "spawner",
+              "type": "object",
+              "kind": "process_spawner",
+              "pass": "taken"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Seeds a session at the host's UUID from a history, so that a later connection's\n`session/resume` or `session/load` of that UUID opens it; an empty history seeds a fresh one.\nThe provider maps the UUID to the harness's own id and keeps the mapping. `spawner` is handed\nover as `start`'s is, for a harness whose files live where its programs run.\n\nAnswers what the seed was made from and what it lost. Refuses `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when the harness cannot import at all or does not read the history's\nversion; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or\na history it cannot read. Never a session left half seeded, never a silent fallback."
+        },
+        {
+          "name": "export_session",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "query",
+              "type": "value",
+              "pass": "borrowed"
+            },
+            {
+              "name": "spawner",
+              "type": "object",
+              "kind": "process_spawner",
+              "pass": "taken"
+            }
+          ],
+          "answer": {
+            "type": "text"
+          },
+          "doc": "The history of the session `query` names (by its UUID), in the standard session-history\nformat, as it is. `spawner` is handed over as `import_session`'s is. Refuses\n`GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_UNSUPPORTED`,\nwith the reason, when it cannot export."
         },
         {
           "name": "models",

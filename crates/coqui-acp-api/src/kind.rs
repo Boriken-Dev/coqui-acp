@@ -10,7 +10,8 @@ use guatiao_channel::{Channel, ChannelSink};
 
 use crate::environment::Environment;
 use crate::models::{
-    HarnessInfo, ModelListing, NonDefault, SessionRecordFile, SessionRecordQuery, StartRequest,
+    HarnessInfo, ImportReport, ModelListing, NonDefault, SessionImport, SessionQuery,
+    SessionRecordFile, StartRequest,
 };
 use crate::requirement::Requirement;
 use crate::spawner::ProcessSpawner;
@@ -71,6 +72,31 @@ pub trait AcpHarness: Send + Sync {
     /// it cannot be found before it starts a connection; `None` for a harness that starts none.
     fn program(&self) -> Result<Option<String>, ProviderError>;
 
+    /// Seeds a session at the host's UUID from a history, so that a later connection's
+    /// `session/resume` or `session/load` of that UUID opens it; an empty history seeds a fresh one.
+    /// The provider maps the UUID to the harness's own id and keeps the mapping. `spawner` is handed
+    /// over as `start`'s is, for a harness whose files live where its programs run.
+    ///
+    /// Answers what the seed was made from and what it lost. Refuses `GUATIAO_ERR_UNSUPPORTED`,
+    /// with the reason, when the harness cannot import at all or does not read the history's
+    /// version; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or already names a session, or
+    /// a history it cannot read. Never a session left half seeded, never a silent fallback.
+    fn import_session(
+        &self,
+        session: SessionImport,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<ImportReport, ProviderError>;
+
+    /// The history of the session `query` names (by its UUID), in the standard session-history
+    /// format, as it is. `spawner` is handed over as `import_session`'s is. Refuses
+    /// `GUATIAO_ERR_NOT_FOUND` for a session the harness does not have, `GUATIAO_ERR_UNSUPPORTED`,
+    /// with the reason, when it cannot export.
+    fn export_session(
+        &self,
+        query: SessionQuery,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<String, ProviderError>;
+
     /// The models the account behind `environment` may use, when the harness can say without a
     /// model turn. Never carries a value from `environment`. The default, for a harness with no
     /// way to list them: unknown, and says so.
@@ -86,7 +112,7 @@ pub trait AcpHarness: Send + Sync {
     /// keeps none: none.
     fn session_record(
         &self,
-        query: SessionRecordQuery,
+        query: SessionQuery,
     ) -> Result<Option<SessionRecordFile>, ProviderError> {
         drop(query);
         Ok(None)

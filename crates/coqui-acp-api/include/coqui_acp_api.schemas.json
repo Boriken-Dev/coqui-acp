@@ -41,13 +41,6 @@
         },
         "description": "What the connection is held to. A name may come once.",
         "default": []
-      },
-      "session_id": {
-        "type": [
-          "string",
-          "null"
-        ],
-        "description": "The id the connection's first `session/new` creates its session under, chosen by the host: a UUID as [`is_session_id`](crate::is_session_id) spells it."
       }
     },
     "additionalProperties": false
@@ -69,7 +62,7 @@
       "name"
     ]
   },
-  "SessionRecordQuery": {
+  "SessionQuery": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
@@ -89,6 +82,40 @@
         "writeOnly": true,
         "x-sensitive": true,
         "description": "The variables its connection was started with.",
+        "default": {}
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "session_id",
+      "working_directory"
+    ]
+  },
+  "SessionImport": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "session_id": {
+        "type": "string",
+        "description": "The id the session is seeded at, created by the host: a UUID no session of the harness has."
+      },
+      "working_directory": {
+        "type": "string",
+        "description": "The directory the session will work in."
+      },
+      "history": {
+        "type": "string",
+        "description": "The history, as JSON lines in the standard session-history format, whose first line is a header carrying its version; empty seeds a session with no history.",
+        "default": ""
+      },
+      "environment": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "writeOnly": true,
+        "x-sensitive": true,
+        "description": "The variables the session's connections will be started with.",
         "default": {}
       }
     },
@@ -480,6 +507,127 @@
       "setting",
       "value",
       "default"
+    ]
+  },
+  "ImportReport": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "seeded_from": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615,
+            "description": "Its line, counting the header as line 1."
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The digest the history gives that line, when it gives one."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "line"
+        ],
+        "description": "Where in the history the seed starts (a compaction boundary, or the first line after the header); absent for an empty history."
+      },
+      "losses": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "What was lost, in the loss report's vocabulary: `thinking` (signed thinking or encrypted reasoning dropped), `tool_as_note` (a tool call with no equivalent, kept as a note), `attachment_by_digest` (an attachment carried by its digest only), `replayed_as_prompt` (the history given as context in a prompt rather than as the harness's own session)."
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615,
+              "description": "How many times."
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "More, for people, when there is more to say."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "count"
+          ]
+        },
+        "description": "What could not be carried into the session.",
+        "default": []
+      },
+      "compacted": {
+        "type": "boolean",
+        "description": "Whether the harness compacted the history to fit its window.",
+        "default": false
+      }
+    },
+    "additionalProperties": false
+  },
+  "SeedPoint": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "line": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "Its line, counting the header as line 1."
+      },
+      "digest": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The digest the history gives that line, when it gives one."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "line"
+    ]
+  },
+  "HistoryLoss": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "kind": {
+        "type": "string",
+        "description": "What was lost, in the loss report's vocabulary: `thinking` (signed thinking or encrypted reasoning dropped), `tool_as_note` (a tool call with no equivalent, kept as a note), `attachment_by_digest` (an attachment carried by its digest only), `replayed_as_prompt` (the history given as context in a prompt rather than as the harness's own session)."
+      },
+      "count": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "How many times."
+      },
+      "detail": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "More, for people, when there is more to say."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "kind",
+      "count"
     ]
   },
   "SpawnerInfo": {

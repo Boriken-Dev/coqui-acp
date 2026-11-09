@@ -19,9 +19,9 @@ use std::thread::JoinHandle;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
 use coqui_acp_api::{
-    AcpHarness, Channel, ChannelSink, Environment, HarnessInfo, ModelInfo, ModelListing,
-    NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement, StartRequest, WorkingRoots,
-    is_session_id,
+    AcpHarness, Channel, ChannelSink, Environment, HarnessInfo, ImportReport, ModelInfo,
+    ModelListing, NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement, SeedPoint,
+    SessionImport, SessionQuery, StartRequest, WorkingRoots, is_session_id,
 };
 use serde_json::{Value, json};
 
@@ -56,6 +56,64 @@ struct EchoSettings {
     /// The largest message it takes, in bytes.
     #[map(default = 1 << 20)]
     max_message_bytes: u64,
+    /// Whether it imports and exports sessions; when not, it refuses both, saying why.
+    #[map(default = true)]
+    imports: bool,
+}
+
+/// The header of the history the echo writes and reads: the standard format's name and the one
+/// version the echo knows. A history is this line, then one line per prompt and per update, each
+/// in ACP's own shape.
+const HISTORY_FORMAT: &str = "coqui-acp-history";
+const HISTORY_VERSION: u64 = 1;
+
+/// A session the echo keeps: its own id, and what it said, as history lines.
+#[derive(Default)]
+struct Kept {
+    #[allow(
+        dead_code,
+        reason = "the mapping a real harness resumes by; the echo has nothing to look up by it"
+    )]
+    own: String,
+    lines: Vec<Value>,
+}
+
+type Store = Arc<Mutex<BTreeMap<String, Kept>>>;
+
+fn lock(store: &Store) -> MutexGuard<'_, BTreeMap<String, Kept>> {
+    store.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The lines of `history` after its header; an empty history has none.
+fn read_history(history: &str) -> Result<Vec<Value>, ProviderError> {
+    let bad = |why: &str| ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why);
+    let mut lines = history.lines().filter(|line| !line.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Ok(Vec::new());
+    };
+    let header: Value =
+        serde_json::from_str(header).map_err(|_| bad("the history's header is not JSON"))?;
+    if header["format"] != HISTORY_FORMAT || !header["version"].is_u64() {
+        return Err(bad(
+            "the history has no header naming its format and version",
+        ));
+    }
+    if header["version"] != HISTORY_VERSION {
+        return Err(ProviderError::new(
+            Status::GUATIAO_ERR_UNSUPPORTED,
+            "the echo reads version 1 of the history format only",
+        ));
+    }
+    lines
+        .map(|line| {
+            let line: Value =
+                serde_json::from_str(line).map_err(|_| bad("a history line is not JSON"))?;
+            match line["method"].as_str() {
+                Some("session/prompt" | "session/update") => Ok(line),
+                _ => Err(bad("a history line is neither a prompt nor an update")),
+            }
+        })
+        .collect()
 }
 
 #[derive(Provider)]
@@ -68,8 +126,8 @@ struct EchoSettings {
 )]
 struct EchoHarness {
     settings: EchoSettings,
-    /// Every session any of its connections created: the id it reported, a UUID, against its own.
-    sessions: Arc<Mutex<BTreeMap<String, String>>>,
+    /// Every session it keeps, by the id it reported: a UUID.
+    sessions: Store,
     /// The next of its own ids.
     next: Arc<AtomicU64>,
 }
@@ -87,7 +145,22 @@ impl EchoHarness {
         Self::configured(EchoSettings {
             title: "Echo".into(),
             max_message_bytes: 1 << 20,
+            imports: true,
         })
+    }
+}
+
+impl EchoHarness {
+    /// Refuses, with the reason, when this echo is configured to keep no session for a host.
+    fn keeps_sessions(&self) -> Result<(), ProviderError> {
+        if self.settings.imports {
+            Ok(())
+        } else {
+            Err(ProviderError::new(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "this echo is configured to import and export no session",
+            ))
+        }
     }
 }
 
@@ -133,21 +206,10 @@ impl AcpHarness for EchoHarness {
         if let Some(why) = refusal_of(&request.requirements)? {
             return Err(ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, &why));
         }
-        if request
-            .session_id
-            .as_deref()
-            .is_some_and(|id| !is_session_id(id))
-        {
-            return Err(ProviderError::new(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the session id is not a UUID",
-            ));
-        }
         let queue = Arc::new(Queue::default());
         let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
         let agent = Agent {
             roots: WorkingRoots::new(request.working_roots),
-            first: request.session_id,
             sessions: Arc::clone(&self.sessions),
             next: Arc::clone(&self.next),
             open: Vec::new(),
@@ -182,6 +244,56 @@ impl AcpHarness for EchoHarness {
 
     fn program(&self) -> Result<Option<String>, ProviderError> {
         Ok(None)
+    }
+
+    fn import_session(
+        &self,
+        session: SessionImport,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<ImportReport, ProviderError> {
+        drop(spawner);
+        self.keeps_sessions()?;
+        if !is_session_id(&session.session_id) {
+            return Err(ProviderError::new(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the session id is not a UUID",
+            ));
+        }
+        let lines = read_history(&session.history)?;
+        let mut sessions = lock(&self.sessions);
+        if sessions.contains_key(&session.session_id) {
+            return Err(ProviderError::new(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the id names a session already",
+            ));
+        }
+        let own = format!("echo-{}", self.next.fetch_add(1, Ordering::SeqCst));
+        sessions.insert(session.session_id, Kept { own, lines });
+        let mut report = ImportReport::new();
+        if !session.history.trim().is_empty() {
+            report.seeded_from = Some(SeedPoint::line(2));
+        }
+        Ok(report)
+    }
+
+    fn export_session(
+        &self,
+        query: SessionQuery,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<String, ProviderError> {
+        drop(spawner);
+        self.keeps_sessions()?;
+        let sessions = lock(&self.sessions);
+        let kept = sessions.get(&query.session_id).ok_or_else(|| {
+            ProviderError::new(Status::GUATIAO_ERR_NOT_FOUND, "no session has this id")
+        })?;
+        let mut history = json!({"format": HISTORY_FORMAT, "version": HISTORY_VERSION}).to_string();
+        history.push('\n');
+        for line in &kept.lines {
+            history.push_str(&line.to_string());
+            history.push('\n');
+        }
+        Ok(history)
     }
 
     fn models(&self, _environment: Secret<Environment>) -> Result<ModelListing, ProviderError> {
@@ -359,9 +471,7 @@ impl Turn {
 /// The ACP side of one connection: what each message from the client is answered with.
 struct Agent {
     roots: WorkingRoots,
-    /// The host's id for the first new session, until it is used.
-    first: Option<String>,
-    sessions: Arc<Mutex<BTreeMap<String, String>>>,
+    sessions: Store,
     next: Arc<AtomicU64>,
     /// The sessions open on this connection, by the id reported.
     open: Vec<String>,
@@ -444,33 +554,43 @@ impl Agent {
             }
             "session/new" => {
                 self.admit(&text("cwd")?, params)?;
-                let session = match self.first.take() {
-                    Some(chosen) => chosen,
-                    None => uuid::Uuid::new_v4().to_string(),
-                };
+                let session = uuid::Uuid::new_v4().to_string();
                 let own = format!("echo-{}", self.next.fetch_add(1, Ordering::SeqCst));
-                let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-                if sessions.contains_key(&session) {
-                    return Err("a session with this id exists".into());
-                }
-                sessions.insert(session.clone(), own);
-                drop(sessions);
+                lock(&self.sessions).insert(
+                    session.clone(),
+                    Kept {
+                        own,
+                        lines: Vec::new(),
+                    },
+                );
                 self.open.push(session.clone());
                 (vec![result(id, json!({"sessionId": session}))], false)
             }
             "session/load" | "session/resume" => {
                 self.admit(&text("cwd")?, params)?;
                 let session = text("sessionId")?;
-                let known = self
-                    .sessions
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .contains_key(&session);
-                if !known {
-                    return Err("no session has this id".into());
-                }
+                let sessions = lock(&self.sessions);
+                let kept = sessions.get(&session).ok_or("no session has this id")?;
+                // `session/load` replays what the session said; `session/resume` does not.
+                let mut answers: Vec<Value> = if method == "session/load" {
+                    kept.lines
+                        .iter()
+                        .filter(|line| line["method"] == "session/update")
+                        .map(|line| {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {"sessionId": session, "update": line["params"]["update"]},
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                drop(sessions);
                 self.open.push(session);
-                (vec![result(id, json!({}))], false)
+                answers.push(result(id, json!({})));
+                (answers, false)
             }
             "session/prompt" => {
                 let session = text("sessionId")?;
@@ -481,6 +601,10 @@ impl Agent {
                     return Err("no session with this id is open here".into());
                 }
                 let said: String = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+                self.keep(
+                    &session,
+                    json!({"method": "session/prompt", "params": {"prompt": blocks}}),
+                );
                 self.prompted(id, &session, &said)
             }
             _ => (vec![error(id, -32601, "method not found")], false),
@@ -537,7 +661,10 @@ impl Agent {
         }
         if let Some(path) = said.strip_prefix("read ") {
             if !self.reads_files {
-                return (finish(session, id, Some("echo: no fs"), "end_turn"), false);
+                return (
+                    self.finish(session, id, Some("echo: no fs"), "end_turn"),
+                    false,
+                );
             }
             self.asked += 1;
             let request = format!("echo-read-{}", self.asked);
@@ -557,7 +684,7 @@ impl Agent {
             return (vec![asked], false);
         }
         (
-            finish(session, id, Some(&format!("echo: {said}")), "end_turn"),
+            self.finish(session, id, Some(&format!("echo: {said}")), "end_turn"),
             said == "close",
         )
     }
@@ -570,7 +697,7 @@ impl Agent {
             return Vec::new();
         };
         match self.turns.remove(session) {
-            Some(turn) => finish(session, turn.prompt(), None, "cancelled"),
+            Some(turn) => self.finish(session, turn.prompt(), None, "cancelled"),
             None => Vec::new(),
         }
     }
@@ -594,7 +721,7 @@ impl Agent {
         let outcome = &message["result"]["outcome"];
         match turn {
             Turn::Asking { prompt, .. } if outcome["outcome"] == "cancelled" => {
-                finish(&session, &prompt, None, "cancelled")
+                self.finish(&session, &prompt, None, "cancelled")
             }
             Turn::Asking { prompt, .. } => {
                 let allowed = outcome["outcome"] == "selected" && outcome["optionId"] == "allow";
@@ -603,13 +730,13 @@ impl Agent {
                 } else {
                     "echo: refused"
                 };
-                finish(&session, &prompt, Some(said), "end_turn")
+                self.finish(&session, &prompt, Some(said), "end_turn")
             }
             Turn::Reading { prompt, .. } => {
                 let said = message["result"]["content"]
                     .as_str()
                     .map_or_else(|| "echo: refused".to_owned(), |c| format!("echo: {c}"));
-                finish(&session, &prompt, Some(&said), "end_turn")
+                self.finish(&session, &prompt, Some(&said), "end_turn")
             }
             Turn::Waiting { .. } => Vec::new(),
         }
@@ -619,8 +746,29 @@ impl Agent {
     fn end_every_turn(&mut self) -> Vec<Value> {
         core::mem::take(&mut self.turns)
             .into_iter()
-            .flat_map(|(session, turn)| finish(&session, turn.prompt(), None, "cancelled"))
+            .flat_map(|(session, turn)| self.finish(&session, turn.prompt(), None, "cancelled"))
             .collect()
+    }
+
+    /// A turn's end, with what the agent said kept in the session's history.
+    fn finish(&self, session: &str, prompt: &Value, said: Option<&str>, stop: &str) -> Vec<Value> {
+        let messages = finish(session, prompt, said, stop);
+        for message in &messages {
+            if message["method"] == "session/update" {
+                self.keep(
+                    session,
+                    json!({"method": "session/update", "params": {"update": message["params"]["update"]}}),
+                );
+            }
+        }
+        messages
+    }
+
+    /// Adds one line to the history of `session`, when the echo keeps it.
+    fn keep(&self, session: &str, line: Value) {
+        if let Some(kept) = lock(&self.sessions).get_mut(session) {
+            kept.lines.push(line);
+        }
     }
 }
 

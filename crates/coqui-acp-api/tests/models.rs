@@ -12,7 +12,7 @@ use coqui_acp_api::guatiao::{FromValue, List, Secret, Status, ToValue, Value};
 use coqui_acp_api::{
     ANSWER_ONLY, DENIED_PATHS, Environment, FILES_UNDER, NETWORK, NO_COMMANDS, Narrowing,
     ONLY_SKILLS, PathRefusal, READ_ONLY, Requirement, RequirementError, SANDBOXED_SCRIPTS,
-    SessionRecordQuery, SpawnSpec, StartRequest, WorkingRoots,
+    SessionQuery, SpawnSpec, StartRequest, WorkingRoots,
 };
 
 fn list(items: &[&str]) -> Value {
@@ -121,7 +121,7 @@ fn an_environment_never_prints_a_value() {
         .environment(environment.clone())
         .requirement(Requirement::new(READ_ONLY))
         .build();
-    let query = SessionRecordQuery::new("0f8fad5b-d9cb-469f-a165-70867728950e", "/")
+    let query = SessionQuery::new("0f8fad5b-d9cb-469f-a165-70867728950e", "/")
         .environment(environment.clone());
     let spec = SpawnSpec::new("claude").environment(environment.clone());
     let printed = format!(
