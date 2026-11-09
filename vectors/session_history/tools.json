@@ -327,5 +327,49 @@
       "tool": "fetch",
       "harness": "agy"
     }
+  ],
+  "collisions": [
+    {
+      "harness": "claude",
+      "name": "Read",
+      "input": {
+        "file_path": "/a",
+        "path": "/b"
+      },
+      "why": "Two keys that would both be `path`: neither may win, so the tool is not normalised."
+    },
+    {
+      "harness": "codex",
+      "name": "shell",
+      "input": {
+        "command": [
+          "ls"
+        ],
+        "cwd": "/a",
+        "workdir": "/b"
+      },
+      "why": "`workdir` renames to `cwd`, which the input already has."
+    },
+    {
+      "harness": "claude",
+      "name": "Bash",
+      "input": {
+        "command": "ls",
+        "timeout": 5,
+        "timeout_ms": 9
+      },
+      "why": "`timeout` renames to `timeout_ms`, which the input already has."
+    }
+  ],
+  "collisions_denormalise": [
+    {
+      "tool": "read",
+      "harness": "claude",
+      "input": {
+        "path": "/a",
+        "file_path": "/b"
+      },
+      "why": "`path` renames to `file_path`, which the input already has."
+    }
   ]
 }

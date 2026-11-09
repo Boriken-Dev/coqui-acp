@@ -197,7 +197,8 @@ const TABLE: &[Row] = &[
 ];
 
 /// Renames the keys of a native `input` to the normalised ones, for the tool `harness` calls
-/// `name`. `None` when the table does not know the tool or the input is not an object.
+/// `name`. `None` when the table does not know the tool, the input is not an object, or two of its
+/// keys would become the same key (neither value may win).
 #[must_use]
 pub fn normalise(harness: &str, name: &str, input: &Value) -> Option<(Tool, Value)> {
     let tool = Tool::from_native(harness, name)?;
@@ -210,7 +211,8 @@ pub fn normalise(harness: &str, name: &str, input: &Value) -> Option<(Tool, Valu
 }
 
 /// Renames the keys of a normalised `input` to `harness`'s, and gives the native name to call.
-/// `None` when `harness` has no such tool or the input is not an object.
+/// `None` when `harness` has no such tool, the input is not an object, or two of its keys would
+/// become the same key.
 #[must_use]
 pub fn denormalise(tool: Tool, harness: &str, input: &Value) -> Option<(&'static str, Value)> {
     let native = tool.native(harness)?;
@@ -219,6 +221,7 @@ pub fn denormalise(tool: Tool, harness: &str, input: &Value) -> Option<(&'static
 }
 
 /// Renames the keys of `input` by `keys`, `(normalised, native)` pairs, in the direction given.
+/// `None` for an input that is not an object or whose renamed keys collide.
 fn rename(input: &Value, keys: &[(&str, &str)], to_native: bool) -> Option<Value> {
     let Value::Object(map) = input else {
         return None;
@@ -229,7 +232,12 @@ fn rename(input: &Value, keys: &[(&str, &str)], to_native: bool) -> Option<Value
             .iter()
             .find(|(normal, native)| key == if to_native { normal } else { native })
             .map(|(normal, native)| if to_native { *native } else { *normal });
-        out.insert(renamed.unwrap_or(key.as_str()).to_owned(), value.clone());
+        if out
+            .insert(renamed.unwrap_or(key.as_str()).to_owned(), value.clone())
+            .is_some()
+        {
+            return None;
+        }
     }
     Some(Value::Object(out))
 }

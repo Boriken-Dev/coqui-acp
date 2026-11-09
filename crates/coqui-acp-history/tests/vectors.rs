@@ -274,3 +274,25 @@ fn a_normalised_input_goes_round_to_its_native_and_back() {
         assert_eq!(Tool::from_native(harness, native_name), Some(tool));
     }
 }
+
+#[test]
+fn two_keys_that_rename_to_one_name_normalise_to_nothing() {
+    let table = vectors("tools.json");
+    let cases = table["collisions"].as_array().unwrap();
+    assert!(cases.len() >= 3);
+    for case in cases {
+        let (harness, name) = (
+            case["harness"].as_str().unwrap(),
+            case["name"].as_str().unwrap(),
+        );
+        assert!(
+            tools::normalise(harness, name, &case["input"]).is_none(),
+            "{harness} {name}"
+        );
+    }
+    for case in table["collisions_denormalise"].as_array().unwrap() {
+        let tool = Tool::from_name(case["tool"].as_str().unwrap()).unwrap();
+        let harness = case["harness"].as_str().unwrap();
+        assert!(tools::denormalise(tool, harness, &case["input"]).is_none());
+    }
+}
