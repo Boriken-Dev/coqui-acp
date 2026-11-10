@@ -54,6 +54,12 @@ data-encoding = { version = "2", default-features = false, features = ["alloc"] 
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 
 
+# `antigravity`: the one RFC 3339 reader this workspace uses.
+time = { version = "0.3", default-features = false, features = ["parsing"] }
+# `antigravity`: a blocking HTTP client for the agent's own loopback port, TLS by rustls with ring and a verifier it can switch off for
+# a literal loopback address only.
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+
 [workspace.lints.rust]
 missing_docs = "warn"
 missing_debug_implementations = "warn"

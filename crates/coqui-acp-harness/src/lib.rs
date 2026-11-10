@@ -5,6 +5,9 @@
 extern crate alloc;
 
 pub mod acp;
+#[cfg(feature = "antigravity")]
+#[cfg_attr(docsrs, doc(cfg(feature = "antigravity")))]
+pub mod antigravity;
 pub mod event;
 pub mod lines;
 pub mod mode;

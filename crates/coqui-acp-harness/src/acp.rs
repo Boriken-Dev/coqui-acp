@@ -24,6 +24,8 @@ mod usage;
 
 pub use connection::serve;
 pub use usage::UsageTracker;
+#[cfg(feature = "antigravity")]
+pub(crate) use usage::now;
 
 /// `path` when it is absolute by this platform's rules: a drive or UNC path on Windows, `/…` elsewhere. `what` names it
 /// in the refusal.

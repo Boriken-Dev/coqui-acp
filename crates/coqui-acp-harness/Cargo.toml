@@ -19,12 +19,17 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
+# `antigravity`: the quota Antigravity (`agy`) reports on its own loopback port, as usage buckets.
+antigravity = ["dep:serde", "dep:time", "dep:ureq"]
 # The acp_harness kind's spawner on this machine, and Spawn through any host's spawner.
 kind = []
 
 [dependencies]
 coqui-acp-api = { path = "../coqui-acp-api" }
 base64.workspace = true
+serde = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
 serde_json.workspace = true
 uuid.workspace = true
 
@@ -36,6 +41,10 @@ win32job.workspace = true
 
 [dev-dependencies]
 coqui-acp = { path = "../coqui-acp" }
+# A self-signed certificate made at test time, for the stand-in that answers over TLS.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+time = { workspace = true, features = ["formatting"] }
 
 [[example]]
 name = "spawner_host"
@@ -44,6 +53,10 @@ required-features = ["kind"]
 [[test]]
 name = "spawner"
 required-features = ["kind"]
+
+[[test]]
+name = "antigravity"
+required-features = ["antigravity"]
 
 [lints]
 workspace = true
