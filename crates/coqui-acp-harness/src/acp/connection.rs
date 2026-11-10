@@ -331,13 +331,22 @@ impl Shared {
         change: impl FnOnce(&mut UsageTracker, i64) -> bool,
     ) {
         let at = now();
-        let told = {
+        let (told, held) = {
             let mut usage = locked(&self.usage);
             if !usage.reports() || !change(&mut usage, at) {
                 return;
             }
-            usage.notifies().then(|| usage.snapshot(session, at))
+            (
+                usage.notifies().then(|| usage.snapshot(session, at)),
+                self.settings
+                    .on_usage
+                    .as_ref()
+                    .map(|_| usage.snapshot(None, at)),
+            )
         };
+        if let (Some(hook), Some(report)) = (&self.settings.on_usage, &held) {
+            hook(report);
+        }
         if let Some(report) = told
             && let Ok(report) = serde_json::to_value(&report)
         {
