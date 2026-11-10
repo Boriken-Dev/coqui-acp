@@ -28,6 +28,7 @@
 
 mod accounts;
 mod checks;
+mod spawner;
 mod host;
 mod json;
 mod transport;
@@ -36,6 +37,8 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+
+pub use spawner::spawner_files;
 
 use crate::{AcpHarness, NO_COMMANDS, READ_ONLY, Requirement};
 

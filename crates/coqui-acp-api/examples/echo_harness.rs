@@ -448,7 +448,7 @@ impl AcpHarness for EchoHarness {
             // spawner that refuses it changes nothing.
             hold.process = spawner.spawn(notional(&catalog, grant)).ok();
             if grant.kind == FILE_KIND {
-                hold.watched = Some((grant.id.clone(), Arc::clone(&self.accounts)));
+                hold.watched = Some((key_of(grant), Arc::clone(&self.accounts)));
             }
         }
         if let Some(why) = refusal_of(&request.requirements)? {
@@ -751,7 +751,7 @@ impl AcpHarness for EchoHarness {
         let mut text = String::from_utf8_lossy(read.expose()).into_owned();
         text.push_str("#renewed");
         spawner.write_file(FILE, Secret::new(text.clone().into_bytes()), true)?;
-        if let Some(entry) = held(&self.accounts).get_mut(&grant.id) {
+        if let Some(entry) = held(&self.accounts).get_mut(&key_of(&grant)) {
             entry.last.clone_from(&text);
             entry.seen = Seen::Present;
         }
@@ -1462,6 +1462,12 @@ fn held(accounts: &Accounts) -> MutexGuard<'_, BTreeMap<String, AccountFile>> {
     accounts.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What the echo keeps an account's file under: the same account in another directory is another
+/// file.
+fn key_of(grant: &AccountGrant) -> String {
+    format!("{} {}", grant.id, grant.state_dir.as_deref().unwrap_or_default())
+}
+
 /// Checks an account's id, kind, settings and credentials, without touching a spawner.
 fn read_account(
     catalog: &AccountCatalog,
@@ -1525,12 +1531,13 @@ fn read_grant(
 /// changed file is renewed, a blank or deleted one lost. Each change is told once.
 fn watch_file(
     accounts: &Accounts,
-    id: &str,
+    key: &str,
     spawner: &Object<dyn ProcessSpawner>,
     keeper: Option<&Object<dyn AccountKeeper>>,
 ) -> Result<(), ProviderError> {
+    let id = key.split(' ').next().unwrap_or(key);
     let Some((path, last, was, revision)) = held(accounts)
-        .get(id)
+        .get(key)
         .map(|k| (k.path.clone(), k.last.clone(), k.seen, k.revision))
     else {
         return Ok(());
@@ -1550,7 +1557,7 @@ fn watch_file(
                 credentials.insert(FILE_KEY, text.clone());
                 credentials
             });
-            if let Some(entry) = held(accounts).get_mut(id) {
+            if let Some(entry) = held(accounts).get_mut(key) {
                 entry.seen = Seen::Present;
                 entry.last.clone_from(&text);
             }
@@ -1561,7 +1568,7 @@ fn watch_file(
         }
     };
     if was != seen {
-        if let Some(entry) = held(accounts).get_mut(id) {
+        if let Some(entry) = held(accounts).get_mut(key) {
             entry.seen = seen;
         }
         if let Some(keeper) = keeper {
@@ -1584,7 +1591,7 @@ fn put_file(
     if spawner.file_info(FILE)?.is_none() {
         spawner.write_file(FILE, Secret::new(text.clone().into_bytes()), true)?;
         held(accounts).insert(
-            grant.id.clone(),
+            key_of(grant),
             AccountFile {
                 path: FILE.to_owned(),
                 last: text,
@@ -1592,7 +1599,7 @@ fn put_file(
                 revision: grant.revision,
             },
         );
-    } else if let Some(entry) = held(accounts).get_mut(&grant.id) {
+    } else if let Some(entry) = held(accounts).get_mut(&key_of(grant)) {
         entry.revision = grant.revision;
     }
     Ok(())
@@ -1608,7 +1615,7 @@ fn apply(
     keeper: &Object<dyn AccountKeeper>,
 ) -> Result<(), ProviderError> {
     read_grant(catalog, grant, spawner)?;
-    watch_file(accounts, &grant.id, spawner, Some(keeper))?;
+    watch_file(accounts, &key_of(grant), spawner, Some(keeper))?;
     put_file(accounts, grant, spawner)
 }
 

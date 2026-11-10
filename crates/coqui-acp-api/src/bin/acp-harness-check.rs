@@ -12,6 +12,8 @@
 //! --holds NAME[=JSON]   a requirement it holds, repeated; the default holds read_only and no_commands
 //! --message-limit N     the largest message it takes, when it has a limit
 //! --no-imports          it imports no session, and must refuse import_session with a reason
+//! --no-logins           it offers no login method, lists none, and must refuse login with a reason
+//! --account KIND        run the account checks on this kind of account alone
 //! ```
 //!
 //! Exits 0 when the provider keeps every rule, 1 with each rule it broke, 2 when it could not be
@@ -43,6 +45,8 @@ struct Args {
     holds: Vec<Requirement>,
     message_limit: Option<usize>,
     no_imports: bool,
+    no_logins: bool,
+    account: Option<String>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -67,6 +71,8 @@ fn parse() -> Result<Args, String> {
                 );
             }
             "--no-imports" => args.no_imports = true,
+            "--no-logins" => args.no_logins = true,
+            "--account" => args.account = Some(value()?),
             "--holds" => {
                 let held = value()?;
                 args.holds.push(match held.split_once('=') {
@@ -198,6 +204,12 @@ fn main() -> ExitCode {
     }
     if args.no_imports {
         contract = contract.imports(false);
+    }
+    if args.no_logins {
+        contract = contract.logins(false);
+    }
+    if let Some(kind) = &args.account {
+        contract = contract.account(kind.clone());
     }
     let outcome = contract.run(&*harness);
     drop(harness);

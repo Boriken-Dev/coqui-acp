@@ -30,8 +30,9 @@ mod with_python {
     use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
     use coqui_acp_api::guatiao::{List, Map, Secret, Status, Value};
     use coqui_acp_api::{
-        AcpHarness, ProcessSpawner, SessionQuery, Source, SpawnSpec, SpawnedProcess, SpawnerInfo,
-        UsageQuery,
+        AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, FileInfo,
+        ModelsRequest, ProcessSpawner, SessionQuery, Source, SpawnSpec, SpawnedProcess,
+        SpawnerInfo, UsageQuery,
     };
 
     use super::support::{guatiao, manifest_dir, python, source};
@@ -54,10 +55,56 @@ mod with_python {
                 "unused",
             ))
         }
+
+        fn write_file(
+            &self,
+            _path: &str,
+            _bytes: Secret<Vec<u8>>,
+            _private: bool,
+        ) -> Result<(), ProviderError> {
+            Err(no_files())
+        }
+
+        fn read_file(
+            &self,
+            _path: &str,
+            _max_bytes: u64,
+        ) -> Result<Secret<Vec<u8>>, ProviderError> {
+            Err(no_files())
+        }
+
+        fn file_info(&self, _path: &str) -> Result<Option<FileInfo>, ProviderError> {
+            Err(no_files())
+        }
+
+        fn remove_file(&self, _path: &str) -> Result<(), ProviderError> {
+            Err(no_files())
+        }
+    }
+
+    fn no_files() -> ProviderError {
+        ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, "no private files")
     }
 
     fn unused_spawner() -> Object<dyn ProcessSpawner> {
         Unused.into_object()
+    }
+
+    /// A keeper that hears nothing.
+    struct Hears;
+
+    impl AccountKeeper for Hears {
+        fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn keeper() -> Object<dyn AccountKeeper> {
+        Hears.into_object()
     }
 
     fn kinds_crate() -> PathBuf {
@@ -125,7 +172,9 @@ mod with_python {
                 .expect("answered"),
             None
         );
-        let models = harness.models(Secret::default()).expect("answered");
+        let models = harness
+            .models(ModelsRequest::new(), unused_spawner(), keeper())
+            .expect("answered");
         assert!(models.known);
         assert_eq!(models.models[0].id, "echo");
     }
@@ -136,7 +185,11 @@ mod with_python {
         let (registry, plain) = loaded();
         assert!(!plain.describe().expect("described").usage.reports());
         let report = plain
-            .usage(UsageQuery::new().account("pool/alice"), unused_spawner())
+            .usage(
+                UsageQuery::new().account(AccountGrant::new("pool/alice", "harness-login")),
+                unused_spawner(),
+                keeper(),
+            )
             .expect("answered");
         assert!(!report.supported && report.unsupported_because.is_some());
         let offer = registry
@@ -165,6 +218,31 @@ mod with_python {
             offer.instantiate(&Value::from(wrong)).is_err(),
             "a value the settings do not take was accepted"
         );
+    }
+
+    /// With its logins off, the Python echo lists none and refuses `login`, and the suite agrees.
+    #[test]
+    fn the_python_echo_without_logins_holds_to_the_contract() {
+        let (registry, _) = loaded();
+        let offer = registry
+            .offer::<dyn AcpHarness>("acp_echo_harness_echo_harness")
+            .expect("the source offers it")
+            .expect("its table is the Rust-declared kind");
+        let mut settings = Map::new();
+        settings.set("logins", false);
+        let harness: Arc<dyn AcpHarness> = Arc::new(
+            offer
+                .instantiate(&Value::from(settings))
+                .expect("the settings fit the schema"),
+        );
+        assert!(harness.accounts().expect("answered").logins.is_empty());
+        if let Err(failures) = Contract::new("the Python echo without logins")
+            .logins(false)
+            .message_limit(1 << 20)
+            .run(&*harness)
+        {
+            panic!("{failures}");
+        }
     }
 
     #[test]

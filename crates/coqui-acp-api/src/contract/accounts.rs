@@ -705,7 +705,7 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                 let (renewed, lost) =
                     polling(harness, &grant, &dir, &conn, &mut heard, PATIENCE, |_, lost| lost >= 1)?;
                 ensure!(renewed.is_empty(), "{label}: a deleted file was reported renewed");
-                ensure!(lost.len() == 1, "{label}: {} losses reported, not one", lost.len());
+                ensure!(lost.len() == 1, "{label}: {} losses reported, not one: {lost:?}", lost.len());
                 ensure!(
                     lost[0].id == grant.id
                         && !lost[0].reason.is_empty()
@@ -755,7 +755,7 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                 let (renewed, lost) =
                     polling(harness, &grant, &dir, &conn, &mut heard, PATIENCE, |_, lost| lost >= 1)?;
                 ensure!(renewed.len() == 1, "{label}: a blanked file was reported renewed");
-                ensure!(lost.len() == 1, "{label}: {} losses reported, not one", lost.len());
+                ensure!(lost.len() == 1, "{label}: {} losses reported, not one: {lost:?}", lost.len());
                 ensure!(
                     lost[0].id == grant.id && !lost[0].reason.contains(CANARY),
                     "{label}: the loss is {:?}",

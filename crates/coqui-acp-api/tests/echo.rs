@@ -296,100 +296,112 @@ fn an_echo_that_reports_no_usage_says_so_with_a_reason() {
     );
 }
 
+struct Disagrees {
+    inner: Arc<dyn AcpHarness>,
+    hides_in_describe: bool,
+    /// Puts a credential of the account it was given into the refusal it answers.
+    leaks: bool,
+}
+
+impl AcpHarness for Disagrees {
+    fn describe(&self) -> Result<HarnessInfo, ProviderError> {
+        let mut info = self.inner.describe()?;
+        if self.hides_in_describe {
+            info.usage = UsageSupport::none();
+        }
+        Ok(info)
+    }
+
+    fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
+        self.inner.accounts()
+    }
+
+    fn start(
+        &self,
+        request: StartRequest,
+        spawner: Object<dyn ProcessSpawner>,
+        sink: Object<dyn ChannelSink>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<Object<dyn Channel>, ProviderError> {
+        let credential = request
+            .account
+            .as_ref()
+            .and_then(|grant| grant.credentials.expose().iter().next().map(|(_, v)| v.clone()));
+        match (self.inner.start(request, spawner, sink, keeper), credential) {
+            (Err(refused), Some(credential)) if self.leaks => Err(ProviderError::new(
+                refused.status,
+                &format!("{} {credential}", refused.message()),
+            )),
+            (answer, _) => answer,
+        }
+    }
+
+    fn refusal(
+        &self,
+        requirements: Vec<Requirement>,
+        environment: Secret<Environment>,
+        account: Option<AccountRef>,
+    ) -> Result<Option<String>, ProviderError> {
+        self.inner.refusal(requirements, environment, account)
+    }
+
+    fn program(&self) -> Result<Option<String>, ProviderError> {
+        self.inner.program()
+    }
+
+    fn import_session(
+        &self,
+        session: SessionImport,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ImportReport, ProviderError> {
+        self.inner.import_session(session, spawner, keeper)
+    }
+
+    fn export_session(
+        &self,
+        export: SessionExport,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ExportPage, ProviderError> {
+        self.inner.export_session(export, spawner, keeper)
+    }
+
+    fn usage(
+        &self,
+        query: UsageQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<UsageReport, ProviderError> {
+        if self.hides_in_describe {
+            return self.inner.usage(query, spawner, keeper);
+        }
+        drop((query, spawner, keeper));
+        Ok(UsageReport::unsupported("it says it has none"))
+    }
+
+    fn login(
+        &self,
+        request: LoginRequest,
+        spawner: Object<dyn ProcessSpawner>,
+        prompter: Object<dyn LoginPrompter>,
+    ) -> Result<LoginOutcome, ProviderError> {
+        self.inner.login(request, spawner, prompter)
+    }
+
+    fn renew(
+        &self,
+        request: RenewRequest,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<RenewReport, ProviderError> {
+        self.inner.renew(request, spawner)
+    }
+}
+
 /// A provider that reports usage differently from what it says is caught: a harness whose `describe`
 /// hides what its connections do, and one whose `usage` slot contradicts its connections.
 #[test]
 fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
-    struct Disagrees {
-        inner: Arc<dyn AcpHarness>,
-        hides_in_describe: bool,
-    }
-
-    impl AcpHarness for Disagrees {
-        fn describe(&self) -> Result<HarnessInfo, ProviderError> {
-            let mut info = self.inner.describe()?;
-            if self.hides_in_describe {
-                info.usage = UsageSupport::none();
-            }
-            Ok(info)
-        }
-
-        fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
-            self.inner.accounts()
-        }
-
-        fn start(
-            &self,
-            request: StartRequest,
-            spawner: Object<dyn ProcessSpawner>,
-            sink: Object<dyn ChannelSink>,
-            keeper: Object<dyn AccountKeeper>,
-        ) -> Result<Object<dyn Channel>, ProviderError> {
-            self.inner.start(request, spawner, sink, keeper)
-        }
-
-        fn refusal(
-            &self,
-            requirements: Vec<Requirement>,
-            environment: Secret<Environment>,
-            account: Option<AccountRef>,
-        ) -> Result<Option<String>, ProviderError> {
-            self.inner.refusal(requirements, environment, account)
-        }
-
-        fn program(&self) -> Result<Option<String>, ProviderError> {
-            self.inner.program()
-        }
-
-        fn import_session(
-            &self,
-            session: SessionImport,
-            spawner: Object<dyn ProcessSpawner>,
-            keeper: Object<dyn AccountKeeper>,
-        ) -> Result<ImportReport, ProviderError> {
-            self.inner.import_session(session, spawner, keeper)
-        }
-
-        fn export_session(
-            &self,
-            export: SessionExport,
-            spawner: Object<dyn ProcessSpawner>,
-            keeper: Object<dyn AccountKeeper>,
-        ) -> Result<ExportPage, ProviderError> {
-            self.inner.export_session(export, spawner, keeper)
-        }
-
-        fn usage(
-            &self,
-            query: UsageQuery,
-            spawner: Object<dyn ProcessSpawner>,
-            keeper: Object<dyn AccountKeeper>,
-        ) -> Result<UsageReport, ProviderError> {
-            if self.hides_in_describe {
-                return self.inner.usage(query, spawner, keeper);
-            }
-            drop((query, spawner, keeper));
-            Ok(UsageReport::unsupported("it says it has none"))
-        }
-
-        fn login(
-            &self,
-            request: LoginRequest,
-            spawner: Object<dyn ProcessSpawner>,
-            prompter: Object<dyn LoginPrompter>,
-        ) -> Result<LoginOutcome, ProviderError> {
-            self.inner.login(request, spawner, prompter)
-        }
-
-        fn renew(
-            &self,
-            request: RenewRequest,
-            spawner: Object<dyn ProcessSpawner>,
-        ) -> Result<RenewReport, ProviderError> {
-            self.inner.renew(request, spawner)
-        }
-    }
-
     let registry = registry();
     let mut settings = Map::new();
     settings.set("usage", "scripted");
@@ -398,6 +410,7 @@ fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
         let harness = Disagrees {
             inner: Arc::clone(&inner),
             hides_in_describe,
+            leaks: false,
         };
         let failures = Contract::new("a provider that disagrees with itself")
             .run(&harness)
@@ -408,4 +421,63 @@ fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
             "{said}"
         );
     }
+}
+
+/// A provider that puts a credential in a refusal is named by the account checks.
+#[test]
+fn the_contract_names_a_provider_that_says_a_credential() {
+    let registry = registry();
+    let harness = Disagrees {
+        inner: instance(&registry, Map::new()),
+        hides_in_describe: false,
+        leaks: true,
+    };
+    let failures = Contract::new("a provider that says a credential")
+        .run(&harness)
+        .expect_err("the contract finds the credential");
+    let said = failures.to_string();
+    assert!(said.contains("saying nothing of its credentials"), "{said}");
+}
+
+/// Logins off: the catalog lists none, `login` is unsupported, and the suite agrees.
+#[test]
+fn an_echo_without_logins_holds_to_the_contract() {
+    let registry = registry();
+    let mut settings = Map::new();
+    settings.set("logins", false);
+    let harness = instance(&registry, settings);
+    assert!(harness.accounts().expect("answered").logins.is_empty());
+    if let Err(failures) = Contract::new("an echo with no login")
+        .logins(false)
+        .message_limit(1 << 20)
+        .run(&*harness)
+    {
+        panic!("{failures}");
+    }
+    // The suite holds a provider that lists methods to say it offers some.
+    let failures = Contract::new("an echo with logins, run as if it had none")
+        .logins(false)
+        .run(&*instance(&registry, Map::new()))
+        .expect_err("the catalog lists methods");
+    assert!(failures.to_string().contains("logins are off"), "{failures}");
+}
+
+/// One kind alone, as `--account` runs it.
+#[test]
+fn the_account_checks_run_on_one_kind() {
+    let (_registry, harness) = loaded();
+    for kind in ["echo-key", "harness-login"] {
+        if let Err(failures) = Contract::new("the Rust echo, one kind")
+            .account(kind)
+            .message_limit(1 << 20)
+            .run(&*harness)
+        {
+            panic!("{kind}: {failures}");
+        }
+    }
+    let failures = Contract::new("the Rust echo, a kind it lacks")
+        .account("no-such-kind")
+        .run(&*harness)
+        .expect_err("the catalog lists no such kind");
+    assert!(failures.to_string().contains("no-such-kind"), "{failures}");
 }

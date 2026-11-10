@@ -266,3 +266,27 @@ fn the_tree_ends_with_its_host() {
     }
     end(&escaped);
 }
+
+/// The file methods keep a provider's paths inside the directory, as the suite holds every spawner to.
+#[test]
+fn files_stay_in_the_directory_it_serves() {
+    let dir = std::env::temp_dir().join(format!("acp-local-spawner-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("a directory");
+    let served = LocalSpawner::new().files(&dir);
+    let outcome = coqui_acp_api::contract::spawner_files(&served, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(failures) = outcome {
+        panic!("{failures}");
+    }
+    assert!(served.describe().expect("described").files);
+}
+
+/// With no directory it says so and refuses the four methods.
+#[test]
+fn without_a_directory_it_has_no_files() {
+    let bare = LocalSpawner::new();
+    assert!(!bare.describe().expect("described").files);
+    if let Err(failures) = coqui_acp_api::contract::spawner_files(&bare, &std::env::temp_dir()) {
+        panic!("{failures}");
+    }
+}

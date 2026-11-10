@@ -41,6 +41,8 @@ win32job.workspace = true
 
 [dev-dependencies]
 coqui-acp = { path = "../coqui-acp" }
+# The suite that holds a spawner's file methods to their rules.
+coqui-acp-api = { path = "../coqui-acp-api", features = ["contract"] }
 # A self-signed certificate made at test time, for the stand-in that answers over TLS.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

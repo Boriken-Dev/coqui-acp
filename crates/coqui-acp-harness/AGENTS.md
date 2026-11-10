@@ -41,16 +41,17 @@ Implement `Spawn` to run a harness elsewhere: in a container, over SSH, under a 
 ## Spawner (`coqui_acp_harness::spawner`, feature `kind`)
 
 ```rust
-pub struct LocalSpawner;                         // Clone, Copy, Debug, Default; #[must_use]
+pub struct LocalSpawner;                         // Clone, Debug, Default; #[must_use]
 pub const fn LocalSpawner::new() -> LocalSpawner // 1 MiB of each output stream held unread
 pub const fn buffer(self, bytes: usize) -> Self  // past it the program waits to write
+pub fn files(self, dir: impl Into<PathBuf>) -> Self  // serves the file methods in dir, which must exist
 impl coqui_acp_api::ProcessSpawner for LocalSpawner
 pub struct ThroughSpawner;                       // Debug
 pub fn ThroughSpawner::new(spawner: Object<dyn ProcessSpawner>) -> ThroughSpawner
 impl Spawn for ThroughSpawner
 ```
 
-`LocalSpawner` is the spawner a host hands an `acp_harness` start by default: it starts a `SpawnSpec` as `PlainSpawn` starts a `Launch`, standard error apart, into its standard output or nowhere, as the spec says, and gives no terminal (`GUATIAO_ERR_UNSUPPORTED`). A missing program is `GUATIAO_ERR_NOT_FOUND`. A thread per output stream reads it into the buffer; `read` and `read_error` wait up to their timeout. `describe` says `local`, `separate_error`, `ends_with_host`, and `kills_escaped` on Windows, Linux and Android. Its link is always up. Destroying a process kills its tree.
+`LocalSpawner` is the spawner a host hands an `acp_harness` start by default: it starts a `SpawnSpec` as `PlainSpawn` starts a `Launch`, standard error apart, into its standard output or nowhere, as the spec says, and gives no terminal (`GUATIAO_ERR_UNSUPPORTED`). A missing program is `GUATIAO_ERR_NOT_FOUND`. A thread per output stream reads it into the buffer; `read` and `read_error` wait up to their timeout. `describe` says `local`, `separate_error`, `ends_with_host`, and `kills_escaped` on Windows, Linux and Android. Its link is always up. Destroying a process kills its tree. With `files(dir)` it serves the kind's file methods (`write_file`, `read_file`, `file_info`, `remove_file`) in `dir` and `describe` says `files`; a path is relative, and an absolute one, a `..` part, an empty one and a link leading out of `dir` are `GUATIAO_ERR_NOT_FOUND`. Without it `files` is false and the four methods are `GUATIAO_ERR_UNSUPPORTED`.
 
 `ThroughSpawner` is `Spawn` over any host's spawner, so a translator served with `serve` starts its program wherever the host's spawner runs it. Every text of the `Launch` must be UTF-8. Its reads wait through a link that is down; dropping its standard input closes the program's.
 

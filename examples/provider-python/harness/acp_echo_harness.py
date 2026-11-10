@@ -4,8 +4,14 @@ The module is the library: its id is its name, its version `__version__`, its pr
 `__all__`. It is the contract agent of `coqui_acp_api::contract`, speaking ACP itself, one
 JSON-RPC message per channel message, and keeps every rule of the channel: `send` waits for room in a
 queue of a few messages and `close` wakes it; one thread of its own answers, in order, and is the only
-caller of the sink; a sink that refuses ends the connection. It starts no program, so it lets go of the
-spawner unused.
+caller of the sink; a sink that refuses ends the connection. It starts no program of its own: on an
+account it starts a notional one through the spawner, to show the specification a real provider's would
+carry.
+
+It takes accounts of two kinds besides the harness's own: `echo-login`, a login kept in a file of the
+account's directory that it watches and tells the keeper of when it changes, and `echo-key`, a key in a
+variable. Its login methods are scripted (`scripted`, `waiting`, `api-key`); the setting `logins = false`
+offers none.
 
 With the setting `usage = "scripted"` it also reports usage, as the contract documents: `quota P`
 reports two buckets, `limit` refuses the turn with a limit hit, and every turn spends fixed tokens.
@@ -23,7 +29,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-from coqui_acp_api_kinds import AcpHarness, Channel, ChannelSink, ProcessSpawner
+from coqui_acp_api_kinds import AccountKeeper, AcpHarness, Channel, ChannelSink, LoginPrompter, ProcessSpawner
 
 from guatiao import Ref, provide
 from guatiao.errors import BadValue, Gone, NotFound, Unsupported
@@ -47,9 +53,9 @@ HOSTS = ("network",)
 WORDS = ("sandboxed_scripts", "only_skills")
 
 #: The keys a request may have: one it does not declare is refused, never dropped.
-START_KEYS = {"environment", "working_roots", "requirements", "account"}
-IMPORT_KEYS = {"session_id", "working_directory", "history", "environment"}
-EXPORT_KEYS = {"session_id", "working_directory", "environment", "after", "max_bytes"}
+START_KEYS = {"environment", "working_roots", "requirements", "account", "cache_lifetime"}
+IMPORT_KEYS = {"session_id", "working_directory", "history", "environment", "account"}
+EXPORT_KEYS = {"session_id", "working_directory", "environment", "account", "after", "max_bytes"}
 QUERY_KEYS = {"environment", "account"}
 
 #: The usage extension's names, as `coqui_acp_api::usage` spells them.
@@ -687,7 +693,7 @@ class _Agent:
         return [m for session, (_, prompt, _) in turns.items() for m in self.finish(session, prompt, None, "cancelled")]
 
 
-def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agent) -> None:
+def _deliver(sink: ChannelSink, hold: _Hold, q: _Queue, agent: _Agent) -> None:
     """The connection's thread, and the only caller of the sink."""
 
     def send(answers: List[Dict[str, Any]]) -> Optional[Tuple[int, str]]:
@@ -703,7 +709,10 @@ def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agen
         while True:
             with q.cond:
                 while not q.items and not q.closed:
-                    q.cond.wait()
+                    if hold.watched is None:
+                        q.cond.wait()
+                    elif not q.cond.wait(timeout=hold.poll):
+                        hold.tick()
                 message: Optional[bytes] = q.items.popleft() if q.items else None
                 q.cond.notify_all()
             if message is None:
@@ -735,10 +744,341 @@ def _deliver(sink: ChannelSink, spawner: ProcessSpawner, q: _Queue, agent: _Agen
         q.end(*status)
     finally:
         try:
-            spawner.destroy()
+            hold.release()
             sink.closed(status[0], status[1])
         finally:
             sink.destroy()
+
+
+# ---------------------------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------------------------
+
+HARNESS_LOGIN = "harness-login"
+#: The kind with a file credential: the login the echo keeps in `auth.json` of the account's
+#: directory, which rotates and which the echo watches.
+FILE_KIND = "echo-login"
+#: The kind with a credential in a variable.
+KEY_KIND = "echo-key"
+FILE = "auth.json"
+FILE_KEY = "auth_file"
+#: The variables the echo reads for a credential.
+VARIABLES = ["ECHO_API_KEY", "ECHO_TOKEN"]
+FILE_MAX = 1 << 20
+ACCOUNT_ID_MAX = 128
+GRANT_KEYS = {"id", "kind", "settings", "credentials", "state_dir", "revision"}
+REF_KEYS = {"id", "kind", "settings", "state_dir", "revision"}
+MODELS_KEYS = {"environment", "account"}
+LOGIN_KEYS = {"method", "inputs", "state_dir", "timeout_ms"}
+RENEW_KEYS = {"account"}
+CACHE_LIFETIMES = ("default", "short", "long")
+GONE = 12
+
+
+def _py(value: Any) -> Any:
+    """A value a host object answered, as plain Python."""
+    return value.to_python() if hasattr(value, "to_python") else value
+
+
+def _credential() -> Dict[str, Any]:
+    return {"type": "string", "writeOnly": True, "x-sensitive": True}
+
+
+def _catalog(logins: bool) -> Dict[str, Any]:
+    """What the echo takes as an account."""
+    url = {"type": "string", "format": "uri"}
+    endpoint = [{"key": "base_url", "purpose": "model_api", "default": "https://echo.example"}]
+    kinds = [
+        {
+            "id": HARNESS_LOGIN,
+            "title": "The harness's own login",
+            "description": "Nothing is handed over and nothing is cleared: the harness uses the login it "
+            "already has where it runs. The account counts use and limits.",
+            "settings": {},
+            "endpoints": [],
+            "rotates": True,
+            "history_portable": False,
+            "state_dir": False,
+            "renews": False,
+            "notices": [],
+        },
+        {
+            "id": FILE_KIND,
+            "title": "Echo login",
+            "description": "A login the echo keeps in a file of its own directory.",
+            "settings": {
+                "type": "object",
+                "properties": {FILE_KEY: _credential(), "base_url": url},
+                "required": [FILE_KEY],
+                "additionalProperties": False,
+            },
+            "endpoints": endpoint,
+            "rotates": True,
+            "history_portable": False,
+            "state_dir": True,
+            "renews": True,
+            "notices": ["the login file can be read by what the agent runs"],
+        },
+        {
+            "id": KEY_KIND,
+            "title": "Echo key",
+            "description": "A key the echo takes in a variable.",
+            "settings": {
+                "type": "object",
+                "properties": {"api_key": _credential(), "base_url": url},
+                "required": ["api_key"],
+                "additionalProperties": False,
+            },
+            "endpoints": endpoint,
+            "rotates": False,
+            "history_portable": True,
+            "state_dir": False,
+            "renews": False,
+            "notices": [],
+        },
+    ]
+    methods: List[Dict[str, Any]] = []
+    if logins:
+        methods = [
+            {
+                "id": "scripted",
+                "title": "Scripted",
+                "description": "",
+                "produces": FILE_KIND,
+                "inputs": {
+                    "type": "object",
+                    "properties": {"email": {"type": "string", "default": "person@example.invalid"}},
+                },
+                "steps": ["ask", "open_url", "user_code"],
+                "remote": True,
+            },
+            {
+                "id": "waiting",
+                "title": "Waiting for a page",
+                "description": "",
+                "produces": FILE_KIND,
+                "inputs": {},
+                "steps": ["open_url"],
+                "remote": False,
+            },
+            {
+                "id": "api-key",
+                "title": "A key",
+                "description": "",
+                "produces": KEY_KIND,
+                "inputs": {},
+                "steps": ["ask"],
+                "remote": False,
+            },
+        ]
+    return {"kinds": kinds, "logins": methods, "credential_variables": list(VARIABLES)}
+
+
+def _is_account_id(text: Any) -> bool:
+    return (
+        isinstance(text, str)
+        and 1 <= len(text.encode("utf-8")) <= ACCOUNT_ID_MAX
+        and not any(ord(c) < 32 or 127 <= ord(c) < 160 for c in text)
+    )
+
+
+def _read_account(logins: bool, asked: Any, keys: set) -> None:
+    """Checks an account's keys, id, kind and settings, without touching a spawner."""
+    if not isinstance(asked, dict) or not set(asked) <= keys:
+        raise BadValue("the account has a key the echo does not know")
+    if not _is_account_id(asked.get("id")):
+        raise BadValue("an account id is 1 to 128 bytes with no control character")
+    kind = asked.get("kind")
+    if kind not in [k["id"] for k in _catalog(logins)["kinds"]]:
+        raise BadValue("the echo takes no account of that kind")
+    settings = asked.get("settings", {})
+    if not isinstance(settings, dict):
+        raise BadValue("the settings are not an object")
+    allowed = () if kind == HARNESS_LOGIN else ("base_url",)
+    for key, value in settings.items():
+        url = isinstance(value, str) and (value.startswith("https://") or value.startswith("http://"))
+        if key not in allowed or (key == "base_url" and not url):
+            raise BadValue("the settings do not fit the kind's schema")
+
+
+def _read_grant(logins: bool, grant: Any, spawner: ProcessSpawner) -> Dict[str, Any]:
+    """Checks a grant for the echo and what it needs of `spawner`."""
+    _read_account(logins, grant, GRANT_KEYS)
+    credentials = grant.get("credentials", {})
+    wanted = {FILE_KIND: [FILE_KEY], KEY_KIND: ["api_key"]}.get(grant["kind"], [])
+    if (
+        not isinstance(credentials, dict)
+        or sorted(credentials) != sorted(wanted)
+        or not all(isinstance(credentials[k], str) and credentials[k] for k in wanted)
+    ):
+        raise BadValue("a credential is missing, or one the kind does not take was given")
+    if grant["kind"] == FILE_KIND:
+        if grant.get("state_dir") is None:
+            raise BadValue("this kind needs a directory and none was granted")
+        if not _py(spawner.describe()).get("files"):
+            raise Unsupported("this spawner has no private files, which an echo login needs")
+    return grant
+
+
+def _key_of(grant: Dict[str, Any]) -> str:
+    """What the echo keeps an account's file under: the same account in another directory is another
+    file."""
+    return f"{grant['id']}\0{grant.get('state_dir') or ''}"
+
+
+class _Accounts:
+    """The files of the accounts an instance runs: what the echo last saw of each."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        #: key -> {"path", "last", "seen" ("present", "blank" or "gone"), "revision"}
+        self.held: Dict[str, Dict[str, Any]] = {}
+
+
+def _read_text(spawner: ProcessSpawner, path: str) -> str:
+    return bytes(_py(spawner.read_file(path, FILE_MAX))).decode("utf-8", "replace")
+
+
+def _watch_file(accounts: _Accounts, key: str, spawner: ProcessSpawner, keeper: Optional[AccountKeeper]) -> None:
+    """Looks at the account's file, and tells `keeper` what happened to it behind the host's back: a
+    changed file is renewed, a blank or deleted one lost. Each change is told once."""
+    ident = key.split("\0")[0]
+    with accounts.lock:
+        entry = accounts.held.get(key)
+        if entry is None:
+            return
+        path, last, was, revision = entry["path"], entry["last"], entry["seen"], entry["revision"]
+    text = None if _py(spawner.file_info(path)) is None else _read_text(spawner, path)
+    if text is not None and text.strip():
+        with accounts.lock:
+            entry["seen"] = "present"
+            entry["last"] = text
+        if text != last and keeper is not None:
+            keeper.renewed({"id": ident, "from_revision": revision, "credentials": {FILE_KEY: text}})
+        return
+    seen, told = ("gone", "the login file is gone") if text is None else ("blank", "the login file is blank")
+    if was != seen:
+        with accounts.lock:
+            entry["seen"] = seen
+        if keeper is not None:
+            keeper.lost({"id": ident, "reason": told})
+
+
+def _put_file(accounts: _Accounts, grant: Dict[str, Any], spawner: ProcessSpawner) -> None:
+    """Puts the account's credential file in its directory when it is not there, and remembers it."""
+    if grant["kind"] != FILE_KIND:
+        return
+    text = grant["credentials"][FILE_KEY]
+    if _py(spawner.file_info(FILE)) is None:
+        spawner.write_file(FILE, list(text.encode("utf-8")), True)
+        with accounts.lock:
+            accounts.held[_key_of(grant)] = {
+                "path": FILE,
+                "last": text,
+                "seen": "present",
+                "revision": grant.get("revision", 0),
+            }
+    else:
+        with accounts.lock:
+            entry = accounts.held.get(_key_of(grant))
+            if entry is not None:
+                entry["revision"] = grant.get("revision", 0)
+
+
+def _apply(
+    logins: bool, accounts: _Accounts, grant: Any, spawner: ProcessSpawner, keeper: AccountKeeper
+) -> Dict[str, Any]:
+    """Applies `grant` for a call that runs the harness: its file first read for what changed, then
+    written when absent."""
+    _read_grant(logins, grant, spawner)
+    _watch_file(accounts, _key_of(grant), spawner, keeper)
+    _put_file(accounts, grant, spawner)
+    return grant
+
+
+def _notional(logins: bool, grant: Dict[str, Any]) -> Dict[str, Any]:
+    """The program the echo notionally starts on an account: its specification carries what a real
+    provider's would, and the suite's spawner records it."""
+    spec: Dict[str, Any] = {"program": "echo-agent", "args": ["--account", grant["id"]]}
+    if grant["kind"] != HARNESS_LOGIN:
+        spec["remove_environment"] = list(_catalog(logins)["credential_variables"])
+        if grant["kind"] == KEY_KIND:
+            spec["environment"] = {VARIABLES[0]: grant["credentials"]["api_key"]}
+    if grant.get("state_dir"):
+        spec["cwd"] = grant["state_dir"]
+    return spec
+
+
+class _Hold:
+    """What a connection keeps of the objects it was handed, so that a change to the account's file
+    is told while it runs and everything is let go before `closed`."""
+
+    def __init__(self, spawner: ProcessSpawner, keeper: AccountKeeper, poll: float) -> None:
+        self.spawner = spawner
+        self.keeper = keeper
+        self.poll = poll
+        #: The notional program; killed when the connection ends.
+        self.process: Any = None
+        #: The account's key and files, for an account with a file.
+        self.watched: Optional[Tuple[str, _Accounts]] = None
+
+    def tick(self) -> None:
+        if self.watched is not None:
+            try:
+                _watch_file(self.watched[1], self.watched[0], self.spawner, self.keeper)
+            except Exception:  # the file is looked at again on the next tick
+                pass
+
+    def release(self) -> None:
+        """Looks once more, ends the program and lets go of every object."""
+        self.tick()
+        if self.process is not None:
+            try:
+                self.process.kill()
+            except Exception:
+                pass
+            self.process.destroy()
+            self.process = None
+        self.keeper.destroy()
+        self.spawner.destroy()
+
+
+def _ended(cancelled: bool) -> Gone:
+    return Gone("login cancelled" if cancelled else "login timed out")
+
+
+class _Signing:
+    """A login in progress: its deadline, the prompter and the notional CLI whose tree a cancel kills."""
+
+    def __init__(self, deadline: float, prompter: LoginPrompter, cli: Any) -> None:
+        self.deadline = deadline
+        self.prompter = prompter
+        self.cli = cli
+
+    def check(self) -> None:
+        """Ends the login with GONE when the person cancelled or the time is up."""
+        cancelled = bool(self.prompter.cancelled())
+        if cancelled or time.monotonic() >= self.deadline:
+            raise self.stop(cancelled)
+
+    def stop(self, cancelled: bool) -> Gone:
+        if self.cli is not None:
+            try:
+                self.cli.kill()
+            except Exception:
+                pass
+            self.cli.destroy()
+            self.cli = None
+        return _ended(cancelled)
+
+    def prompt(self, call: Any) -> Any:
+        """Runs one prompter call: GONE from it is the person cancelling."""
+        try:
+            answer = call(self.prompter)
+        except Gone:
+            raise self.stop(True) from None
+        self.check()
+        return answer
 
 
 @dataclass(frozen=True)
@@ -747,6 +1087,10 @@ class EchoConfig:
 
     #: `none`, which reports no usage, or `scripted`, which reports what its prompts script.
     usage: str = "none"
+    #: Whether it offers login methods; when not, it lists none and refuses `login`.
+    logins: bool = True
+    #: How often, in milliseconds, a running connection looks at its account's file.
+    renew_poll_ms: int = 30000
 
 
 class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in Python", default=True):
@@ -756,7 +1100,10 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         if config.usage not in ("none", "scripted"):
             raise BadValue("`usage` is `none` or `scripted`")
         self.scripted = config.usage == "scripted"
+        self.logins = config.logins
+        self.poll = max(config.renew_poll_ms, 1) / 1000.0
         self.reports = _Reports()
+        self.accounts = _Accounts()
 
     def describe(self) -> Dict[str, Any]:
         info: Dict[str, Any] = {
@@ -768,41 +1115,63 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             info["usage"] = {"sources": ["reported"], "spend": True}
         return info
 
-    def start(self, request: Ref, spawner: ProcessSpawner, sink: ChannelSink) -> Channel:
-        # A refusal raises: the binding then destroys the spawner and the sink it was handed.
+    def accounts(self) -> Dict[str, Any]:
+        return _catalog(self.logins)
+
+    def start(self, request: Ref, spawner: ProcessSpawner, sink: ChannelSink, keeper: AccountKeeper) -> Channel:
+        # A refusal raises: the binding then destroys the objects it was handed.
         asked = request.to_python()
         if not isinstance(asked, dict) or not set(asked) <= START_KEYS:
             raise BadValue("the request has a key the echo does not know")
+        if asked.get("cache_lifetime", "default") not in CACHE_LIFETIMES:
+            raise BadValue("the cache lifetime is default, short or long")
+        grant = asked.get("account")
+        hold = _Hold(spawner, keeper, self.poll)
+        if grant is not None:
+            _apply(self.logins, self.accounts, grant, spawner, keeper)
+            # A notional program, so the specification a real provider's would carry is seen; a
+            # spawner that refuses it changes nothing.
+            try:
+                hold.process = spawner.spawn(_notional(self.logins, grant))
+            except Exception:
+                hold.process = None
+            if grant["kind"] == FILE_KIND:
+                hold.watched = (_key_of(grant), self.accounts)
         refusal = _refusal(asked.get("requirements", []))
         if refusal is not None:
             raise Unsupported(refusal)
         roots = asked.get("working_roots", [])
         if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
             raise BadValue("the working roots are not a list of texts")
-        account = asked.get("account")
-        if account is not None and not isinstance(account, str):
-            raise BadValue("the account is not text")
+        account = grant["id"] if grant is not None else None
         q = _Queue()
         usage = _Usage(account, self.reports) if self.scripted else None
         threading.Thread(
             target=_deliver,
-            args=(sink, spawner, q, _Agent(list(roots), usage)),
+            args=(sink, hold, q, _Agent(list(roots), usage)),
             name="acp_echo_harness",
             daemon=True,
         ).start()
         return Connection(q)
 
-    def refusal(self, requirements: Ref, environment: Ref) -> Optional[str]:
+    def refusal(self, requirements: Ref, environment: Ref, account: Optional[Ref]) -> Optional[str]:
+        if account is not None:
+            _read_account(self.logins, account.to_python(), REF_KEYS)
         return _refusal(requirements.to_python())
 
     def program(self) -> Optional[str]:
         return None
 
-    def import_session(self, session: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
-        spawner.destroy()
+    def import_session(self, session: Ref, spawner: ProcessSpawner, keeper: AccountKeeper) -> Dict[str, Any]:
         asked = session.to_python()
-        if not isinstance(asked, dict) or not set(asked) <= IMPORT_KEYS:
-            raise BadValue("the import has a key the echo does not know")
+        try:
+            if not isinstance(asked, dict) or not set(asked) <= IMPORT_KEYS:
+                raise BadValue("the import has a key the echo does not know")
+            if asked.get("account") is not None:
+                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+        finally:
+            spawner.destroy()
+            keeper.destroy()
         id = asked.get("session_id")
         if not (isinstance(id, str) and UUID.fullmatch(id)):
             raise BadValue("the session id is not a UUID")
@@ -819,13 +1188,18 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             report["seeded_from"] = {"line": 2}
         return report
 
-    def export_session(self, export: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
+    def export_session(self, export: Ref, spawner: ProcessSpawner, keeper: AccountKeeper) -> Dict[str, Any]:
         """A position is `<line>:<digest>`: the next line to give, and the digest of the body when
         the first page was given, so a session that has changed since refuses it."""
-        spawner.destroy()
         asked = export.to_python()
-        if not isinstance(asked, dict) or not set(asked) <= EXPORT_KEYS:
-            raise BadValue("the export has a key the echo does not know")
+        try:
+            if not isinstance(asked, dict) or not set(asked) <= EXPORT_KEYS:
+                raise BadValue("the export has a key the echo does not know")
+            if asked.get("account") is not None:
+                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+        finally:
+            spawner.destroy()
+            keeper.destroy()
         with _SESSIONS_LOCK:
             kept = _SESSIONS.get(asked.get("session_id"))
             if kept is None:
@@ -856,14 +1230,28 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             page["next"] = f"{end}:{digest}"
         return page
 
-    def models(self, environment: Ref) -> Dict[str, Any]:
+    def models(self, request: Ref, spawner: ProcessSpawner, keeper: AccountKeeper) -> Dict[str, Any]:
+        asked = request.to_python()
+        try:
+            if not isinstance(asked, dict) or not set(asked) <= MODELS_KEYS:
+                raise BadValue("the request has a key the echo does not know")
+            if asked.get("account") is not None:
+                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+        finally:
+            spawner.destroy()
+            keeper.destroy()
         return {"known": True, "models": [{"id": "echo"}]}
 
-    def usage(self, query: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
-        spawner.destroy()
+    def usage(self, query: Ref, spawner: ProcessSpawner, keeper: AccountKeeper) -> Dict[str, Any]:
         asked = query.to_python()
-        if not isinstance(asked, dict) or not set(asked) <= QUERY_KEYS:
-            raise BadValue("the query has a key the echo does not know")
+        try:
+            if not isinstance(asked, dict) or not set(asked) <= QUERY_KEYS:
+                raise BadValue("the query has a key the echo does not know")
+            if asked.get("account") is not None:
+                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+        finally:
+            spawner.destroy()
+            keeper.destroy()
         if not self.scripted:
             return {
                 "supported": False,
@@ -876,7 +1264,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
                 "limit": None,
                 "spend": None,
             }
-        account = asked.get("account")
+        account = asked["account"]["id"] if asked.get("account") is not None else None
         with self.reports.lock:
             held = self.reports.held.get(account or "")
         if held is not None:
@@ -892,3 +1280,99 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             "limit": None,
             "spend": None,
         }
+
+    def login(self, request: Ref, spawner: ProcessSpawner, prompter: LoginPrompter) -> Dict[str, Any]:
+        asked = request.to_python()
+        cli = None
+        try:
+            if not self.logins:
+                raise Unsupported("this echo is configured to offer no login method")
+            if not isinstance(asked, dict) or not set(asked) <= LOGIN_KEYS:
+                raise BadValue("the login has a key the echo does not know")
+            method = asked.get("method")
+            if method not in [m["id"] for m in _catalog(True)["logins"]]:
+                raise BadValue("the echo has no such login method")
+            timeout_ms = asked.get("timeout_ms", 600000)
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            # The notional CLI, so that a cancel has a tree to kill.
+            try:
+                cli = spawner.spawn({"program": "echo-login-cli", "cwd": asked["state_dir"]})
+            except Exception:
+                cli = None
+            signing = _Signing(deadline, prompter, cli)
+            signing.check()
+
+            def form(title: str, field: str) -> Dict[str, Any]:
+                return {
+                    "title": title,
+                    "schema": {"type": "object", "properties": {field: _credential()}, "required": [field]},
+                }
+
+            if method == "scripted":
+                signing.prompt(lambda p: p.say("Signing in as the echo does"))
+                signing.prompt(lambda p: p.open_url(
+                    {"url": "https://echo.example/device", "user_code": "ECHO-0000", "expires_ms": timeout_ms}
+                ))
+                answer = _py(signing.prompt(lambda p: p.ask(form("Paste the code", "code"))))
+                code = (answer.get("secrets") or {}).get("code", "")
+                if not code or code == "refuse-me":
+                    raise BadValue("login refused: the echo does not take that code")
+                text = json.dumps({"token": code}, separators=(",", ":"))
+                spawner.write_file(FILE, list(text.encode("utf-8")), True)
+                outcome: Dict[str, Any] = {
+                    "kind": FILE_KIND,
+                    "settings": {},
+                    "credentials": {FILE_KEY: _read_text(spawner, FILE)},
+                    "label": "person@example.invalid",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "checked": True,
+                }
+            elif method == "waiting":
+                signing.prompt(lambda p: p.say("Waiting for the page"))
+                signing.prompt(lambda p: p.open_url({"url": "https://echo.example/browser"}))
+                # The person finishes in the browser; the CLI would then print.
+                until = time.monotonic() + 0.4
+                while time.monotonic() < until:
+                    signing.check()
+                    time.sleep(0.02)
+                text = '{"token":"from-the-browser"}'
+                spawner.write_file(FILE, list(text.encode("utf-8")), True)
+                outcome = {"kind": FILE_KIND, "settings": {}, "credentials": {FILE_KEY: text}, "checked": True}
+            else:
+                answer = _py(signing.prompt(lambda p: p.ask(form("Paste the key", "api_key"))))
+                key = (answer.get("secrets") or {}).get("api_key", "")
+                if not key or key == "refuse-me":
+                    raise BadValue("login refused: the echo does not take that key")
+                outcome = {"kind": KEY_KIND, "settings": {}, "credentials": {"api_key": key}, "checked": False}
+            signing.check()
+            return outcome
+        finally:
+            if cli is not None:
+                try:
+                    cli.kill()
+                except Exception:
+                    pass
+                cli.destroy()
+            spawner.destroy()
+            prompter.destroy()
+
+    def renew(self, request: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
+        asked = request.to_python()
+        try:
+            if not isinstance(asked, dict) or not set(asked) <= RENEW_KEYS:
+                raise BadValue("the request has a key the echo does not know")
+            grant = _read_grant(self.logins, asked.get("account"), spawner)
+            kind = next(k for k in _catalog(self.logins)["kinds"] if k["id"] == grant["kind"])
+            if not kind["renews"]:
+                raise Unsupported("this kind cannot be renewed without a model turn")
+            _put_file(self.accounts, grant, spawner)
+            text = _read_text(spawner, FILE) + "#renewed"
+            spawner.write_file(FILE, list(text.encode("utf-8")), True)
+            with self.accounts.lock:
+                entry = self.accounts.held.get(_key_of(grant))
+                if entry is not None:
+                    entry["last"] = text
+                    entry["seen"] = "present"
+            return {"credentials": {FILE_KEY: text}, "expires_at": "2099-01-01T00:00:00Z"}
+        finally:
+            spawner.destroy()

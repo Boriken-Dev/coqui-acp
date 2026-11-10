@@ -166,13 +166,13 @@ pub(super) fn text(path: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn make_link(target: &Path, link: &Path) -> bool {
+pub(super) fn make_link(target: &Path, link: &Path) -> bool {
     std::os::unix::fs::symlink(target, link).is_ok()
 }
 
 /// A junction, which Windows lets anyone make, unlike a symbolic link.
 #[cfg(windows)]
-fn make_link(target: &Path, link: &Path) -> bool {
+pub(super) fn make_link(target: &Path, link: &Path) -> bool {
     std::process::Command::new("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(link)
@@ -182,7 +182,7 @@ fn make_link(target: &Path, link: &Path) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn make_link(_target: &Path, _link: &Path) -> bool {
+pub(super) fn make_link(_target: &Path, _link: &Path) -> bool {
     false
 }
 
