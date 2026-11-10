@@ -4,10 +4,12 @@
 
 extern crate alloc;
 
+pub mod accounts;
 mod agent;
 mod launch;
 mod limits;
 pub mod parse;
+mod provider;
 mod replay;
 mod session;
 mod tools;
@@ -21,6 +23,7 @@ pub use agent::{ClaudeAgent, DEFAULT, EFFORTS};
 pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned};
 pub use launch::{ClaudeLaunch, SessionStart, mcp_config, valid_session_id};
 pub use parse::{ModeHook, ModePermit, Parser, ParserLimits};
+pub use provider::{ClaudeProvider, ProviderSettings};
 pub use replay::{config_dir, project_directory, replay, transcript};
 pub use session::{ClaudeSession, ClaudeSettings, Model, models_of, user_blocks};
 
