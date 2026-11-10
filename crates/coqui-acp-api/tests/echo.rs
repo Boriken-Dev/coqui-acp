@@ -16,8 +16,9 @@ use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeper, AccountLoss, AccountRef, AccountRenewal,
     AcpHarness, Channel, ChannelSink, Environment, ExportPage, FileInfo, HarnessInfo, ImportReport,
     LoginOutcome, LoginPrompter, LoginRequest, ModelListing, ModelsRequest, ProcessSpawner,
-    RenewReport, RenewRequest, Requirement, SessionExport, SessionImport, SessionQuery, Source,
-    SpawnSpec, SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery, UsageReport, UsageSupport,
+    RenewReport, RenewRequest, Requirement, SecretBytes, SessionExport, SessionImport,
+    SessionQuery, Source, SpawnSpec, SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery,
+    UsageReport, UsageSupport,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -167,13 +168,17 @@ impl ProcessSpawner for LocalSpawner {
     fn write_file(
         &self,
         _path: &str,
-        _bytes: Secret<Vec<u8>>,
+        _bytes: Secret<SecretBytes>,
         _private: bool,
     ) -> Result<(), ProviderError> {
         Err(no_files())
     }
 
-    fn read_file(&self, _path: &str, _max_bytes: u64) -> Result<Secret<Vec<u8>>, ProviderError> {
+    fn read_file(
+        &self,
+        _path: &str,
+        _max_bytes: u64,
+    ) -> Result<Secret<SecretBytes>, ProviderError> {
         Err(no_files())
     }
 

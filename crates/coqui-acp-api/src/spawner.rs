@@ -4,7 +4,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use guatiao::library::{Object, ProviderError};
-use guatiao::{FromValue, Schema, Secret, ToValue};
+use guatiao::schema::KindBuilder;
+use guatiao::{
+    Alloc, Bytes, FromValue, MapError, Schema, Secret, ToValue, Value, ValueError, Wipe,
+};
 
 use crate::environment::Environment;
 
@@ -38,20 +41,23 @@ pub trait ProcessSpawner: Send + Sync {
     ///
     /// **The host resolves every path** against that directory and never trusts the provider's:
     /// `path` is relative, and an absolute path, a `..` part, or a link leading out of the directory
-    /// is `GUATIAO_ERR_NOT_FOUND`, as is any call on a spawner with no such directory. A spawner
-    /// that cannot give files says `files` false in [`describe`](Self::describe) and refuses all four
+    /// is `GUATIAO_ERR_NOT_FOUND`, as is any call on a spawner with no such directory. A file
+    /// with another name for the same data (a hard link) is `GUATIAO_ERR_NOT_FOUND` too, where the
+    /// system lets the host see it. `private` is honoured where the file is made: on Unix the file
+    /// is created owner-only (mode 0600) before it holds a byte; on Windows the granted
+    /// directory's ACL is the guard. A spawner that cannot give files says `files` false in [`describe`](Self::describe) and refuses all four
     /// file methods `GUATIAO_ERR_UNSUPPORTED`.
     fn write_file(
         &self,
         path: &str,
-        bytes: Secret<Vec<u8>>,
+        bytes: Secret<SecretBytes>,
         private: bool,
     ) -> Result<(), ProviderError>;
 
     /// The content of the file `path`, whole. `GUATIAO_ERR_NOT_FOUND` for a file that is not there
     /// or a path [`write_file`](Self::write_file) refuses; `GUATIAO_ERR_BAD_VALUE` for one longer
-    /// than `max_bytes`.
-    fn read_file(&self, path: &str, max_bytes: u64) -> Result<Secret<Vec<u8>>, ProviderError>;
+    /// than `max_bytes`, or a file that is not a regular file `GUATIAO_ERR_NOT_FOUND`.
+    fn read_file(&self, path: &str, max_bytes: u64) -> Result<Secret<SecretBytes>, ProviderError>;
 
     /// How long the file `path` is and when it last changed; `None` when it is not there.
     /// `GUATIAO_ERR_NOT_FOUND` for a path [`write_file`](Self::write_file) refuses.
@@ -133,6 +139,62 @@ pub struct SpawnerInfo {
     /// `false`, and a provider whose account kind needs a directory refuses that kind.
     #[map(default)]
     pub files: bool,
+}
+
+/// The bytes of a file, crossing the kind as Guatiao's bytes kind. Wiped when dropped inside a
+/// [`Secret`]; `Debug` shows only the length.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    /// These bytes.
+    #[must_use]
+    pub const fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The bytes as text, with anything that is not UTF-8 replaced.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        String::from_utf8_lossy(&self.0).into_owned()
+    }
+}
+
+impl core::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "[{} bytes]", self.0.len())
+    }
+}
+
+impl Wipe for SecretBytes {
+    fn wipe(&mut self) {
+        self.0.wipe();
+    }
+}
+
+impl ToValue for SecretBytes {
+    fn to_value_in(&self, alloc: Alloc) -> Result<Value, ValueError> {
+        Bytes(self.0.clone()).to_value_in(alloc)
+    }
+}
+
+impl FromValue for SecretBytes {
+    const KINDS: guatiao::Kinds = Bytes::KINDS;
+    fn from_value(value: &Value) -> Result<Self, MapError> {
+        Bytes::from_value(value).map(|bytes| Self(bytes.0))
+    }
+}
+
+impl Schema for SecretBytes {
+    fn kind(alloc: Alloc) -> KindBuilder {
+        Bytes::kind(alloc)
+    }
 }
 
 /// How long a file is and when it last changed, from [`ProcessSpawner::file_info`].

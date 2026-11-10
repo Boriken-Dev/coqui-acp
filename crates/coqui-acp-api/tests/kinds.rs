@@ -430,10 +430,20 @@ fn every_models_keys_are_pinned() {
         ("ModelsRequest", &["account", "environment"], &[]),
         (
             "AccountRenewal",
-            &["credentials", "expires_at", "from_revision", "id"],
-            &["credentials", "from_revision", "id"],
+            &[
+                "credentials",
+                "expires_at",
+                "from_revision",
+                "id",
+                "sequence",
+            ],
+            &["credentials", "from_revision", "id", "sequence"],
         ),
-        ("AccountLoss", &["id", "reason"], &["id", "reason"]),
+        (
+            "AccountLoss",
+            &["id", "reason", "sequence"],
+            &["id", "reason", "sequence"],
+        ),
         ("OpenUrl", &["expires_ms", "url", "user_code"], &["url"]),
         ("LoginForm", &["schema", "title"], &["title"]),
         ("LoginAnswer", &["secrets", "values"], &[]),
@@ -612,7 +622,7 @@ fn the_kinds_hashes_are_pinned() {
 const HARNESS_HASH: u32 = 4111118208;
 const CHANNEL_HASH: u32 = 3787630980;
 const SINK_HASH: u32 = 4115266557;
-const SPAWNER_HASH: u32 = 3394663830;
+const SPAWNER_HASH: u32 = 4134697914;
 const PROCESS_HASH: u32 = 3306532587;
 const KEEPER_HASH: u32 = 708146915;
 const PROMPTER_HASH: u32 = 2606822037;

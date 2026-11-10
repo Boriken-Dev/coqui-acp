@@ -77,7 +77,7 @@ class SpawnedProcess(KindProtocol, Protocol, kind="spawned_process", floor_hash=
         ...
 
 
-class ProcessSpawner(KindProtocol, Protocol, kind="process_spawner", floor_hash=3394663830, is_object=True):
+class ProcessSpawner(KindProtocol, Protocol, kind="process_spawner", floor_hash=4134697914, is_object=True):
     """Starts programs where the host chooses: on this machine, on another over SSH, in a container or
     a virtual machine. The host implements it and hands one to every
     [`AcpHarness::start`](crate::AcpHarness::start); the provider owns it from then on, starts its
@@ -111,8 +111,11 @@ class ProcessSpawner(KindProtocol, Protocol, kind="process_spawner", floor_hash=
 
         **The host resolves every path** against that directory and never trusts the provider's:
         `path` is relative, and an absolute path, a `..` part, or a link leading out of the directory
-        is `GUATIAO_ERR_NOT_FOUND`, as is any call on a spawner with no such directory. A spawner
-        that cannot give files says `files` false in [`describe`](Self::describe) and refuses all four
+        is `GUATIAO_ERR_NOT_FOUND`, as is any call on a spawner with no such directory. A file
+        with another name for the same data (a hard link) is `GUATIAO_ERR_NOT_FOUND` too, where the
+        system lets the host see it. `private` is honoured where the file is made: on Unix the file
+        is created owner-only (mode 0600) before it holds a byte; on Windows the granted
+        directory's ACL is the guard. A spawner that cannot give files says `files` false in [`describe`](Self::describe) and refuses all four
         file methods `GUATIAO_ERR_UNSUPPORTED`.
         """
         ...
@@ -122,7 +125,7 @@ class ProcessSpawner(KindProtocol, Protocol, kind="process_spawner", floor_hash=
     def read_file(self, path: str, max_bytes: U64) -> ValueAnswer:
         """The content of the file `path`, whole. `GUATIAO_ERR_NOT_FOUND` for a file that is not there
         or a path [`write_file`](Self::write_file) refuses; `GUATIAO_ERR_BAD_VALUE` for one longer
-        than `max_bytes`.
+        than `max_bytes`, or a file that is not a regular file `GUATIAO_ERR_NOT_FOUND`.
         """
         ...
 
@@ -181,6 +184,12 @@ class AccountKeeper(KindProtocol, Protocol, kind="account_keeper", floor_hash=70
     """Where a provider reports what happens to an account's credentials behind the host's back. The
     host implements it and hands one to every call that runs the harness; the provider owns it from
     then on, and destroys it by the time it calls the sink's `closed` (or when the call returns).
+
+    **Every live keeper of the account hears each event**, not the first to ask: a connection's
+    keeper hears a rotation a `models` call noticed, and the other way round. An event carries a
+    sequence the provider counts per account; **the host deduplicates by (account, sequence)** and
+    orders chained rotations by it, so a keeper that hears an event twice, or two keepers of one
+    host that hear it once each, store it once.
 
     A provider of a kind with files watches them through the spawner while the connection runs
     (every `renew_poll_ms`, 30000 by default) and after each import, export, models call and close,
@@ -318,7 +327,9 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=41111182
 
         `keeper` is handed over the same way: the provider reports through it every renewal and loss
         of the request's account that it sees while the connection runs, and destroys it by the time
-        it calls `closed`. A host with no use for them hands one that ignores them.
+        it calls `closed`. It hears every event of the account, as every other live keeper of the
+        account does, each with a sequence; a host deduplicates by (account, sequence), and so may
+        hand one that keeps nothing.
 
         With `request.account` the provider applies the account (see
         [`AccountGrant`](crate::AccountGrant)): it removes every name in its catalog's
@@ -432,12 +443,15 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=41111182
         runs the harness's own sign-in in `request.state_dir` (on a terminal where the CLI needs one)
         through `spawner`, reads what it prints and relays each step through `prompter`, and at the
         end reads the files it wrote into the outcome's credentials. `spawner` and `prompter` are
-        handed over: the provider destroys both before it answers.
+        handed over: the provider destroys both before it answers, a timeout excepted (see below).
 
         When the person cancels (`prompter.cancelled()` true, or a prompter call answering
         `GUATIAO_ERR_GONE`), or `request.timeout_ms` passes, the provider kills the CLI's whole tree
         and answers `GUATIAO_ERR_GONE` with `login cancelled` or `login timed out` within two
-        seconds; it checks the deadline after every prompter call and before it answers an outcome.
+        seconds. It runs a watchdog of its own: at the deadline it kills the tree and answers even if
+        a prompter call has not returned (the call is then left to end by itself, and the prompter
+        destroyed when it does), so a host's `ask` should return by `timeout_ms`. It also checks the
+        deadline after every prompter call and before it answers an outcome.
         A key the CLI refused is `GUATIAO_ERR_BAD_VALUE` with `login refused: ` and the CLI's
         reason; any other failure `GUATIAO_ERR_INTERNAL` with a reason that holds no input value and
         no URL query. A method the catalog does not list is `GUATIAO_ERR_BAD_VALUE`; a provider with

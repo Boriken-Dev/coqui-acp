@@ -9,6 +9,7 @@ mod account;
 #[cfg_attr(docsrs, doc(cfg(feature = "contract")))]
 pub mod contract;
 mod environment;
+pub mod files;
 mod kind;
 mod models;
 mod requirement;
@@ -27,6 +28,7 @@ pub use account::{
     OPEN_URL, OpenUrl, PASTE_CODE, PROXY, RenewReport, RenewRequest, USER_CODE, is_account_id,
 };
 pub use environment::Environment;
+pub use files::PrivateDir;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{
     CacheLifetime, DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo, HistoryLoss, ImportReport,
@@ -41,8 +43,8 @@ pub use requirement::{
 pub use roots::{PathRefusal, PathStyle, WorkingRoots, is_plain_absolute, is_session_id};
 pub use spawner::{
     ErrorOutput, FileInfo, LinkState, ProcessExit, ProcessSpawner, ProcessSpawnerVtable,
-    READ_LINK_DOWN, READ_TIMED_OUT, SpawnSpec, SpawnedProcess, SpawnedProcessVtable, SpawnerInfo,
-    TerminalSize,
+    READ_LINK_DOWN, READ_TIMED_OUT, SecretBytes, SpawnSpec, SpawnedProcess, SpawnedProcessVtable,
+    SpawnerInfo, TerminalSize,
 };
 pub use usage::{
     Bucket, Coverage, DEFAULT_LIMIT_PHRASES, LIMIT_META_KEY, LimitHit, ModelSpend, Refill, Source,

@@ -56,7 +56,9 @@ pub trait AcpHarness: Send + Sync {
     ///
     /// `keeper` is handed over the same way: the provider reports through it every renewal and loss
     /// of the request's account that it sees while the connection runs, and destroys it by the time
-    /// it calls `closed`. A host with no use for them hands one that ignores them.
+    /// it calls `closed`. It hears every event of the account, as every other live keeper of the
+    /// account does, each with a sequence; a host deduplicates by (account, sequence), and so may
+    /// hand one that keeps nothing.
     ///
     /// With `request.account` the provider applies the account (see
     /// [`AccountGrant`](crate::AccountGrant)): it removes every name in its catalog's
@@ -186,12 +188,15 @@ pub trait AcpHarness: Send + Sync {
     /// runs the harness's own sign-in in `request.state_dir` (on a terminal where the CLI needs one)
     /// through `spawner`, reads what it prints and relays each step through `prompter`, and at the
     /// end reads the files it wrote into the outcome's credentials. `spawner` and `prompter` are
-    /// handed over: the provider destroys both before it answers.
+    /// handed over: the provider destroys both before it answers, a timeout excepted (see below).
     ///
     /// When the person cancels (`prompter.cancelled()` true, or a prompter call answering
     /// `GUATIAO_ERR_GONE`), or `request.timeout_ms` passes, the provider kills the CLI's whole tree
     /// and answers `GUATIAO_ERR_GONE` with `login cancelled` or `login timed out` within two
-    /// seconds; it checks the deadline after every prompter call and before it answers an outcome.
+    /// seconds. It runs a watchdog of its own: at the deadline it kills the tree and answers even if
+    /// a prompter call has not returned (the call is then left to end by itself, and the prompter
+    /// destroyed when it does), so a host's `ask` should return by `timeout_ms`. It also checks the
+    /// deadline after every prompter call and before it answers an outcome.
     /// A key the CLI refused is `GUATIAO_ERR_BAD_VALUE` with `login refused: ` and the CLI's
     /// reason; any other failure `GUATIAO_ERR_INTERNAL` with a reason that holds no input value and
     /// no URL query. A method the catalog does not list is `GUATIAO_ERR_BAD_VALUE`; a provider with

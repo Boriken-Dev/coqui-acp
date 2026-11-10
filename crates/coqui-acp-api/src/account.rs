@@ -43,6 +43,9 @@ pub const PASTE_CODE: &str = "paste_code";
 pub const DEFAULT_LOGIN_TIMEOUT_MS: u64 = 600_000;
 
 /// Whether `text` can be an account id: 1 to [`ACCOUNT_ID_MAX`] bytes and no control character.
+///
+/// An id is the host's label and nothing more: a provider never puts it in a path or an argument
+/// vector, so it needs no more than this.
 #[must_use]
 pub fn is_account_id(text: &str) -> bool {
     !text.is_empty() && text.len() <= ACCOUNT_ID_MAX && !text.chars().any(char::is_control)
@@ -672,17 +675,28 @@ pub struct AccountRenewal {
     pub credentials: Secret<Credentials>,
     /// When they stop working, as an RFC 3339 time, when known.
     pub expires_at: Option<String>,
+    /// Counts what happened to this account, renewals and losses together, from 1, without a gap
+    /// or a repeat for as long as the provider lives, so the host orders chained rotations by it.
+    /// The same event reaches every keeper that is live for the account and carries the same
+    /// sequence: the host deduplicates by (account, sequence).
+    pub sequence: u64,
 }
 
 impl AccountRenewal {
     /// A renewal of the account `id`, which replaces `from_revision`.
     #[must_use]
-    pub fn new(id: impl Into<String>, from_revision: u64, credentials: Credentials) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        from_revision: u64,
+        sequence: u64,
+        credentials: Credentials,
+    ) -> Self {
         Self {
             id: id.into(),
             from_revision,
             credentials: Secret::new(credentials),
             expires_at: None,
+            sequence,
         }
     }
 }
@@ -696,15 +710,18 @@ pub struct AccountLoss {
     pub id: String,
     /// Why, for people; it shows no credential.
     pub reason: String,
+    /// As [`AccountRenewal::sequence`]: one count for the account's renewals and losses.
+    pub sequence: u64,
 }
 
 impl AccountLoss {
     /// The account `id` is lost, for `reason`.
     #[must_use]
-    pub fn new(id: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<String>, sequence: u64, reason: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             reason: reason.into(),
+            sequence,
         }
     }
 }
@@ -712,6 +729,12 @@ impl AccountLoss {
 /// Where a provider reports what happens to an account's credentials behind the host's back. The
 /// host implements it and hands one to every call that runs the harness; the provider owns it from
 /// then on, and destroys it by the time it calls the sink's `closed` (or when the call returns).
+///
+/// **Every live keeper of the account hears each event**, not the first to ask: a connection's
+/// keeper hears a rotation a `models` call noticed, and the other way round. An event carries a
+/// sequence the provider counts per account; **the host deduplicates by (account, sequence)** and
+/// orders chained rotations by it, so a keeper that hears an event twice, or two keepers of one
+/// host that hear it once each, store it once.
 ///
 /// A provider of a kind with files watches them through the spawner while the connection runs
 /// (every `renew_poll_ms`, 30000 by default) and after each import, export, models call and close,

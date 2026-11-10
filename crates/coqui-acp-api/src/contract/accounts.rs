@@ -37,6 +37,9 @@ const UNSUPPORTED: u32 = 13;
 /// What a rotated copy of a credential reads as.
 const ROTATED: &str = "coqui-acp-contract-rotated-9e2a";
 
+/// What a second rotation of it reads as.
+const SECOND: &str = "coqui-acp-contract-second-4c1d";
+
 /// How long a cancelled or timed out login may take to answer.
 const PROMPTLY: Duration = Duration::from_secs(2);
 
@@ -374,12 +377,21 @@ fn running(
     )
 }
 
-/// Checks the specs the spawner was asked to start while an account was applied.
+/// Checks the specs the spawner was asked to start while an account was applied: that there are
+/// some (a provider that starts nothing through the spawner shows nothing), that no credential is
+/// in a command line, that a kind clears every credential variable and that `harness-login`
+/// clears none.
 fn applied_to(
     specs: &[crate::SpawnSpec],
     catalog: &AccountCatalog,
     info: &AccountKindInfo,
 ) -> Outcome {
+    ensure!(
+        !specs.is_empty(),
+        "the provider started no program through the spawner on a {} account, so nothing shows \
+         that it clears the credential variables",
+        info.id
+    );
     for spec in specs {
         ensure!(
             !spec.args.iter().any(|arg| arg.contains(CANARY))
@@ -388,6 +400,14 @@ fn applied_to(
             "a program was started with a credential in its command line"
         );
         if info.id == HARNESS_LOGIN {
+            ensure!(
+                !spec.clear_environment
+                    && !catalog
+                        .credential_variables
+                        .iter()
+                        .any(|name| spec.remove_environment.contains(name)),
+                "a program was started on a harness-login account with variables cleared"
+            );
             continue;
         }
         let missed: Vec<&String> = catalog
@@ -399,6 +419,31 @@ fn applied_to(
             missed.is_empty(),
             "a program was started on a {} account without clearing {missed:?}",
             info.id
+        );
+    }
+    Ok(())
+}
+
+/// Checks that a program the provider started to sign in cleared every credential variable, and
+/// that at least one was started.
+fn clears_all(specs: &[crate::SpawnSpec], catalog: &AccountCatalog) -> Outcome {
+    ensure!(
+        !specs.is_empty(),
+        "no program was started through the spawner, so nothing shows that it clears the credential variables"
+    );
+    for spec in specs {
+        ensure!(
+            !spec.args.iter().any(|arg| arg.contains(CANARY)),
+            "a program was started with a credential in its command line"
+        );
+        let missed: Vec<&String> = catalog
+            .credential_variables
+            .iter()
+            .filter(|name| !spec.clear_environment && !spec.remove_environment.contains(name))
+            .collect();
+        ensure!(
+            missed.is_empty(),
+            "a program was started without clearing {missed:?}"
         );
     }
     Ok(())
@@ -474,7 +519,6 @@ fn applies(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
             info.id,
             report.account
         );
-        applied_to(&watch.specs(), &catalog, &info).map_err(|e| format!("{}: {e}", info.id))?;
         if contract.imports {
             let session = fresh_uuid();
             let (watch, spawner, keeper) = host::spawner_in(Some(&dir));
@@ -710,8 +754,27 @@ struct Heard {
     lost: Vec<crate::AccountLoss>,
 }
 
+/// What every keeper heard, each event once by (account, sequence), as a host deduplicates.
+struct Events {
+    renewed: Vec<crate::AccountRenewal>,
+    lost: Vec<crate::AccountLoss>,
+}
+
+fn distinct<T: Clone>(items: impl Iterator<Item = T>, key: impl Fn(&T) -> (String, u64)) -> Vec<T> {
+    let mut seen = Vec::new();
+    let mut kept = Vec::new();
+    for item in items {
+        let k = key(&item);
+        if !seen.contains(&k) {
+            seen.push(k);
+            kept.push(item);
+        }
+    }
+    kept
+}
+
 /// Asks the provider, with `models` calls on the same account, until `done` holds of how many
-/// renewals and losses every keeper heard in all, or `patience` passes. Answers what they heard.
+/// distinct renewals and losses every keeper heard in all, or `patience` passes.
 fn polling(
     harness: &dyn AcpHarness,
     grant: &AccountGrant,
@@ -720,7 +783,7 @@ fn polling(
     heard: &mut Heard,
     patience: Duration,
     mut done: impl FnMut(usize, usize) -> bool,
-) -> Result<(Vec<crate::AccountRenewal>, Vec<crate::AccountLoss>), String> {
+) -> Result<Events, String> {
     let deadline = Instant::now() + patience;
     loop {
         let (watch, spawner, keeper) = host::spawner_in(Some(dir));
@@ -730,27 +793,46 @@ fn polling(
         heard.renewed.extend(watch.renewed());
         heard.lost.extend(watch.lost());
         let held = conn.watch();
-        let renewed: Vec<_> = heard
-            .renewed
-            .iter()
-            .cloned()
-            .chain(held.renewed())
-            .collect();
-        let lost: Vec<_> = heard.lost.iter().cloned().chain(held.lost()).collect();
-        if done(renewed.len(), lost.len()) || Instant::now() >= deadline {
-            return Ok((renewed, lost));
+        let events = Events {
+            renewed: distinct(heard.renewed.iter().cloned().chain(held.renewed()), |e| {
+                (e.id.clone(), e.sequence)
+            }),
+            lost: distinct(heard.lost.iter().cloned().chain(held.lost()), |e| {
+                (e.id.clone(), e.sequence)
+            }),
+        };
+        if done(events.renewed.len(), events.lost.len()) || Instant::now() >= deadline {
+            return Ok(events);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
+/// How many times the connection's own keeper heard the renewal with `sequence`.
+fn conn_renewals(conn: &super::host::Conn, sequence: u64) -> usize {
+    conn.watch()
+        .renewed()
+        .iter()
+        .filter(|e| e.sequence == sequence)
+        .count()
+}
+
+fn conn_losses(conn: &super::host::Conn, sequence: u64) -> usize {
+    conn.watch()
+        .lost()
+        .iter()
+        .filter(|e| e.sequence == sequence)
+        .count()
+}
+
 fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
     let catalog = catalog_of(harness)?;
     for info in kinds(contract, &catalog)? {
-        if !info.state_dir {
+        // A kind that keeps a rotating login in a directory keeps it in a file the suite can see.
+        if !(info.state_dir && info.rotates) {
             continue;
         }
-        for scenario in ["rotated then blanked", "deleted"] {
+        for scenario in ["rotated twice then blanked", "deleted"] {
             let label = format!("{} ({scenario})", info.id);
             let dir = place.scratch()?;
             let grant = grant_of(&info, Some(&dir), 1)?;
@@ -758,9 +840,10 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                 .map_err(|e| format!("{label}: {e}"))?;
             let writes = conn.watch().writes();
             let Some(path) = credential_file(&writes) else {
-                // The credential lives in a variable, not a file.
-                conn.close_with(OK)?;
-                break;
+                return Err(format!(
+                    "{label}: a rotating kind that needs a directory wrote no file holding its \
+                     credential there, so nothing shows that it watches the login"
+                ));
             };
             let file = dir.join(&path);
             let mut heard = Heard::default();
@@ -768,7 +851,7 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                 .map_err(|e| format!("{label}: the file {path} cannot be read: {e}"))?;
             if scenario == "deleted" {
                 std::fs::remove_file(&file).map_err(|e| format!("{label}: {e}"))?;
-                let (renewed, lost) = polling(
+                let events = polling(
                     harness,
                     &grant,
                     &dir,
@@ -778,29 +861,34 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                     |_, lost| lost >= 1,
                 )?;
                 ensure!(
-                    renewed.is_empty(),
+                    events.renewed.is_empty(),
                     "{label}: a deleted file was reported renewed"
                 );
                 ensure!(
-                    lost.len() == 1,
-                    "{label}: {} losses reported, not one: {lost:?}",
-                    lost.len()
+                    events.lost.len() == 1,
+                    "{label}: {} losses reported, not one: {:?}",
+                    events.lost.len(),
+                    events.lost
                 );
+                let loss = &events.lost[0];
                 ensure!(
-                    lost[0].id == grant.id
-                        && !lost[0].reason.is_empty()
-                        && !lost[0].reason.contains(CANARY),
-                    "{label}: the loss is {:?}",
-                    lost[0]
+                    loss.id == grant.id
+                        && loss.sequence >= 1
+                        && !loss.reason.is_empty()
+                        && !loss.reason.contains(CANARY),
+                    "{label}: the loss is {loss:?}"
                 );
                 std::thread::sleep(GRACE);
-                let (renewed, lost) =
-                    polling(harness, &grant, &dir, &conn, &mut heard, GRACE, |_, _| true)?;
+                let again = polling(harness, &grant, &dir, &conn, &mut heard, GRACE, |_, _| true)?;
                 ensure!(
-                    renewed.is_empty() && lost.len() == 1,
+                    again.renewed.is_empty() && again.lost.len() == 1,
                     "{label}: a deleted file was reported again ({} renewed, {} lost)",
-                    renewed.len(),
-                    lost.len()
+                    again.renewed.len(),
+                    again.lost.len()
+                );
+                ensure!(
+                    conn_losses(&conn, loss.sequence) == 1,
+                    "{label}: the connection's own keeper did not hear the loss once"
                 );
             } else {
                 let rotated = original.replace(CANARY, ROTATED);
@@ -809,7 +897,7 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                     "{label}: the file does not hold the credential"
                 );
                 std::fs::write(&file, &rotated).map_err(|e| format!("{label}: {e}"))?;
-                let (renewed, lost) = polling(
+                let first = polling(
                     harness,
                     &grant,
                     &dir,
@@ -818,37 +906,83 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                     PATIENCE,
                     |renewed, _| renewed >= 1,
                 )?;
-                ensure!(lost.is_empty(), "{label}: a rotated file was reported lost");
                 ensure!(
-                    renewed.len() == 1,
+                    first.lost.is_empty(),
+                    "{label}: a rotated file was reported lost"
+                );
+                ensure!(
+                    first.renewed.len() == 1,
                     "{label}: {} renewals reported, not one",
-                    renewed.len()
+                    first.renewed.len()
                 );
-                let renewal = &renewed[0];
+                let one = &first.renewed[0];
                 ensure!(
-                    renewal.id == grant.id && renewal.from_revision == grant.revision,
-                    "{label}: the renewal is for {} at revision {}",
-                    renewal.id,
-                    renewal.from_revision
+                    one.id == grant.id && one.from_revision == grant.revision && one.sequence >= 1,
+                    "{label}: the renewal is for {} at revision {}, sequence {}",
+                    one.id,
+                    one.from_revision,
+                    one.sequence
                 );
-                let held = renewal.credentials.expose();
+                let held = one.credentials.expose();
                 ensure!(
                     held.iter().any(|(_, value)| value.contains(ROTATED))
                         && !held.iter().any(|(_, value)| value.contains(CANARY)),
                     "{label}: the renewal does not hold the rotated credential alone"
                 );
                 std::thread::sleep(GRACE);
-                let (renewed, _) =
+                let settled =
                     polling(harness, &grant, &dir, &conn, &mut heard, GRACE, |_, _| true)?;
                 ensure!(
-                    renewed.len() == 1,
-                    "{label}: the rotation was reported {} times",
-                    renewed.len()
+                    settled.renewed.len() == 1,
+                    "{label}: the rotation was reported as {} events",
+                    settled.renewed.len()
+                );
+                // Every live keeper hears it, the connection's whichever call noticed it, and once.
+                ensure!(
+                    conn_renewals(&conn, one.sequence) == 1,
+                    "{label}: the connection's own keeper heard the rotation {} times, not once",
+                    conn_renewals(&conn, one.sequence)
                 );
 
-                // Blanked: lost, never renewed.
+                // A second rotation, chained on the first: a later sequence.
+                let again = rotated.replace(ROTATED, SECOND);
+                std::fs::write(&file, &again).map_err(|e| format!("{label}: {e}"))?;
+                let second = polling(
+                    harness,
+                    &grant,
+                    &dir,
+                    &conn,
+                    &mut heard,
+                    PATIENCE,
+                    |renewed, _| renewed >= 2,
+                )?;
+                ensure!(
+                    second.renewed.len() == 2 && second.lost.is_empty(),
+                    "{label}: {} renewals and {} losses after the second rotation",
+                    second.renewed.len(),
+                    second.lost.len()
+                );
+                let two = second
+                    .renewed
+                    .iter()
+                    .find(|e| e.sequence != one.sequence)
+                    .ok_or("the second rotation has the first one's sequence")?;
+                ensure!(
+                    two.sequence > one.sequence
+                        && two
+                            .credentials
+                            .expose()
+                            .iter()
+                            .any(|(_, value)| value.contains(SECOND)),
+                    "{label}: the second rotation has sequence {} after {} and holds {:?}",
+                    two.sequence,
+                    one.sequence,
+                    two.credentials
+                );
+
+                // Blanked: lost, never renewed, and later than both.
                 std::fs::write(&file, "").map_err(|e| format!("{label}: {e}"))?;
-                let (renewed, lost) = polling(
+                let blank = polling(
                     harness,
                     &grant,
                     &dir,
@@ -858,18 +992,26 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                     |_, lost| lost >= 1,
                 )?;
                 ensure!(
-                    renewed.len() == 1,
+                    blank.renewed.len() == 2,
                     "{label}: a blanked file was reported renewed"
                 );
                 ensure!(
-                    lost.len() == 1,
-                    "{label}: {} losses reported, not one: {lost:?}",
-                    lost.len()
+                    blank.lost.len() == 1,
+                    "{label}: {} losses reported, not one: {:?}",
+                    blank.lost.len(),
+                    blank.lost
+                );
+                let loss = &blank.lost[0];
+                ensure!(
+                    loss.id == grant.id
+                        && !loss.reason.contains(CANARY)
+                        && loss.sequence > two.sequence,
+                    "{label}: the loss is {loss:?}, after sequence {}",
+                    two.sequence
                 );
                 ensure!(
-                    lost[0].id == grant.id && !lost[0].reason.contains(CANARY),
-                    "{label}: the loss is {:?}",
-                    lost[0]
+                    conn_losses(&conn, loss.sequence) == 1,
+                    "{label}: the connection's own keeper did not hear the loss once"
                 );
             }
             ensure!(
@@ -887,11 +1029,25 @@ fn renews(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outco
     for info in kinds(contract, &catalog)? {
         let dir = place.scratch()?;
         let grant = grant_of(&info, Some(&dir), 1)?;
-        let (watch, spawner, keeper) = host::spawner_in(Some(&dir));
-        drop(keeper);
-        let answer = harness.renew(RenewRequest::new(grant), spawner);
+        // A connection on the account first, so the files it keeps are where renew looks.
+        let held = if info.renews && info.state_dir {
+            Some(
+                running(contract, harness, place, grant.clone(), &dir)
+                    .map_err(|e| format!("{}: {e}", info.id))?
+                    .0,
+            )
+        } else {
+            None
+        };
+        let renew = |grant: &AccountGrant| {
+            let (watch, spawner, keeper) = host::spawner_in(Some(&dir));
+            drop(keeper);
+            let answer = harness.renew(RenewRequest::new(grant.clone()), spawner);
+            (watch.spawner_destroyed(), answer)
+        };
+        let (gone, answer) = renew(&grant);
         ensure!(
-            watch.spawner_destroyed(),
+            gone,
             "{}: renew answered with the spawner it was handed alive",
             info.id
         );
@@ -920,6 +1076,33 @@ fn renews(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outco
                 "{}: renew's report carried a credential",
                 info.id
             );
+            if let Some(conn) = held {
+                // A login the harness lost is GONE, whatever is left of its file: never a renewal
+                // made of nothing.
+                if let Some(path) = credential_file(&conn.watch().writes()) {
+                    let file = dir.join(&path);
+                    for (how, make) in [("blank", true), ("missing", false)] {
+                        if make {
+                            std::fs::write(&file, "").map_err(|e| format!("{}: {e}", info.id))?;
+                        } else {
+                            std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", info.id))?;
+                        }
+                        let (_, lost) = renew(&grant);
+                        let error = lost.err().ok_or_else(|| {
+                            format!("{}: renew of a {how} login file answered a report", info.id)
+                        })?;
+                        ensure!(
+                            status(&error) == GONE
+                                && !error.message().is_empty()
+                                && !error.message().contains(CANARY),
+                            "{}: renew of a {how} login file refused with {}, not {GONE} and a reason",
+                            info.id,
+                            why(&error)
+                        );
+                    }
+                }
+                conn.close_with(OK)?;
+            }
         } else {
             let error = answer.err().ok_or_else(|| {
                 format!(
@@ -1004,6 +1187,8 @@ fn signs_in(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
             why(&error)
         );
     }
+    let mut waits_on_a_person = false;
+    let mut cancelled_while_waiting = false;
     for method in &catalog.logins {
         if contract
             .account
@@ -1033,6 +1218,8 @@ fn signs_in(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
             !watch.said().contains(CANARY),
             "{label}: a secret the person typed was shown back to them"
         );
+        clears_all(&watch.specs(), &catalog)
+            .map_err(|e| format!("{label}: the sign-in's program: {e}"))?;
         let made = catalog
             .kind(&outcome.kind)
             .ok_or_else(|| format!("{label}: it made a kind the catalog does not list"))?;
@@ -1107,6 +1294,10 @@ fn signs_in(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
         }
 
         // The person cancels while the login waits.
+        waits_on_a_person |= method
+            .steps
+            .iter()
+            .any(|step| matches!(step.as_str(), "open_url" | "user_code" | "paste_code"));
         let dir = place.scratch()?;
         let (watch, spawner, prompter) = host::login_in(
             &dir,
@@ -1119,6 +1310,7 @@ fn signs_in(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
         let answer = harness.login(request(&dir, 5_000)?, spawner, prompter);
         let took = begun.elapsed();
         if let Err(error) = answer {
+            cancelled_while_waiting = true;
             ensure!(
                 status(&error) == GONE && error.message().contains("cancelled"),
                 "{label}: a login cancelled while it waited answered {}",
@@ -1147,31 +1339,43 @@ fn signs_in(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
         let begun = Instant::now();
         let answer = harness.login(request(&dir, 300)?, spawner, prompter);
         let took = begun.elapsed();
-        ensure!(
-            watch.spawner_destroyed() && watch.prompter_destroyed(),
-            "{label}: a login that timed out answered with an object it was handed alive"
-        );
         match answer {
-            Ok(_) => ensure!(
-                watch.asked() == 0 && took < Duration::from_millis(300),
-                "{label}: a login went past its 300 ms timeout and made an account"
-            ),
+            Ok(_) => {
+                ensure!(
+                    watch.spawner_destroyed() && watch.prompter_destroyed(),
+                    "{label}: a login answered with an object it was handed alive"
+                );
+                ensure!(
+                    watch.asked() == 0 && took < Duration::from_millis(300),
+                    "{label}: a login went past its 300 ms timeout and made an account"
+                );
+            }
             Err(error) => {
                 ensure!(
                     status(&error) == GONE && error.message().contains("timed out"),
                     "{label}: a login that ran out of time answered {}, not GONE `login timed out`",
                     why(&error)
                 );
+                // The provider answers at the deadline, even with a prompter call still out.
                 ensure!(
-                    took <= Duration::from_millis(300) + delay + PROMPTLY,
+                    took <= Duration::from_millis(300) + PROMPTLY,
                     "{label}: a login that ran out of time took {took:?}"
                 );
                 ensure!(
                     watch.all_killed(),
                     "{label}: a login that ran out of time left a program running"
                 );
+                ensure!(
+                    watch.wait_destroyed(PATIENCE),
+                    "{label}: a login that ran out of time never let go of what it was handed"
+                );
             }
         }
     }
+    ensure!(
+        !waits_on_a_person || cancelled_while_waiting,
+        "no login method that waits for a person was cancelled while it waited: none of them \
+         answered GONE within the 250 ms the suite waits before cancelling"
+    );
     Ok(())
 }

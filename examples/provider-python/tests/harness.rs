@@ -31,8 +31,8 @@ mod with_python {
     use coqui_acp_api::guatiao::{List, Map, Secret, Status, Value};
     use coqui_acp_api::{
         AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, FileInfo,
-        ModelsRequest, ProcessSpawner, SessionQuery, Source, SpawnSpec, SpawnedProcess,
-        SpawnerInfo, UsageQuery,
+        ModelsRequest, ProcessSpawner, SecretBytes, SessionQuery, Source, SpawnSpec,
+        SpawnedProcess, SpawnerInfo, UsageQuery,
     };
 
     use super::support::{guatiao, manifest_dir, python, source};
@@ -59,7 +59,7 @@ mod with_python {
         fn write_file(
             &self,
             _path: &str,
-            _bytes: Secret<Vec<u8>>,
+            _bytes: Secret<SecretBytes>,
             _private: bool,
         ) -> Result<(), ProviderError> {
             Err(no_files())
@@ -69,7 +69,7 @@ mod with_python {
             &self,
             _path: &str,
             _max_bytes: u64,
-        ) -> Result<Secret<Vec<u8>>, ProviderError> {
+        ) -> Result<Secret<SecretBytes>, ProviderError> {
             Err(no_files())
         }
 

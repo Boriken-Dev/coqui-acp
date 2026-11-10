@@ -13,9 +13,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 use guatiao::library::{Object, ProviderError};
 use guatiao::{Secret, Status};
@@ -24,9 +24,10 @@ use serde_json::{Value, json};
 
 use super::checks::CANARY;
 use super::json;
+use crate::files::PrivateDir;
 use crate::spawner::{
-    FileInfo, LinkState, ProcessExit, ProcessSpawner, READ_TIMED_OUT, SpawnSpec, SpawnedProcess,
-    SpawnerInfo, TerminalSize,
+    FileInfo, LinkState, ProcessExit, ProcessSpawner, READ_TIMED_OUT, SecretBytes, SpawnSpec,
+    SpawnedProcess, SpawnerInfo, TerminalSize,
 };
 use crate::{
     AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, LoginAnswer, LoginForm, LoginPrompter,
@@ -214,57 +215,16 @@ impl Drop for Idle {
     }
 }
 
-/// A relative path inside `root`, or the refusal the file methods owe: an absolute path, a `..`
-/// part and a link leading out are all `GUATIAO_ERR_NOT_FOUND`.
-pub(super) fn confined(root: &Path, path: &str) -> Result<PathBuf, ProviderError> {
-    let outside = || {
-        refuse(
-            Status::GUATIAO_ERR_NOT_FOUND,
-            "no such path in the granted directory",
-        )
-    };
-    let drive = path.as_bytes().get(1) == Some(&b':');
-    if path.is_empty()
-        || path.contains('\0')
-        || drive
-        || path.starts_with(['/', '\\'])
-        || Path::new(path).is_absolute()
-    {
-        return Err(outside());
-    }
-    let mut full = root.to_path_buf();
-    for part in path.split(['/', '\\']) {
-        match part {
-            "" | "." => {}
-            ".." => return Err(outside()),
-            part => full.push(part),
-        }
-    }
-    let base = std::fs::canonicalize(root).map_err(|_| outside())?;
-    let mut nearest = full.clone();
-    while !nearest.exists() {
-        if !nearest.pop() {
-            return Err(outside());
-        }
-    }
-    let nearest = std::fs::canonicalize(&nearest).map_err(|_| outside())?;
-    if nearest.starts_with(&base) {
-        Ok(full)
-    } else {
-        Err(outside())
-    }
-}
-
 /// A spawner that starts only idle processes, records what it is asked, and serves files in a
 /// directory when it was given one. It says when it is destroyed.
 struct Spawner {
     shared: Arc<Shared>,
-    root: Option<PathBuf>,
+    files: Option<PrivateDir>,
 }
 
 impl Spawner {
-    fn files(&self) -> Result<&Path, ProviderError> {
-        self.root.as_deref().ok_or_else(|| {
+    fn files(&self) -> Result<&PrivateDir, ProviderError> {
+        self.files.as_ref().ok_or_else(|| {
             refuse(
                 Status::GUATIAO_ERR_UNSUPPORTED,
                 "this spawner has no private files",
@@ -276,7 +236,7 @@ impl Spawner {
 impl ProcessSpawner for Spawner {
     fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
         let mut info = SpawnerInfo::new(std::env::consts::OS, std::env::consts::ARCH, true);
-        info.files = self.root.is_some();
+        info.files = self.files.is_some();
         Ok(info)
     }
 
@@ -294,77 +254,31 @@ impl ProcessSpawner for Spawner {
     fn write_file(
         &self,
         path: &str,
-        bytes: Secret<Vec<u8>>,
+        bytes: Secret<SecretBytes>,
         private: bool,
     ) -> Result<(), ProviderError> {
-        let root = self.files()?;
-        let full = confined(root, path)?;
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|_| refuse(Status::GUATIAO_ERR_INTERNAL, "cannot make the directory"))?;
-        }
-        std::fs::write(&full, bytes.expose())
-            .map_err(|_| refuse(Status::GUATIAO_ERR_INTERNAL, "cannot write the file"))?;
-        #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o600));
-        }
-        #[cfg(not(unix))]
-        let _ = private;
+        self.files()?
+            .write(path, bytes.expose().as_slice(), private)?;
         self.shared
             .lock()
             .writes
-            .push((path.to_owned(), bytes.expose().clone()));
+            .push((path.to_owned(), bytes.expose().as_slice().to_vec()));
         self.shared.changed.notify_all();
         Ok(())
     }
 
-    fn read_file(&self, path: &str, max_bytes: u64) -> Result<Secret<Vec<u8>>, ProviderError> {
-        let full = confined(self.files()?, path)?;
-        let meta = std::fs::metadata(&full)
-            .ok()
-            .filter(std::fs::Metadata::is_file)
-            .ok_or_else(|| refuse(Status::GUATIAO_ERR_NOT_FOUND, "no such file"))?;
-        if meta.len() > max_bytes {
-            return Err(refuse(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the file is too large",
-            ));
-        }
-        std::fs::read(&full)
-            .map(Secret::new)
-            .map_err(|_| refuse(Status::GUATIAO_ERR_NOT_FOUND, "no such file"))
+    fn read_file(&self, path: &str, max_bytes: u64) -> Result<Secret<SecretBytes>, ProviderError> {
+        self.files()?
+            .read(path, max_bytes)
+            .map(|bytes| Secret::new(SecretBytes::new(bytes)))
     }
 
     fn file_info(&self, path: &str) -> Result<Option<FileInfo>, ProviderError> {
-        let full = confined(self.files()?, path)?;
-        let Ok(meta) = std::fs::metadata(&full) else {
-            return Ok(None);
-        };
-        if !meta.is_file() {
-            return Ok(None);
-        }
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |since| {
-                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-            });
-        Ok(Some(FileInfo::new(meta.len(), modified)))
+        self.files()?.info(path)
     }
 
     fn remove_file(&self, path: &str) -> Result<(), ProviderError> {
-        let full = confined(self.files()?, path)?;
-        match std::fs::remove_file(&full) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(refuse(
-                Status::GUATIAO_ERR_INTERNAL,
-                "cannot remove the file",
-            )),
-        }
+        self.files()?.remove(path)
     }
 }
 
@@ -517,6 +431,26 @@ impl Watch {
         self.0.lock().prompter_destroyed
     }
 
+    /// Waits up to `patience` for the spawner and the prompter to be destroyed: a login that ran
+    /// out of time answers while a prompter call may still be out, and lets go when it returns.
+    pub(super) fn wait_destroyed(&self, patience: Duration) -> bool {
+        let deadline = Instant::now() + patience;
+        let mut log = self.0.lock();
+        while !(log.spawner_destroyed && log.prompter_destroyed) {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            log = self
+                .0
+                .changed
+                .wait_timeout(log, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
     /// The specs the spawner was asked to start.
     pub(super) fn specs(&self) -> Vec<SpawnSpec> {
         self.0.lock().specs.clone()
@@ -594,7 +528,7 @@ pub(super) fn handed_in(root: Option<&Path>) -> Handed {
     let shared = Shared::new();
     let spawner = Spawner {
         shared: Arc::clone(&shared),
-        root: root.map(Path::to_path_buf),
+        files: root.map(PrivateDir::new),
     }
     .into_object();
     let sink = Sink(Arc::clone(&shared)).into_object();

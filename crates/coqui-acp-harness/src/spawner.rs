@@ -8,16 +8,17 @@ use alloc::vec::Vec;
 use core::time::Duration;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{Secret, Status};
 use coqui_acp_api::{
-    Environment, ErrorOutput, FileInfo, LinkState, ProcessExit, ProcessSpawner, READ_LINK_DOWN,
-    READ_TIMED_OUT, SpawnSpec, SpawnedProcess, SpawnerInfo, TerminalSize,
+    Environment, ErrorOutput, FileInfo, LinkState, PrivateDir, ProcessExit, ProcessSpawner,
+    READ_LINK_DOWN, READ_TIMED_OUT, SecretBytes, SpawnSpec, SpawnedProcess, SpawnerInfo,
+    TerminalSize,
 };
 
 use crate::process::{ErrorStream, Exit, Launch, Process, Spawn, Spawned, start};
@@ -35,7 +36,7 @@ use crate::process::{ErrorStream, Exit, Launch, Process, Spawn, Spawned, start};
 #[must_use]
 pub struct LocalSpawner {
     buffer: usize,
-    files: Option<PathBuf>,
+    files: Option<PrivateDir>,
 }
 
 impl Default for LocalSpawner {
@@ -61,58 +62,17 @@ impl LocalSpawner {
 
     /// Serves the file methods in `dir`, which must exist: an account's private directory.
     pub fn files(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.files = Some(dir.into());
+        self.files = Some(PrivateDir::new(dir));
         self
     }
 
-    fn root(&self) -> Result<&Path, ProviderError> {
-        self.files.as_deref().ok_or_else(|| {
+    fn root(&self) -> Result<&PrivateDir, ProviderError> {
+        self.files.as_ref().ok_or_else(|| {
             refused(
                 Status::GUATIAO_ERR_UNSUPPORTED,
                 "this spawner has no private files",
             )
         })
-    }
-}
-
-/// `path`, relative, inside `root`: an absolute path, a `..` part, an empty path and a link leading
-/// out of `root` are `GUATIAO_ERR_NOT_FOUND`.
-fn confined(root: &Path, path: &str) -> Result<PathBuf, ProviderError> {
-    let outside = || {
-        refused(
-            Status::GUATIAO_ERR_NOT_FOUND,
-            "no such path in the granted directory",
-        )
-    };
-    let drive = path.as_bytes().get(1) == Some(&b':');
-    if path.is_empty()
-        || path.contains('\0')
-        || drive
-        || path.starts_with(['/', '\\'])
-        || Path::new(path).is_absolute()
-    {
-        return Err(outside());
-    }
-    let mut full = root.to_path_buf();
-    for part in path.split(['/', '\\']) {
-        match part {
-            "" | "." => {}
-            ".." => return Err(outside()),
-            part => full.push(part),
-        }
-    }
-    let base = std::fs::canonicalize(root).map_err(|_| outside())?;
-    let mut nearest = full.clone();
-    while !nearest.exists() {
-        if !nearest.pop() {
-            return Err(outside());
-        }
-    }
-    let nearest = std::fs::canonicalize(&nearest).map_err(|_| outside())?;
-    if nearest.starts_with(&base) {
-        Ok(full)
-    } else {
-        Err(outside())
     }
 }
 
@@ -177,67 +137,24 @@ impl ProcessSpawner for LocalSpawner {
     fn write_file(
         &self,
         path: &str,
-        bytes: Secret<Vec<u8>>,
+        bytes: Secret<SecretBytes>,
         private: bool,
     ) -> Result<(), ProviderError> {
-        let full = confined(self.root()?, path)?;
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io_refused(&e))?;
-        }
-        std::fs::write(&full, bytes.expose()).map_err(|e| io_refused(&e))?;
-        #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| io_refused(&e))?;
-        }
-        #[cfg(not(unix))]
-        let _ = private;
-        Ok(())
+        self.root()?.write(path, bytes.expose().as_slice(), private)
     }
 
-    fn read_file(&self, path: &str, max_bytes: u64) -> Result<Secret<Vec<u8>>, ProviderError> {
-        let full = confined(self.root()?, path)?;
-        let meta = std::fs::metadata(&full)
-            .ok()
-            .filter(std::fs::Metadata::is_file)
-            .ok_or_else(|| refused(Status::GUATIAO_ERR_NOT_FOUND, "no such file"))?;
-        if meta.len() > max_bytes {
-            return Err(refused(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the file is longer than max_bytes",
-            ));
-        }
-        std::fs::read(&full)
-            .map(Secret::new)
-            .map_err(|e| io_refused(&e))
+    fn read_file(&self, path: &str, max_bytes: u64) -> Result<Secret<SecretBytes>, ProviderError> {
+        self.root()?
+            .read(path, max_bytes)
+            .map(|bytes| Secret::new(SecretBytes::new(bytes)))
     }
 
     fn file_info(&self, path: &str) -> Result<Option<FileInfo>, ProviderError> {
-        let full = confined(self.root()?, path)?;
-        let Ok(meta) = std::fs::metadata(&full) else {
-            return Ok(None);
-        };
-        if !meta.is_file() {
-            return Ok(None);
-        }
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |since| {
-                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-            });
-        Ok(Some(FileInfo::new(meta.len(), modified)))
+        self.root()?.info(path)
     }
 
     fn remove_file(&self, path: &str) -> Result<(), ProviderError> {
-        let full = confined(self.root()?, path)?;
-        match std::fs::remove_file(&full) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(io_refused(&e)),
-        }
+        self.root()?.remove(path)
     }
 }
 

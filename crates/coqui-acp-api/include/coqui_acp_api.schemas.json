@@ -2958,13 +2958,20 @@
           "null"
         ],
         "description": "When they stop working, as an RFC 3339 time, when known."
+      },
+      "sequence": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "Counts what happened to this account, renewals and losses together, from 1, without a gap or a repeat for as long as the provider lives, so the host orders chained rotations by it. The same event reaches every keeper that is live for the account and carries the same sequence: the host deduplicates by (account, sequence)."
       }
     },
     "additionalProperties": false,
     "required": [
       "id",
       "from_revision",
-      "credentials"
+      "credentials",
+      "sequence"
     ]
   },
   "AccountLoss": {
@@ -2978,12 +2985,19 @@
       "reason": {
         "type": "string",
         "description": "Why, for people; it shows no credential."
+      },
+      "sequence": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "As [`AccountRenewal::sequence`]: one count for the account's renewals and losses."
       }
     },
     "additionalProperties": false,
     "required": [
       "id",
-      "reason"
+      "reason",
+      "sequence"
     ]
   },
   "OpenUrl": {

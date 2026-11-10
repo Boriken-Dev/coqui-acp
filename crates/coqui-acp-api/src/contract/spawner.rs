@@ -14,7 +14,7 @@ use guatiao::Secret;
 
 use super::checks::{fresh_uuid, make_link};
 use super::{Failure, Failures};
-use crate::ProcessSpawner;
+use crate::{ProcessSpawner, SecretBytes};
 
 const NOT_FOUND: u32 = 10;
 const BAD_VALUE: u32 = 7;
@@ -74,8 +74,8 @@ fn status<T>(answer: &Result<T, guatiao::library::ProviderError>) -> Option<u32>
     answer.as_ref().err().map(|e| e.status.into())
 }
 
-fn secret(bytes: &[u8]) -> Secret<Vec<u8>> {
-    Secret::new(bytes.to_vec())
+fn secret(bytes: &[u8]) -> Secret<SecretBytes> {
+    Secret::new(SecretBytes::new(bytes.to_vec()))
 }
 
 fn refuses(spawner: &dyn ProcessSpawner) -> Outcome {
@@ -175,6 +175,13 @@ fn confined(spawner: &dyn ProcessSpawner, root: &Path) -> Outcome {
         "C:\\outside".to_owned(),
         "C:outside".to_owned(),
         "a\0b".to_owned(),
+        "NUL".to_owned(),
+        "nul.txt".to_owned(),
+        "COM1".to_owned(),
+        "dir/CONIN$".to_owned(),
+        "auth.json:stream".to_owned(),
+        "x/C:y".to_owned(),
+        "trailing.".to_owned(),
     ];
     let base = std::fs::canonicalize(root).map_err(|e| format!("no directory: {e}"))?;
     let outside = base.with_file_name(format!("outside-{}", fresh_uuid()));
@@ -184,6 +191,15 @@ fn confined(spawner: &dyn ProcessSpawner, root: &Path) -> Outcome {
     if linked {
         paths.push("escape/leaked".to_owned());
         paths.push("escape".to_owned());
+    }
+    // A second name for a file outside: seen and refused where the system tells (Unix).
+    let other = outside.join("other");
+    let hard = base.join("hard");
+    let hard_linked = cfg!(unix)
+        && std::fs::write(&other, b"x").is_ok()
+        && std::fs::hard_link(&other, &hard).is_ok();
+    if hard_linked {
+        paths.push("hard".to_owned());
     }
     let mut broken = Vec::new();
     for path in &paths {
@@ -202,7 +218,10 @@ fn confined(spawner: &dyn ProcessSpawner, root: &Path) -> Outcome {
             }
         }
     }
-    let left = std::fs::read_dir(&outside).map_or(0, Iterator::count);
+    let left = std::fs::read_dir(&outside).map_or(0, Iterator::count) - usize::from(hard_linked);
+    if hard_linked {
+        let _ = std::fs::remove_file(&hard);
+    }
     if linked {
         let _ = std::fs::remove_dir(&link).or_else(|_| std::fs::remove_file(&link));
     }
@@ -273,7 +292,7 @@ mod tests {
             fn write_file(
                 &self,
                 path: &str,
-                bytes: Secret<Vec<u8>>,
+                bytes: Secret<SecretBytes>,
                 _private: bool,
             ) -> Result<(), guatiao::library::ProviderError> {
                 // It trusts a relative path, `..` included; an absolute path it only pretends to write,
@@ -285,7 +304,7 @@ mod tests {
                 if let Some(parent) = full.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                std::fs::write(full, bytes.expose()).map_err(|_| {
+                std::fs::write(full, bytes.expose().as_slice()).map_err(|_| {
                     guatiao::library::ProviderError::new(guatiao::Status::GUATIAO_ERR_INTERNAL, "x")
                 })
             }
@@ -294,9 +313,9 @@ mod tests {
                 &self,
                 path: &str,
                 _max_bytes: u64,
-            ) -> Result<Secret<Vec<u8>>, guatiao::library::ProviderError> {
+            ) -> Result<Secret<SecretBytes>, guatiao::library::ProviderError> {
                 std::fs::read(self.0.join(path))
-                    .map(Secret::new)
+                    .map(|b| Secret::new(SecretBytes::new(b)))
                     .map_err(|_| {
                         guatiao::library::ProviderError::new(
                             guatiao::Status::GUATIAO_ERR_NOT_FOUND,
