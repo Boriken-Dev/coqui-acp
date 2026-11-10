@@ -26,6 +26,9 @@ mod status;
 
 pub use ports::loopback_listeners;
 
+/// What every bucket id starts with, so a host replaces this reader's buckets and no other's.
+pub const BUCKET_PREFIX: &str = "agy:";
+
 /// The path of the status call, on the language server's service.
 const STATUS_PATH: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 

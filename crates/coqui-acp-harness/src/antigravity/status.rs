@@ -12,7 +12,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use super::{AcpModel, ReadError};
+use super::{AcpModel, BUCKET_PREFIX, ReadError};
 
 /// What the permille limit of a bucket is.
 const WHOLE: u64 = 1000;
@@ -62,8 +62,9 @@ pub(super) struct Model {
     /// agy's id for the model, the ACP model id when it sends one.
     pub(super) id: Option<String>,
     pub(super) label: Option<String>,
-    /// What is left, in thousandths.
-    pub(super) permille: u64,
+    /// What is left, in thousandths: 1000 only for a fraction of exactly 1, 0 only for exactly 0 or
+    /// none given, and within 1 to 999 between.
+    pub(super) remaining: u64,
     /// When the window ends, in Unix seconds.
     pub(super) resets_at: i64,
 }
@@ -71,7 +72,8 @@ pub(super) struct Model {
 /// Reads `body` as agy's status.
 ///
 /// A model without a usable allowance, a fraction that is not a number in `0..=1` or a reset that is
-/// not an RFC 3339 time, or one that names itself by neither id nor label, is left out.
+/// not an RFC 3339 time, or one that names itself by neither id nor label, is left out. A fraction
+/// left out beside a reset is zero: the answer is protobuf JSON, which omits zero values.
 pub(super) fn parse(body: &[u8]) -> Result<Vec<Model>, ReadError> {
     let answer: Answer = serde_json::from_slice(body).map_err(|_| ReadError::Malformed)?;
     let data = answer
@@ -83,7 +85,10 @@ pub(super) fn parse(body: &[u8]) -> Result<Vec<Model>, ReadError> {
 
 fn model(config: Config) -> Option<Model> {
     let quota = config.quota?;
-    let fraction = quota.fraction?.as_f64()?;
+    let fraction = match quota.fraction {
+        None => 0.0,
+        Some(value) => value.as_f64()?,
+    };
     if !(0.0..=1.0).contains(&fraction) {
         return None;
     }
@@ -98,17 +103,38 @@ fn model(config: Config) -> Option<Model> {
     Some(Model {
         id,
         label,
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "the fraction is within 0..=1"
-        )]
-        permille: (fraction * 1000.0).round() as u64,
+        remaining: permille(fraction),
         resets_at,
     })
 }
 
-/// What a reader remembers between readings: how long each bucket's window is.
+/// A fraction in `0..=1` in thousandths. The ends are kept for exactly the ends: a figure that only
+/// rounds to one of them is not unused or exhausted.
+fn permille(fraction: f64) -> u64 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the fraction is within 0..=1"
+    )]
+    let rounded = (fraction * 1000.0).round() as u64;
+    if fraction <= 0.0 {
+        0
+    } else if fraction >= 1.0 {
+        WHOLE
+    } else {
+        rounded.clamp(1, WHOLE - 1)
+    }
+}
+
+impl Model {
+    /// What names the model in a bucket id and in what is remembered of it.
+    fn key(&self) -> &str {
+        self.id.as_deref().or(self.label.as_deref()).unwrap_or("")
+    }
+}
+
+/// What a reader remembers between readings: how long the window of each model was when it was
+/// last seen unused, so a bucket a model splits off into still has one.
 #[derive(Debug, Default)]
 pub(super) struct Windows(BTreeMap<String, Duration>);
 
@@ -144,8 +170,7 @@ fn bucket(
     unmatched: &mut u64,
 ) -> Bucket {
     let first = members[0];
-    let name = first.id.as_deref().or(first.label.as_deref()).unwrap_or("");
-    let mut bucket = Bucket::new(alloc::format!("agy:{name}"));
+    let mut bucket = Bucket::new(alloc::format!("{BUCKET_PREFIX}{}", first.key()));
 
     let mut covered: Vec<String> = Vec::new();
     let mut all_matched = true;
@@ -166,7 +191,7 @@ fn bucket(
         bucket.models = Coverage::Only { models: covered };
     }
 
-    let remaining = members.iter().map(|m| m.permille).min().unwrap_or(0);
+    let remaining = members.iter().map(|m| m.remaining).min().unwrap_or(0);
     bucket.limit = Some(WHOLE);
     bucket.remaining = Some(remaining);
     bucket.status = if remaining == 0 {
@@ -182,11 +207,15 @@ fn bucket(
     let length = if remaining == WHOLE {
         let length = window_length(resets_at, now);
         if let Some(length) = length {
-            windows.0.insert(bucket.id.clone(), length);
+            for member in members {
+                windows.0.insert(member.key().into(), length);
+            }
         }
         length
     } else {
-        windows.0.get(&bucket.id).copied()
+        members
+            .iter()
+            .find_map(|member| windows.0.get(member.key()).copied())
     };
     bucket.refill = Refill::FixedWindow {
         length,
@@ -237,7 +266,7 @@ mod tests {
         Model {
             id: Some(id.into()),
             label: None,
-            permille,
+            remaining: permille,
             resets_at,
         }
     }
@@ -289,5 +318,94 @@ mod tests {
             ]
         );
         assert!(made.iter().all(|b| b.models == Coverage::Unknown));
+    }
+
+    /// An answer of models `(id, quotaInfo)`; a `None` fraction leaves the key out as protobuf JSON
+    /// leaves out a zero.
+    fn body(models: &[(&str, Option<f64>, i64)]) -> Vec<u8> {
+        let configs: Vec<_> = models
+            .iter()
+            .map(|(id, fraction, reset)| {
+                let mut quota = serde_json::json!({"resetTime": rfc3339(*reset)});
+                if let Some(fraction) = fraction {
+                    quota["remainingFraction"] = serde_json::json!(fraction);
+                }
+                serde_json::json!({"label": id, "modelId": id, "quotaInfo": quota})
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({"userStatus": {"cascadeModelConfigData":
+            {"clientModelConfigs": configs}}}))
+        .unwrap()
+    }
+
+    fn rfc3339(unix: i64) -> String {
+        OffsetDateTime::from_unix_timestamp(unix)
+            .unwrap()
+            .format(&Rfc3339)
+            .unwrap()
+    }
+
+    fn read(models: &[(&str, Option<f64>, i64)], now: i64, windows: &mut Windows) -> Vec<Bucket> {
+        let parsed = parse(&body(models)).unwrap();
+        buckets(&parsed, &[], now, windows, &mut 0)
+    }
+
+    const WEEK: i64 = 604_800;
+
+    #[test]
+    fn a_model_that_omits_its_fraction_is_exhausted() {
+        let made = read(&[("a", None, 5_000)], 0, &mut Windows::default());
+        assert_eq!(made[0].remaining, Some(0));
+        assert_eq!(made[0].status, Status::Exhausted);
+    }
+
+    #[test]
+    fn only_a_fraction_of_exactly_one_is_unused_and_only_zero_is_exhausted() {
+        let mut windows = Windows::default();
+        let near_empty = read(&[("a", Some(0.0004), 5_000)], 0, &mut windows);
+        assert_eq!(near_empty[0].remaining, Some(1));
+        assert_eq!(near_empty[0].status, Status::Ok);
+        let near_full = read(&[("a", Some(0.9996), 5_000)], 0, &mut windows);
+        assert_eq!(near_full[0].remaining, Some(999));
+        assert!(matches!(
+            near_full[0].refill,
+            Refill::FixedWindow {
+                resets_at: Some(5_000),
+                ..
+            }
+        ));
+        let full = read(&[("a", Some(1.0), 5_000)], 0, &mut windows);
+        assert_eq!(full[0].remaining, Some(1000));
+        let empty = read(&[("a", Some(0.0), 5_000)], 0, &mut windows);
+        assert_eq!(empty[0].status, Status::Exhausted);
+    }
+
+    #[test]
+    fn a_model_that_splits_off_a_group_keeps_the_length_the_group_had() {
+        let mut windows = Windows::default();
+        let unused = [
+            ("a", Some(1.0), WEEK),
+            ("b", Some(1.0), WEEK),
+            ("c", Some(1.0), WEEK),
+        ];
+        read(&unused, 0, &mut windows);
+        let split = read(
+            &[
+                ("a", Some(1.0), WEEK + 60),
+                ("b", Some(1.0), WEEK + 60),
+                ("c", Some(0.5), 3_000),
+            ],
+            60,
+            &mut windows,
+        );
+        let c = split.iter().find(|b| b.id == "agy:c").unwrap();
+        assert_eq!(c.label.as_deref(), Some("7 d"));
+        assert!(matches!(
+            c.refill,
+            Refill::FixedWindow {
+                length: Some(length),
+                resets_at: Some(3_000),
+            } if length.as_secs() == 604_800
+        ));
     }
 }
