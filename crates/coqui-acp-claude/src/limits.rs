@@ -7,10 +7,13 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use coqui_acp_api::usage::{
-    Bucket, Coverage, LimitHit, ModelSpend, Refill, Source, Spend, Status, Unit,
+    Bucket, Coverage, LimitHit, ModelSpend, Refill, Source, Spend, Status, Unit, infer_limit,
 };
 use coqui_acp_harness::event::Usage;
 use serde_json::Value;
+
+/// The words by which Claude Code says a quota stopped it.
+const LIMIT_PHRASES: &[&str] = &["usage limit", "limit reached", "hit your limit"];
 
 /// A Unix timestamp that may be in seconds or milliseconds, in seconds.
 pub(crate) const fn unix_seconds(value: i64) -> i64 {
@@ -47,9 +50,7 @@ pub(crate) fn limit(value: &Value) -> Option<LimitHit> {
             let text = value.get("result").and_then(Value::as_str)?;
             let lower = text.to_lowercase();
             let limited = value.get("api_error_status").and_then(Value::as_i64) == Some(429)
-                || ["usage limit", "limit reached", "hit your limit"]
-                    .iter()
-                    .any(|phrase| lower.contains(phrase));
+                || infer_limit(text, LIMIT_PHRASES).is_some();
             if !limited {
                 return None;
             }

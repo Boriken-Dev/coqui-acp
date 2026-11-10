@@ -1,0 +1,9 @@
+{
+  "_note": "Shape from docs.litellm.ai/docs/proxy/error_reference; message text paraphrased, not captured. Headers on this response: retry-after: <seconds>, rate_limit_type: requests|tokens|concurrent_requests, reset_at: <UTC timestamp>",
+  "error": {
+    "message": "Rate limit exceeded for api_key: <limit type>. Limit reset at: <time>",
+    "type": "throttling_error",
+    "param": null,
+    "code": "429"
+  }
+}

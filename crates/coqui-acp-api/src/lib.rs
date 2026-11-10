@@ -36,7 +36,7 @@ pub use spawner::{
     READ_TIMED_OUT, SpawnSpec, SpawnedProcess, SpawnedProcessVtable, SpawnerInfo, TerminalSize,
 };
 pub use usage::{
-    Bucket, Coverage, LIMIT_META_KEY, LimitHit, ModelSpend, Refill, Source, Spend, Status,
-    USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit, UsageQuery,
-    UsageReport, UsageSupport,
+    Bucket, Coverage, DEFAULT_LIMIT_PHRASES, LIMIT_META_KEY, LimitHit, ModelSpend, Refill, Source,
+    Spend, Status, USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit,
+    UsageQuery, UsageReport, UsageSupport, infer_limit,
 };

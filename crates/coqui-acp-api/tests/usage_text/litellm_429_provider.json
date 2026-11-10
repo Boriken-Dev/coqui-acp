@@ -1,0 +1,9 @@
+{
+  "_note": "Upstream provider throttle passed through; no retry-after / rate_limit_type / reset_at headers. Shape from the same page.",
+  "error": {
+    "message": "litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit reached ...",
+    "type": "throttling_error",
+    "param": null,
+    "code": "429"
+  }
+}

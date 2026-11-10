@@ -1,0 +1,11 @@
+User-reported texts (not captured here; no 429 was triggered).
+1. discuss.ai.google.dev/t/antigravity-agent-execution-termination-error-http-429-resource-exhausted/181274
+Agent execution terminated due to error.
+Trajectory ID: <trajectory-id>
+Error: HTTP 429 Too Many Requests
+TraceID: <trace-id>
+{ "error": { "code": 429, "message": "Resource has been exhausted (e.g. check quota).", "status": "RESOURCE_EXHAUSTED" } }
+
+2. agentpedia.codes/blog/antigravity-model-capacity-exhausted-fix (third-party blog, quoting users)
+RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after ...
+UNAVAILABLE (code 503): No capacity available for model ...   (capacity, not quota)
