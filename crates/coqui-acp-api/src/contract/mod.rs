@@ -28,6 +28,7 @@
 
 mod checks;
 mod host;
+mod json;
 mod transport;
 
 use alloc::borrow::ToOwned;

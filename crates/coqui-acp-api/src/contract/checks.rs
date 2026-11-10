@@ -17,7 +17,7 @@ use super::Contract;
 use super::host::{self, Conn, GRACE, PATIENCE, open, status};
 use crate::usage::{LimitHit, Refill, Status, UsageQuery, UsageReport};
 use crate::{
-    AcpHarness, Environment, ExportPage, FILES_UNDER, ImportReport, LIMIT_META_KEY, Requirement,
+    AccountGrant, AcpHarness, Environment, ExportPage, HARNESS_LOGIN, ModelsRequest, FILES_UNDER, ImportReport, LIMIT_META_KEY, Requirement,
     SessionExport, SessionImport, SessionQuery, StartRequest, USAGE_CAPABILITY, USAGE_METHOD,
     USAGE_NOTIFICATION, is_session_id,
 };
@@ -31,7 +31,7 @@ const NOT_FOUND: u32 = 10;
 
 /// A value that must never come back from a provider: put in an environment, looked for in every
 /// answer.
-const CANARY: &str = "coqui-acp-contract-canary-6b1d";
+pub(super) const CANARY: &str = "coqui-acp-contract-canary-6b1d";
 
 macro_rules! ensure {
     ($cond:expr, $($arg:tt)+) => {
@@ -178,6 +178,12 @@ fn make_link(_target: &Path, _link: &Path) -> bool {
     false
 }
 
+/// A grant of the kind every provider lists, which hands nothing over: for the checks that need an
+/// account only to name it.
+pub(super) fn grant(id: &str) -> AccountGrant {
+    AccountGrant::new(id, HARNESS_LOGIN)
+}
+
 /// A version 4 UUID no other call picks: the clock and the process, hashed with keys `RandomState`
 /// draws afresh for each half. Unique, not secret.
 pub(super) fn fresh_uuid() -> String {
@@ -291,16 +297,17 @@ fn describes_itself(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
         contract.version
     );
     harness.program().map_err(|e| e.message().to_owned())?;
+    let (_, spawner, keeper) = host::spawner();
     harness
-        .models(Secret::default())
+        .models(ModelsRequest::new(), spawner, keeper)
         .map_err(|e| e.message().to_owned())?;
     harness
         .session_record(SessionQuery::new(fresh_uuid(), "/"))
         .map_err(|e| e.message().to_owned())?;
     harness.non_defaults().map_err(|e| e.message().to_owned())?;
-    let (watch, spawner) = host::spawner();
+    let (watch, spawner, keeper) = host::spawner();
     let report = harness
-        .usage(UsageQuery::new(), spawner)
+        .usage(UsageQuery::new(), spawner, keeper)
         .map_err(|e| e.message().to_owned())?;
     ensure!(
         watch.destroyed(),
@@ -349,7 +356,7 @@ fn refused_with(harness: &dyn AcpHarness, request: StartRequest, expected: u32) 
 fn requirements(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
     let refusal = |requirements: Vec<Requirement>| {
         harness
-            .refusal(requirements, Secret::default())
+            .refusal(requirements, Secret::default(), None)
             .map_err(|e| status(&e))
     };
     let with = |requirements: &[Requirement]| {
@@ -423,13 +430,18 @@ fn keeps_secrets(harness: &dyn AcpHarness) -> Outcome {
     let unknown = vec![Requirement::new("no_such_requirement")];
     let answered = format!(
         "{:?} {:?} {:?} {:?}",
-        harness.refusal(unknown.clone(), secret()),
-        harness.models(secret()),
+        harness.refusal(unknown.clone(), secret(), None),
+        harness.models(
+            ModelsRequest::new().environment(environment.clone()),
+            host::spawner().1,
+            host::spawner().2
+        ),
         harness
             .session_record(SessionQuery::new(fresh_uuid(), "/").environment(environment.clone())),
         harness.usage(
             UsageQuery::new().environment(environment.clone()),
-            host::spawner().1
+            host::spawner().1,
+            host::spawner().2
         ),
     );
     ensure!(
@@ -561,8 +573,9 @@ fn import(
     cwd: &str,
     history: &str,
 ) -> Result<Result<ImportReport, (u32, String)>, String> {
-    let (watch, spawner) = host::spawner();
-    let answer = harness.import_session(SessionImport::new(session, cwd, history), spawner);
+    let (watch, spawner, keeper) = host::spawner();
+    let answer =
+        harness.import_session(SessionImport::new(session, cwd, history), spawner, keeper);
     ensure!(
         watch.destroyed(),
         "import_session answered with the spawner it was handed alive"
@@ -596,12 +609,12 @@ fn export_page(
     after: Option<&str>,
     max_bytes: u64,
 ) -> Result<Result<ExportPage, (u32, String)>, String> {
-    let (watch, spawner) = host::spawner();
+    let (watch, spawner, keeper) = host::spawner();
     let mut asked = SessionExport::new(session, cwd).max_bytes(max_bytes);
     if let Some(after) = after {
         asked = asked.after(after);
     }
-    let answer = harness.export_session(asked, spawner);
+    let answer = harness.export_session(asked, spawner, keeper);
     ensure!(
         watch.destroyed(),
         "export_session answered with the spawner it was handed alive"
@@ -1130,7 +1143,7 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         json!({"_meta": {USAGE_CAPABILITY: {"notify": true, "account": "from-the-client"}}});
     if !info.usage.reports() {
         // Nothing advertised, `-32601`, and the scripted prompts are plain text.
-        let mut conn = open(harness, StartRequest::builder().account("acct-1").build())?;
+        let mut conn = open(harness, StartRequest::builder().account(grant("acct-1")).build())?;
         conn.send(&initialize(0, contract.version, optin))?;
         let answer = conn.answer(0)?;
         ensure!(
@@ -1161,7 +1174,10 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
 
     // A harness that reports: the capability agrees with `describe`.
     let account = "acct-1";
-    let mut conn = open(harness, StartRequest::builder().account(account).build())?;
+    let mut conn = open(
+        harness,
+        StartRequest::builder().account(grant(account)).build(),
+    )?;
     conn.send(&initialize(
         0,
         contract.version,
@@ -1322,18 +1338,18 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
 
     // The kind answers what the connection last reported for the account, and an empty report for
     // one it never saw.
-    let (watch, spawner) = host::spawner();
+    let (watch, spawner, keeper) = host::spawner();
     let kind = harness
-        .usage(UsageQuery::new().account(account), spawner)
+        .usage(UsageQuery::new().account(grant(account)), spawner, keeper)
         .map_err(|e| e.message().to_owned())?;
     ensure!(watch.destroyed(), "usage kept the spawner it was handed");
     ensure!(
         kind == limited,
         "the kind answers {kind:?}, the connection's last report was {limited:?}"
     );
-    let (_, spawner) = host::spawner();
+    let (_, spawner, keeper) = host::spawner();
     let unseen = harness
-        .usage(UsageQuery::new().account("nobody"), spawner)
+        .usage(UsageQuery::new().account(grant("nobody")), spawner, keeper)
         .map_err(|e| e.message().to_owned())?;
     ensure!(
         unseen.supported

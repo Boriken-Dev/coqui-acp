@@ -31,6 +31,35 @@ pub trait ProcessSpawner: Send + Sync {
     /// what [`describe`](Self::describe) says it cannot give, `GUATIAO_ERR_NOT_FOUND` a program
     /// that is not there, `GUATIAO_ERR_BAD_VALUE` a spec it cannot read.
     fn spawn(&self, spec: SpawnSpec) -> Result<Object<dyn SpawnedProcess>, ProviderError>;
+
+    /// Writes `bytes` to the file `path` in the private directory the host granted this spawner (an
+    /// account's `state_dir`, or a login's), making directories on the way and replacing a file
+    /// there; `private` makes it readable by its owner alone where the system has such a notion.
+    ///
+    /// **The host resolves every path** against that directory and never trusts the provider's:
+    /// `path` is relative, and an absolute path, a `..` part, or a link leading out of the directory
+    /// is `GUATIAO_ERR_NOT_FOUND`, as is any call on a spawner with no such directory. A spawner
+    /// that cannot give files says `files` false in [`describe`](Self::describe) and refuses all four
+    /// file methods `GUATIAO_ERR_UNSUPPORTED`.
+    fn write_file(
+        &self,
+        path: &str,
+        bytes: Secret<Vec<u8>>,
+        private: bool,
+    ) -> Result<(), ProviderError>;
+
+    /// The content of the file `path`, whole. `GUATIAO_ERR_NOT_FOUND` for a file that is not there
+    /// or a path [`write_file`](Self::write_file) refuses; `GUATIAO_ERR_BAD_VALUE` for one longer
+    /// than `max_bytes`.
+    fn read_file(&self, path: &str, max_bytes: u64) -> Result<Secret<Vec<u8>>, ProviderError>;
+
+    /// How long the file `path` is and when it last changed; `None` when it is not there.
+    /// `GUATIAO_ERR_NOT_FOUND` for a path [`write_file`](Self::write_file) refuses.
+    fn file_info(&self, path: &str) -> Result<Option<FileInfo>, ProviderError>;
+
+    /// Removes the file `path`; removing a file that is not there is no error.
+    /// `GUATIAO_ERR_NOT_FOUND` for a path [`write_file`](Self::write_file) refuses.
+    fn remove_file(&self, path: &str) -> Result<(), ProviderError>;
 }
 
 /// One program a spawner started, and everything it starts in turn.
@@ -100,6 +129,29 @@ pub struct SpawnerInfo {
     /// least); when not, it outlives the host.
     #[map(default)]
     pub ends_with_host: bool,
+    /// Whether it serves the file methods in a private directory. A transport without files says
+    /// `false`, and a provider whose account kind needs a directory refuses that kind.
+    #[map(default)]
+    pub files: bool,
+}
+
+/// How long a file is and when it last changed, from [`ProcessSpawner::file_info`].
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct FileInfo {
+    /// Its length in bytes.
+    pub len: u64,
+    /// When it last changed, in milliseconds since the Unix epoch.
+    pub modified_ms: i64,
+}
+
+impl FileInfo {
+    /// A file of `len` bytes last changed at `modified_ms`.
+    #[must_use]
+    pub const fn new(len: u64, modified_ms: i64) -> Self {
+        Self { len, modified_ms }
+    }
 }
 
 impl SpawnerInfo {
@@ -116,6 +168,7 @@ impl SpawnerInfo {
             survives_link_loss: false,
             kills_escaped: false,
             ends_with_host: false,
+            files: false,
         }
     }
 }
