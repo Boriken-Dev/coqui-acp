@@ -1686,10 +1686,11 @@ fn notional(catalog: &AccountCatalog, grant: &AccountGrant) -> SpawnSpec {
         spec.remove_environment
             .clone_from(&catalog.credential_variables);
         let mut environment = Environment::new();
-        if grant.kind == KEY_KIND {
-            if let Some(key) = grant.credentials.expose().get("api_key") {
-                environment.insert(VARIABLES[0], key);
-            }
+        if let (KEY_KIND, Some(key)) = (
+            grant.kind.as_str(),
+            grant.credentials.expose().get("api_key"),
+        ) {
+            environment.insert(VARIABLES[0], key);
         }
         spec = spec.environment(environment);
     }
