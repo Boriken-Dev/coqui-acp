@@ -11,13 +11,14 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
-use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status};
+use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
     Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter, LoginRequest,
     ModelInfo, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport, RenewRequest,
     Requirement, SessionExport, SessionImport, StartRequest, UsageQuery, UsageReport,
 };
+use coqui_acp_harness::Mode;
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Reports, Serving, account_refusal, shared, takes_of};
 use coqui_acp_harness::{Settings, ThroughSpawner};
@@ -26,7 +27,7 @@ use crate::accounts;
 use crate::{CodexAgent, CodexLaunch, CodexSession, CodexSettings};
 
 /// How the Codex provider is configured.
-#[derive(FromValue, Schema, Debug, Clone)]
+#[derive(ToValue, FromValue, Schema, Debug, Clone)]
 #[map(crate = ::coqui_acp_api::guatiao)]
 pub struct ProviderSettings {
     /// The Codex program: a path, or a name looked up on the `PATH` where the spawner runs it.
@@ -45,6 +46,10 @@ pub struct ProviderSettings {
     /// Whether the Bypass mode may be chosen: never ask, no sandbox.
     #[map(default = false)]
     pub allow_bypass: bool,
+    /// The modes a client may choose, written by id (`manual`, `accept_edits`, `auto`, `plan`, `bypass`): these widen what
+    /// the approval policy and sandbox amount to and every stricter mode. Bypass is offered only with `allow_bypass`,
+    /// whatever this names. Absent, a client chooses that mode and every stricter one.
+    pub modes: Option<Vec<Mode>>,
     /// The highest ACP version `initialize` answers: 1 or 2.
     #[map(default = 2)]
     pub max_acp_version: u64,
@@ -72,6 +77,7 @@ impl Default for ProviderSettings {
             approval_policy: None,
             sandbox: None,
             allow_bypass: false,
+            modes: None,
             max_acp_version: 2,
             max_sessions: 8,
             max_requests: 32,
@@ -139,6 +145,7 @@ impl CodexProvider {
             .clone_from(&self.settings.approval_policy);
         launch.sandbox.clone_from(&self.settings.sandbox);
         launch.allow_bypass = self.settings.allow_bypass;
+        launch.modes.clone_from(&self.settings.modes);
         for (name, value) in environment.iter() {
             launch.env.insert(name.into(), value.into());
         }

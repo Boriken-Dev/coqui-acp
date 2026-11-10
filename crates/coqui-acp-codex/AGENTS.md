@@ -165,11 +165,12 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 ```rust
 #[derive(Provider)] pub struct CodexProvider;                        // an `acp_harness` provider; Debug
 pub fn CodexProvider::new(settings: ProviderSettings) -> CodexProvider    // also From<ProviderSettings>
-pub struct ProviderSettings {                                        // FromValue, Schema, Default; every field defaults
+pub struct ProviderSettings {                                        // ToValue, FromValue, Schema, Default; every field defaults
     pub executable: String,              // "codex": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>,
     pub approval_policy: Option<String>, pub sandbox: Option<String>,
     pub allow_bypass: bool,              // false
+    pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen what approval_policy and sandbox amount to and every stricter mode (Bypass still needs allow_bypass, and is left out without it)
     pub max_acp_version: u64,            // 2 (1 or 2)
     pub max_sessions: u64,               // 8
     pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused

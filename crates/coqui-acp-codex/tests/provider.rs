@@ -10,14 +10,16 @@ use std::process::Command;
 
 use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
-use coqui_acp_api::guatiao::{Map, Status, Value};
+use coqui_acp_api::guatiao::{FromValue, Map, Status, ToValue, Value};
 use coqui_acp_api::{
     AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ModelsRequest, ProcessSpawner,
     READ_ONLY, Requirement, UsageQuery,
 };
 use coqui_acp_api::{ChannelSink, LoginPrompter};
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
-use coqui_acp_harness::LocalSpawner;
+use coqui_acp_harness::{LocalSpawner, Mode};
+use guatiao_serde::Presentation;
+use guatiao_serde::text::json;
 
 fn profile() -> PathBuf {
     let tests = std::env::current_exe().expect("the test knows where it is");
@@ -269,6 +271,139 @@ fn it_lists_models_and_reads_usage_through_the_spawner_it_is_given() {
             )
             .expect("answered");
         assert!(report.supported && !report.buckets.is_empty(), "{report:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+struct Frames(std::sync::mpsc::Sender<serde_json::Value>);
+
+impl ChannelSink for Frames {
+    fn receive(&mut self, bytes: &[u8]) -> Result<(), ProviderError> {
+        let _ = self.0.send(serde_json::from_slice(bytes).expect("JSON"));
+        Ok(())
+    }
+
+    fn closed(&mut self, _status: u32, _reason: &str) {}
+}
+
+fn settings_from(text: &str) -> Result<ProviderSettings, guatiao_serde::Error> {
+    json::from_str_as::<ProviderSettings>(text, Presentation::new())
+}
+
+/// The ids of the `mode` option of a session opened on a provider with `settings`, over a connection in `dir`.
+fn modes_offered(settings: ProviderSettings, dir: &Path) -> Vec<String> {
+    let (sender, received) = std::sync::mpsc::channel();
+    let request = coqui_acp_api::StartRequest::builder()
+        .environment(
+            [("CODEX_HOME", dir.to_string_lossy().into_owned())]
+                .into_iter()
+                .collect::<coqui_acp_api::Environment>(),
+        )
+        .build();
+    let channel = CodexProvider::new(settings)
+        .start(
+            request,
+            spawner(),
+            Frames(sender).into_object(),
+            Keeper.into_object(),
+        )
+        .expect("it starts");
+    let ask = |id: u64, method: &str, params: serde_json::Value| {
+        let message =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        channel.send(message.to_string().as_bytes()).expect("taken");
+        loop {
+            let answer = received
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("an answer");
+            if answer["id"] == id && answer.get("method").is_none() {
+                return answer;
+            }
+        }
+    };
+    ask(1, "initialize", serde_json::json!({"protocolVersion": 1}));
+    let opened = ask(
+        2,
+        "session/new",
+        serde_json::json!({"cwd": dir.to_string_lossy(), "mcpServers": []}),
+    );
+    channel.close(0, "");
+    opened["result"]["configOptions"]
+        .as_array()
+        .and_then(|options| options.iter().find(|option| option["id"] == "mode"))
+        .and_then(|option| option["options"].as_array())
+        .expect("a session shows its modes")
+        .iter()
+        .map(|value| value["value"].as_str().expect("an id").to_string())
+        .collect()
+}
+
+#[test]
+fn modes_are_written_as_a_snake_case_list_and_round_trip() {
+    let settings = settings_from(r#"{"modes": ["plan", "accept_edits", "bypass"]}"#).expect("read");
+    assert_eq!(
+        settings.modes,
+        Some(vec![Mode::Plan, Mode::AcceptEdits, Mode::Bypass])
+    );
+    let written = settings.to_value().expect("written");
+    let again = ProviderSettings::from_value(&written).expect("read again");
+    assert_eq!(again.to_value().expect("written"), written);
+    assert_eq!(again.modes, settings.modes);
+    assert!(settings_from("{}").expect("read").modes.is_none());
+    assert_eq!(
+        settings_from(r#"{"modes": []}"#).expect("read").modes,
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn a_mode_it_does_not_know_is_refused() {
+    for text in [
+        r#"{"modes": ["yolo"]}"#,
+        r#"{"modes": ["acceptEdits"]}"#,
+        r#"{"modes": "plan"}"#,
+    ] {
+        assert!(settings_from(text).is_err(), "{text} was taken");
+    }
+}
+
+#[test]
+fn the_modes_it_names_widen_what_a_client_may_choose_and_bypass_needs_its_switch() {
+    for (allow_bypass, expected) in [
+        (false, vec!["manual", "accept_edits", "auto", "plan"]),
+        (
+            true,
+            vec!["manual", "accept_edits", "auto", "plan", "bypass"],
+        ),
+    ] {
+        let dir = scratch("modes");
+        let offered = modes_offered(
+            ProviderSettings {
+                executable: fake(),
+                approval_policy: Some("on-request".into()),
+                sandbox: Some("workspace-write".into()),
+                allow_bypass,
+                modes: Some(vec![Mode::Auto, Mode::Bypass]),
+                ..ProviderSettings::default()
+            },
+            &dir,
+        );
+        assert_eq!(offered, expected, "allow_bypass {allow_bypass}");
+        let narrow = modes_offered(
+            ProviderSettings {
+                executable: fake(),
+                approval_policy: Some("on-request".into()),
+                sandbox: Some("workspace-write".into()),
+                allow_bypass,
+                ..ProviderSettings::default()
+            },
+            &dir,
+        );
+        let mut base: Vec<&str> = vec!["manual", "accept_edits", "plan"];
+        if allow_bypass {
+            base.push("bypass");
+        }
+        assert_eq!(narrow, base, "allow_bypass {allow_bypass}, no modes");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

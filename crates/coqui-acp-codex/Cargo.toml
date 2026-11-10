@@ -33,6 +33,7 @@ coqui-acp = { path = "../coqui-acp" }
 # The contract suite and `acp-harness-check`, which hold the provider to the kind.
 coqui-acp-api = { path = "../coqui-acp-api", features = ["contract"] }
 guatiao = { workspace = true, features = ["provider", "load"] }
+guatiao-serde = { workspace = true, features = ["json"] }
 uuid.workspace = true
 
 # A real library the tests load: `cargo test` builds it into target/<profile>/examples.
