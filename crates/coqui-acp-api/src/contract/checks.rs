@@ -1188,7 +1188,8 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
     ensure!(
         sources == described
             && advertised["spend"] == json!(info.usage.spend)
-            && advertised["needs_turn"].as_bool().unwrap_or(false) == info.usage.needs_turn,
+            && advertised["needs_turn"].as_bool().unwrap_or(false) == info.usage.needs_turn
+            && advertised["needs_session"].as_bool().unwrap_or(false) == info.usage.needs_session,
         "initialize advertises {advertised}, describe says {:?}",
         info.usage
     );

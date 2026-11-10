@@ -425,6 +425,11 @@
             "type": "boolean",
             "description": "Whether it learns its usage only during a turn. Then a read with no turn answers what the connection last saw, and a host keeps a timed retry instead of polling for fresh figures. `false` means [`USAGE_METHOD`] re-reads the account each time, so a host may poll it.",
             "default": false
+          },
+          "needs_session": {
+            "type": "boolean",
+            "description": "Whether it learns its usage only once a session is open, though no turn is needed (an agent that serves its figures from the process a session starts). With none open, a read answers what the connection last saw, and nothing is started for it.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -432,7 +437,8 @@
         "default": {
           "sources": [],
           "spend": false,
-          "needs_turn": false
+          "needs_turn": false,
+          "needs_session": false
         }
       }
     },
@@ -2017,6 +2023,11 @@
       "needs_turn": {
         "type": "boolean",
         "description": "Whether it learns its usage only during a turn. Then a read with no turn answers what the connection last saw, and a host keeps a timed retry instead of polling for fresh figures. `false` means [`USAGE_METHOD`] re-reads the account each time, so a host may poll it.",
+        "default": false
+      },
+      "needs_session": {
+        "type": "boolean",
+        "description": "Whether it learns its usage only once a session is open, though no turn is needed (an agent that serves its figures from the process a session starts). With none open, a read answers what the connection last saw, and nothing is started for it.",
         "default": false
       }
     },

@@ -23,6 +23,7 @@ mod shape;
 mod usage;
 
 pub use connection::serve;
+pub use usage::UsageTracker;
 
 /// `path` when it is absolute by this platform's rules: a drive or UNC path on Windows, `/…` elsewhere. `what` names it
 /// in the refusal.

@@ -18,18 +18,23 @@ pub(crate) fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// The report of a connection, and what a client asked of it.
+/// The report of one account as a connection or a host sees it: its buckets, the limit last hit and
+/// each session's spend, with the rules that merge what a reader reports. A bucket replaces the earlier
+/// of its id and keeps what it leaves unknown; a change bumps the revision and a repeat moves only
+/// `observed_at`; a limit exhausts the bucket it names until its reset passes or a later reading shows
+/// room.
 #[derive(Debug)]
-pub(crate) struct Tracker {
+pub struct UsageTracker {
     support: UsageSupport,
-    /// Whether the client asked for `_coqui_acp/usage_update`.
-    pub(crate) notify: bool,
+    notify: bool,
     report: UsageReport,
     spends: BTreeMap<String, Spend>,
 }
 
-impl Tracker {
-    pub(crate) fn new(support: UsageSupport, account: Option<String>) -> Self {
+impl UsageTracker {
+    /// A report of what `support` says is reported, for `account` when one is known.
+    #[must_use]
+    pub fn new(support: UsageSupport, account: Option<String>) -> Self {
         let mut report = UsageReport::new();
         report.sources.clone_from(&support.sources);
         report.account = account;
@@ -42,12 +47,19 @@ impl Tracker {
     }
 
     /// Whether the harness reports usage at all.
-    pub(crate) fn reports(&self) -> bool {
+    #[must_use]
+    pub fn reports(&self) -> bool {
         self.support.reports()
     }
 
+    /// Whether the client asked for `_coqui_acp/usage_update`.
+    #[must_use]
+    pub const fn notifies(&self) -> bool {
+        self.notify
+    }
+
     /// What the client said at `initialize`. A host's own account, set in the settings, stays.
-    pub(crate) fn client(&mut self, notify: bool, account: Option<String>) {
+    pub fn client(&mut self, notify: bool, account: Option<String>) {
         self.notify = notify;
         if self.report.account.is_none() {
             self.report.account = account;
@@ -56,7 +68,8 @@ impl Tracker {
 
     /// The report as of `now`, for `session` when one is named: with that session's spend, and
     /// without a limit whose reset has passed.
-    pub(crate) fn snapshot(&self, session: Option<&str>, now: i64) -> UsageReport {
+    #[must_use]
+    pub fn snapshot(&self, session: Option<&str>, now: i64) -> UsageReport {
         let mut report = self.report.clone();
         if report
             .limit
@@ -73,7 +86,7 @@ impl Tracker {
 
     /// Takes the buckets a harness reported: one replaces the earlier of its id, keeping what the
     /// new one leaves unknown. Answers whether the report changed, other than in when it was read.
-    pub(crate) fn buckets(&mut self, incoming: Vec<Bucket>, now: i64) -> bool {
+    pub fn buckets(&mut self, incoming: Vec<Bucket>, now: i64) -> bool {
         let mut changed = false;
         for mut bucket in incoming {
             if bucket.observed_at == 0 {
@@ -109,7 +122,7 @@ impl Tracker {
     }
 
     /// Takes a session's spend, as running totals.
-    pub(crate) fn spend(&mut self, session: &str, mut spend: Spend) -> bool {
+    pub fn spend(&mut self, session: &str, mut spend: Spend) -> bool {
         if !self.support.spend {
             return false;
         }
@@ -122,7 +135,7 @@ impl Tracker {
     }
 
     /// Takes a refusal: it is the report's limit, and the bucket it names is exhausted.
-    pub(crate) fn limit(&mut self, mut hit: LimitHit, now: i64) -> bool {
+    pub fn limit(&mut self, mut hit: LimitHit, now: i64) -> bool {
         stamp(&mut hit, now);
         if self.report.limit.as_ref() == Some(&hit) {
             return false;
@@ -239,7 +252,7 @@ mod tests {
 
     #[test]
     fn a_change_bumps_the_revision_and_a_repeat_does_not() {
-        let mut tracker = Tracker::new(support(), None);
+        let mut tracker = UsageTracker::new(support(), None);
         assert!(tracker.buckets(alloc::vec![five_hour(620)], 100));
         assert_eq!(tracker.snapshot(None, 100).revision, 1);
         let mut again = five_hour(620);
@@ -253,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_sparse_update_keeps_the_fields_it_lacks() {
-        let mut tracker = Tracker::new(support(), None);
+        let mut tracker = UsageTracker::new(support(), None);
         tracker.buckets(alloc::vec![five_hour(620)], 100);
         let mut sparse = Bucket::new("five_hour");
         sparse.used = Some(640);
@@ -275,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_limit_exhausts_its_bucket_until_room_or_its_reset() {
-        let mut tracker = Tracker::new(support(), Some("a".into()));
+        let mut tracker = UsageTracker::new(support(), Some("a".into()));
         tracker.buckets(alloc::vec![five_hour(620)], 100);
         let mut hit = LimitHit::new(200);
         hit.bucket = Some("five_hour".into());
@@ -298,7 +311,7 @@ mod tests {
 
     #[test]
     fn spend_is_kept_per_session_and_only_for_a_harness_that_reports_it() {
-        let mut tracker = Tracker::new(support(), None);
+        let mut tracker = UsageTracker::new(support(), None);
         let mut spend = Spend::new("");
         spend.input = 5;
         assert!(tracker.spend("s1", spend.clone()));
@@ -312,7 +325,7 @@ mod tests {
         );
         assert!(tracker.snapshot(Some("s2"), 0).spend.is_none());
         assert!(tracker.snapshot(None, 0).spend.is_none());
-        let mut bare = Tracker::new(
+        let mut bare = UsageTracker::new(
             UsageSupport::new(alloc::vec![Source::Reported], false),
             None,
         );

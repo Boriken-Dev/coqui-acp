@@ -544,3 +544,25 @@ fn a_session_is_read_once_it_has_opened_and_not_while_opening() {
         .collect();
     assert!(used.contains(&json!(250)), "{told:?}");
 }
+
+#[test]
+fn a_harness_that_needs_a_session_says_so_and_is_read_only_with_one_open() {
+    let harness = Reports::new(reporting().needs_session(true));
+    *harness.readings.harness.lock().unwrap() = Some(vec![five_hour(1)]);
+    *harness.readings.session.lock().unwrap() = Some(vec![five_hour(450)]);
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    let initialized = opted_in(&mut wire, 1, false);
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["dev.boriken.coqui.acp/usage"],
+        json!({"version": 1, "sources": ["reported"], "spend": true, "needs_session": true}),
+        "{initialized}"
+    );
+    assert!(
+        wire.report(None).buckets.is_empty(),
+        "nothing is started for a read"
+    );
+    assert_eq!(harness.readings.harness_reads.load(Ordering::SeqCst), 0);
+    let s = session(&mut wire);
+    assert_eq!(wire.report(Some(&s)).buckets[0].used, Some(450));
+    assert_eq!(harness.readings.harness_reads.load(Ordering::SeqCst), 0);
+}

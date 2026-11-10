@@ -17,7 +17,7 @@ pub mod version;
 
 pub use acp::{
     AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, McpServer,
-    McpTransport, Open, OpenRequest, OptionValue, Settings, Takes, serve,
+    McpTransport, Open, OpenRequest, OptionValue, Settings, Takes, UsageTracker, serve,
 };
 pub use event::{Event, Outcome, PermissionRequest, Responder};
 pub use mode::Mode;

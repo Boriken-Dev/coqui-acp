@@ -19,7 +19,7 @@ use coqui_acp_api::{USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VE
 use serde_json::{Value, json};
 
 use super::session::{Item, Session};
-use super::usage::{Tracker, now};
+use super::usage::{UsageTracker, now};
 use super::{EventSink, Harness, HarnessError, Open, OpenRequest, Settings, parse, shape};
 use crate::lines::{self, Line};
 
@@ -44,7 +44,7 @@ pub fn serve(
     input: impl Read,
     output: impl Write + Send + 'static,
 ) -> io::Result<()> {
-    let usage = Tracker::new(harness.usage(), settings.account.clone());
+    let usage = UsageTracker::new(harness.usage(), settings.account.clone());
     let shared = Arc::new(Shared {
         harness,
         settings,
@@ -109,7 +109,7 @@ pub(crate) struct Shared {
     pub(crate) settings: Settings,
     out: Mutex<Box<dyn Write + Send>>,
     version: Mutex<Option<u8>>,
-    usage: Mutex<Tracker>,
+    usage: Mutex<UsageTracker>,
     sessions: Mutex<Sessions>,
     pending: Mutex<Pending>,
     next_id: AtomicU64,
@@ -316,6 +316,9 @@ impl Shared {
             if support.needs_turn {
                 capability["needs_turn"] = json!(true);
             }
+            if support.needs_session {
+                capability["needs_session"] = json!(true);
+            }
             capability
         })
     }
@@ -325,7 +328,7 @@ impl Shared {
     pub(crate) fn usage_changed(
         &self,
         session: Option<&str>,
-        change: impl FnOnce(&mut Tracker, i64) -> bool,
+        change: impl FnOnce(&mut UsageTracker, i64) -> bool,
     ) {
         let at = now();
         let told = {
@@ -333,7 +336,7 @@ impl Shared {
             if !usage.reports() || !change(&mut usage, at) {
                 return;
             }
-            usage.notify.then(|| usage.snapshot(session, at))
+            usage.notifies().then(|| usage.snapshot(session, at))
         };
         if let Some(report) = told
             && let Ok(report) = serde_json::to_value(&report)
@@ -364,7 +367,8 @@ impl Shared {
     /// Re-reads the account's usage from the harness before an answer, when the harness can without
     /// a turn: from an open session's running harness, else with none open.
     fn refresh_usage(&self) {
-        if self.harness.usage().needs_turn {
+        let support = self.harness.usage();
+        if support.needs_turn {
             return;
         }
         // One session is asked, so a read that times out costs one wait, not one for each open session.
@@ -376,6 +380,8 @@ impl Shared {
             .find_map(|session| session.conversation());
         let read = match asked {
             Some(conversation) => conversation.read_usage(),
+            // Nothing is started for a harness whose figures come from a session's process.
+            None if support.needs_session => None,
             None => self.harness.read_usage(),
         };
         if let Some(buckets) = read {

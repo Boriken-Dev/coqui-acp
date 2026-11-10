@@ -21,7 +21,8 @@ use crate::environment::Environment;
 
 /// The key of `agentCapabilities._meta` (`capabilities._meta` in ACP version 2) in which an agent
 /// that reports usage says so: `{"version": 1, "sources": ["reported", "inferred"], "spend": true}`,
-/// with `"needs_turn": true` added by an agent that learns its usage only during a turn.
+/// with `"needs_turn": true` added by an agent that learns its usage only during a turn, and
+/// `"needs_session": true` by one that learns it once a session is open, with no turn.
 /// Absent means the agent reports none, and a client does not call [`USAGE_METHOD`].
 pub const USAGE_CAPABILITY: &str = "dev.boriken.coqui.acp/usage";
 
@@ -592,6 +593,12 @@ pub struct UsageSupport {
     #[map(default)]
     #[serde(default)]
     pub needs_turn: bool,
+    /// Whether it learns its usage only once a session is open, though no turn is needed (an agent
+    /// that serves its figures from the process a session starts). With none open, a read answers
+    /// what the connection last saw, and nothing is started for it.
+    #[map(default)]
+    #[serde(default)]
+    pub needs_session: bool,
 }
 
 impl UsageSupport {
@@ -602,6 +609,7 @@ impl UsageSupport {
             sources: Vec::new(),
             spend: false,
             needs_turn: false,
+            needs_session: false,
         }
     }
 
@@ -612,6 +620,7 @@ impl UsageSupport {
             sources,
             spend,
             needs_turn: false,
+            needs_session: false,
         }
     }
 
@@ -619,6 +628,13 @@ impl UsageSupport {
     #[must_use]
     pub const fn needs_turn(mut self, needs: bool) -> Self {
         self.needs_turn = needs;
+        self
+    }
+
+    /// Says whether it learns its usage only once a session is open.
+    #[must_use]
+    pub const fn needs_session(mut self, needs: bool) -> Self {
+        self.needs_session = needs;
         self
     }
 

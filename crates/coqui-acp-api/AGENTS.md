@@ -185,7 +185,7 @@ ImportReport::new()
 #[non_exhaustive] pub struct NonDefault { pub setting: String, pub value: String, pub default: String }   NonDefault::new(setting, value, default)
 ```
 
-`usage`: what the harness can report (`UsageSupport { sources, spend, needs_turn }`; empty `sources` is none), which `initialize` agrees with: a harness that reports any advertises the usage capability, one that reports none does not. `needs_turn` is true for a harness that learns its usage only during a turn (Claude Code): `_coqui_acp/usage` then answers what the connection last saw, a host keeps a timed retry instead of polling, and the capability carries `"needs_turn": true` (absent means false). False means a read re-reads the account, so a host may poll it (Codex).
+`usage`: what the harness can report (`UsageSupport { sources, spend, needs_turn }`; empty `sources` is none), which `initialize` agrees with: a harness that reports any advertises the usage capability, one that reports none does not. `needs_turn` is true for a harness that learns its usage only during a turn (Claude Code): `_coqui_acp/usage` then answers what the connection last saw, a host keeps a timed retry instead of polling, and the capability carries `"needs_turn": true` (absent means false). False means a read re-reads the account, so a host may poll it (Codex). `needs_session` is true for a harness whose figures come from the process a session starts and need no turn (Antigravity): with a session open a read re-reads, with none it answers what the connection last saw and starts nothing, and the capability carries `"needs_session": true` (absent means false).
 
 `resumes_wider`: a session held to requirements can be reopened (`session/load` or `session/resume`) on a later connection started with fewer, and then has what that connection allows. A host that changes what a session may do starts a new connection with the new requirements and reopens the session there.
 
@@ -259,7 +259,7 @@ Bucket::new(id);  bucket.resets_in(now: i64) -> Option<Duration>
     pub cache_write: u64, pub reasoning: Option<u64>, pub cost_micro_usd: Option<u64>, pub by_model: Vec<ModelSpend> }   // Spend::new(session_id)
 #[non_exhaustive] pub struct ModelSpend { pub model: String, pub input: u64, pub output: u64, pub cache_read: u64,
     pub cache_write: u64, pub cost_micro_usd: Option<u64> }                                      // ModelSpend::new(model)
-#[non_exhaustive] pub struct UsageSupport { pub sources: Vec<Source>, pub spend: bool, pub needs_turn: bool }   // none(); new(sources, spend); .needs_turn(bool); reports()
+#[non_exhaustive] pub struct UsageSupport { pub sources: Vec<Source>, pub spend: bool, pub needs_turn: bool, pub needs_session: bool }   // none(); new(sources, spend); .needs_turn(bool); .needs_session(bool); reports()
 #[non_exhaustive] pub struct UsageQuery { pub environment: Secret<Environment>, pub account: Option<String> }   // new(); .environment(env); .account(id)
 pub const USAGE_CAPABILITY: &str = "dev.boriken.coqui.acp/usage";   pub const USAGE_METHOD: &str = "_coqui_acp/usage";
 pub const USAGE_NOTIFICATION: &str = "_coqui_acp/usage_update";     pub const LIMIT_META_KEY: &str = "dev.boriken.coqui.acp/limit";

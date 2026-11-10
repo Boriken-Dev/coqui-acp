@@ -300,7 +300,11 @@ fn every_models_keys_are_pinned() {
             ],
             &["cache_read", "cache_write", "input", "model", "output"],
         ),
-        ("UsageSupport", &["needs_turn", "sources", "spend"], &[]),
+        (
+            "UsageSupport",
+            &["needs_session", "needs_turn", "sources", "spend"],
+            &[],
+        ),
     ];
     let schemas = schemas();
     for (name, keys, required) in pinned {
