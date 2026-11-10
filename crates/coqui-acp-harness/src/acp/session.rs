@@ -206,7 +206,7 @@ impl Session {
             }
             Event::TurnEnd(end) => {
                 self.finish(shared, end);
-                self.read_usage_after_turn(shared);
+                self.read_usage_in_background(shared);
             }
             Event::Exited(reason) => {
                 self.state().gone = Some(reason.clone());
@@ -450,9 +450,10 @@ impl Session {
         }
     }
 
-    /// A harness that can be read with no turn is read once a turn has ended, off the thread that
-    /// delivers its events: what a turn used shows in its buckets without a host's poll.
-    fn read_usage_after_turn(&self, shared: &Arc<Shared>) {
+    /// A harness that can be read with no turn is read once its session has opened and once each turn has
+    /// ended, off the thread that delivers its events and off the request that opened it: where the account
+    /// stands shows without a host's poll, and a slow read holds nothing up.
+    pub(crate) fn read_usage_in_background(&self, shared: &Arc<Shared>) {
         let support = shared.usage_support();
         if !support.reports() || support.needs_turn {
             return;
@@ -469,7 +470,7 @@ impl Session {
                 }
             });
         if let Err(error) = spawned {
-            shared.note(&format!("usage could not be read after a turn: {error}"));
+            shared.note(&format!("usage could not be read: {error}"));
         }
     }
 

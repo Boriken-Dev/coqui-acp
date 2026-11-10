@@ -367,22 +367,17 @@ impl Shared {
         if self.harness.usage().needs_turn {
             return;
         }
-        let open: Vec<_> = self
+        // One session is asked, so a read that times out costs one wait, not one for each open session.
+        let asked = self
             .sessions()
             .open
             .values()
-            .filter_map(|session| session.conversation())
-            .collect();
-        let read = open
-            .iter()
-            .find_map(|conversation| conversation.read_usage())
-            .or_else(|| {
-                if open.is_empty() {
-                    self.harness.read_usage()
-                } else {
-                    None
-                }
-            });
+            .rev()
+            .find_map(|session| session.conversation());
+        let read = match asked {
+            Some(conversation) => conversation.read_usage(),
+            None => self.harness.read_usage(),
+        };
         if let Some(buckets) = read {
             self.usage_changed(None, |usage, at| usage.buckets(buckets, at));
         }
@@ -761,5 +756,6 @@ impl Shared {
             self.respond(id, result);
             let _ = sender.send(Item::Release);
         }
+        session.read_usage_in_background(self);
     }
 }

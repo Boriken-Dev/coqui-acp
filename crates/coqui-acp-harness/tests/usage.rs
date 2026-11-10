@@ -486,7 +486,7 @@ fn a_turns_end_reads_the_harness_so_a_client_is_told_without_polling() {
 }
 
 #[test]
-fn a_hit_with_a_reset_and_no_wait_is_given_the_wait_to_that_reset() {
+fn a_hit_with_a_reset_and_no_wait_is_left_with_no_wait() {
     let harness = Reports::new(reporting());
     let mut wire = Wire::serve(harness.clone(), Settings::new());
     opted_in(&mut wire, 1, false);
@@ -503,10 +503,44 @@ fn a_hit_with_a_reset_and_no_wait_is_given_the_wait_to_that_reset() {
     let told: LimitHit =
         serde_json::from_value(ended["result"]["_meta"]["dev.boriken.coqui.acp/limit"].clone())
             .unwrap();
-    let wait = told.retry_after.expect("a wait was given");
+    assert_eq!(told.resets_at, Some(4_000_000_000));
     assert_eq!(
-        i64::try_from(wait.as_secs()).unwrap(),
-        4_000_000_000 - told.observed_at
+        told.retry_after, None,
+        "only a harness that said a wait gives one"
     );
-    assert_eq!(wire.report(None).limit.unwrap().retry_after, Some(wait));
+    assert_eq!(wire.report(None).limit.unwrap().retry_after, None);
+}
+
+#[test]
+fn only_one_open_session_is_asked_for_a_read() {
+    let harness = Reports::new(reporting());
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    opted_in(&mut wire, 1, false);
+    // Two sessions that answer nothing: each question would be a wait of its own.
+    let first = session(&mut wire);
+    let second = wire.ask("session/new", &json!({"cwd": cwd(), "mcpServers": []}));
+    assert_ne!(second["result"]["sessionId"], json!(first));
+    // The reads that opening and the first questions made are not the ones counted.
+    wire.told();
+    let before = harness.readings.session_reads.load(Ordering::SeqCst);
+    wire.report(None);
+    assert_eq!(
+        harness.readings.session_reads.load(Ordering::SeqCst) - before,
+        1
+    );
+}
+
+#[test]
+fn a_session_is_read_once_it_has_opened_and_not_while_opening() {
+    let harness = Reports::new(reporting());
+    *harness.readings.session.lock().unwrap() = Some(vec![five_hour(250)]);
+    let mut wire = Wire::serve(harness.clone(), Settings::new());
+    opted_in(&mut wire, 1, true);
+    session(&mut wire);
+    let told = wire.told();
+    let used: Vec<_> = told
+        .iter()
+        .map(|message| message["params"]["report"]["buckets"][0]["used"].clone())
+        .collect();
+    assert!(used.contains(&json!(250)), "{told:?}");
 }
