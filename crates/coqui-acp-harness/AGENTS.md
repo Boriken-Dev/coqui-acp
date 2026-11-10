@@ -223,7 +223,7 @@ What each event becomes:
 ## Modes (`coqui_acp_harness::mode`)
 
 ```rust
-#[non_exhaustive] pub enum Mode { Manual, AcceptEdits, Auto, Plan, Bypass }   // Clone, Copy, Debug, PartialEq, Eq, Hash
+#[non_exhaustive] pub enum Mode { Manual, AcceptEdits, Auto, Plan, Bypass }   // Clone, Copy, Debug, PartialEq, Eq, Hash, ToValue, FromValue, Schema; as a setting, its id in snake case
 pub const ALL: [Mode; 5]   // Mode::ALL, in the order a client cycles them
 pub const fn id(self) -> &'static str          // manual, accept_edits, auto, plan, bypass
 pub const fn name(self) -> &'static str;  pub const fn description(self) -> &'static str
