@@ -40,7 +40,11 @@ impl Pipe {
     }
 
     /// Reads `source` to its end into the pipe, on a thread of its own.
-    fn fill(self: &Arc<Self>, mut source: impl Read + Send + 'static, ended: Option<Arc<AtomicBool>>) {
+    fn fill(
+        self: &Arc<Self>,
+        mut source: impl Read + Send + 'static,
+        ended: Option<Arc<AtomicBool>>,
+    ) {
         let pipe = Arc::clone(self);
         std::thread::spawn(move || {
             let mut chunk = [0u8; 8192];
@@ -131,14 +135,13 @@ impl Program {
         for (name, value) in spec.environment.expose().iter() {
             command.env(name, value);
         }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(if spec.error_output == ErrorOutput::Discarded {
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(
+            if spec.error_output == ErrorOutput::Discarded {
                 Stdio::null()
             } else {
                 Stdio::piped()
-            });
+            },
+        );
         let mut child = command.spawn().map_err(|error| {
             let status = if error.kind() == std::io::ErrorKind::NotFound {
                 Status::GUATIAO_ERR_NOT_FOUND
@@ -198,7 +201,12 @@ impl SpawnedProcess for Program {
     }
 
     fn close_input(&self) -> Result<(), ProviderError> {
-        drop(self.input.lock().unwrap_or_else(PoisonError::into_inner).take());
+        drop(
+            self.input
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
         Ok(())
     }
 
@@ -259,4 +267,3 @@ fn signal_of(status: &std::process::ExitStatus) -> Option<i64> {
 fn signal_of(_status: &std::process::ExitStatus) -> Option<i64> {
     None
 }
-

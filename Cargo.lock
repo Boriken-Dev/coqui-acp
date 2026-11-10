@@ -466,6 +466,7 @@ dependencies = [
  "coqui-acp",
  "coqui-acp-api",
  "coqui-acp-harness",
+ "guatiao",
  "serde_json",
  "uuid",
 ]
@@ -478,7 +479,9 @@ dependencies = [
  "coqui-acp",
  "coqui-acp-api",
  "coqui-acp-harness",
+ "guatiao",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -488,6 +491,7 @@ dependencies = [
  "base64 0.22.1",
  "coqui-acp",
  "coqui-acp-api",
+ "guatiao-serde",
  "rcgen",
  "rustix",
  "rustls",

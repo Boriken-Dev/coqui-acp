@@ -61,9 +61,11 @@ pub fn serve(
     let read = lines::read_lines(input, shared.settings.max_line, |line| {
         match line {
             Line::Json(message) => shared.receive(message),
-            Line::Text(_) => {
-                shared.respond_error(&Value::Null, PARSE_ERROR, "not a JSON-RPC message")
-            }
+            // `5` and `"x"` are JSON, though no message: only text that is no JSON at all is a parse error.
+            Line::Text(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(value) => shared.receive(value),
+                Err(_) => shared.respond_error(&Value::Null, PARSE_ERROR, "not a JSON-RPC message"),
+            },
             Line::TooLong(_) => {
                 too_long = true;
                 return false;
@@ -215,12 +217,26 @@ impl Shared {
     }
 
     fn receive(self: &Arc<Self>, message: Value) {
+        if !message.is_object() {
+            // A batch, a number, text: not one JSON-RPC message.
+            return self.respond_error(&Value::Null, INVALID_REQUEST, "not a JSON-RPC message");
+        }
+        if message
+            .get("method")
+            .is_some_and(|method| !method.is_string())
+        {
+            let id = message.get("id").cloned().unwrap_or(Value::Null);
+            return self.respond_error(&id, INVALID_REQUEST, "the method is not text");
+        }
         let Some(method) = message
             .get("method")
             .and_then(Value::as_str)
             .map(str::to_string)
         else {
             // An answer to one of our requests.
+            if message.get("result").is_none() && message.get("error").is_none() {
+                return self.respond_error(&Value::Null, INVALID_REQUEST, "not a JSON-RPC message");
+            }
             let Some(id) = message.get("id").and_then(Value::as_u64) else {
                 return;
             };

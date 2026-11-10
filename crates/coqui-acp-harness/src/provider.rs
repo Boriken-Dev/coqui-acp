@@ -432,9 +432,7 @@ impl Reports {
     }
 
     fn held(&self) -> MutexGuard<'_, BTreeMap<String, UsageTracker>> {
-        self.accounts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Takes the report a connection on `account` has now.
@@ -473,8 +471,9 @@ impl Reports {
         let now = unix_now();
         match self.held().get(account.unwrap_or_default()) {
             Some(tracker) => tracker.snapshot(None, now),
-            None => UsageTracker::new(support.clone(), account.map(str::to_string))
-                .snapshot(None, now),
+            None => {
+                UsageTracker::new(support.clone(), account.map(str::to_string)).snapshot(None, now)
+            }
         }
     }
 }
@@ -492,4 +491,63 @@ fn unix_now() -> i64 {
 pub fn shared(harness: impl Harness) -> Arc<dyn Harness> {
     let boxed: Box<dyn Harness> = Box::new(harness);
     Arc::from(boxed)
+}
+
+/// A harness's `Takes` as the kind's: the same, and `session/resume`, which every harness served here answers.
+#[must_use]
+pub fn takes_of(takes: &crate::acp::Takes) -> coqui_acp_api::Takes {
+    let mut kind = coqui_acp_api::Takes::default();
+    kind.images = takes.images;
+    kind.embedded_context = takes.embedded_context;
+    kind.mcp_http = takes.mcp_http;
+    kind.mcp_sse = takes.mcp_sse;
+    kind.load = takes.load;
+    kind.resume = true;
+    kind.additional_directories = takes.additional_directories;
+    kind.system_prompt = takes.system_prompt;
+    kind
+}
+
+/// A JSON Schema, or any JSON, as a Guatiao value: what a catalog's `settings` and `inputs` hold.
+///
+/// # Panics
+///
+/// `json` holds a number Guatiao cannot, which no schema written by hand does.
+#[must_use]
+pub fn schema(json: &Value) -> coqui_acp_api::guatiao::Value {
+    guatiao_serde::from_serde(json.clone()).expect("a schema is a value")
+}
+
+/// The schema of a setting that is a credential: text, marked `writeOnly` and `x-sensitive`, with no default.
+#[must_use]
+pub fn credential() -> Value {
+    serde_json::json!({"type": "string", "writeOnly": true, "x-sensitive": true})
+}
+
+/// Whether a provider that applies nothing to the harness's environment can take `account`: why not, when it cannot.
+///
+/// Only [`HARNESS_LOGIN`](coqui_acp_api::HARNESS_LOGIN) hands nothing over and clears nothing, so only it is taken; any
+/// other kind the catalog lists is refused with the reason, as the kind says for one that cannot be applied.
+///
+/// # Errors
+///
+/// `GUATIAO_ERR_BAD_VALUE`: the id is not an account id, or the kind is not one the catalog lists.
+pub fn account_refusal(
+    catalog: &coqui_acp_api::AccountCatalog,
+    account: &coqui_acp_api::AccountRef,
+) -> Result<Option<String>, ProviderError> {
+    account.check_id()?;
+    let Some(kind) = catalog.kind(&account.kind) else {
+        return Err(ProviderError::new(
+            Status::GUATIAO_ERR_BAD_VALUE,
+            "this harness takes no account of that kind",
+        ));
+    };
+    Ok((kind.id != coqui_acp_api::HARNESS_LOGIN).then(|| {
+        alloc::format!(
+            "this provider does not apply an account of kind `{}` yet: only `{}` is taken",
+            kind.id,
+            coqui_acp_api::HARNESS_LOGIN
+        )
+    }))
 }

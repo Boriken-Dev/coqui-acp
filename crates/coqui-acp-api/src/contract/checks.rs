@@ -1070,8 +1070,18 @@ fn permission(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
         ("allow", Some("allow_once"), "echo: allowed", "end_turn"),
         ("reject", Some("reject_once"), "echo: refused", "end_turn"),
         ("an error", None, "echo: refused", "end_turn"),
-        ("an outcome it does not know", None, "echo: refused", "end_turn"),
-        ("a selected option it never offered", None, "echo: refused", "end_turn"),
+        (
+            "an outcome it does not know",
+            None,
+            "echo: refused",
+            "end_turn",
+        ),
+        (
+            "a selected option it never offered",
+            None,
+            "echo: refused",
+            "end_turn",
+        ),
         ("cancelled", None, "", "cancelled"),
     ];
     for (id, (what, kind, text, stop)) in (10u64..).zip(cases) {
@@ -1178,7 +1188,10 @@ fn same_buckets(a: &UsageReport, b: &UsageReport) -> bool {
             bucket.observed_at = 0;
         }
         buckets.sort_by(|x, y| x.id.cmp(&y.id));
-        (buckets, report.limit.clone().map(|hit| (hit.bucket, hit.resets_at)))
+        (
+            buckets,
+            report.limit.clone().map(|hit| (hit.bucket, hit.resets_at)),
+        )
     };
     plain(a) == plain(b)
 }
