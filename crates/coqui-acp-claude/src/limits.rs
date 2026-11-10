@@ -162,12 +162,13 @@ pub(crate) fn limit_of_text(text: &str) -> Option<LimitHit> {
     limit(&serde_json::json!({"type": "result", "is_error": true, "result": text}))
 }
 
-/// `limit`, with what `hint`, the rejected event before it, knows and it does not. A hit that event backs is the harness's
-/// own word, so it is `reported` whatever else the turn's text says.
+/// `limit`, with what `hint`, the rejected event before it, knows. A hit that event backs is the harness's own word, so
+/// it is `reported`, and the event's bucket and reset win over what the turn's text says; the text fills in what the
+/// event lacks.
 pub(crate) fn with_hint(mut limit: LimitHit, hint: Option<LimitHit>) -> LimitHit {
     if let Some(hint) = hint {
-        limit.resets_at = limit.resets_at.or(hint.resets_at);
-        limit.bucket = limit.bucket.or(hint.bucket);
+        limit.resets_at = hint.resets_at.or(limit.resets_at);
+        limit.bucket = hint.bucket.or(limit.bucket);
         limit.source = hint.source;
     }
     limit
@@ -220,10 +221,14 @@ fn spend(value: &Value) -> Spend {
             .and_then(|usage| usage.pointer("/output_tokens_details/thinking_tokens"))
             .and_then(Value::as_u64);
     }
-    spend.cost_micro_usd = value
-        .get("total_cost_usd")
-        .and_then(Value::as_f64)
-        .and_then(micro_usd);
+    // `total_cost_usd` is the session's running total: beside only the turn's own counts it would be a partial pair, and
+    // a cost is unset when it is partial.
+    if models.is_some() {
+        spend.cost_micro_usd = value
+            .get("total_cost_usd")
+            .and_then(Value::as_f64)
+            .and_then(micro_usd);
+    }
     for (name, used) in models.into_iter().flatten() {
         let tokens = |key: &str| used.get(key).and_then(Value::as_u64).unwrap_or(0);
         let mut row = ModelSpend::new(name.as_str());

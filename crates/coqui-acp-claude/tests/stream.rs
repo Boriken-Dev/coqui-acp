@@ -1378,11 +1378,44 @@ fn a_result_without_a_cost_has_no_cost_and_not_zero() {
     assert_eq!(spend.cost_micro_usd, None);
     assert_eq!(spend.reasoning, None);
     assert!(spend.by_model.is_empty());
-    let free = events_of(&[json!({"type": "result", "result": "ok", "total_cost_usd": 0.0})]);
+    let free = events_of(&[
+        json!({"type": "result", "result": "ok", "total_cost_usd": 0.0, "modelUsage": {"m": {"inputTokens": 1}}}),
+    ]);
     assert_eq!(
         spends_of(&free)[0].cost_micro_usd,
         Some(0),
         "a reported zero is zero"
+    );
+}
+
+#[test]
+fn the_turns_own_counts_are_not_paired_with_the_running_cost() {
+    let events = events_of(&[
+        json!({"type": "result", "result": "ok", "total_cost_usd": 1.5, "usage": {"input_tokens": 3, "output_tokens": 4}}),
+    ]);
+    let spend = &spends_of(&events)[0];
+    assert_eq!((spend.input, spend.output), (3, 4));
+    assert_eq!(spend.cost_micro_usd, None, "a partial pair has no cost");
+    assert_eq!(usage_of(&events).unwrap().cost_usd, Some(1.5));
+}
+
+#[test]
+fn a_rejected_event_wins_over_the_texts_bucket_and_reset() {
+    let events = events_of(&[
+        json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_000_000, "rateLimitType": "five_hour"}}),
+        json!({"type": "result", "is_error": true, "result": "Claude AI usage limit reached for your weekly window|1790999999"}),
+    ]);
+    let TurnEnd::Limited(hit) = end_of(&events) else {
+        panic!("{:?}", end_of(&events))
+    };
+    assert_eq!(hit.source, Source::Reported);
+    assert_eq!(
+        (hit.resets_at, hit.bucket.as_deref()),
+        (Some(1_790_000_000), Some("five_hour"))
+    );
+    assert!(
+        hit.text.as_deref().unwrap().contains("weekly"),
+        "the text stays as evidence"
     );
 }
 
