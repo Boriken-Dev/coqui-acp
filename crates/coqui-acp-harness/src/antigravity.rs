@@ -220,14 +220,15 @@ impl AgyQuota {
         {
             return Ok(held.clone());
         }
-        let listeners = loopback_listeners(owners).map_err(|error| ReadError::Io(error.kind()))?;
+        let deadline = Instant::now().checked_add(self.limits.total);
+        let listeners = ports::listeners_before(owners, deadline)
+            .map_err(|error| ReadError::Io(error.kind()))?;
         let stale = self
             .endpoint
             .is_some_and(|(address, _)| !listeners.contains(&address));
         if stale {
             self.endpoint = None;
         }
-        let deadline = Instant::now().checked_add(self.limits.total);
         let mut failure: Option<ReadError> = None;
         for (address, scheme) in self.attempts(&listeners) {
             match self.fetch(address, scheme, deadline) {
@@ -244,6 +245,8 @@ impl AgyQuota {
                     return Ok(buckets);
                 }
                 Err(error) => {
+                    // The next reading looks at every port again.
+                    self.endpoint = None;
                     if failure
                         .as_ref()
                         .is_none_or(|held| rank(&error) > rank(held))

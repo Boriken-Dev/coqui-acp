@@ -8,22 +8,42 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::SocketAddr;
+use core::time::Duration;
 use std::io;
+use std::time::Instant;
 
-/// The loopback addresses that `owners` (process ids) listen on, TCP, without repeats, in order.
+/// How long [`loopback_listeners`] lets the system's tool run.
+const LISTING_LIMIT: Duration = Duration::from_secs(3);
+/// The most of a tool's output that is read.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    allow(dead_code, reason = "only the tools' output is bounded")
+)]
+const OUTPUT_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// The loopback addresses that `owners` (process ids) listen on, TCP, without repeats, in order. A tool
+/// the system is asked through is ended after 3 s.
 ///
 /// Windows reads `netstat.exe -ano`, Linux `/proc/<pid>/fd` joined with `/proc/net/tcp` and `tcp6`,
 /// macOS `lsof`. A process that has ended, or whose descriptors may not be read, has none.
 ///
 /// # Errors
 ///
-/// The system's tool could not be run or answered failure, or this system has none to ask
-/// ([`io::ErrorKind::Unsupported`]).
+/// The system's tool could not be run, answered failure or took too long
+/// ([`io::ErrorKind::TimedOut`]), or this system has none to ask ([`io::ErrorKind::Unsupported`]).
 pub fn loopback_listeners(owners: &[u32]) -> io::Result<Vec<SocketAddr>> {
+    listeners_before(owners, Instant::now().checked_add(LISTING_LIMIT))
+}
+
+/// [`loopback_listeners`] with a deadline of the caller's: `None` is one already passed.
+pub(super) fn listeners_before(
+    owners: &[u32],
+    deadline: Option<Instant>,
+) -> io::Result<Vec<SocketAddr>> {
     if owners.is_empty() {
         return Ok(Vec::new());
     }
-    let mut found = system(owners)?;
+    let mut found = system(owners, deadline)?;
     found.sort_unstable();
     found.dedup();
     Ok(found)
@@ -33,40 +53,77 @@ fn is_loopback(address: &SocketAddr) -> bool {
     address.port() != 0 && address.ip().to_canonical().is_loopback()
 }
 
+/// Runs `command` with its standard output read, and ends it at `deadline`.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    allow(dead_code, reason = "only the tools' output is bounded")
+)]
+pub(super) fn run_until(
+    command: &mut std::process::Command,
+    deadline: Option<Instant>,
+) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    use std::io::Read as _;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let stdout = child.stdout.take().ok_or(io::ErrorKind::BrokenPipe)?;
+    let reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout
+            .take(OUTPUT_LIMIT)
+            .read_to_end(&mut output)
+            .map(|_| output)
+    });
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let output = reader
+                .join()
+                .map_err(|_| io::Error::other("the output was not read"))??;
+            return Ok((status, output));
+        }
+        if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[cfg(windows)]
-fn system(owners: &[u32]) -> io::Result<Vec<SocketAddr>> {
+fn system(owners: &[u32], deadline: Option<Instant>) -> io::Result<Vec<SocketAddr>> {
+    use std::os::windows::process::CommandExt as _;
+    /// `CREATE_NO_WINDOW`: no console window flashes up for a program started from a GUI.
+    const NO_WINDOW: u32 = 0x0800_0000;
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let netstat = std::path::Path::new(&root)
         .join("System32")
         .join("netstat.exe");
     let mut found = Vec::new();
     for (family, needed) in [("TCP", true), ("TCPv6", false)] {
-        let ran = std::process::Command::new(&netstat)
-            .args(["-ano", "-p", family])
-            .stdin(std::process::Stdio::null())
-            .output();
+        let ran = run_until(
+            std::process::Command::new(&netstat)
+                .args(["-ano", "-p", family])
+                .creation_flags(NO_WINDOW),
+            deadline,
+        );
         let output = match ran {
-            Ok(output) if output.status.success() => output,
+            Ok((status, output)) if status.success() => output,
             Ok(_) if !needed => continue,
-            Err(error) if !needed && error.kind() != io::ErrorKind::NotFound => continue,
-            Ok(output) => {
-                return Err(io::Error::other(alloc::format!(
-                    "netstat {}",
-                    output.status
-                )));
-            }
+            Err(error) if !needed && error.kind() != io::ErrorKind::TimedOut => continue,
+            Ok((status, _)) => return Err(io::Error::other(alloc::format!("netstat {status}"))),
             Err(error) => return Err(error),
         };
-        found.extend(parse_netstat(
-            &String::from_utf8_lossy(&output.stdout),
-            owners,
-        ));
+        found.extend(parse_netstat(&String::from_utf8_lossy(&output), owners));
     }
     Ok(found)
 }
 
 #[cfg(target_os = "linux")]
-fn system(owners: &[u32]) -> io::Result<Vec<SocketAddr>> {
+fn system(owners: &[u32], _deadline: Option<Instant>) -> io::Result<Vec<SocketAddr>> {
     let mut inodes = BTreeSet::new();
     for pid in owners {
         let Ok(entries) = std::fs::read_dir(alloc::format!("/proc/{pid}/fd")) else {
@@ -93,25 +150,33 @@ fn system(owners: &[u32]) -> io::Result<Vec<SocketAddr>> {
 }
 
 #[cfg(target_os = "macos")]
-fn system(owners: &[u32]) -> io::Result<Vec<SocketAddr>> {
+fn system(owners: &[u32], deadline: Option<Instant>) -> io::Result<Vec<SocketAddr>> {
     let pids = owners
         .iter()
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let output = std::process::Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-p", &pids, "-Fpn"])
-        .stdin(std::process::Stdio::null())
-        .output()?;
+    let (status, output) = run_until(
+        std::process::Command::new("/usr/sbin/lsof").args([
+            "-nP",
+            "-a",
+            "-iTCP",
+            "-sTCP:LISTEN",
+            "-p",
+            &pids,
+            "-Fpn",
+        ]),
+        deadline,
+    )?;
     // lsof exits 1 when it finds nothing to list.
-    if !output.status.success() && !output.stdout.is_empty() {
-        return Err(io::Error::other(alloc::format!("lsof {}", output.status)));
+    if !status.success() && !output.is_empty() {
+        return Err(io::Error::other(alloc::format!("lsof {status}")));
     }
-    Ok(parse_lsof(&String::from_utf8_lossy(&output.stdout), owners))
+    Ok(parse_lsof(&String::from_utf8_lossy(&output), owners))
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn system(_owners: &[u32]) -> io::Result<Vec<SocketAddr>> {
+fn system(_owners: &[u32], _deadline: Option<Instant>) -> io::Result<Vec<SocketAddr>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "listening ports are not read on this system",
@@ -269,6 +334,40 @@ Active Connections
         );
         assert_eq!(socket_inode("socket:[7001]"), Some(7001));
         assert_eq!(socket_inode("pipe:[7001]"), None);
+    }
+
+    #[test]
+    fn a_tool_that_outlasts_the_deadline_is_ended() {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        let started = Instant::now();
+        let error = run_until(
+            &mut command,
+            Instant::now().checked_add(Duration::from_millis(300)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_deadline_that_has_passed_starts_no_tool() {
+        let listed = listeners_before(&[1], None);
+        if cfg!(any(windows, target_os = "macos")) {
+            assert_eq!(listed.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        } else {
+            assert!(listed.is_ok());
+        }
     }
 
     #[test]

@@ -600,3 +600,41 @@ fn a_listener_this_process_owns_is_found_by_the_system() {
             .all(|found| found.port() != port)
     );
 }
+
+#[test]
+fn a_failed_reading_forgets_the_port_so_the_other_is_tried_next() {
+    let _only = one_at_a_time();
+    let broken = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
+    let body = answer(|_| {});
+    let servers: Vec<Server> = (0..2)
+        .map(|which| {
+            let (broken, body) = (Arc::clone(&broken), body.clone());
+            Server::start(move |mut stream, _| {
+                if is_tls(&stream) {
+                    return;
+                }
+                read_request(&mut stream);
+                if broken[which].load(Ordering::SeqCst) {
+                    respond(&mut stream, "500 Internal Server Error", &[], b"", false);
+                } else {
+                    respond(&mut stream, "200 OK", &[], &body, true);
+                }
+            })
+        })
+        .collect();
+    let mut quota = AgyQuota::new(ReadLimits::default());
+    quota.read(&me(), &acp_models()).unwrap();
+    let cached = servers
+        .iter()
+        .position(|server| server.accepted() > 0)
+        .unwrap();
+    broken[cached].store(true, Ordering::SeqCst);
+    assert_eq!(
+        quota.read(&me(), &acp_models()),
+        Err(ReadError::Status(500))
+    );
+    assert!(
+        quota.read(&me(), &acp_models()).is_ok(),
+        "the other port answers"
+    );
+}
