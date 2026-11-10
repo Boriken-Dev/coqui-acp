@@ -1446,14 +1446,15 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             done: "queue.Queue[Tuple[bool, Any]]" = queue.Queue()
 
             def work() -> None:
-                # The thread lets go of what it holds when it ends, even if the caller has answered.
+                # The thread lets go of what it holds before it hands the caller the result, or when
+                # it ends if the caller has already answered at the deadline.
                 try:
-                    done.put((True, _run_login(method, timeout_ms, signing, spawner)))
+                    result: Tuple[bool, Any] = (True, _run_login(method, timeout_ms, signing, spawner))
                 except BaseException as e:
-                    done.put((False, e))
-                finally:
-                    spawner.destroy()
-                    prompter.destroy()
+                    result = (False, e)
+                spawner.destroy()
+                prompter.destroy()
+                done.put(result)
 
             # The login runs on a thread of its own, so that the answer comes at the deadline even
             # when a prompter call has not returned.
