@@ -188,7 +188,10 @@ fn confined(spawner: &dyn ProcessSpawner, root: &Path) -> Outcome {
     let mut broken = Vec::new();
     for path in &paths {
         let answers = [
-            ("write_file", status(&spawner.write_file(path, secret(b"x"), false))),
+            (
+                "write_file",
+                status(&spawner.write_file(path, secret(b"x"), false)),
+            ),
             ("read_file", status(&spawner.read_file(path, 8))),
             ("file_info", status(&spawner.file_info(path))),
             ("remove_file", status(&spawner.remove_file(path))),
@@ -273,6 +276,11 @@ mod tests {
                 bytes: Secret<Vec<u8>>,
                 _private: bool,
             ) -> Result<(), guatiao::library::ProviderError> {
+                // It trusts a relative path, `..` included; an absolute path it only pretends to write,
+                // so the test never writes outside its own directory.
+                if path.contains(':') || path.starts_with(['/', '\\']) {
+                    return Ok(());
+                }
                 let full = self.0.join(path);
                 if let Some(parent) = full.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -287,9 +295,14 @@ mod tests {
                 path: &str,
                 _max_bytes: u64,
             ) -> Result<Secret<Vec<u8>>, guatiao::library::ProviderError> {
-                std::fs::read(self.0.join(path)).map(Secret::new).map_err(|_| {
-                    guatiao::library::ProviderError::new(guatiao::Status::GUATIAO_ERR_NOT_FOUND, "x")
-                })
+                std::fs::read(self.0.join(path))
+                    .map(Secret::new)
+                    .map_err(|_| {
+                        guatiao::library::ProviderError::new(
+                            guatiao::Status::GUATIAO_ERR_NOT_FOUND,
+                            "x",
+                        )
+                    })
             }
 
             fn file_info(
@@ -304,12 +317,16 @@ mod tests {
             }
         }
 
-        let dir = std::env::temp_dir().join(format!("acp-spawner-careless-{}", fresh_uuid()));
+        let base = std::env::temp_dir().join(format!("acp-spawner-careless-{}", fresh_uuid()));
+        let dir = base.join("root");
         std::fs::create_dir_all(&dir).expect("a directory");
         let failures = spawner_files(&Careless(dir.clone()), &dir)
             .expect_err("a spawner that trusts a path is caught");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&base);
         let said = failures.to_string();
-        assert!(said.contains("keeps a file") || said.contains("inside its directory"), "{said}");
+        assert!(
+            said.contains("keeps a file") || said.contains("inside its directory"),
+            "{said}"
+        );
     }
 }

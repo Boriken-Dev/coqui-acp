@@ -217,7 +217,12 @@ impl Drop for Idle {
 /// A relative path inside `root`, or the refusal the file methods owe: an absolute path, a `..`
 /// part and a link leading out are all `GUATIAO_ERR_NOT_FOUND`.
 pub(super) fn confined(root: &Path, path: &str) -> Result<PathBuf, ProviderError> {
-    let outside = || refuse(Status::GUATIAO_ERR_NOT_FOUND, "no such path in the granted directory");
+    let outside = || {
+        refuse(
+            Status::GUATIAO_ERR_NOT_FOUND,
+            "no such path in the granted directory",
+        )
+    };
     let drive = path.as_bytes().get(1) == Some(&b':');
     if path.is_empty()
         || path.contains('\0')
@@ -322,7 +327,10 @@ impl ProcessSpawner for Spawner {
             .filter(std::fs::Metadata::is_file)
             .ok_or_else(|| refuse(Status::GUATIAO_ERR_NOT_FOUND, "no such file"))?;
         if meta.len() > max_bytes {
-            return Err(refuse(Status::GUATIAO_ERR_BAD_VALUE, "the file is too large"));
+            return Err(refuse(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the file is too large",
+            ));
         }
         std::fs::read(&full)
             .map(Secret::new)
@@ -341,7 +349,9 @@ impl ProcessSpawner for Spawner {
             .modified()
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX));
+            .map_or(0, |since| {
+                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+            });
         Ok(Some(FileInfo::new(meta.len(), modified)))
     }
 
@@ -350,7 +360,10 @@ impl ProcessSpawner for Spawner {
         match std::fs::remove_file(&full) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(refuse(Status::GUATIAO_ERR_INTERNAL, "cannot remove the file")),
+            Err(_) => Err(refuse(
+                Status::GUATIAO_ERR_INTERNAL,
+                "cannot remove the file",
+            )),
         }
     }
 }
@@ -680,7 +693,8 @@ pub(super) fn open_in(
     request: StartRequest,
     root: &Path,
 ) -> Result<Conn, String> {
-    start_in(harness, request, Some(root)).map_err(|(e, _)| format!("start refused: {}", e.message()))
+    start_in(harness, request, Some(root))
+        .map_err(|(e, _)| format!("start refused: {}", e.message()))
 }
 
 pub(super) fn status(error: &ProviderError) -> u32 {

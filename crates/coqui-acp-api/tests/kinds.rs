@@ -434,11 +434,7 @@ fn every_models_keys_are_pinned() {
             &["credentials", "from_revision", "id"],
         ),
         ("AccountLoss", &["id", "reason"], &["id", "reason"]),
-        (
-            "OpenUrl",
-            &["expires_ms", "url", "user_code"],
-            &["url"],
-        ),
+        ("OpenUrl", &["expires_ms", "url", "user_code"], &["url"]),
         ("LoginForm", &["schema", "title"], &["title"]),
         ("LoginAnswer", &["secrets", "values"], &[]),
     ];

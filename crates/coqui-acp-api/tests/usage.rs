@@ -140,9 +140,14 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
         };
         assert!(refused, "{name}: a key nobody declared was taken");
     }
-    let query = read_value::<UsageQuery>(&json!({"account": {"id": "pool/alice", "kind": "harness-login"}}))
-        .expect("declared");
-    assert_eq!(query.account.map(|grant| grant.id).as_deref(), Some("pool/alice"));
+    let query = read_value::<UsageQuery>(
+        &json!({"account": {"id": "pool/alice", "kind": "harness-login"}}),
+    )
+    .expect("declared");
+    assert_eq!(
+        query.account.map(|grant| grant.id).as_deref(),
+        Some("pool/alice")
+    );
 }
 
 fn bucket_of(figures: &Json) -> Bucket {

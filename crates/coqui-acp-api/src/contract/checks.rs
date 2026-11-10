@@ -17,9 +17,9 @@ use super::Contract;
 use super::host::{self, Conn, GRACE, PATIENCE, open, status};
 use crate::usage::{LimitHit, Refill, Status, UsageQuery, UsageReport};
 use crate::{
-    AccountGrant, AcpHarness, Environment, ExportPage, HARNESS_LOGIN, ModelsRequest, FILES_UNDER, ImportReport, LIMIT_META_KEY, Requirement,
-    SessionExport, SessionImport, SessionQuery, StartRequest, USAGE_CAPABILITY, USAGE_METHOD,
-    USAGE_NOTIFICATION, is_session_id,
+    AccountGrant, AcpHarness, Environment, ExportPage, FILES_UNDER, HARNESS_LOGIN, ImportReport,
+    LIMIT_META_KEY, ModelsRequest, Requirement, SessionExport, SessionImport, SessionQuery,
+    StartRequest, USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, is_session_id,
 };
 
 // `guatiao_status` numbers, as a channel's `close` and `closed` carry them.
@@ -597,8 +597,7 @@ fn import(
     history: &str,
 ) -> Result<Result<ImportReport, (u32, String)>, String> {
     let (watch, spawner, keeper) = host::spawner();
-    let answer =
-        harness.import_session(SessionImport::new(session, cwd, history), spawner, keeper);
+    let answer = harness.import_session(SessionImport::new(session, cwd, history), spawner, keeper);
     ensure!(
         watch.destroyed(),
         "import_session answered with the spawner it was handed alive"
@@ -1166,7 +1165,10 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         json!({"_meta": {USAGE_CAPABILITY: {"notify": true, "account": "from-the-client"}}});
     if !info.usage.reports() {
         // Nothing advertised, `-32601`, and the scripted prompts are plain text.
-        let mut conn = open(harness, StartRequest::builder().account(grant("acct-1")).build())?;
+        let mut conn = open(
+            harness,
+            StartRequest::builder().account(grant("acct-1")).build(),
+        )?;
         conn.send(&initialize(0, contract.version, optin))?;
         let answer = conn.answer(0)?;
         ensure!(

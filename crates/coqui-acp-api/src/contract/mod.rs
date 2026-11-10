@@ -28,9 +28,9 @@
 
 mod accounts;
 mod checks;
-mod spawner;
 mod host;
 mod json;
+mod spawner;
 mod transport;
 
 use alloc::borrow::ToOwned;

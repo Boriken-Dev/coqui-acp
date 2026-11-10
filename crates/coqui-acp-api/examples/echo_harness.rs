@@ -36,11 +36,11 @@ use coqui_acp_api::usage::{
 use coqui_acp_api::{
     ASK, AccountCatalog, AccountGrant, AccountKeeper, AccountKindInfo, AccountLoss, AccountRef,
     AccountRenewal, AcpHarness, Channel, ChannelSink, Credentials, EndpointSlot, Environment,
-    ExportPage, HARNESS_LOGIN, HarnessInfo, ImportReport, LINE_TOO_LARGE, LoginForm, LoginMethodInfo,
-    LoginOutcome, LoginPrompter, LoginRequest, MODEL_API, ModelInfo, ModelListing, ModelsRequest,
-    NO_COMMANDS, Narrowing, OPEN_URL, OpenUrl, ProcessSpawner, READ_ONLY, RenewReport,
-    RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SpawnSpec, SpawnedProcess,
-    StartRequest, USER_CODE, WorkingRoots, is_account_id, is_session_id,
+    ExportPage, HARNESS_LOGIN, HarnessInfo, ImportReport, LINE_TOO_LARGE, LoginForm,
+    LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest, MODEL_API, ModelInfo, ModelListing,
+    ModelsRequest, NO_COMMANDS, Narrowing, OPEN_URL, OpenUrl, ProcessSpawner, READ_ONLY,
+    RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SpawnSpec,
+    SpawnedProcess, StartRequest, USER_CODE, WorkingRoots, is_account_id, is_session_id,
 };
 use serde_json::{Value, json};
 
@@ -514,7 +514,13 @@ impl AcpHarness for EchoHarness {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
         if let Some(grant) = &session.account {
-            apply(&catalog(self.settings.logins), &self.accounts, grant, &spawner, &keeper)?;
+            apply(
+                &catalog(self.settings.logins),
+                &self.accounts,
+                grant,
+                &spawner,
+                &keeper,
+            )?;
         }
         drop((spawner, keeper));
         self.keeps_sessions()?;
@@ -550,7 +556,13 @@ impl AcpHarness for EchoHarness {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
         if let Some(grant) = &export.account {
-            apply(&catalog(self.settings.logins), &self.accounts, grant, &spawner, &keeper)?;
+            apply(
+                &catalog(self.settings.logins),
+                &self.accounts,
+                grant,
+                &spawner,
+                &keeper,
+            )?;
         }
         drop((spawner, keeper));
         self.keeps_sessions()?;
@@ -604,7 +616,13 @@ impl AcpHarness for EchoHarness {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
         if let Some(grant) = &request.account {
-            apply(&catalog(self.settings.logins), &self.accounts, grant, &spawner, &keeper)?;
+            apply(
+                &catalog(self.settings.logins),
+                &self.accounts,
+                grant,
+                &spawner,
+                &keeper,
+            )?;
         }
         Ok(ModelListing::of(vec![ModelInfo::new("echo")]))
     }
@@ -616,7 +634,13 @@ impl AcpHarness for EchoHarness {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
         if let Some(grant) = &query.account {
-            apply(&catalog(self.settings.logins), &self.accounts, grant, &spawner, &keeper)?;
+            apply(
+                &catalog(self.settings.logins),
+                &self.accounts,
+                grant,
+                &spawner,
+                &keeper,
+            )?;
         }
         drop((spawner, keeper));
         let account = query.account.as_ref().map(|grant| grant.id.clone());
@@ -682,7 +706,12 @@ impl AcpHarness for EchoHarness {
                 open.expires_ms = Some(request.timeout_ms);
                 signing.prompt(|p| p.open_url(open))?;
                 let answer = signing.prompt(|p| p.ask(form("Paste the code", "code")))?;
-                let code = answer.secrets.expose().get("code").unwrap_or_default().to_owned();
+                let code = answer
+                    .secrets
+                    .expose()
+                    .get("code")
+                    .unwrap_or_default()
+                    .to_owned();
                 if code.is_empty() || code == "refuse-me" {
                     return Err(refused("the echo does not take that code"));
                 }
@@ -691,8 +720,10 @@ impl AcpHarness for EchoHarness {
                 let read = spawner.read_file("auth.json", FILE_MAX)?;
                 let _ = text;
                 let mut credentials = Credentials::new();
-                credentials
-                    .insert(FILE_KEY, String::from_utf8_lossy(read.expose()).into_owned());
+                credentials.insert(
+                    FILE_KEY,
+                    String::from_utf8_lossy(read.expose()).into_owned(),
+                );
                 let mut outcome = LoginOutcome::new(FILE_KIND, credentials);
                 outcome.label = Some("person@example.invalid".into());
                 outcome.expires_at = Some("2099-01-01T00:00:00Z".into());
@@ -719,7 +750,12 @@ impl AcpHarness for EchoHarness {
             }
             _ => {
                 let answer = signing.prompt(|p| p.ask(form("Paste the key", "api_key")))?;
-                let key = answer.secrets.expose().get("api_key").unwrap_or_default().to_owned();
+                let key = answer
+                    .secrets
+                    .expose()
+                    .get("api_key")
+                    .unwrap_or_default()
+                    .to_owned();
                 if key.is_empty() || key == "refuse-me" {
                     return Err(refused("the echo does not take that key"));
                 }
@@ -1398,8 +1434,11 @@ fn catalog(logins: bool) -> AccountCatalog {
         "required": [FILE_KEY],
         "additionalProperties": false,
     }));
-    file.endpoints =
-        vec![EndpointSlot::new(MODEL_API).key("base_url").default_url("https://echo.example")];
+    file.endpoints = vec![
+        EndpointSlot::new(MODEL_API)
+            .key("base_url")
+            .default_url("https://echo.example"),
+    ];
     file.rotates = true;
     file.state_dir = true;
     file.renews = true;
@@ -1412,8 +1451,11 @@ fn catalog(logins: bool) -> AccountCatalog {
         "required": ["api_key"],
         "additionalProperties": false,
     }));
-    key.endpoints =
-        vec![EndpointSlot::new(MODEL_API).key("base_url").default_url("https://echo.example")];
+    key.endpoints = vec![
+        EndpointSlot::new(MODEL_API)
+            .key("base_url")
+            .default_url("https://echo.example"),
+    ];
     key.history_portable = true;
     catalog.kinds.extend([file, key]);
     catalog.credential_variables = VARIABLES.iter().map(|v| (*v).to_owned()).collect();
@@ -1465,7 +1507,11 @@ fn held(accounts: &Accounts) -> MutexGuard<'_, BTreeMap<String, AccountFile>> {
 /// What the echo keeps an account's file under: the same account in another directory is another
 /// file.
 fn key_of(grant: &AccountGrant) -> String {
-    format!("{} {}", grant.id, grant.state_dir.as_deref().unwrap_or_default())
+    format!(
+        "{} {}",
+        grant.id,
+        grant.state_dir.as_deref().unwrap_or_default()
+    )
 }
 
 /// Checks an account's id, kind, settings and credentials, without touching a spawner.
@@ -1476,13 +1522,19 @@ fn read_account(
     settings: &guatiao::Value,
 ) -> Result<(), ProviderError> {
     if !is_account_id(id) {
-        return Err(bad("an account id is 1 to 128 bytes with no control character"));
+        return Err(bad(
+            "an account id is 1 to 128 bytes with no control character",
+        ));
     }
     if catalog.kind(kind).is_none() {
         return Err(bad("the echo takes no account of that kind"));
     }
     let settings = plain(settings);
-    let allowed: &[&str] = if kind == HARNESS_LOGIN { &[] } else { &["base_url"] };
+    let allowed: &[&str] = if kind == HARNESS_LOGIN {
+        &[]
+    } else {
+        &["base_url"]
+    };
     let Some(entries) = settings.as_object() else {
         return Err(bad("the settings are not an object"));
     };
@@ -1511,7 +1563,9 @@ fn read_grant(
         _ => &[],
     };
     if held.len() != wanted.len() || wanted.iter().any(|k| held.get(k).is_none_or(str::is_empty)) {
-        return Err(bad("a credential is missing, or one the kind does not take was given"));
+        return Err(bad(
+            "a credential is missing, or one the kind does not take was given",
+        ));
     }
     if grant.kind == FILE_KIND {
         if grant.state_dir.is_none() {
@@ -1587,7 +1641,12 @@ fn put_file(
     if grant.kind != FILE_KIND {
         return Ok(());
     }
-    let text = grant.credentials.expose().get(FILE_KEY).unwrap_or_default().to_owned();
+    let text = grant
+        .credentials
+        .expose()
+        .get(FILE_KEY)
+        .unwrap_or_default()
+        .to_owned();
     if spawner.file_info(FILE)?.is_none() {
         spawner.write_file(FILE, Secret::new(text.clone().into_bytes()), true)?;
         held(accounts).insert(
@@ -1624,7 +1683,8 @@ fn apply(
 fn notional(catalog: &AccountCatalog, grant: &AccountGrant) -> SpawnSpec {
     let mut spec = SpawnSpec::new("echo-agent").arg("--account").arg(&grant.id);
     if grant.kind != HARNESS_LOGIN {
-        spec.remove_environment.clone_from(&catalog.credential_variables);
+        spec.remove_environment
+            .clone_from(&catalog.credential_variables);
         let mut environment = Environment::new();
         if grant.kind == KEY_KIND {
             if let Some(key) = grant.credentials.expose().get("api_key") {
@@ -1687,7 +1747,11 @@ impl Hold {
 fn ended(cancelled: bool) -> ProviderError {
     ProviderError::new(
         Status::GUATIAO_ERR_GONE,
-        if cancelled { "login cancelled" } else { "login timed out" },
+        if cancelled {
+            "login cancelled"
+        } else {
+            "login timed out"
+        },
     )
 }
 

@@ -18,7 +18,9 @@ use guatiao::Secret;
 use serde_json::{Value, json};
 
 use super::Contract;
-use super::checks::{CANARY, Outcome, Place, fresh_uuid, initialize, new_session, open_session_in, text};
+use super::checks::{
+    CANARY, Outcome, Place, fresh_uuid, initialize, new_session, open_session_in, text,
+};
 use super::host::{self, GRACE, PATIENCE, Script, status};
 use super::json::{from_json, to_json};
 use crate::{
@@ -65,8 +67,14 @@ pub(super) fn all(
             "reports a login it saw renewed or lost",
             keeps_watch(contract, harness, place),
         ),
-        ("renews as its catalog says", renews(contract, harness, place)),
-        ("signs in as its catalog says", signs_in(contract, harness, place)),
+        (
+            "renews as its catalog says",
+            renews(contract, harness, place),
+        ),
+        (
+            "signs in as its catalog says",
+            signs_in(contract, harness, place),
+        ),
     ]
 }
 
@@ -103,7 +111,13 @@ fn required(schema: &Value) -> Vec<String> {
     schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -182,7 +196,11 @@ fn settings_for(info: &AccountKindInfo) -> Result<crate::guatiao::Value, String>
 
 /// A grant of `info`, with a canary for each credential, and `dir` as its directory when the kind
 /// needs one.
-fn grant_of(info: &AccountKindInfo, dir: Option<&Path>, revision: u64) -> Result<AccountGrant, String> {
+fn grant_of(
+    info: &AccountKindInfo,
+    dir: Option<&Path>,
+    revision: u64,
+) -> Result<AccountGrant, String> {
     let schema = to_json(&info.settings);
     let credentials: Credentials = credential_keys(&schema)
         .into_iter()
@@ -217,8 +235,15 @@ fn catalog(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
     );
     let mut seen = Vec::new();
     for info in &catalog.kinds {
-        ensure!(!info.id.is_empty() && !info.title.is_empty(), "a kind has no id or title");
-        ensure!(!seen.contains(&&info.id), "the kind {} is listed twice", info.id);
+        ensure!(
+            !info.id.is_empty() && !info.title.is_empty(),
+            "a kind has no id or title"
+        );
+        ensure!(
+            !seen.contains(&&info.id),
+            "the kind {} is listed twice",
+            info.id
+        );
         seen.push(&info.id);
         let schema = to_json(&info.settings);
         ensure!(
@@ -263,14 +288,20 @@ fn catalog(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
                 );
             }
             if let Some(default) = &slot.default {
-                ensure!(is_url(default), "{}'s endpoint default is not a URL", info.id);
+                ensure!(
+                    is_url(default),
+                    "{}'s endpoint default is not a URL",
+                    info.id
+                );
             }
         }
     }
     let mut variables = Vec::new();
     for name in &catalog.credential_variables {
         ensure!(
-            !name.is_empty() && !name.contains(['=', '\0']) && !name.chars().any(char::is_whitespace),
+            !name.is_empty()
+                && !name.contains(['=', '\0'])
+                && !name.chars().any(char::is_whitespace),
             "credential_variables names {name:?}, which cannot be a variable"
         );
         ensure!(!variables.contains(&name), "{name} is listed twice");
@@ -279,7 +310,11 @@ fn catalog(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
     let mut methods = Vec::new();
     for login in &catalog.logins {
         ensure!(!login.id.is_empty(), "a login method has no id");
-        ensure!(!methods.contains(&&login.id), "the method {} is listed twice", login.id);
+        ensure!(
+            !methods.contains(&&login.id),
+            "the method {} is listed twice",
+            login.id
+        );
         methods.push(&login.id);
         ensure!(
             catalog.kind(&login.produces).is_some(),
@@ -289,7 +324,10 @@ fn catalog(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
         );
         for step in &login.steps {
             ensure!(
-                matches!(step.as_str(), "open_url" | "user_code" | "ask" | "paste_code"),
+                matches!(
+                    step.as_str(),
+                    "open_url" | "user_code" | "ask" | "paste_code"
+                ),
                 "{} has the step {step:?}",
                 login.id
             );
@@ -398,7 +436,8 @@ fn applies(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
             "{}: a credential came back in the connection's messages",
             info.id
         );
-        conn.close_with(OK).map_err(|e| format!("{}: {e}", info.id))?;
+        conn.close_with(OK)
+            .map_err(|e| format!("{}: {e}", info.id))?;
         ensure!(
             watch.all_killed(),
             "{}: closed with a program it started still running",
@@ -482,10 +521,16 @@ fn refuses(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
             "{what} refused an unknown kind with {}, not {BAD_VALUE}",
             why(&error)
         );
-        ensure!(!error.message().contains(CANARY), "{what}'s refusal carried a credential");
+        ensure!(
+            !error.message().contains(CANARY),
+            "{what}'s refusal carried a credential"
+        );
         Ok(())
     };
-    match super::host::start(harness, StartRequest::builder().account(strange.clone()).build()) {
+    match super::host::start(
+        harness,
+        StartRequest::builder().account(strange.clone()).build(),
+    ) {
         Ok(conn) => {
             conn.channel().close(OK, "");
             refused("start", None)?;
@@ -507,19 +552,32 @@ fn refuses(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
         spawner,
         keeper,
     );
-    ensure!(watch.destroyed(), "models refused with an object it was handed alive");
+    ensure!(
+        watch.destroyed(),
+        "models refused with an object it was handed alive"
+    );
     refused("models", answer.err())?;
     let (watch, spawner, keeper) = host::spawner();
     let answer = harness.usage(UsageQuery::new().account(strange.clone()), spawner, keeper);
-    ensure!(watch.destroyed(), "usage refused with an object it was handed alive");
+    ensure!(
+        watch.destroyed(),
+        "usage refused with an object it was handed alive"
+    );
     refused("usage", answer.err())?;
     let (watch, spawner, _keeper) = host::spawner();
     let answer = harness.renew(RenewRequest::new(strange.clone()), spawner);
-    ensure!(watch.spawner_destroyed(), "renew refused with the spawner it was handed alive");
+    ensure!(
+        watch.spawner_destroyed(),
+        "renew refused with the spawner it was handed alive"
+    );
     refused("renew", answer.err())?;
 
     // An id that is not an id.
-    for id in [String::new(), "x".repeat(ACCOUNT_ID_MAX + 1), "a\nb".to_owned()] {
+    for id in [
+        String::new(),
+        "x".repeat(ACCOUNT_ID_MAX + 1),
+        "a\nb".to_owned(),
+    ] {
         ensure!(!is_account_id(&id), "the suite's bad id is a good one");
         let grant = AccountGrant::new(id, HARNESS_LOGIN);
         match super::host::start(harness, StartRequest::builder().account(grant).build()) {
@@ -558,7 +616,10 @@ fn refuses(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
             ) {
                 Ok(conn) => {
                     conn.channel().close(OK, "");
-                    return Err(format!("{}: started with a required credential missing", info.id));
+                    return Err(format!(
+                        "{}: started with a required credential missing",
+                        info.id
+                    ));
                 }
                 Err((error, conn)) => {
                     ensure!(
@@ -669,7 +730,12 @@ fn polling(
         heard.renewed.extend(watch.renewed());
         heard.lost.extend(watch.lost());
         let held = conn.watch();
-        let renewed: Vec<_> = heard.renewed.iter().cloned().chain(held.renewed()).collect();
+        let renewed: Vec<_> = heard
+            .renewed
+            .iter()
+            .cloned()
+            .chain(held.renewed())
+            .collect();
         let lost: Vec<_> = heard.lost.iter().cloned().chain(held.lost()).collect();
         if done(renewed.len(), lost.len()) || Instant::now() >= deadline {
             return Ok((renewed, lost));
@@ -702,10 +768,24 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                 .map_err(|e| format!("{label}: the file {path} cannot be read: {e}"))?;
             if scenario == "deleted" {
                 std::fs::remove_file(&file).map_err(|e| format!("{label}: {e}"))?;
-                let (renewed, lost) =
-                    polling(harness, &grant, &dir, &conn, &mut heard, PATIENCE, |_, lost| lost >= 1)?;
-                ensure!(renewed.is_empty(), "{label}: a deleted file was reported renewed");
-                ensure!(lost.len() == 1, "{label}: {} losses reported, not one: {lost:?}", lost.len());
+                let (renewed, lost) = polling(
+                    harness,
+                    &grant,
+                    &dir,
+                    &conn,
+                    &mut heard,
+                    PATIENCE,
+                    |_, lost| lost >= 1,
+                )?;
+                ensure!(
+                    renewed.is_empty(),
+                    "{label}: a deleted file was reported renewed"
+                );
+                ensure!(
+                    lost.len() == 1,
+                    "{label}: {} losses reported, not one: {lost:?}",
+                    lost.len()
+                );
                 ensure!(
                     lost[0].id == grant.id
                         && !lost[0].reason.is_empty()
@@ -714,7 +794,8 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                     lost[0]
                 );
                 std::thread::sleep(GRACE);
-                let (renewed, lost) = polling(harness, &grant, &dir, &conn, &mut heard, GRACE, |_, _| true)?;
+                let (renewed, lost) =
+                    polling(harness, &grant, &dir, &conn, &mut heard, GRACE, |_, _| true)?;
                 ensure!(
                     renewed.is_empty() && lost.len() == 1,
                     "{label}: a deleted file was reported again ({} renewed, {} lost)",
@@ -723,12 +804,26 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                 );
             } else {
                 let rotated = original.replace(CANARY, ROTATED);
-                ensure!(rotated != original, "{label}: the file does not hold the credential");
+                ensure!(
+                    rotated != original,
+                    "{label}: the file does not hold the credential"
+                );
                 std::fs::write(&file, &rotated).map_err(|e| format!("{label}: {e}"))?;
-                let (renewed, lost) =
-                    polling(harness, &grant, &dir, &conn, &mut heard, PATIENCE, |renewed, _| renewed >= 1)?;
+                let (renewed, lost) = polling(
+                    harness,
+                    &grant,
+                    &dir,
+                    &conn,
+                    &mut heard,
+                    PATIENCE,
+                    |renewed, _| renewed >= 1,
+                )?;
                 ensure!(lost.is_empty(), "{label}: a rotated file was reported lost");
-                ensure!(renewed.len() == 1, "{label}: {} renewals reported, not one", renewed.len());
+                ensure!(
+                    renewed.len() == 1,
+                    "{label}: {} renewals reported, not one",
+                    renewed.len()
+                );
                 let renewal = &renewed[0];
                 ensure!(
                     renewal.id == grant.id && renewal.from_revision == grant.revision,
@@ -743,7 +838,8 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
                     "{label}: the renewal does not hold the rotated credential alone"
                 );
                 std::thread::sleep(GRACE);
-                let (renewed, _) = polling(harness, &grant, &dir, &conn, &mut heard, GRACE, |_, _| true)?;
+                let (renewed, _) =
+                    polling(harness, &grant, &dir, &conn, &mut heard, GRACE, |_, _| true)?;
                 ensure!(
                     renewed.len() == 1,
                     "{label}: the rotation was reported {} times",
@@ -752,10 +848,24 @@ fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> 
 
                 // Blanked: lost, never renewed.
                 std::fs::write(&file, "").map_err(|e| format!("{label}: {e}"))?;
-                let (renewed, lost) =
-                    polling(harness, &grant, &dir, &conn, &mut heard, PATIENCE, |_, lost| lost >= 1)?;
-                ensure!(renewed.len() == 1, "{label}: a blanked file was reported renewed");
-                ensure!(lost.len() == 1, "{label}: {} losses reported, not one: {lost:?}", lost.len());
+                let (renewed, lost) = polling(
+                    harness,
+                    &grant,
+                    &dir,
+                    &conn,
+                    &mut heard,
+                    PATIENCE,
+                    |_, lost| lost >= 1,
+                )?;
+                ensure!(
+                    renewed.len() == 1,
+                    "{label}: a blanked file was reported renewed"
+                );
+                ensure!(
+                    lost.len() == 1,
+                    "{label}: {} losses reported, not one: {lost:?}",
+                    lost.len()
+                );
                 ensure!(
                     lost[0].id == grant.id && !lost[0].reason.contains(CANARY),
                     "{label}: the loss is {:?}",
@@ -802,14 +912,21 @@ fn renews(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outco
                     .as_deref()
                     .unwrap_or_default()
                     .contains(CANARY)
-                    && !report.expires_at.as_deref().unwrap_or_default().contains(CANARY),
+                    && !report
+                        .expires_at
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(CANARY),
                 "{}: renew's report carried a credential",
                 info.id
             );
         } else {
-            let error = answer
-                .err()
-                .ok_or_else(|| format!("{}: renew answered where the catalog says it cannot", info.id))?;
+            let error = answer.err().ok_or_else(|| {
+                format!(
+                    "{}: renew answered where the catalog says it cannot",
+                    info.id
+                )
+            })?;
             ensure!(
                 status(&error) == UNSUPPORTED
                     && !error.message().is_empty()
@@ -870,7 +987,11 @@ fn signs_in(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
     {
         let (watch, spawner, prompter) = host::login_in(&dir, Script::default());
         let error = harness
-            .login(LoginRequest::new("no-such-method", text(&dir)), spawner, prompter)
+            .login(
+                LoginRequest::new("no-such-method", text(&dir)),
+                spawner,
+                prompter,
+            )
             .err()
             .ok_or("login took a method the catalog does not list")?;
         ensure!(
@@ -884,7 +1005,11 @@ fn signs_in(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
         );
     }
     for method in &catalog.logins {
-        if contract.account.as_ref().is_some_and(|kind| *kind != method.produces) {
+        if contract
+            .account
+            .as_ref()
+            .is_some_and(|kind| *kind != method.produces)
+        {
             continue;
         }
         let label = method.id.as_str();

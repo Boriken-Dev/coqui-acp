@@ -225,7 +225,9 @@ impl ProcessSpawner for LocalSpawner {
             .modified()
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX));
+            .map_or(0, |since| {
+                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+            });
         Ok(Some(FileInfo::new(meta.len(), modified)))
     }
 

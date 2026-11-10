@@ -323,10 +323,14 @@ impl AcpHarness for Disagrees {
         sink: Object<dyn ChannelSink>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
-        let credential = request
-            .account
-            .as_ref()
-            .and_then(|grant| grant.credentials.expose().iter().next().map(|(_, v)| v.clone()));
+        let credential = request.account.as_ref().and_then(|grant| {
+            grant
+                .credentials
+                .expose()
+                .iter()
+                .next()
+                .map(|(_, v)| v.clone())
+        });
         match (self.inner.start(request, spawner, sink, keeper), credential) {
             (Err(refused), Some(credential)) if self.leaks => Err(ProviderError::new(
                 refused.status,
@@ -459,7 +463,10 @@ fn an_echo_without_logins_holds_to_the_contract() {
         .logins(false)
         .run(&*instance(&registry, Map::new()))
         .expect_err("the catalog lists methods");
-    assert!(failures.to_string().contains("logins are off"), "{failures}");
+    assert!(
+        failures.to_string().contains("logins are off"),
+        "{failures}"
+    );
 }
 
 /// One kind alone, as `--account` runs it.
