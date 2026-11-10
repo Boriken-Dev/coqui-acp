@@ -141,7 +141,10 @@ fn over_link(
     server: &str,
     body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>),
 ) {
-    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::builder(client)
+        .responders(Trust::pinned([server.parse().unwrap()]))
+        .build()
+        .unwrap();
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     let sealed = Sealed::new(&channel, established.session);
@@ -187,7 +190,10 @@ fn two_protocols_share_one_proof_and_a_plain_client_still_works() {
 
     // A client that knows nothing of streams gets the one protocol it speaks.
     let (_, again) = fixture.identity("client");
-    let method = Proof::new(again).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::builder(again)
+        .responders(Trust::pinned([server.parse().unwrap()]))
+        .build()
+        .unwrap();
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     initialized(&Sealed::new(&channel, established.session));
@@ -661,7 +667,10 @@ fn one_peer_gets_only_so_many_links_and_others_are_not_affected() {
         "mcp=nothing",
     ];
     let server = fixture.serve(None, &flags, port);
-    let method = Proof::new(greedy).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::builder(greedy)
+        .responders(Trust::pinned([server.parse().unwrap()]))
+        .build()
+        .unwrap();
     let opening = coqui_agentic_peer::mux::Frame::Open {
         stream: 1,
         protocol: "link/1".to_owned(),
@@ -843,7 +852,10 @@ fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
         &grant,
     ];
     let server = fixture.serve(None, &flags, port);
-    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::builder(client)
+        .responders(Trust::pinned([server.parse().unwrap()]))
+        .build()
+        .unwrap();
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     let sealed = Sealed::new(&channel, established.session);

@@ -20,10 +20,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "3cd5e04cfc7bc5d7a976a9e85d8eb808662db997" }
-coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "b6aa1f47ca956578ffcd20f936c43e8663ed059a" }
+coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "2966a25c956678e44e23faf3757d2b34c6a769f3" }
+coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "984db3d54b73de10c7892b06fe269a259de2d1c5" }
 # Unpublished so far.
-coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "a491a0034e0a9084c7aa3a5298f3b3c649ae7941", features = ["pin"] }
+coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "9146f55dd9fb9be8d6d96f43e17bc7a057ba0681", features = ["pin"] }
 coqui-peer-tls = { version = "=0.0.0-alpha.1", features = ["generate", "ca"] }
 coqui-net-acl = { version = "=0.0.0-alpha.0" }
 coqui-web-channel = { git = "https://github.com/Boriken-Dev/coqui-web-channel.git", rev = "0b5b05c9af3417f6b13edc0fc7d9c86c02a63eca", features = ["websocket", "webtransport"] }

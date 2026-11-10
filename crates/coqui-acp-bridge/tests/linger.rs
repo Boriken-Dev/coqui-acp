@@ -267,7 +267,10 @@ struct Peer {
 impl Peer {
     fn new(identity: Identity, port: u16, server: &str) -> Self {
         Self {
-            method: Proof::new(identity).with_responders(Trust::pinned([server.parse().unwrap()])),
+            method: Proof::builder(identity)
+                .responders(Trust::pinned([server.parse().unwrap()]))
+                .build()
+                .unwrap(),
             port,
         }
     }

@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
 use coqui_acp_bridge::agent::{self, Agent};
 use coqui_acp_bridge::linger::{self, Keeper, Settings};
 use coqui_acp_bridge::relay::{LinkEnd, relay};
-use coqui_agentic_peer::auth::{Identity, Method, Proof, Sealed, Trust};
+use coqui_agentic_peer::auth::{Identity, Method, Proof, ProofBuilder, Sealed, Trust};
 use coqui_agentic_peer::discovery::{Advertised, Advertisement};
 use coqui_agentic_peer::forward::{self, Target};
 use coqui_agentic_peer::link::{self, Accepted, Prefilled, Services};
@@ -458,15 +458,20 @@ fn proof_identity(
 }
 
 /// `identity`'s proof with the session's settings.
-fn proof_of(identity: Identity, session: SessionArgs) -> Result<Proof, String> {
-    let mut proof = Proof::new(identity);
+fn proof_of(identity: Identity, session: SessionArgs) -> ProofBuilder {
+    let mut proof = Proof::builder(identity);
     if let Some(bytes) = session.key_limit {
-        proof = proof.with_key_limit(bytes);
+        proof = proof.key_limit(bytes);
     }
     if session.no_rekey {
-        proof = proof.with_rekey(false).map_err(|error| error.to_string())?;
+        proof = proof.rekey(false);
     }
-    Ok(proof)
+    proof
+}
+
+/// The proof a builder describes, or why its settings do not fit the identity's method.
+fn built(builder: ProofBuilder) -> Result<Proof, String> {
+    builder.build().map_err(|error| error.to_string())
 }
 
 /// Says on standard error which method a proof runs, and each of its settings other than the default. A parent that stopped
@@ -496,9 +501,13 @@ fn read_tls_identity(path: &std::path::Path) -> Result<tls::Identity, String> {
 }
 
 fn server_tls(path: &std::path::Path) -> Result<Arc<rustls::ServerConfig>, String> {
-    let config = tls::server_config_without_client_auth(&read_tls_identity(path)?, &[])
+    let identity = read_tls_identity(path)?;
+    let built = tls::ServerBuilder::new()
+        .identity(&identity)
+        .client_auth(tls::ClientAuth::None)
+        .build()
         .map_err(|error| error.to_string())?;
-    Ok(Arc::new(config))
+    Ok(Arc::new(built.config))
 }
 
 /// TLS for a connection whose peer the in-band proof authenticates.
@@ -507,9 +516,11 @@ fn in_band_tls(ca_file: Option<&PathBuf>) -> Result<Arc<rustls::ClientConfig>, S
         Some(file) => tls::Trust::Roots(tls::Roots::bundle_file(file)),
         None => tls::Trust::AnyWithKeyProof,
     };
-    let config =
-        tls::client_config_without_identity(&trust, &[]).map_err(|error| error.to_string())?;
-    Ok(Arc::new(config))
+    let built = tls::ClientBuilder::new()
+        .server(trust)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(Arc::new(built.config))
 }
 
 fn remote_trust(args: &Dial) -> Result<tls::Trust, String> {
@@ -528,14 +539,21 @@ fn mtls_client(path: &std::path::Path, args: &Dial) -> Result<Arc<rustls::Client
     let identity = tls::Identity::open_or_create(path).map_err(|error| error.to_string())?;
     let trust = remote_trust(args)?;
     // This builder turns resumption off, so a peer that lost trust cannot return on a session.
-    let config = tls::client_config(&identity, &trust, &[]).map_err(|error| error.to_string())?;
-    Ok(Arc::new(config))
+    let built = tls::ClientBuilder::new()
+        .server(trust)
+        .identity(&identity)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(Arc::new(built.config))
 }
 
 /// A certificate browsers will pin, starting a little early for a client whose clock runs behind.
 fn short_lived_identity() -> Result<tls::Identity, String> {
     let not_before = SystemTime::now() - Duration::from_secs(3600);
-    tls::Identity::generate_with(not_before, not_before + SHORT_LIVED_VALIDITY)
+    tls::Identity::builder()
+        .not_before(not_before)
+        .not_after(not_before + SHORT_LIVED_VALIDITY)
+        .generate()
         .map_err(|error| error.to_string())
 }
 
@@ -1273,9 +1291,13 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             None => tls::Trust::Pinned(pins),
         };
         // This builder turns resumption off, so a peer that lost trust cannot return on a session.
-        let config = tls::server_config(&read_tls_identity(path)?, &trust, &[])
+        let identity = read_tls_identity(path)?;
+        let built = tls::ServerBuilder::new()
+            .identity(&identity)
+            .client_auth(tls::ClientAuth::Required(trust))
+            .build()
             .map_err(|error| error.to_string())?;
-        let listener = websocket::Listener::bind(args.listen, Some(Arc::new(config)))
+        let listener = websocket::Listener::bind(args.listen, Some(Arc::new(built.config)))
             .map_err(|failure| failure.to_string())?
             .with_limits(limits())
             .with_origins(args.origins.clone())
@@ -1328,7 +1350,7 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         Some(store) => Trust::Store(TrustStore::clone(store)),
         None => Trust::pinned(peers(&args.allow)?),
     };
-    let method = proof_of(identity, args.session)?.with_initiators(trust);
+    let method = built(proof_of(identity, args.session).initiators(trust))?;
     println!("{peer_id}");
     let _ = std::io::stdout().flush();
     let proof = Duration::from_secs(args.proof_seconds.unwrap_or(15));
@@ -1338,9 +1360,12 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         .transpose()?;
     let tls_config = match &short_lived {
         Some(identity) => {
-            let config = tls::server_config_without_client_auth(identity, &[])
+            let built = tls::ServerBuilder::new()
+                .identity(identity)
+                .client_auth(tls::ClientAuth::None)
+                .build()
                 .map_err(|error| error.to_string())?;
-            Some(Arc::new(config))
+            Some(Arc::new(built.config))
         }
         None => args.tls_identity.as_deref().map(server_tls).transpose()?,
     };
@@ -1499,8 +1524,9 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
         }
         let identity = proof_identity(None, args.method, true)?;
         let store = Arc::new(home::store(None).map_err(|error| error.to_string())?);
-        let method = proof_of(identity, args.session)?
-            .with_responders(Trust::Store(TrustStore::clone(&store)));
+        let method = built(
+            proof_of(identity, args.session).responders(Trust::Store(TrustStore::clone(&store))),
+        )?;
         return Ok((
             DialProof::InBand(method, Some(store)),
             in_band_dialer(args)?,
@@ -1532,7 +1558,7 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
                 (Some(store), true) => Trust::Store(TrustStore::clone(store)),
                 (None, false) => Trust::pinned(peers(&args.peers)?),
             };
-            let method = proof_of(identity, args.session)?.with_responders(trust);
+            let method = built(proof_of(identity, args.session).responders(trust))?;
             Ok((DialProof::InBand(method, store), in_band_dialer(args)?))
         }
         (None, Some(path)) => {
@@ -1567,10 +1593,12 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
             if !args.peers.is_empty() || args.trust_store.is_some() {
                 return Err("--peer and --trust-store belong to --identity".to_owned());
             }
-            let config = tls::client_config_without_identity(&remote_trust(args)?, &[])
+            let built = tls::ClientBuilder::new()
+                .server(remote_trust(args)?)
+                .build()
                 .map_err(|error| error.to_string())?;
             let dialer = websocket::Dialer::new()
-                .with_tls(Arc::new(config))
+                .with_tls(Arc::new(built.config))
                 .with_limits(limits());
             Ok((DialProof::Transport, dialer))
         }
@@ -1870,8 +1898,10 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
         let identity = proof_identity(None, args.method, true)?;
         let store = Arc::new(home::store(None).map_err(|error| error.to_string())?);
         (
-            proof_of(identity, args.session)?
-                .with_responders(Trust::Store(TrustStore::clone(&store))),
+            built(
+                proof_of(identity, args.session)
+                    .responders(Trust::Store(TrustStore::clone(&store))),
+            )?,
             Some(store),
         )
     } else {
@@ -1881,7 +1911,7 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
             .ok_or("give --identity or --paired")?;
         let identity = proof_identity(Some(path), args.method, true)?;
         (
-            proof_of(identity, args.session)?.with_responders(Trust::pinned(peers(&args.peers)?)),
+            built(proof_of(identity, args.session).responders(Trust::pinned(peers(&args.peers)?)))?,
             None,
         )
     };

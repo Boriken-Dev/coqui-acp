@@ -293,7 +293,7 @@ mod native {
     use std::path::Path;
     use std::sync::Arc;
 
-    use coqui_peer_tls::{Identity, Pins, Trust};
+    use coqui_peer_tls::{Identity, PeerClientVerifier, PeerServerVerifier, Pins, Policy, Trust};
 
     fn provider() -> Arc<rustls::crypto::CryptoProvider> {
         Arc::new(rustls::crypto::ring::default_provider())
@@ -304,9 +304,10 @@ mod native {
     }
 
     pub fn server_requiring(server: &Identity, client: &Identity) -> Arc<rustls::ServerConfig> {
-        let verifier = Trust::Pinned(Pins::fixed([client.fingerprint()]))
-            .client_cert_verifier()
-            .unwrap();
+        let verifier =
+            PeerClientVerifier::builder(&Trust::Pinned(Pins::fixed([client.fingerprint()])))
+                .build()
+                .unwrap();
         Arc::new(
             rustls::ServerConfig::builder_with_provider(provider())
                 .with_safe_default_protocol_versions()
@@ -318,9 +319,11 @@ mod native {
     }
 
     pub fn client_of(client: &Identity, server: &Identity) -> Arc<rustls::ClientConfig> {
-        let verifier = Trust::Pinned(Pins::fixed([server.fingerprint()]))
-            .server_cert_verifier()
-            .unwrap();
+        let verifier = PeerServerVerifier::new(
+            &Trust::Pinned(Pins::fixed([server.fingerprint()])),
+            &Policy::default(),
+        )
+        .unwrap();
         Arc::new(
             rustls::ClientConfig::builder_with_provider(provider())
                 .with_safe_default_protocol_versions()
@@ -660,7 +663,10 @@ fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
     let server = start_store_bridge(&mut fixture, &store_path, port, &log);
     let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/agent")).unwrap();
     let wait = Duration::from_secs(10);
-    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::builder(client)
+        .responders(Trust::pinned([server.parse().unwrap()]))
+        .build()
+        .unwrap();
 
     let channel = binary_dial(&url);
     let established = prove_out(&method, &channel, wait, 1 << 20).unwrap();
@@ -712,7 +718,10 @@ fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
     let server = start_store_bridge(&mut fixture, &store_path, port, &log);
     let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/agent")).unwrap();
     let wait = Duration::from_secs(10);
-    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::builder(client)
+        .responders(Trust::pinned([server.parse().unwrap()]))
+        .build()
+        .unwrap();
 
     let channel = binary_dial(&url);
     prove_out(&method, &channel, wait, 1 << 20).unwrap();
@@ -740,8 +749,14 @@ fn a_link_cut_before_the_close_record_is_a_failure_and_a_close_record_is_an_orde
     let fixture = Fixture::new("closerecord");
     let near = method::identity(&fixture.dir.join("near.pem"));
     let far = method::identity(&fixture.dir.join("far.pem"));
-    let near_method = Proof::new(near.clone()).with_responders(Trust::pinned([far.peer_id()]));
-    let far_method = Proof::new(far).with_initiators(Trust::pinned([near.peer_id()]));
+    let near_method = Proof::builder(near.clone())
+        .responders(Trust::pinned([far.peer_id()]))
+        .build()
+        .unwrap();
+    let far_method = Proof::builder(far)
+        .initiators(Trust::pinned([near.peer_id()]))
+        .build()
+        .unwrap();
     let wait = Duration::from_secs(10);
     for cut in [false, true] {
         let listener =
@@ -882,7 +897,10 @@ fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject(
     let responder = method::identity(&fixture.dir.join("responder.pem"));
     let dialer = method::identity(&fixture.dir.join("dialer.pem"));
     let peer = responder.peer_id().to_string();
-    let method = Proof::new(responder).with_initiators(Trust::pinned([dialer.peer_id()]));
+    let method = Proof::builder(responder)
+        .initiators(Trust::pinned([dialer.peer_id()]))
+        .build()
+        .unwrap();
     let wait = Duration::from_secs(30);
     let backend =
         coqui_web_channel::websocket::Listener::bind("127.0.0.1:0".parse().unwrap(), None)
@@ -1175,7 +1193,12 @@ fn dial_can_pin_only_the_server_or_with_a_flag_nothing_on_loopback() {
     let fixture = Fixture::new("dialmodes");
     let agent = echo_agent();
     let server = native::identity(&fixture.dir.join("server.pem"));
-    let tls = coqui_peer_tls::server_config_without_client_auth(&server, &[]).unwrap();
+    let tls = coqui_peer_tls::ServerBuilder::new()
+        .identity(&server)
+        .client_auth(coqui_peer_tls::ClientAuth::None)
+        .build()
+        .unwrap()
+        .config;
     let wait = Some(Duration::from_secs(30));
     let pinned = coqui_web_channel::websocket::Listener::bind(
         "127.0.0.1:0".parse().unwrap(),
@@ -1438,13 +1461,19 @@ fn a_fresh_home_proves_by_the_default_and_a_webcrypto_home_keeps_serving_its_pee
     assert_eq!(heard_line(&heard, "proving by"), "proving by webcrypto");
     let url = url::Url::parse(&format!("ws://{address}/agent")).unwrap();
     let channel = binary_dial(&url);
-    let method = Proof::new(client).with_responders(Trust::pinned([server.peer_id()]));
+    let method = Proof::builder(client)
+        .responders(Trust::pinned([server.peer_id()]))
+        .build()
+        .unwrap();
     let established = prove_out(&method, &channel, Duration::from_secs(10), 1 << 20).unwrap();
     initialize(&Sealed::new(&channel, established.session));
 
     // A Noise client of the same home is refused, and the bridge says why.
     let stranger = Identity::generate(Method::Noise).unwrap();
-    let method = Proof::new(stranger).with_responders(Trust::pinned([server.peer_id()]));
+    let method = Proof::builder(stranger)
+        .responders(Trust::pinned([server.peer_id()]))
+        .build()
+        .unwrap();
     assert!(
         prove_out(
             &method,

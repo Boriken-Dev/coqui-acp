@@ -195,7 +195,10 @@ fn over_link(
     server: &str,
     body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>),
 ) {
-    let method = Proof::new(client).with_responders(Trust::pinned([server.parse().unwrap()]));
+    let method = Proof::builder(client)
+        .responders(Trust::pinned([server.parse().unwrap()]))
+        .build()
+        .unwrap();
     let channel = dial(port);
     let established = prove_out(&method, &channel, WAIT, 1 << 25).unwrap();
     let sealed = Sealed::new(&channel, established.session);
