@@ -76,7 +76,7 @@ impl Account {
             .filter(|listed| !listed.is_empty());
         match listed {
             Some(listed) => {
-                for (id, snapshot) in listed {
+                for (id, snapshot) in listed.iter().filter(|(_, one)| one.is_object()) {
                     let mut snapshot = snapshot.clone();
                     if snapshot.get("limitId").is_none_or(Value::is_null) {
                         snapshot["limitId"] = Value::String(id.clone());
@@ -132,20 +132,32 @@ impl Account {
             return None;
         }
         let id = limit_id(message.pointer("/params/rateLimits")?);
-        let snapshot = self.snapshots.get(id)?;
-        ["primary", "secondary"]
+        exhausted_in(id, self.snapshots.get(id)?)
+    }
+
+    /// The same over every limit the last read and the updates since hold.
+    pub(crate) fn exhausted_any(&self) -> Option<LimitHit> {
+        self.snapshots
             .iter()
-            .filter_map(|position| {
-                let window = snapshot.get(position)?;
-                (window.get("usedPercent")?.as_f64()? >= 100.0).then(|| {
-                    let mut limit = LimitHit::new(0);
-                    limit.resets_at = window.get("resetsAt").and_then(Value::as_i64);
-                    limit.bucket = Some(format!("{id}:{}", window_name(window, position)));
-                    limit
-                })
-            })
+            .filter_map(|(id, snapshot)| exhausted_in(id, snapshot))
             .max_by_key(|limit| limit.resets_at)
     }
+}
+
+/// The window of one snapshot that is used up, the one that resets last.
+fn exhausted_in(id: &str, snapshot: &Value) -> Option<LimitHit> {
+    ["primary", "secondary"]
+        .iter()
+        .filter_map(|position| {
+            let window = snapshot.get(position)?;
+            (window.get("usedPercent")?.as_f64()? >= 100.0).then(|| {
+                let mut limit = LimitHit::new(0);
+                limit.resets_at = window.get("resetsAt").and_then(Value::as_i64);
+                limit.bucket = Some(format!("{id}:{}", window_name(window, position)));
+                limit
+            })
+        })
+        .max_by_key(|limit| limit.resets_at)
 }
 
 /// The buckets of one snapshot: each window as `<limit id>:<five_hour|weekly|primary|secondary>`, and the spend

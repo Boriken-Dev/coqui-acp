@@ -320,13 +320,18 @@ impl CodexSession {
         }
         let sink: Arc<dyn Fn(Event) -> bool + Send + Sync> = Arc::new(sink);
         let spawned = spawn.spawn(&launch.launch()).map_err(Error::Spawn)?;
+        let process: Arc<dyn Process> = Arc::from(spawned.process);
+        // Past here the app server runs: a failure ends it, since no session exists yet to do so on drop.
+        let ended_with = |error: io::Error| {
+            let _ = process.kill();
+            Error::Spawn(error)
+        };
         let writer: Writer = line_writer(
             spawned.stdin,
             settings.max_queued_writes,
             "coqui-acp-codex-stdin",
         )
-        .map_err(Error::Spawn)?;
-        let process: Arc<dyn Process> = Arc::from(spawned.process);
+        .map_err(&ended_with)?;
         let parser = Arc::new(Mutex::new(Parser::with_limits(
             Arc::clone(&writer),
             settings.max_tools,
@@ -343,7 +348,7 @@ impl CodexSession {
             thread::Builder::new()
                 .name("coqui-acp-codex-stderr".into())
                 .spawn(move || lines::read_diagnostics(stderr, max_line, &tail))
-                .map_err(Error::Spawn)?;
+                .map_err(&ended_with)?;
         }
         let mut stream = Stream::new(
             "Codex app-server",
@@ -371,7 +376,7 @@ impl CodexSession {
                     },
                     Vec::new,
                 )
-                .map_err(Error::Spawn)?;
+                .map_err(&ended_with)?;
         }
         Ok(Self {
             thread: String::new(),
@@ -480,13 +485,6 @@ impl CodexSession {
         if let Some(check) = self.settings.check_thread.clone() {
             check(&opened).map_err(Error::Refused)?;
         }
-        // Where the account stands is told as soon as the session opens; a login that has no allowances to report, or
-        // a Codex that does not know the request, stops nothing.
-        if let Ok(buckets) = self.read_usage()
-            && !buckets.is_empty()
-        {
-            (self.sink)(Event::Buckets(buckets));
-        }
         self.thread = thread.to_string();
         self.thread_model = opened
             .get("model")
@@ -535,12 +533,16 @@ impl CodexSession {
     /// [`Error::Harness`] when Codex refused (it is not signed in with an account that has allowances), or
     /// [`Error::Timeout`] when it did not answer.
     pub fn read_usage(&self) -> Result<Vec<Bucket>, Error> {
-        let answer = self.request(
+        let number = self.next_request();
+        locked(&self.parser).expect_rate_limits_read(&json!(number));
+        self.request_numbered(
+            number,
             "account/rateLimits/read",
             json!({}),
             self.settings.request_timeout,
         )?;
-        Ok(locked(&self.parser).rate_limits_read(&answer))
+        // The answer was applied where it was read, so an update read after it is kept.
+        Ok(locked(&self.parser).rate_limits())
     }
 
     /// Asks for the models. Their being unknown stops nothing: a notice says so.

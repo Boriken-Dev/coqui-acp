@@ -117,6 +117,9 @@ pub struct Parser {
     exhausted: Option<LimitHit>,
     /// What the account has said of its allowances, for merging each sparse update into.
     account: limits::Account,
+    /// The `account/rateLimits/read` requests not yet answered: their answers are applied where they are read, so
+    /// an update read before one is not overwritten by it.
+    reads: BTreeSet<String>,
     /// The error the running turn reported before its end.
     error: Option<Value>,
     answers: Vec<Answer>,
@@ -155,6 +158,7 @@ impl Parser {
             interrupted: false,
             exhausted: None,
             account: limits::Account::default(),
+            reads: BTreeSet::new(),
             error: None,
             answers: Vec::new(),
         }
@@ -295,6 +299,11 @@ impl Parser {
                         self.give_up(turn.to_string(), None);
                     }
                 }
+                if self.reads.remove(&request)
+                    && let Ok(result) = &answer
+                {
+                    self.apply_read(result);
+                }
                 self.answers.push((request, answer));
                 Vec::new()
             }
@@ -327,7 +336,20 @@ impl Parser {
     /// Takes a full `account/rateLimits/read` answer as the account's allowances, in place of what was known, and
     /// answers the buckets of it. Later sparse updates merge into it.
     pub fn rate_limits_read(&mut self, answer: &Value) -> Vec<Bucket> {
-        self.account.read(answer)
+        self.apply_read(answer)
+    }
+
+    /// Says that the answer to request `id` is an `account/rateLimits/read` answer, to be applied as it is read.
+    pub fn expect_rate_limits_read(&mut self, id: &Value) {
+        self.reads.insert(id_text(id));
+    }
+
+    fn apply_read(&mut self, answer: &Value) -> Vec<Bucket> {
+        let buckets = self.account.read(answer);
+        if let Some(window) = self.account.exhausted_any() {
+            self.exhausted = Some(window);
+        }
+        buckets
     }
 
     /// The account's allowances as they now stand: the last full read with every update merged in.

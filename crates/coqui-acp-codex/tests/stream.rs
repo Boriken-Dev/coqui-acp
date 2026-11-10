@@ -935,3 +935,57 @@ fn another_threads_usage_is_spent_but_not_this_sessions_spend() {
     assert!(usage.elsewhere);
     assert!(usage.spend.is_none());
 }
+
+#[test]
+fn a_snapshot_that_is_not_an_object_is_skipped_not_a_panic() {
+    let (mut parser, _) = parser();
+    assert!(
+        parser
+            .rate_limits_read(&json!({"rateLimitsByLimitId": {"codex": 5}}))
+            .is_empty()
+    );
+    let mixed = parser.rate_limits_read(&json!({"rateLimitsByLimitId": {"codex": 5, "other": {
+        "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1}}}}));
+    assert_eq!(mixed.len(), 1, "{mixed:?}");
+    assert_eq!(mixed[0].id, "other:five_hour");
+    assert!(
+        parser
+            .rate_limits_read(&json!({"rateLimits": 7, "rateLimitsByLimitId": null}))
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_read_answer_is_applied_where_it_is_read_so_a_later_update_is_kept() {
+    let (mut parser, _) = parser();
+    parser.expect_rate_limits_read(&json!(7));
+    parser.line(&json!({"id": 7, "result": read_answer()}));
+    parser.line(
+        &json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "limitId": "codex", "primary": {"usedPercent": 64, "resetsAt": 1_794_248_800}}}}),
+    );
+    // What the session reads back once its request is answered is the account as merged, not the answer alone.
+    let now = parser.rate_limits();
+    assert_eq!(by_id(&now, "codex:five_hour").used, Some(640));
+    assert_eq!(by_id(&now, "codex:weekly").used, Some(30));
+    assert_eq!(
+        parser.answers().len(),
+        1,
+        "the waiting request is still answered"
+    );
+}
+
+#[test]
+fn a_used_up_window_in_a_read_names_the_limit_error_that_follows_without_a_reset() {
+    let (mut parser, _) = parser();
+    let mut answer = read_answer();
+    answer["rateLimitsByLimitId"]["codex"]["primary"]["usedPercent"] = json!(100);
+    parser.expect_rate_limits_read(&json!(3));
+    parser.line(&json!({"id": 3, "result": answer}));
+    let ended = parser.line(&json!({"method": "turn/completed", "params": {"turn": {"id": "t", "status": "failed", "error": {"message": "usage limit", "codexErrorInfo": "usage_limit_exceeded"}}}}));
+    let TurnEnd::Limited(limit) = end_of(&ended) else {
+        panic!("{:?}", end_of(&ended))
+    };
+    assert_eq!(limit.bucket.as_deref(), Some("codex:five_hour"));
+    assert_eq!(limit.resets_at, Some(1_794_248_766));
+}
