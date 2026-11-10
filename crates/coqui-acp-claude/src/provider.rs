@@ -382,7 +382,9 @@ impl AcpHarness for ClaudeProvider {
     ) -> Result<UsageReport, ProviderError> {
         // Claude Code learns usage only during a turn: this is what the connections last saw.
         let account = query.account.as_ref().map(AccountGrant::reference);
-        account_check(account.as_ref())?;
+        if let Some(why) = account_check(account.as_ref())? {
+            return Err(unsupported(&why));
+        }
         Ok(self
             .reports
             .report(&self.support(), account.as_ref().map(|a| a.id.as_str())))

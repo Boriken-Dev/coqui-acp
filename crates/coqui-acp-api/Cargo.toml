@@ -21,7 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 # The suite every provider of the kind is held to, as a module and as `acp-harness-check`, which runs it
 # on a library file or a source file in any language.
-contract = ["dep:serde_json", "dep:guatiao-serde", "dep:coqui-acp", "guatiao/load"]
+contract = ["dep:serde_json", "dep:guatiao-serde", "dep:coqui-acp", "dep:rustix", "dep:win32job", "guatiao/load"]
 
 [dependencies]
 guatiao = { workspace = true, features = ["provider"] }
@@ -30,6 +30,13 @@ serde.workspace = true
 coqui-acp = { path = "../coqui-acp", optional = true }
 serde_json = { workspace = true, optional = true }
 guatiao-serde = { workspace = true, optional = true }
+
+# The programs the contract suite starts end with their whole tree.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+win32job = { workspace = true, optional = true }
 
 [dev-dependencies]
 guatiao = { workspace = true, features = ["provider", "load"] }

@@ -28,6 +28,8 @@ pub(crate) const INVALID_REQUEST: i64 = -32600;
 pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 pub(crate) const INVALID_PARAMS: i64 = -32602;
 pub(crate) const INTERNAL_ERROR: i64 = -32603;
+/// What the reason starts with when the client answered one of our requests with an error.
+pub(crate) const CLIENT_ERROR: &str = "client error: ";
 
 /// Serves `harness` to one client over `input` and `output`, one JSON-RPC message per line, on the calling thread
 /// until the input ends. Then every session it opened is closed.
@@ -235,14 +237,15 @@ impl Shared {
         else {
             // An answer to one of our requests.
             if message.get("result").is_none() && message.get("error").is_none() {
-                return self.respond_error(&Value::Null, INVALID_REQUEST, "not a JSON-RPC message");
+                let id = message.get("id").cloned().unwrap_or(Value::Null);
+                return self.respond_error(&id, INVALID_REQUEST, "not a JSON-RPC message");
             }
             let Some(id) = message.get("id").and_then(Value::as_u64) else {
                 return;
             };
             if let Some(waiting) = self.pending().remove(&id) {
                 let answer = match message.get("error") {
-                    Some(error) => Err(error.to_string()),
+                    Some(error) => Err(format!("{CLIENT_ERROR}{error}")),
                     None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                 };
                 let _ = waiting.send(answer);

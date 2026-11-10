@@ -1082,6 +1082,12 @@ fn permission(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
             "echo: refused",
             "end_turn",
         ),
+        (
+            "an allow option it never offered",
+            None,
+            "echo: refused",
+            "end_turn",
+        ),
         ("cancelled", None, "", "cancelled"),
     ];
     for (id, (what, kind, text, stop)) in (10u64..).zip(cases) {
@@ -1121,6 +1127,24 @@ fn permission(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
                 json!({"result": {"outcome": {"outcome": "maybe"}}})
             }
             ("a selected option it never offered", _) => selected("never-offered-option"),
+            ("an allow option it never offered", _) => {
+                // The id of an option that allows, as harnesses spell them, which this question did not put.
+                let put: Vec<&str> = options
+                    .iter()
+                    .filter_map(|o| o["optionId"].as_str())
+                    .collect();
+                let absent = [
+                    "allow",
+                    "allow_always",
+                    "accept",
+                    "accept_always",
+                    "accept_for_session",
+                ]
+                .into_iter()
+                .find(|id| !put.contains(id))
+                .unwrap_or("allow-never-offered");
+                selected(absent)
+            }
             _ => json!({"result": {"outcome": {"outcome": "cancelled"}}}),
         };
         let mut answer = reply;
@@ -1129,11 +1153,8 @@ fn permission(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
         conn.send(&answer)?;
         let (said, end) = turn(&mut conn, id)?;
         let stopped = end["result"]["stopReason"].as_str().unwrap_or("");
-        // A reply that chooses no offered option is a refusal: the tool does not run. A harness that has only the
-        // person's cancel to tell its program ends the turn cancelled for all of them, which is a refusal too.
-        let refused_by_cancel = kind.is_none() && what != "cancelled" && stopped == "cancelled";
         ensure!(
-            (said == text && stopped == stop) || (refused_by_cancel && said != "echo: allowed"),
+            said == text && stopped == stop,
             "answered {what}, the turn said {said:?} and ended {end}"
         );
     }
@@ -1438,7 +1459,7 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         } else if waits_for_a_turn {
             kind.supported && same_buckets(&kind, &limited)
         } else {
-            kind.supported
+            kind.supported && kind.account.as_deref() == Some(account) && !kind.buckets.is_empty()
         },
         "the kind answers {kind:?}, the connection's last report was {limited:?}"
     );

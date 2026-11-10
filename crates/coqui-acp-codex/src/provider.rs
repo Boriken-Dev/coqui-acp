@@ -25,9 +25,6 @@ use coqui_acp_harness::{Settings, ThroughSpawner};
 use crate::accounts;
 use crate::{CodexAgent, CodexLaunch, CodexSession, CodexSettings};
 
-/// The approval policy a read-only launch is given when the settings name none: the one Plan mode has.
-const READ_ONLY_APPROVAL: &str = "on-request";
-
 /// How the Codex provider is configured.
 #[derive(FromValue, Schema, Debug, Clone)]
 #[map(crate = ::coqui_acp_api::guatiao)]
@@ -108,13 +105,6 @@ impl From<ProviderSettings> for CodexProvider {
     }
 }
 
-/// What the requirements a start holds change besides the launch.
-#[derive(Debug, Default)]
-struct Narrowed {
-    /// A client may give no MCP server: it would start a program outside the sandbox.
-    no_client_mcp: bool,
-}
-
 impl CodexProvider {
     /// A provider configured as `settings` say.
     #[must_use]
@@ -139,7 +129,7 @@ impl CodexProvider {
         &self,
         environment: &Environment,
         requirements: &[Requirement],
-    ) -> Result<(CodexLaunch, Narrowed, Option<String>), ProviderError> {
+    ) -> Result<(CodexLaunch, Option<String>), ProviderError> {
         let mut launch = CodexLaunch::new(".");
         launch.executable = OsString::from(&self.settings.executable);
         launch.model.clone_from(&self.settings.model);
@@ -152,9 +142,8 @@ impl CodexProvider {
         for (name, value) in environment.iter() {
             launch.env.insert(name.into(), value.into());
         }
-        let mut narrowed = Narrowed::default();
-        let refusal = narrow(requirements, &mut launch, &mut narrowed)?;
-        Ok((launch, narrowed, refusal))
+        let refusal = narrow(requirements)?;
+        Ok((launch, refusal))
     }
 
     fn support(&self) -> coqui_acp_api::UsageSupport {
@@ -162,17 +151,12 @@ impl CodexProvider {
     }
 }
 
-/// Holds the requirements a launch can, changing it to; the reason for the first it cannot.
+/// The reason for the first requirement Codex cannot be held to; none is held.
 ///
-/// `read_only` is the read-only sandbox, with the approval policy Plan mode has when none is set, which also leaves a
-/// client Plan mode and no other. A client's MCP servers start programs that run outside the sandbox, so none is taken
-/// while it holds; the person's own Codex configuration is Codex's to read, and its servers are not under the sandbox.
-/// No other name is held: Codex has no flag for what the rest take away.
-fn narrow(
-    requirements: &[Requirement],
-    launch: &mut CodexLaunch,
-    narrowed: &mut Narrowed,
-) -> Result<Option<String>, ProviderError> {
+/// `read_only` is not the read-only sandbox alone: an approval policy that asks lets Codex escalate, Bypass mode is
+/// still offered, Plan mode applies `on-request` again, and the MCP servers of the person's own configuration start
+/// outside the sandbox. Nothing else has a Codex setting that takes it away.
+fn narrow(requirements: &[Requirement]) -> Result<Option<String>, ProviderError> {
     let narrowings = match Narrowing::read_all(requirements) {
         Ok(narrowings) => narrowings,
         Err(error) if error.status() == Status::GUATIAO_ERR_UNSUPPORTED => {
@@ -180,22 +164,10 @@ fn narrow(
         }
         Err(error) => return Err(error.into()),
     };
-    for narrowing in narrowings {
-        match narrowing {
-            Narrowing::ReadOnly => {
-                launch.sandbox = Some("read-only".into());
-                if launch.approval_policy.is_none() {
-                    launch.approval_policy = Some(READ_ONLY_APPROVAL.into());
-                }
-                narrowed.no_client_mcp = true;
-            }
-            other => {
-                let name = Requirement::from(other).name;
-                return Ok(Some(format!("Codex cannot be held to `{name}`")));
-            }
-        }
-    }
-    Ok(None)
+    Ok(narrowings.into_iter().next().map(|narrowing| {
+        let name = Requirement::from(narrowing).name;
+        format!("Codex cannot be held to `{name}`")
+    }))
 }
 
 fn unsupported(why: &str) -> ProviderError {
@@ -245,8 +217,7 @@ impl AcpHarness for CodexProvider {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
         drop(keeper);
-        let (launch, narrowed, refusal) =
-            self.launch(request.environment.expose(), &request.requirements)?;
+        let (launch, refusal) = self.launch(request.environment.expose(), &request.requirements)?;
         if let Some(why) = refusal {
             return Err(unsupported(&why));
         }
@@ -263,7 +234,7 @@ impl AcpHarness for CodexProvider {
         } else {
             1
         };
-        settings.client_mcp_servers = self.settings.client_mcp_servers && !narrowed.no_client_mcp;
+        settings.client_mcp_servers = self.settings.client_mcp_servers;
         settings.working_roots = request.working_roots.iter().map(PathBuf::from).collect();
         settings.account.clone_from(&account_id);
         let reports = Arc::clone(&self.reports);
@@ -283,8 +254,7 @@ impl AcpHarness for CodexProvider {
         _environment: Secret<Environment>,
         account: Option<AccountRef>,
     ) -> Result<Option<String>, ProviderError> {
-        let mut launch = CodexLaunch::new(".");
-        if let Some(why) = narrow(&requirements, &mut launch, &mut Narrowed::default())? {
+        if let Some(why) = narrow(&requirements)? {
             return Ok(Some(why));
         }
         account_check(account.as_ref())
@@ -333,7 +303,7 @@ impl AcpHarness for CodexProvider {
         )? {
             return Err(unsupported(&why));
         }
-        let (launch, _, _) = self.launch(request.environment.expose(), &[])?;
+        let (launch, _) = self.launch(request.environment.expose(), &[])?;
         let spawn = ThroughSpawner::new(spawner);
         Ok(
             match CodexSession::read_models(&launch, &spawn, CodexSettings::new()) {
@@ -361,9 +331,11 @@ impl AcpHarness for CodexProvider {
         _keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
         let account = query.account.as_ref().map(AccountGrant::reference);
-        account_check(account.as_ref())?;
+        if let Some(why) = account_check(account.as_ref())? {
+            return Err(unsupported(&why));
+        }
         let id = account.as_ref().map(|account| account.id.as_str());
-        let (launch, _, _) = self.launch(query.environment.expose(), &[])?;
+        let (launch, _) = self.launch(query.environment.expose(), &[])?;
         let spawn = ThroughSpawner::new(spawner);
         // Codex answers with no turn: ask it. A login with no allowances answers with an error, and nothing is reported.
         Ok(

@@ -124,6 +124,22 @@ fn a_decision_not_offered_rejects() {
 }
 
 #[test]
+fn a_refusal_declines_and_only_a_cancel_cancels() {
+    let (mut parser, written) = parser();
+    for (outcome, expected) in [
+        (Outcome::Refused, "decline"),
+        (Outcome::Cancelled, "cancel"),
+    ] {
+        let request = question(
+            &mut parser,
+            &command(&json!({"availableDecisions": ["accept", "cancel"]})),
+        );
+        request.responder.answer(outcome).unwrap();
+        assert_eq!(decision(&written), expected);
+    }
+}
+
+#[test]
 fn a_rule_says_it_is_a_prefix_that_stays_on_one_line_and_is_sent_as_codex_gave_it() {
     let (mut parser, written) = parser();
     let request = question(

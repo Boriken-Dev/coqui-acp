@@ -848,3 +848,67 @@ fn initialize_does_not_hold_up_reading_the_client() {
         .unwrap();
     assert_eq!(second["id"], json!(initialize), "{second}");
 }
+
+/// How the harness is told a client answered its question: an error, an outcome nobody knows and an option that was
+/// never put refuse this request alone; only the client's own cancel is a cancel.
+#[test]
+fn a_client_answer_that_chooses_no_offered_option_is_a_refusal_and_only_its_cancel_is_a_cancel() {
+    let replies = [
+        (
+            json!({"error": {"code": -32603, "message": "failed"}}),
+            "answered Refused",
+        ),
+        (
+            json!({"result": {"outcome": {"outcome": "maybe"}}}),
+            "answered Refused",
+        ),
+        (
+            json!({"result": {"outcome": {"outcome": "selected", "optionId": "never"}}}),
+            "answered Refused",
+        ),
+        (
+            json!({"result": {"outcome": {"outcome": "cancelled"}}}),
+            "answered Cancelled",
+        ),
+        (
+            json!({"result": {"outcome": {"outcome": "selected", "optionId": "yes"}}}),
+            "answered Selected(\"yes\")",
+        ),
+    ];
+    for (reply, expected) in replies {
+        let fake = Fake::new(Mode::Asks);
+        let log = Arc::clone(&fake.log);
+        let mut client = Client::serve(fake, Settings::new());
+        let session = client.open(2);
+        client.request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+        );
+        let asked = client.until(|message| message["method"] == "session/request_permission");
+        let mut reply = reply;
+        reply["id"] = asked["id"].clone();
+        client.send(reply);
+        let until = Instant::now() + Duration::from_secs(5);
+        let answered = loop {
+            if let Some(entry) = log
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| e.starts_with("answered"))
+            {
+                break entry.clone();
+            }
+            assert!(Instant::now() < until, "the harness was never answered");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(answered, expected);
+    }
+}
+
+#[test]
+fn a_message_with_an_id_and_nothing_else_is_answered_invalid_with_its_id() {
+    let mut client = Client::serve(Fake::new(Mode::Slow), Settings::new());
+    client.send(json!({"id": 77}));
+    let answer = client.until(|message| message["id"] == 77);
+    assert_eq!(answer["error"]["code"], -32600);
+}

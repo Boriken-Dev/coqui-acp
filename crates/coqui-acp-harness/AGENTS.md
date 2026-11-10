@@ -149,7 +149,7 @@ pub struct PermissionRequest { pub tool: ToolCall, pub title: String, pub descri
 pub fn PermissionRequest::new(tool, title, description, options, responder) -> PermissionRequest
 pub fn details(self, details: Map<String, Value>) -> Self
 pub struct PermissionOption { pub id: String, pub name: String, pub kind: OptionKind }
-pub enum Outcome { Selected(String), Cancelled }
+pub enum Outcome { Selected(String), Cancelled, Refused }
 pub fn Responder::new(answer: impl FnOnce(Outcome) -> io::Result<()> + Send + 'static) -> Responder
 pub fn answer(self, outcome: Outcome) -> io::Result<()>
 ```
@@ -198,7 +198,7 @@ pub const PLAN_ID: &str = "plan";
 - `session/cancel` calls `interrupt` once per turn, after the turn's prompt has reached the harness; the turn's end is answered `cancelled`. If it has not ended within `cancel_grace` it is answered `cancelled` anyway, its later end is dropped, and a prompt is refused until it comes.
 - `session/set_config_option` (`configId`, `value` an id) calls `set_option` and answers `{configOptions}`: `id` in version 1, `configId` in version 2.
 - `session/close` answers a running turn `cancelled`, closes the harness's session and lets go of it, and answers `{}`. Anything else with an id is method not found.
-- A permission request is `session/request_permission`: version 1 `{sessionId, toolCall, options}`; version 2 `{sessionId, title, description, subject: {type: "tool_call", toolCall}, options}`, with `requires_action` before it and `running` after. An answer naming an option not offered, an error, no answer within `permission_timeout`, or a client that has gone is `Outcome::Cancelled`; so is a question still open when its turn ends, is answered cancelled after `cancel_grace`, or its session closes, and the client's later answer is dropped.
+- A permission request is `session/request_permission`: version 1 `{sessionId, toolCall, options}`; version 2 `{sessionId, title, description, subject: {type: "tool_call", toolCall}, options}`, with `requires_action` before it and `running` after. An answer naming an option not offered, an outcome nobody knows, or an error is `Outcome::Refused` (this request alone is refused); the cancelled outcome, no answer within `permission_timeout`, or a client that has gone is `Outcome::Cancelled`; so is a question still open when its turn ends, is answered cancelled after `cancel_grace`, or its session closes, and the client's later answer is dropped.
 
 What each event becomes:
 

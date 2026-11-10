@@ -72,7 +72,10 @@ fn the_provider_keeps_every_rule_of_the_kind_against_the_stand_in() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env("CLAUDE_CONFIG_DIR", &dir)
+        .env("HOME", &dir)
+        .env("USERPROFILE", &dir)
+        .env("ACP_HARNESS_CHECK_HOME", &dir)
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .expect("the test runs itself");
     let _ = std::fs::remove_dir_all(&dir);
@@ -279,6 +282,30 @@ fn what_it_does_not_do_yet_is_refused_unsupported_with_a_reason() {
         )
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+}
+
+#[test]
+fn a_usage_read_for_an_account_it_does_not_apply_is_refused_like_a_models_call() {
+    let spawner = || -> Object<dyn ProcessSpawner> { LocalSpawner::new().into_object() };
+    let account = coqui_acp_api::AccountGrant::new("a", "claude-login");
+    let error = provider()
+        .usage(
+            coqui_acp_api::UsageQuery::new().account(account.clone()),
+            spawner(),
+            Keeper.into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    assert!(error.message().contains("claude-login"));
+    let error = provider()
+        .usage(
+            coqui_acp_api::UsageQuery::new()
+                .account(coqui_acp_api::AccountGrant::new("a", "no-such-kind")),
+            spawner(),
+            Keeper.into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
 }
 
 #[test]

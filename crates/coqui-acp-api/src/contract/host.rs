@@ -11,11 +11,13 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::path::Path;
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::path::PathBuf;
+use std::sync::{
+    Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use std::time::Instant;
 
 use guatiao::library::{Object, ProviderError};
@@ -25,7 +27,7 @@ use serde_json::{Value, json};
 
 use super::checks::CANARY;
 use super::json;
-use super::programs::Program;
+use super::programs::{HOME_VARIABLE, Program};
 use crate::files::PrivateDir;
 use crate::spawner::{
     FileInfo, LinkState, ProcessExit, ProcessSpawner, READ_TIMED_OUT, SecretBytes, SpawnSpec,
@@ -36,23 +38,50 @@ use crate::{
     OpenUrl, StartRequest,
 };
 
-thread_local! {
-    /// Whether the spawners made on this thread start the programs they are asked to.
-    static RUNNING: Cell<bool> = const { Cell::new(false) };
+/// Runs whose spawners start nothing share the lock; a run whose spawners start the programs they are asked to holds it
+/// alone, so no spawner of another run is made while the mode is the program agent's.
+static MODE: RwLock<()> = RwLock::new(());
+/// The home the programs of the run holding [`MODE`] alone are given.
+static HOME: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// While it lives, the spawners made start real programs, in a home of the suite's (see [`Contract::program_agent`]),
+/// or none start any.
+#[allow(dead_code, reason = "the guards are held for their lock")]
+pub(super) enum Running {
+    /// No program is started.
+    Idle(RwLockReadGuard<'static, ()>),
+    /// Programs are started; the directory is the home made for them, removed at the end, when there is one.
+    Programs(RwLockWriteGuard<'static, ()>, Option<PathBuf>),
 }
 
-/// While it lives, the spawners made on this thread start real programs; see [`Contract::program_agent`].
-pub(super) struct Running(bool);
-
 impl Running {
-    pub(super) fn on(on: bool) -> Self {
-        Self(RUNNING.with(|running| running.replace(on)))
+    pub(super) fn on(programs: bool) -> Self {
+        if !programs {
+            return Self::Idle(MODE.read().unwrap_or_else(PoisonError::into_inner));
+        }
+        let guard = MODE.write().unwrap_or_else(PoisonError::into_inner);
+        let (home, made) = match std::env::var_os(HOME_VARIABLE) {
+            Some(home) => (PathBuf::from(home), None),
+            None => {
+                let home = std::env::temp_dir()
+                    .join(format!("acp-harness-home-{}", super::checks::fresh_uuid()));
+                let _ = std::fs::create_dir_all(&home);
+                (home.clone(), Some(home))
+            }
+        };
+        *HOME.lock().unwrap_or_else(PoisonError::into_inner) = Some(home);
+        Self::Programs(guard, made)
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        RUNNING.with(|running| running.set(self.0));
+        if let Self::Programs(_, made) = self {
+            *HOME.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            if let Some(home) = made {
+                let _ = std::fs::remove_dir_all(home);
+            }
+        }
     }
 }
 
@@ -242,8 +271,8 @@ impl Drop for Idle {
 struct Spawner {
     shared: Arc<Shared>,
     files: Option<PrivateDir>,
-    /// Whether it starts the programs it is asked to, in place of idle ones.
-    programs: bool,
+    /// The home of the programs it starts for real, in place of idle ones; none when it starts none.
+    programs: Option<PathBuf>,
 }
 
 impl Spawner {
@@ -261,16 +290,15 @@ impl ProcessSpawner for Spawner {
     fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
         let mut info = SpawnerInfo::new(std::env::consts::OS, std::env::consts::ARCH, true);
         info.files = self.files.is_some();
-        info.separate_error = self.programs;
+        info.separate_error = self.programs.is_some();
         Ok(info)
     }
 
     fn spawn(&self, spec: SpawnSpec) -> Result<Object<dyn SpawnedProcess>, ProviderError> {
         let killed = Arc::new(AtomicBool::new(false));
-        let program = if self.programs {
-            Some(Program::start(&spec, Arc::clone(&killed))?)
-        } else {
-            None
+        let program = match &self.programs {
+            Some(home) => Some(Program::start(&spec, Arc::clone(&killed), home)?),
+            None => None,
         };
         {
             let mut log = self.shared.lock();
@@ -562,7 +590,7 @@ pub(super) fn handed_in(root: Option<&Path>) -> Handed {
     let spawner = Spawner {
         shared: Arc::clone(&shared),
         files: root.map(PrivateDir::new),
-        programs: RUNNING.with(Cell::get),
+        programs: HOME.lock().unwrap_or_else(PoisonError::into_inner).clone(),
     }
     .into_object();
     let sink = Sink(Arc::clone(&shared)).into_object();

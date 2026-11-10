@@ -8,8 +8,8 @@
 //! reports the five-hour window used P tenths of a percent beside its answer and keeps it for the reads that follow;
 //! `limit` hits the usage limit; any other text is answered `echo: TEXT`.
 //!
-//! Threads are kept in `fake_threads/<id>.json` of `CODEX_HOME`, which it requires so that it never writes in a real
-//! home: `thread/resume` of an id with no file there is refused as Codex refuses it. The window the reads report is
+//! Threads are kept in `fake_threads/<id>.json` of `CODEX_HOME` or of `.codex` in the home `ACP_HARNESS_CHECK_HOME`
+//! names, one of which it requires so that it never writes in a real home: `thread/resume` of an id with no file there is refused as Codex refuses it. The window the reads report is
 //! kept in `fake_rate_limits.json` there.
 //!
 //! `COQUI_ACP_FAKE_CODEX_LOG` names a file each start appends to: one line of JSON with the arguments and the names
@@ -157,10 +157,20 @@ fn main() {
             let _ = writeln!(file, "{}", json!({"args": args, "env_names": names}));
         }
     }
-    let Some(home) = std::env::var_os("CODEX_HOME") else {
-        eprintln!("fake_codex: set CODEX_HOME, so that it never writes in a real home");
+    // Never in a real home: in the directory it is told, or in the home the contract suite gave it.
+    let home = std::env::var_os("CODEX_HOME").or_else(|| {
+        std::env::var_os("ACP_HARNESS_CHECK_HOME").and_then(|_| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| PathBuf::from(home).join(".codex").into_os_string())
+        })
+    });
+    let Some(home) = home else {
+        eprintln!(
+            "fake_codex: set CODEX_HOME, or run where the contract suite gave a home, so that it never writes in a real home"
+        );
         std::process::exit(2);
     };
+    let _ = std::fs::create_dir_all(&home);
     let mut fake = Fake {
         home: PathBuf::from(home),
         next_request: 0,

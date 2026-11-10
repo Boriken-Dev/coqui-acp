@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use coqui_acp_api::LoginPrompter;
 use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Status, Value};
@@ -16,6 +15,7 @@ use coqui_acp_api::{
     AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ModelsRequest, ProcessSpawner,
     READ_ONLY, Requirement, UsageQuery,
 };
+use coqui_acp_api::{ChannelSink, LoginPrompter};
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
 use coqui_acp_harness::LocalSpawner;
 
@@ -87,7 +87,10 @@ fn the_provider_keeps_every_rule_of_the_kind_against_the_stand_in() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env("CODEX_HOME", &dir)
+        .env("HOME", &dir)
+        .env("USERPROFILE", &dir)
+        .env("ACP_HARNESS_CHECK_HOME", &dir)
+        .env_remove("CODEX_HOME")
         .output()
         .expect("the test runs itself");
     let _ = std::fs::remove_dir_all(&dir);
@@ -118,7 +121,7 @@ fn the_suite_inside() {
         .program_agent(true)
         .imports(false)
         .logins(false)
-        .holds(vec![Requirement::new(READ_ONLY)])
+        .holds(Vec::new())
         .account("harness-login")
         .run(&harness);
     drop(harness);
@@ -141,7 +144,7 @@ fn it_says_the_cache_hint_is_ignored_and_that_usage_needs_no_turn() {
 }
 
 #[test]
-fn read_only_is_the_read_only_sandbox_and_nothing_else_is_held() {
+fn nothing_is_held_and_read_only_is_refused_with_why_it_is_not_the_sandbox_alone() {
     let provider = provider();
     let refusal = |names: &[&str]| {
         provider
@@ -152,8 +155,20 @@ fn read_only_is_the_read_only_sandbox_and_nothing_else_is_held() {
             )
             .expect("answered")
     };
-    assert_eq!(refusal(&[READ_ONLY]), None);
-    assert!(refusal(&[READ_ONLY, "no_commands"]).is_some_and(|why| why.contains("no_commands")));
+    assert!(refusal(&[READ_ONLY]).is_some_and(|why| why.contains("read_only")));
+    assert!(refusal(&["no_commands"]).is_some_and(|why| why.contains("no_commands")));
+    assert_eq!(refusal(&[]), None);
+    let request = coqui_acp_api::StartRequest::builder()
+        .requirement(Requirement::new(READ_ONLY))
+        .build();
+    let (sender, _received) = std::sync::mpsc::channel();
+    let started = provider.start(
+        request,
+        spawner(),
+        Sink(sender).into_object(),
+        Keeper.into_object(),
+    );
+    assert!(matches!(started, Err(error) if error.status == Status::GUATIAO_ERR_UNSUPPORTED));
 }
 
 #[test]
@@ -180,6 +195,30 @@ fn it_lists_the_account_kinds_it_measured_and_refuses_what_it_does_not_apply() {
         )
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+}
+
+struct Sink(std::sync::mpsc::Sender<Vec<u8>>);
+
+impl ChannelSink for Sink {
+    fn receive(&mut self, bytes: &[u8]) -> Result<(), ProviderError> {
+        let _ = self.0.send(bytes.to_vec());
+        Ok(())
+    }
+
+    fn closed(&mut self, _status: u32, _reason: &str) {}
+}
+
+#[test]
+fn a_usage_read_for_an_account_it_does_not_apply_is_refused_like_a_models_call() {
+    let error = provider()
+        .usage(
+            UsageQuery::new().account(coqui_acp_api::AccountGrant::new("a", "codex-chatgpt")),
+            spawner(),
+            Keeper.into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    assert!(error.message().contains("codex-chatgpt"));
 }
 
 struct Prompter;

@@ -7,8 +7,8 @@
 //! the answer asks to interrupt, ends cancelled; `quota P` reports the five-hour window used P of 1000 beside its
 //! answer; `limit` hits the five-hour limit; any other text is answered `echo: TEXT`.
 //!
-//! Sessions are kept as Claude Code keeps them, in `projects/<directory>/<id>.jsonl` of `CLAUDE_CONFIG_DIR`, which it
-//! requires so that it never writes in a real home: `--resume` of an id with no file there fails as Claude Code does.
+//! Sessions are kept as Claude Code keeps them, in `projects/<directory>/<id>.jsonl` of `CLAUDE_CONFIG_DIR` or of
+//! `.claude` in the home `ACP_HARNESS_CHECK_HOME` names, one of which it requires so that it never writes in a real home: `--resume` of an id with no file there fails as Claude Code does.
 //!
 //! `COQUI_ACP_FAKE_CLAUDE_LOG` names a file each start appends to: one line of JSON with the arguments, the names (never
 //! the values) of the environment, and the two prompt-cache variables' values. `--version` prints the recorded version.
@@ -228,8 +228,17 @@ fn main() {
             );
         }
     }
-    let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR") else {
-        eprintln!("fake_claude: set CLAUDE_CONFIG_DIR, so that it never writes in a real home");
+    // Never in a real home: in the directory it is told, or in the home the contract suite gave it.
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").or_else(|| {
+        std::env::var_os("ACP_HARNESS_CHECK_HOME").and_then(|_| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| Path::new(&home).join(".claude").into_os_string())
+        })
+    });
+    let Some(config) = config else {
+        eprintln!(
+            "fake_claude: set CLAUDE_CONFIG_DIR, or run where the contract suite gave a home, so that it never writes in a real home"
+        );
         std::process::exit(2);
     };
     let value_of = |flag: &str| {

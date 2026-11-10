@@ -39,6 +39,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub use programs::HOME_VARIABLE;
 pub use spawner::spawner_files;
 
 use crate::{AcpHarness, NO_COMMANDS, READ_ONLY, Requirement};
