@@ -1,7 +1,7 @@
-//! What a provider of the `acp_harness` kind needs to front a harness that [`serve`](crate::serve) serves: the channel
+//! What a provider of the `acp_harness` kind needs to front a harness that [`serve`] serves: the channel
 //! the host talks over, ended the way the kind says, and the usage a provider keeps for its `usage` method.
 //!
-//! [`open`] runs `serve` on a thread of its own over a [`Channel`]: each message the host sends is a line `serve`
+//! [`Serving::open`] runs `serve` on a thread of its own over a [`Channel`]: each message the host sends is a line `serve`
 //! reads, each line it writes a message handed to the host's sink. The harness starts its programs through the host's
 //! spawner, which is destroyed before the sink is told the connection has closed.
 //!
@@ -229,7 +229,6 @@ impl Shared {
 }
 
 /// The host's end of the connection.
-
 struct Link {
     shared: Arc<Shared>,
     max_message_bytes: usize,

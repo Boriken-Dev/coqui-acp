@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp-claude` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-There are no Cargo features. MSRV Rust 1.89. A default build depends on `coqui-acp-harness`, `serde_json`, `uuid` and, for the command, `clap`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0. Tested with Claude Code 2.1.318 (`TESTED_VERSIONS`).
+There are no Cargo features. MSRV Rust 1.89. A default build depends on `coqui-acp-api`, `coqui-acp-harness` (with its `kind` feature), `serde_json`, `uuid` and, for the command, `clap`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0. Tested with Claude Code 2.1.318 (`TESTED_VERSIONS`).
 
 Imports: everything is at the crate root, and `parse` is public. `coqui_acp_claude::harness` is `coqui-acp-harness`, for its events, processes and ACP server; `Launch`, `PlainSpawn`, `Spawn` and `Spawned` are re-exported from it.
 
@@ -148,6 +148,34 @@ The mode option (`mode`, category `mode`; ids from `coqui_acp_harness::mode`), m
 What a client may choose is capped by the launch: the launch's own `permission_mode` (default `default`, so Manual) and every stricter one, in the order Plan, Manual, Accept edits, Auto, Bypass; `ClaudeLaunch::modes` names more (a host's widening, still with no Bypass unless `allow_bypass`). A launch in a mode no mode names (`dontAsk`) offers Plan only, and shows it as `custom`. The current mode at the start is `current_permission_mode` of the `initialize` answer. A switch is a `set_permission_mode` control request and holds for the turn running and every turn after it. The mode shown is the one Claude Code is really in: the session tells it when Claude Code reports a `permissionMode` (`system` lines, `init` included) and when a person's "allow always" forwards a `setMode` suggestion (the last one wins; `setMode` is never stripped, since the person chose it), and the conversation sends a `config_option_update` for each change. `ClaudeSession::on_permission_mode` is that hook. A `setMode` an "allow always" would apply is left out of what the answer applies when it names a mode outside the offered list (`ClaudeSession::permit_modes`), so a person's "always" cannot loosen what a host capped; an option that would then grant nothing is not offered. The hook is told after the parser's lock is released, never under it. Claude Code's own list of modes is the `--permission-mode` choices (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`) and the error text of an unknown mode (`acceptEdits, auto, bypassPermissions, default, dontAsk, plan`); its `initialize` answer lists none.
 
 Config options: `model` (category `model`): the models Claude Code lists, and the current one; `effort` (category `thought_level`): `default` and the current model's efforts, else `EFFORTS`. Setting one not offered is refused; setting one sends `set_model` or `apply_flag_settings` for the turns that follow.
+
+## Provider (`ClaudeProvider`, id `claude`)
+
+```rust
+#[derive(Provider)] pub struct ClaudeProvider;                       // an `acp_harness` provider; Debug
+pub fn ClaudeProvider::new(settings: ProviderSettings) -> ClaudeProvider  // also From<ProviderSettings>
+pub struct ProviderSettings {                                        // FromValue, Schema, Default; every field defaults
+    pub executable: String,              // "claude": a path, or a name looked up where the spawner runs it
+    pub model: Option<String>, pub effort: Option<String>, pub permission_mode: Option<String>,
+    pub allow_bypass: bool,              // false
+    pub max_acp_version: u64,            // 2 (1 or 2)
+    pub max_sessions: u64,               // 8
+    pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused
+    pub max_message_bytes: u64,          // 64 MiB: one byte more ends the connection GUATIAO_ERR_BAD_VALUE
+    pub allow_client_plugins: bool,      // false
+    pub client_mcp_servers: bool,        // true
+}
+pub mod accounts { pub fn catalog() -> AccountCatalog;  pub const LOGIN, CONSOLE, OAUTH_TOKEN, API_KEY, AUTH_TOKEN: &str; }
+```
+
+Register it with `Registry::register_local`, or build it into a library with `guatiao::providers!` (`examples/claude_provider.rs` is that library, built by `cargo test`). Each connection serves a `ClaudeAgent` over the channel with `coqui_acp_harness::provider::Serving`; it starts `claude` through the host's spawner. `examples/fake_claude.rs` is a stand-in for Claude Code in its stream-json dialect that behaves as the contract agent does (it needs `CLAUDE_CONFIG_DIR`, keeps sessions as Claude Code does, and with `COQUI_ACP_FAKE_CLAUDE_LOG` logs its arguments, environment names and the two cache variables); the suite runs against it as `acp-harness-check --library <claude_provider> --provider claude --settings '{"executable": "<fake_claude>"}' --program-agent --no-imports --no-logins --holds no_project_mcp --account harness-login`, with `CLAUDE_CONFIG_DIR` set to a scratch directory.
+
+- `describe`: title `Claude Code`, ACP versions 1 and 2 (to `max_acp_version`), what `ClaudeAgent` takes and `session/resume`, `resumes_wider`, usage `reported` and `inferred` with spend and `needs_turn`, and the cache hint: `cache_lifetime` short sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` to `5m`, long to `1h`, default leaves both as the environment has them.
+- `refusal`, `start`: holds `no_project_mcp` as `--strict-mcp-config` (which starts only the servers `--mcp-config` names, so none of the user's own either); every other requirement is `GUATIAO_ERR_UNSUPPORTED` with its name (the flags do not leave instruction files loaded while they drop a directory's settings, and what the rest take away is not measured). The environment is the host's, over nothing; the session ids are Claude Code's UUIDs.
+- `accounts`: `harness-login` and the kinds measured on Claude Code 2.1.311 (`claude-login`, `claude-console` with a login file and a directory, rotating; `claude-oauth-token`, `anthropic-api-key` in a variable; `anthropic-auth-token` through a gateway), with every credential variable. `renews` is false for each and no login method is listed. A call with an account of `harness-login` runs as it would with none; a listed kind is `GUATIAO_ERR_UNSUPPORTED` ("does not apply an account of kind ... yet"), an unlisted one or a bad id `GUATIAO_ERR_BAD_VALUE`.
+- `models`: starts `claude` through the spawner, reads its `initialize` answer and ends it (no turn); unknown, with the reason, when it could not be asked.
+- `usage`: what the connections last saw for the account (`Reports`), as Claude Code learns usage only in a turn.
+- `import_session`, `export_session`, `login`, `renew`: `GUATIAO_ERR_UNSUPPORTED` with a reason (`renew` after checking the account). `session_record`, `non_defaults`: the kind's defaults.
 
 ## Errors
 

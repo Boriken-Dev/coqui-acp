@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use coqui_acp_api::LoginPrompter;
 use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Status, Value};
@@ -51,9 +52,10 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn provider() -> CodexProvider {
-    let mut settings = ProviderSettings::default();
-    settings.executable = fake();
-    CodexProvider::new(settings)
+    CodexProvider::new(ProviderSettings {
+        executable: fake(),
+        ..ProviderSettings::default()
+    })
 }
 
 struct Keeper;
@@ -182,7 +184,7 @@ fn it_lists_the_account_kinds_it_measured_and_refuses_what_it_does_not_apply() {
 
 struct Prompter;
 
-impl coqui_acp_api::LoginPrompter for Prompter {
+impl LoginPrompter for Prompter {
     fn say(&self, _text: &str) -> Result<(), ProviderError> {
         Ok(())
     }

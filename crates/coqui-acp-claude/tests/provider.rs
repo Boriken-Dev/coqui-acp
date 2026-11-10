@@ -53,9 +53,10 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn provider() -> ClaudeProvider {
-    let mut settings = ProviderSettings::default();
-    settings.executable = fake();
-    ClaudeProvider::new(settings)
+    ClaudeProvider::new(ProviderSettings {
+        executable: fake(),
+        ..ProviderSettings::default()
+    })
 }
 
 /// The suite, run in a process of its own whose environment names the stand-in's configuration directory, so that no
@@ -248,11 +249,10 @@ fn it_holds_what_it_can_and_refuses_the_rest_with_the_reason() {
     assert_eq!(refusal(&[NO_PROJECT_MCP]).expect("answered"), None);
     let why = refusal(&[NO_PROJECT_MCP, READ_ONLY]).expect("answered");
     assert!(why.is_some_and(|why| why.contains("read_only")));
-    assert_eq!(
+    assert!(
         refusal(&["no_such_requirement"])
             .expect("answered")
-            .is_some(),
-        true
+            .is_some()
     );
 }
 
