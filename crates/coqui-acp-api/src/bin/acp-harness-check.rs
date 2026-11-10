@@ -14,6 +14,8 @@
 //! --no-imports          it imports no session, and must refuse import_session with a reason
 //! --no-logins           it offers no login method, lists none, and must refuse login with a reason
 //! --account KIND        run the account checks on this kind of account alone
+//! --program-agent       the provider starts its harness's own program, which the checker's spawner then
+//!                       starts for real: name a stand-in for it in --settings
 //! ```
 //!
 //! Exits 0 when the provider keeps every rule, 1 with each rule it broke, 2 when it could not be
@@ -47,6 +49,7 @@ struct Args {
     no_imports: bool,
     no_logins: bool,
     account: Option<String>,
+    program_agent: bool,
 }
 
 fn parse() -> Result<Args, String> {
@@ -72,6 +75,7 @@ fn parse() -> Result<Args, String> {
             }
             "--no-imports" => args.no_imports = true,
             "--no-logins" => args.no_logins = true,
+            "--program-agent" => args.program_agent = true,
             "--account" => args.account = Some(value()?),
             "--holds" => {
                 let held = value()?;
@@ -210,6 +214,9 @@ fn main() -> ExitCode {
     }
     if let Some(kind) = &args.account {
         contract = contract.account(kind.clone());
+    }
+    if args.program_agent {
+        contract = contract.program_agent(true);
     }
     let outcome = contract.run(&*harness);
     drop(harness);

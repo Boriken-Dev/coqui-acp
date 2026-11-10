@@ -30,6 +30,7 @@ mod accounts;
 mod checks;
 mod host;
 mod json;
+mod programs;
 mod spawner;
 mod transport;
 
@@ -53,6 +54,7 @@ pub struct Contract {
     imports: bool,
     logins: bool,
     account: Option<String>,
+    program_agent: bool,
 }
 
 /// One rule a provider broke.
@@ -103,6 +105,7 @@ impl Contract {
             imports: true,
             logins: true,
             account: None,
+            program_agent: false,
         }
     }
 
@@ -147,12 +150,27 @@ impl Contract {
         self
     }
 
+    /// Whether the agent is the harness's own program, which the provider starts through the spawner and the suite's
+    /// spawner then starts for real (the default is the in-process contract agent, and a spawner that starts nothing).
+    /// The provider's settings name a stand-in for the program that behaves as the module's documentation says for
+    /// `wait`, `ask` and a plain prompt (`echo: TEXT`) and, when `describe` lists usage sources, `quota P` and `limit`.
+    ///
+    /// What a program agent cannot do is not asked of it: asking the client for a file (`read PATH`), ending the
+    /// connection on its own (`close`), and the exact figures `quota` and `limit` script (their ids and token bucket),
+    /// of which the checks keep the shape: a report that changes, tells a client that asked, agrees with the kind's
+    /// answer, and a limit that refuses the turn and is kept.
+    pub const fn program_agent(mut self, program_agent: bool) -> Self {
+        self.program_agent = program_agent;
+        self
+    }
+
     /// Runs every check against `harness`.
     ///
     /// # Errors
     ///
     /// Every rule it broke.
     pub fn run(&self, harness: &dyn AcpHarness) -> Result<(), Failures> {
+        let _running = host::Running::on(self.program_agent);
         let failures: Vec<Failure> = checks::all(self, harness)
             .into_iter()
             .filter_map(|(check, outcome)| outcome.err().map(|message| Failure { check, message }))

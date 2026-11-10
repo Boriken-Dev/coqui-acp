@@ -298,15 +298,23 @@ fn turn(conn: &mut Conn, id: u64) -> Result<(String, Value), String> {
     loop {
         let message = conn.next()?;
         if message.get("method") == Some(&json!("session/update")) {
-            if let Some(more) = message["params"]["update"]["content"]["text"].as_str() {
-                text.push_str(more);
-            }
+            text.push_str(&said_by(&message));
             continue;
         }
         if message.get("id") == Some(&json!(id)) && message.get("method").is_none() {
             return Ok((text, message));
         }
         return Err(format!("the agent sent {message} during the turn"));
+    }
+}
+
+/// The text of an `agent_message_chunk` update; any other update says nothing the suite reads.
+fn said_by(update: &Value) -> String {
+    let update = &update["params"]["update"];
+    if update["sessionUpdate"] == "agent_message_chunk" {
+        update["content"]["text"].as_str().unwrap_or("").to_owned()
+    } else {
+        String::new()
     }
 }
 
@@ -499,11 +507,17 @@ fn speaks_acp(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
         json!({}),
     )?;
     conn.send(&prompt(2, &session, "hello"))?;
-    let update = conn.next()?;
-    ensure!(
-        update["method"] == "session/update" && update["params"]["sessionId"] == json!(session),
-        "a prompt's first message was {update}"
-    );
+    // A harness may tell more than its words (a title, its commands, a usage figure), before or after them.
+    let update = loop {
+        let update = conn.next()?;
+        ensure!(
+            update["method"] == "session/update" && update["params"]["sessionId"] == json!(session),
+            "a prompt's first message was {update}"
+        );
+        if update["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+            break update;
+        }
+    };
     ensure!(
         update["params"]["update"]["content"]["text"] == "echo: hello",
         "the prompt was echoed as {update}"
@@ -955,13 +969,18 @@ fn reopens(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
     .filter_map(|(method, taken)| taken.then_some(method))
     .collect();
     for method in methods {
-        let (conn, chosen) = open_session(
+        let (mut conn, chosen) = open_session(
             contract,
             harness,
             StartRequest::new(),
             &place.root,
             json!({}),
         )?;
+        if contract.program_agent {
+            // A harness's program keeps a session from its first turn on.
+            conn.send(&prompt(2, &chosen, "first"))?;
+            turn(&mut conn, 2)?;
+        }
         conn.close_with(OK)?;
 
         let mut conn = open(harness, StartRequest::new())?;
@@ -1045,35 +1064,17 @@ fn permission(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
     )?;
     let selected =
         |option: &str| json!({"result": {"outcome": {"outcome": "selected", "optionId": option}}});
+    // Which option allows once and which rejects once is the option's kind; its id is the harness's own. `None` for the
+    // replies that choose no offered option.
     let cases = [
-        ("allow", selected("allow"), "echo: allowed", "end_turn"),
-        ("reject", selected("reject"), "echo: refused", "end_turn"),
-        (
-            "an error",
-            json!({"error": {"code": -32603, "message": "the host failed"}}),
-            "echo: refused",
-            "end_turn",
-        ),
-        (
-            "an outcome it does not know",
-            json!({"result": {"outcome": {"outcome": "maybe"}}}),
-            "echo: refused",
-            "end_turn",
-        ),
-        (
-            "a selected option it never offered",
-            selected("always"),
-            "echo: refused",
-            "end_turn",
-        ),
-        (
-            "cancelled",
-            json!({"result": {"outcome": {"outcome": "cancelled"}}}),
-            "",
-            "cancelled",
-        ),
+        ("allow", Some("allow_once"), "echo: allowed", "end_turn"),
+        ("reject", Some("reject_once"), "echo: refused", "end_turn"),
+        ("an error", None, "echo: refused", "end_turn"),
+        ("an outcome it does not know", None, "echo: refused", "end_turn"),
+        ("a selected option it never offered", None, "echo: refused", "end_turn"),
+        ("cancelled", None, "", "cancelled"),
     ];
-    for (id, (what, reply, text, stop)) in (10u64..).zip(cases) {
+    for (id, (what, kind, text, stop)) in (10u64..).zip(cases) {
         conn.send(&prompt(id, &session, "ask"))?;
         let asked = loop {
             let message = conn.next()?;
@@ -1088,23 +1089,41 @@ fn permission(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> O
                 && asked.get("id").is_some(),
             "a prompt of `ask` sent {asked}"
         );
-        let offered: Vec<&str> = asked["params"]["options"]
+        let options = asked["params"]["options"]
             .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|o| o["optionId"].as_str())
-            .collect();
+            .cloned()
+            .unwrap_or_default();
+        let option_of = |kind: &str| {
+            options
+                .iter()
+                .find(|o| o["kind"] == kind)
+                .and_then(|o| o["optionId"].as_str())
+                .map(str::to_owned)
+        };
         ensure!(
-            offered.contains(&"allow") && offered.contains(&"reject"),
-            "the permission offered {offered:?}"
+            option_of("allow_once").is_some() && option_of("reject_once").is_some(),
+            "the permission offered {options:?}, with no option of kind allow_once and one of kind reject_once"
         );
+        let reply = match (what, kind) {
+            (_, Some(kind)) => selected(&option_of(kind).unwrap_or_default()),
+            ("an error", _) => json!({"error": {"code": -32603, "message": "the host failed"}}),
+            ("an outcome it does not know", _) => {
+                json!({"result": {"outcome": {"outcome": "maybe"}}})
+            }
+            ("a selected option it never offered", _) => selected("never-offered-option"),
+            _ => json!({"result": {"outcome": {"outcome": "cancelled"}}}),
+        };
         let mut answer = reply;
         answer["jsonrpc"] = json!("2.0");
         answer["id"] = asked["id"].clone();
         conn.send(&answer)?;
         let (said, end) = turn(&mut conn, id)?;
+        let stopped = end["result"]["stopReason"].as_str().unwrap_or("");
+        // A reply that chooses no offered option is a refusal: the tool does not run. A harness that has only the
+        // person's cancel to tell its program ends the turn cancelled for all of them, which is a refusal too.
+        let refused_by_cancel = kind.is_none() && what != "cancelled" && stopped == "cancelled";
         ensure!(
-            said == text && end["result"]["stopReason"] == stop,
+            (said == text && stopped == stop) || (refused_by_cancel && said != "echo: allowed"),
             "answered {what}, the turn said {said:?} and ended {end}"
         );
     }
@@ -1129,17 +1148,39 @@ fn turn_with_usage(conn: &mut Conn, id: u64) -> Result<(String, Value, Vec<Value
     loop {
         let message = conn.next()?;
         match message.get("method").and_then(Value::as_str) {
-            Some("session/update") => {
-                if let Some(more) = message["params"]["update"]["content"]["text"].as_str() {
-                    text.push_str(more);
-                }
-            }
+            Some("session/update") => text.push_str(&said_by(&message)),
             Some(USAGE_NOTIFICATION) => told.push(message),
             Some(_) => return Err(format!("the agent sent {message} during the turn")),
             None if message.get("id") == Some(&json!(id)) => return Ok((text, message, told)),
             None => return Err(format!("the agent sent {message} during the turn")),
         }
     }
+}
+
+/// Whether two reports hold the same figures, whenever each was read.
+fn same_figures(a: &UsageReport, b: &UsageReport) -> bool {
+    let plain = |report: &UsageReport| {
+        let mut report = report.clone();
+        report.observed_at = 0;
+        for bucket in &mut report.buckets {
+            bucket.observed_at = 0;
+        }
+        report
+    };
+    plain(a) == plain(b)
+}
+
+/// Whether two reports hold the same buckets and the same limit, whatever their revisions.
+fn same_buckets(a: &UsageReport, b: &UsageReport) -> bool {
+    let plain = |report: &UsageReport| {
+        let mut buckets = report.buckets.clone();
+        for bucket in &mut buckets {
+            bucket.observed_at = 0;
+        }
+        buckets.sort_by(|x, y| x.id.cmp(&y.id));
+        (buckets, report.limit.clone().map(|hit| (hit.bucket, hit.resets_at)))
+    };
+    plain(a) == plain(b)
 }
 
 /// Asks `_coqui_acp/usage` and reads the report.
@@ -1235,18 +1276,21 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         info.usage
     );
 
-    // Answerable with no session and no turn, and an unchanged account costs nothing to read.
+    // Answerable with no session and no turn, and an unchanged account costs nothing to read. A harness that can read
+    // its account with no turn may have figures before one.
+    let scripted = !contract.program_agent;
+    let waits_for_a_turn = scripted || info.usage.needs_turn;
     let first = usage_report(&mut conn, 1, None)?;
     ensure!(
         first.supported
-            && first.buckets.is_empty()
+            && (first.buckets.is_empty() || !waits_for_a_turn)
             && first.spend.is_none()
             && first.account.as_deref() == Some(account),
         "the report before any turn is {first:?}, not an empty one for `{account}`"
     );
     let again = usage_report(&mut conn, 2, None)?;
     ensure!(
-        again == first,
+        same_figures(&again, &first),
         "polling an unchanged account changed the report: {first:?} then {again:?}"
     );
     conn.send(&request(
@@ -1284,42 +1328,50 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         first.revision,
         quota.revision
     );
-    let five = quota
-        .buckets
-        .iter()
-        .find(|bucket| bucket.id == "five_hour")
-        .ok_or_else(|| format!("no `five_hour` bucket in {quota:?}"))?;
-    ensure!(
-        (five.used, five.limit) == (Some(620), Some(1000))
-            && UsageReport::fraction_permille(five) == Some(620)
-            && five.status == Status::Ok
-            && matches!(five.refill, Refill::FixedWindow { resets_at: Some(at), .. } if at > five.observed_at),
-        "the five-hour bucket is {five:?}"
-    );
-    ensure!(
-        quota.buckets.iter().any(|bucket| bucket.id == "rpm"
-            && matches!(
-                bucket.refill,
-                Refill::TokenBucket {
-                    amount: 60,
-                    max: 60,
-                    ..
-                }
-            )),
-        "no token bucket in {quota:?}"
-    );
+    if scripted {
+        let five = quota
+            .buckets
+            .iter()
+            .find(|bucket| bucket.id == "five_hour")
+            .ok_or_else(|| format!("no `five_hour` bucket in {quota:?}"))?;
+        ensure!(
+            (five.used, five.limit) == (Some(620), Some(1000))
+                && UsageReport::fraction_permille(five) == Some(620)
+                && five.status == Status::Ok
+                && matches!(five.refill, Refill::FixedWindow { resets_at: Some(at), .. } if at > five.observed_at),
+            "the five-hour bucket is {five:?}"
+        );
+        ensure!(
+            quota.buckets.iter().any(|bucket| bucket.id == "rpm"
+                && matches!(
+                    bucket.refill,
+                    Refill::TokenBucket {
+                        amount: 60,
+                        max: 60,
+                        ..
+                    }
+                )),
+            "no token bucket in {quota:?}"
+        );
+    } else {
+        ensure!(
+            !quota.buckets.is_empty(),
+            "a turn that scripted a quota left no bucket in {quota:?}"
+        );
+    }
     ensure!(
         quota.account.as_deref() == Some(account) && quota.spend.is_none(),
         "the account or the spend of a report with no session: {quota:?}"
     );
     let with_session = usage_report(&mut conn, 7, Some(&session))?;
     ensure!(
-        with_session
-            .spend
-            .as_ref()
-            .is_some_and(|spend| spend.session_id == session
-                && spend.input > 0
-                && spend.output > 0),
+        !info.usage.spend
+            || with_session
+                .spend
+                .as_ref()
+                .is_some_and(|spend| spend.session_id == session
+                    && spend.input > 0
+                    && spend.output > 0),
         "the session's spend is {:?}",
         with_session.spend
     );
@@ -1344,9 +1396,8 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
     let hit: LimitHit = serde_json::from_value(end["result"]["_meta"][LIMIT_META_KEY].clone())
         .map_err(|e| format!("the refusal's `_meta` holds no limit hit ({e}): {end}"))?;
     ensure!(
-        hit.bucket.as_deref() == Some("five_hour")
+        (!scripted || (hit.bucket.as_deref() == Some("five_hour") && hit.retry_after.is_some()))
             && hit.resets_at.is_some()
-            && hit.retry_after.is_some()
             && hit.text.is_some(),
         "the limit hit is {hit:?}"
     );
@@ -1354,10 +1405,9 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
     ensure!(
         limited.limit.as_ref() == Some(&hit)
             && limited.revision > quota.revision
-            && limited
-                .buckets
-                .iter()
-                .any(|bucket| bucket.id == "five_hour" && bucket.status == Status::Exhausted),
+            && limited.buckets.iter().any(|bucket| {
+                (!scripted || bucket.id == "five_hour") && bucket.status == Status::Exhausted
+            }),
         "after the refusal the report is {limited:?}"
     );
 
@@ -1368,8 +1418,15 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         .usage(UsageQuery::new().account(grant(account)), spawner, keeper)
         .map_err(|e| e.message().to_owned())?;
     ensure!(watch.destroyed(), "usage kept the spawner it was handed");
+    // A harness that reads its account itself (no turn needed) answers from that reading, not from a connection's.
     ensure!(
-        kind == limited,
+        if waits_for_a_turn && scripted {
+            kind == limited
+        } else if waits_for_a_turn {
+            kind.supported && same_buckets(&kind, &limited)
+        } else {
+            kind.supported
+        },
         "the kind answers {kind:?}, the connection's last report was {limited:?}"
     );
     let (_, spawner, keeper) = host::spawner();
@@ -1378,7 +1435,7 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
         .map_err(|e| e.message().to_owned())?;
     ensure!(
         unseen.supported
-            && unseen.buckets.is_empty()
+            && (unseen.buckets.is_empty() || !waits_for_a_turn)
             && unseen.account.as_deref() == Some("nobody"),
         "an account no connection ran on is {unseen:?}"
     );
@@ -1400,13 +1457,21 @@ fn usage(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcom
     );
     let report = usage_report(&mut quiet, 11, None)?;
     ensure!(
-        report.buckets.iter().any(|bucket| bucket.used == Some(100)),
+        if scripted {
+            report.buckets.iter().any(|bucket| bucket.used == Some(100))
+        } else {
+            !report.buckets.is_empty()
+        },
         "a client that did not ask reads {report:?}"
     );
     quiet.close_with(OK)
 }
 
 fn client_capabilities(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
+    if contract.program_agent {
+        // The harness reads its own files; it has no way to ask the client for one.
+        return Ok(());
+    }
     let file = format!("{}/notes.txt", place.root);
     let (mut conn, session) = open_session(
         contract,
@@ -1500,10 +1565,16 @@ fn back_pressure(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
             .is_none(),
         "a send was refused once the sink took again"
     );
-    for id in 0..MANY {
-        let answer = conn.next()?;
-        ensure!(answer["id"] == id, "answers came out of order: {answer}");
+    // Requests are answered as their work ends, so in no order the suite may rely on; each is answered once.
+    let mut answered = Vec::new();
+    for _ in 0..MANY {
+        answered.push(conn.next()?["id"].as_u64());
     }
+    answered.sort_unstable();
+    ensure!(
+        answered == (0..MANY).map(Some).collect::<Vec<_>>(),
+        "the {MANY} requests were answered as {answered:?}"
+    );
     conn.close_with(OK)
 }
 
@@ -1574,6 +1645,10 @@ fn close_answers_pending(contract: &Contract, harness: &dyn AcpHarness, place: &
 }
 
 fn provider_closes(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
+    if contract.program_agent {
+        // A program that ends ends one session; the connection is the host's to close.
+        return Ok(());
+    }
     let (mut conn, session) = open_session(
         contract,
         harness,

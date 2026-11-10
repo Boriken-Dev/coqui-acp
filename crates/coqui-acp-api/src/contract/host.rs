@@ -11,6 +11,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::path::Path;
@@ -24,6 +25,7 @@ use serde_json::{Value, json};
 
 use super::checks::CANARY;
 use super::json;
+use super::programs::Program;
 use crate::files::PrivateDir;
 use crate::spawner::{
     FileInfo, LinkState, ProcessExit, ProcessSpawner, READ_TIMED_OUT, SecretBytes, SpawnSpec,
@@ -33,6 +35,26 @@ use crate::{
     AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, LoginAnswer, LoginForm, LoginPrompter,
     OpenUrl, StartRequest,
 };
+
+thread_local! {
+    /// Whether the spawners made on this thread start the programs they are asked to.
+    static RUNNING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While it lives, the spawners made on this thread start real programs; see [`Contract::program_agent`].
+pub(super) struct Running(bool);
+
+impl Running {
+    pub(super) fn on(on: bool) -> Self {
+        Self(RUNNING.with(|running| running.replace(on)))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.with(|running| running.set(self.0));
+    }
+}
 
 /// How long an awaited call may take: generous, for an interpreter under load.
 pub(super) const PATIENCE: Duration = Duration::from_secs(30);
@@ -220,6 +242,8 @@ impl Drop for Idle {
 struct Spawner {
     shared: Arc<Shared>,
     files: Option<PrivateDir>,
+    /// Whether it starts the programs it is asked to, in place of idle ones.
+    programs: bool,
 }
 
 impl Spawner {
@@ -237,18 +261,27 @@ impl ProcessSpawner for Spawner {
     fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
         let mut info = SpawnerInfo::new(std::env::consts::OS, std::env::consts::ARCH, true);
         info.files = self.files.is_some();
+        info.separate_error = self.programs;
         Ok(info)
     }
 
     fn spawn(&self, spec: SpawnSpec) -> Result<Object<dyn SpawnedProcess>, ProviderError> {
         let killed = Arc::new(AtomicBool::new(false));
+        let program = if self.programs {
+            Some(Program::start(&spec, Arc::clone(&killed))?)
+        } else {
+            None
+        };
         {
             let mut log = self.shared.lock();
             log.specs.push(spec);
             log.processes.push(Arc::clone(&killed));
         }
         self.shared.changed.notify_all();
-        Ok(Idle(killed).into_object())
+        Ok(match program {
+            Some(program) => program.into_object(),
+            None => Idle(killed).into_object(),
+        })
     }
 
     fn write_file(
@@ -529,6 +562,7 @@ pub(super) fn handed_in(root: Option<&Path>) -> Handed {
     let spawner = Spawner {
         shared: Arc::clone(&shared),
         files: root.map(PrivateDir::new),
+        programs: RUNNING.with(Cell::get),
     }
     .into_object();
     let sink = Sink(Arc::clone(&shared)).into_object();
@@ -730,12 +764,22 @@ impl Conn {
         }
     }
 
-    /// Whether nothing more arrives within [`GRACE`].
+    /// Whether nothing but updates arrives within [`GRACE`]: a turn running may tell what it does, and answers nothing.
     pub(super) fn quiet(&self) -> Result<bool, String> {
         let at = self.read;
         Ok(self
             .wait_for("nothing", GRACE, |log| {
-                (log.received.len() > at).then_some(())
+                log.received[at.min(log.received.len())..]
+                    .iter()
+                    .any(|bytes| {
+                        serde_json::from_slice::<Value>(bytes).map_or(true, |message| {
+                            !matches!(
+                                message.get("method").and_then(Value::as_str),
+                                Some("session/update" | "_coqui_acp/usage_update")
+                            )
+                        })
+                    })
+                    .then_some(())
             })?
             .is_none())
     }
