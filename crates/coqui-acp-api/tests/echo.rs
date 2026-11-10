@@ -15,9 +15,9 @@ use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeper, AccountLoss, AccountRef, AccountRenewal,
     AcpHarness, Channel, ChannelSink, Environment, ExportPage, FileInfo, HarnessInfo, ImportReport,
-    LoginOutcome, LoginPrompter, LoginRequest, ModelsRequest, ProcessSpawner, RenewReport,
-    RenewRequest, Requirement, SessionExport, SessionImport, SessionQuery, Source, SpawnSpec,
-    SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery, UsageReport, UsageSupport,
+    LoginOutcome, LoginPrompter, LoginRequest, ModelListing, ModelsRequest, ProcessSpawner,
+    RenewReport, RenewRequest, Requirement, SessionExport, SessionImport, SessionQuery, Source,
+    SpawnSpec, SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery, UsageReport, UsageSupport,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -382,6 +382,15 @@ impl AcpHarness for Disagrees {
         }
         drop((query, spawner, keeper));
         Ok(UsageReport::unsupported("it says it has none"))
+    }
+
+    fn models(
+        &self,
+        request: ModelsRequest,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        self.inner.models(request, spawner, keeper)
     }
 
     fn login(
