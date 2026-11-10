@@ -1103,7 +1103,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         self.logins = config.logins
         self.poll = max(config.renew_poll_ms, 1) / 1000.0
         self.reports = _Reports()
-        self.accounts = _Accounts()
+        self.watching = _Accounts()
 
     def describe(self) -> Dict[str, Any]:
         info: Dict[str, Any] = {
@@ -1128,7 +1128,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         grant = asked.get("account")
         hold = _Hold(spawner, keeper, self.poll)
         if grant is not None:
-            _apply(self.logins, self.accounts, grant, spawner, keeper)
+            _apply(self.logins, self.watching, grant, spawner, keeper)
             # A notional program, so the specification a real provider's would carry is seen; a
             # spawner that refuses it changes nothing.
             try:
@@ -1136,7 +1136,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             except Exception:
                 hold.process = None
             if grant["kind"] == FILE_KIND:
-                hold.watched = (_key_of(grant), self.accounts)
+                hold.watched = (_key_of(grant), self.watching)
         refusal = _refusal(asked.get("requirements", []))
         if refusal is not None:
             raise Unsupported(refusal)
@@ -1155,8 +1155,9 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         return Connection(q)
 
     def refusal(self, requirements: Ref, environment: Ref, account: Optional[Ref]) -> Optional[str]:
-        if account is not None:
-            _read_account(self.logins, account.to_python(), REF_KEYS)
+        named = account.to_python() if account is not None else None
+        if named is not None:
+            _read_account(self.logins, named, REF_KEYS)
         return _refusal(requirements.to_python())
 
     def program(self) -> Optional[str]:
@@ -1168,7 +1169,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             if not isinstance(asked, dict) or not set(asked) <= IMPORT_KEYS:
                 raise BadValue("the import has a key the echo does not know")
             if asked.get("account") is not None:
-                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+                _apply(self.logins, self.watching, asked["account"], spawner, keeper)
         finally:
             spawner.destroy()
             keeper.destroy()
@@ -1196,7 +1197,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             if not isinstance(asked, dict) or not set(asked) <= EXPORT_KEYS:
                 raise BadValue("the export has a key the echo does not know")
             if asked.get("account") is not None:
-                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+                _apply(self.logins, self.watching, asked["account"], spawner, keeper)
         finally:
             spawner.destroy()
             keeper.destroy()
@@ -1236,7 +1237,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             if not isinstance(asked, dict) or not set(asked) <= MODELS_KEYS:
                 raise BadValue("the request has a key the echo does not know")
             if asked.get("account") is not None:
-                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+                _apply(self.logins, self.watching, asked["account"], spawner, keeper)
         finally:
             spawner.destroy()
             keeper.destroy()
@@ -1248,7 +1249,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             if not isinstance(asked, dict) or not set(asked) <= QUERY_KEYS:
                 raise BadValue("the query has a key the echo does not know")
             if asked.get("account") is not None:
-                _apply(self.logins, self.accounts, asked["account"], spawner, keeper)
+                _apply(self.logins, self.watching, asked["account"], spawner, keeper)
         finally:
             spawner.destroy()
             keeper.destroy()
@@ -1365,11 +1366,11 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             kind = next(k for k in _catalog(self.logins)["kinds"] if k["id"] == grant["kind"])
             if not kind["renews"]:
                 raise Unsupported("this kind cannot be renewed without a model turn")
-            _put_file(self.accounts, grant, spawner)
+            _put_file(self.watching, grant, spawner)
             text = _read_text(spawner, FILE) + "#renewed"
             spawner.write_file(FILE, list(text.encode("utf-8")), True)
-            with self.accounts.lock:
-                entry = self.accounts.held.get(_key_of(grant))
+            with self.watching.lock:
+                entry = self.watching.held.get(_key_of(grant))
                 if entry is not None:
                     entry["last"] = text
                     entry["seen"] = "present"
