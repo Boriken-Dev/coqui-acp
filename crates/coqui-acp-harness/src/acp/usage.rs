@@ -121,6 +121,50 @@ impl UsageTracker {
         self.settle(changed)
     }
 
+    /// Takes a complete reading of the buckets whose ids start with `prefix`: each replaces the held
+    /// bucket of its id outright, so nothing of an earlier reading (a reset that has passed) comes
+    /// back, and a held bucket of that prefix the reading leaves out is dropped. Buckets of other ids
+    /// are not touched. Answers whether the report changed other than in when it was read.
+    pub fn replace(&mut self, prefix: &str, incoming: Vec<Bucket>, now: i64) -> bool {
+        let before = self.report.buckets.len();
+        self.report.buckets.retain(|held| {
+            !held.id.starts_with(prefix) || incoming.iter().any(|bucket| bucket.id == held.id)
+        });
+        let mut changed = self.report.buckets.len() != before;
+        for mut bucket in incoming {
+            if bucket.observed_at == 0 {
+                bucket.observed_at = now;
+            }
+            let room = matches!(bucket.status, Status::Ok | Status::Warning);
+            let id = bucket.id.clone();
+            match self.report.buckets.iter_mut().find(|held| held.id == id) {
+                Some(held) => {
+                    let mut probe = bucket.clone();
+                    probe.observed_at = held.observed_at;
+                    changed |= probe != *held;
+                    *held = bucket;
+                }
+                None => {
+                    self.report.buckets.push(bucket);
+                    changed = true;
+                }
+            }
+            if room && self.limit_names(&id) {
+                self.report.limit = None;
+                changed = true;
+            }
+        }
+        self.settle(changed)
+    }
+
+    /// Whether the report's limit names the bucket `id`.
+    fn limit_names(&self, id: &str) -> bool {
+        self.report
+            .limit
+            .as_ref()
+            .is_some_and(|hit| hit.bucket.as_deref() == Some(id))
+    }
+
     /// Takes a session's spend, as running totals.
     pub fn spend(&mut self, session: &str, mut spend: Spend) -> bool {
         if !self.support.spend {
@@ -347,5 +391,64 @@ mod tests {
             (told.observed_at, told.retry_after),
             (900, Some(core::time::Duration::from_secs(7)))
         );
+    }
+
+    #[test]
+    fn a_replacing_reading_drops_the_buckets_it_leaves_out_and_those_of_other_ids_stay() {
+        let mut tracker = UsageTracker::new(support(), None);
+        let mut other = five_hour(10);
+        other.id = "five_hour".into();
+        let mut split = five_hour(0);
+        split.id = "agy:b".into();
+        split.status = Status::Exhausted;
+        let mut kept = five_hour(0);
+        kept.id = "agy:a".into();
+        tracker.buckets(alloc::vec![other, split, kept.clone()], 100);
+
+        kept.observed_at = 200;
+        assert!(tracker.replace("agy:", alloc::vec![kept], 200));
+        let ids: Vec<_> = tracker
+            .snapshot(None, 200)
+            .buckets
+            .into_iter()
+            .map(|bucket| bucket.id)
+            .collect();
+        assert_eq!(ids, ["five_hour", "agy:a"]);
+    }
+
+    #[test]
+    fn a_replacing_reading_does_not_bring_back_a_reset_that_passed() {
+        let mut tracker = UsageTracker::new(support(), None);
+        let mut used = five_hour(400);
+        used.id = "agy:a".into();
+        tracker.replace("agy:", alloc::vec![used.clone()], 100);
+
+        used.refill = Refill::FixedWindow {
+            length: Some(core::time::Duration::from_secs(18_000)),
+            resets_at: None,
+        };
+        used.observed_at = 2_000_000;
+        assert!(tracker.replace("agy:", alloc::vec![used], 2_000_000));
+        assert!(matches!(
+            tracker.snapshot(None, 2_000_000).buckets[0].refill,
+            Refill::FixedWindow {
+                resets_at: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_replacing_reading_that_shows_room_clears_the_limit() {
+        let mut tracker = UsageTracker::new(support(), None);
+        let mut bucket = five_hour(0);
+        bucket.id = "agy:a".into();
+        tracker.replace("agy:", alloc::vec![bucket.clone()], 100);
+        let mut hit = LimitHit::new(150);
+        hit.bucket = Some("agy:a".into());
+        tracker.limit(hit, 150);
+        bucket.observed_at = 300;
+        tracker.replace("agy:", alloc::vec![bucket], 300);
+        assert!(tracker.snapshot(None, 300).limit.is_none());
     }
 }
