@@ -12,13 +12,15 @@ use std::time::Duration;
 
 use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
-use coqui_acp_api::guatiao::{Map, Status, Value};
+use coqui_acp_api::guatiao::{FromValue, Map, Status, ToValue, Value};
 use coqui_acp_api::{
     AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, CacheLifetime, Channel, ChannelSink,
     NO_PROJECT_MCP, ProcessSpawner, READ_ONLY, Requirement, StartRequest,
 };
-use coqui_acp_claude::{ClaudeProvider, ProviderSettings};
-use coqui_acp_harness::LocalSpawner;
+use coqui_acp_claude::{ClaudeProvider, ProviderSettings, SettingSource};
+use coqui_acp_harness::{LocalSpawner, Mode};
+use guatiao_serde::Presentation;
+use guatiao_serde::text::json;
 
 fn profile() -> PathBuf {
     let tests = std::env::current_exe().expect("the test knows where it is");
@@ -156,6 +158,20 @@ fn connect(
     request: StartRequest,
     cwd: &Path,
 ) -> (Object<dyn Channel>, mpsc::Receiver<serde_json::Value>) {
+    let (channel, received, _opened) = connect_opened(provider, request, cwd);
+    (channel, received)
+}
+
+/// [`connect`], with the answer to `session/new` as well.
+fn connect_opened(
+    provider: &ClaudeProvider,
+    request: StartRequest,
+    cwd: &Path,
+) -> (
+    Object<dyn Channel>,
+    mpsc::Receiver<serde_json::Value>,
+    serde_json::Value,
+) {
     let (sender, received) = mpsc::channel();
     let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().into_object();
     let channel = provider
@@ -178,7 +194,7 @@ fn connect(
     );
     let opened = answer_to(&received, 2);
     assert!(opened["result"]["sessionId"].is_string(), "{opened}");
-    (channel, received)
+    (channel, received, opened)
 }
 
 fn logged(path: &Path) -> Vec<serde_json::Value> {
@@ -337,4 +353,143 @@ fn it_lists_the_account_kinds_it_measured_and_applies_only_the_harness_login() {
         )
         .expect("answered");
     assert!(refused.is_some_and(|why| why.contains("claude-login")));
+}
+
+fn settings_from(text: &str) -> Result<ProviderSettings, guatiao_serde::Error> {
+    json::from_str_as::<ProviderSettings>(text, Presentation::new())
+}
+
+/// The environment that points the stand-in at `dir` and its log at `log`.
+fn stand_in_environment(dir: &Path, log: &Path) -> coqui_acp_api::Environment {
+    [
+        ("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()),
+        (
+            "COQUI_ACP_FAKE_CLAUDE_LOG",
+            log.to_string_lossy().into_owned(),
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// The ids of the `mode` option a session was opened with.
+fn offered_modes(opened: &serde_json::Value) -> Vec<String> {
+    opened["result"]["configOptions"]
+        .as_array()
+        .and_then(|options| options.iter().find(|option| option["id"] == "mode"))
+        .and_then(|option| option["options"].as_array())
+        .expect("a session shows its modes")
+        .iter()
+        .map(|value| value["value"].as_str().expect("an id").to_string())
+        .collect()
+}
+
+/// The arguments of the stand-in's last start.
+fn last_arguments(log: &Path) -> Vec<String> {
+    logged(log).last().expect("it was started")["args"]
+        .as_array()
+        .expect("arguments")
+        .iter()
+        .map(|arg| arg.as_str().expect("text").to_string())
+        .collect()
+}
+
+#[test]
+fn modes_and_setting_sources_are_written_as_snake_case_lists_and_round_trip() {
+    let settings = settings_from(
+        r#"{"modes": ["plan", "accept_edits", "bypass"], "setting_sources": ["user", "local"]}"#,
+    )
+    .expect("read");
+    assert_eq!(
+        settings.modes,
+        Some(vec![Mode::Plan, Mode::AcceptEdits, Mode::Bypass])
+    );
+    assert_eq!(
+        settings.setting_sources,
+        Some(vec![SettingSource::User, SettingSource::Local])
+    );
+    let written = settings.to_value().expect("written");
+    let again = ProviderSettings::from_value(&written).expect("read again");
+    assert_eq!(again.to_value().expect("written"), written);
+    assert_eq!(again.modes, settings.modes);
+    assert_eq!(again.setting_sources, settings.setting_sources);
+
+    let none = settings_from("{}").expect("read");
+    assert!(none.modes.is_none() && none.setting_sources.is_none());
+    let empty = settings_from(r#"{"setting_sources": []}"#).expect("read");
+    assert_eq!(empty.setting_sources, Some(Vec::new()));
+}
+
+#[test]
+fn a_mode_or_a_setting_source_it_does_not_know_is_refused() {
+    for text in [
+        r#"{"setting_sources": ["user", "global"]}"#,
+        r#"{"setting_sources": ["User"]}"#,
+        r#"{"modes": ["yolo"]}"#,
+        r#"{"modes": ["acceptEdits"]}"#,
+        r#"{"modes": "plan"}"#,
+    ] {
+        assert!(settings_from(text).is_err(), "{text} was taken");
+    }
+}
+
+#[test]
+fn what_the_settings_name_reaches_the_command_line_and_the_modes_a_client_may_choose() {
+    for (allow_bypass, modes) in [
+        (false, vec!["manual", "accept_edits", "auto", "plan"]),
+        (
+            true,
+            vec!["manual", "accept_edits", "auto", "plan", "bypass"],
+        ),
+    ] {
+        let dir = scratch("settings");
+        let log = dir.join("log.jsonl");
+        let provider = ClaudeProvider::new(ProviderSettings {
+            executable: fake(),
+            allow_bypass,
+            setting_sources: Some(vec![SettingSource::User, SettingSource::Project]),
+            modes: Some(vec![Mode::AcceptEdits, Mode::Auto, Mode::Bypass]),
+            ..ProviderSettings::default()
+        });
+        let request = StartRequest::builder()
+            .environment(stand_in_environment(&dir, &log))
+            .build();
+        let (channel, _received, opened) = connect_opened(&provider, request, &dir);
+        channel.close(0, "");
+        assert!(
+            last_arguments(&log)
+                .iter()
+                .any(|arg| arg == "--setting-sources=user,project")
+        );
+        // Bypass is the allow_bypass switch's alone, whatever `modes` names.
+        assert_eq!(offered_modes(&opened), modes, "allow_bypass {allow_bypass}");
+        drop(channel);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn an_empty_list_of_setting_sources_loads_none_and_absent_leaves_the_flag_off() {
+    for (sources, flag) in [(Some(Vec::new()), Some("--setting-sources=")), (None, None)] {
+        let dir = scratch("sources");
+        let log = dir.join("log.jsonl");
+        let provider = ClaudeProvider::new(ProviderSettings {
+            executable: fake(),
+            setting_sources: sources,
+            ..ProviderSettings::default()
+        });
+        let request = StartRequest::builder()
+            .environment(stand_in_environment(&dir, &log))
+            .build();
+        let (channel, _received) = connect(&provider, request, &dir);
+        channel.close(0, "");
+        let args = last_arguments(&log);
+        let found = args
+            .iter()
+            .find(|arg| arg.starts_with("--setting-sources"))
+            .map(String::as_str);
+        assert_eq!(found, flag, "{args:?}");
+        drop(channel);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

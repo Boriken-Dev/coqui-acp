@@ -11,13 +11,14 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
-use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status};
+use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, CacheLifetime, Channel,
     ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter,
     LoginRequest, ModelInfo, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport,
     RenewRequest, Requirement, SessionExport, SessionImport, StartRequest, UsageQuery, UsageReport,
 };
+use coqui_acp_harness::Mode;
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Reports, Serving, account_refusal, shared, takes_of};
 use coqui_acp_harness::{Settings, ThroughSpawner};
@@ -35,8 +36,34 @@ const TTL_VARIABLES: [&str; 2] = [
     "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
 ];
 
+/// A place Claude Code reads settings from: the person's own, the project's, or the project's untracked ones. Written
+/// as `user`, `project` and `local`.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[map(crate = ::coqui_acp_api::guatiao, rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SettingSource {
+    /// The person's own settings.
+    User,
+    /// The project's shared settings.
+    Project,
+    /// The project's settings that stay out of version control.
+    Local,
+}
+
+impl SettingSource {
+    /// The name `--setting-sources` takes.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+            Self::Local => "local",
+        }
+    }
+}
+
 /// How the Claude Code provider is configured.
-#[derive(FromValue, Schema, Debug, Clone)]
+#[derive(ToValue, FromValue, Schema, Debug, Clone)]
 #[map(crate = ::coqui_acp_api::guatiao)]
 pub struct ProviderSettings {
     /// The Claude Code program: a path, or a name looked up on the `PATH` where the spawner runs it.
@@ -52,6 +79,13 @@ pub struct ProviderSettings {
     /// Whether the Bypass mode may be chosen: Claude Code started with `--allow-dangerously-skip-permissions`.
     #[map(default = false)]
     pub allow_bypass: bool,
+    /// The modes a client may choose, written by id (`manual`, `accept_edits`, `auto`, `plan`, `bypass`): these widen the
+    /// permission mode's own and every stricter one. Bypass is offered only with `allow_bypass`, whatever this names.
+    /// Absent, a client chooses the permission mode's own and every stricter one.
+    pub modes: Option<Vec<Mode>>,
+    /// The setting sources Claude Code loads, any of `user`, `project` and `local`; an empty list loads none. Claude Code's
+    /// own default, every source, when absent.
+    pub setting_sources: Option<Vec<SettingSource>>,
     /// The highest ACP version `initialize` answers: 1 or 2.
     #[map(default = 2)]
     pub max_acp_version: u64,
@@ -82,6 +116,8 @@ impl Default for ProviderSettings {
             effort: None,
             permission_mode: None,
             allow_bypass: false,
+            modes: None,
+            setting_sources: None,
             max_acp_version: 2,
             max_sessions: 8,
             max_requests: 32,
@@ -149,6 +185,13 @@ impl ClaudeProvider {
             .permission_mode
             .clone_from(&self.settings.permission_mode);
         launch.allow_bypass = self.settings.allow_bypass;
+        launch.modes.clone_from(&self.settings.modes);
+        launch.setting_sources = self.settings.setting_sources.as_ref().map(|sources| {
+            sources
+                .iter()
+                .map(|source| source.as_str().to_string())
+                .collect()
+        });
         for (name, value) in environment.iter() {
             launch.env.insert(name.into(), value.into());
         }

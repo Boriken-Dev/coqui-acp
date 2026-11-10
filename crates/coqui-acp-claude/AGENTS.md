@@ -154,10 +154,12 @@ Config options: `model` (category `model`): the models Claude Code lists, and th
 ```rust
 #[derive(Provider)] pub struct ClaudeProvider;                       // an `acp_harness` provider; Debug
 pub fn ClaudeProvider::new(settings: ProviderSettings) -> ClaudeProvider  // also From<ProviderSettings>
-pub struct ProviderSettings {                                        // FromValue, Schema, Default; every field defaults
+pub struct ProviderSettings {                                        // ToValue, FromValue, Schema, Default; every field defaults
     pub executable: String,              // "claude": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>, pub permission_mode: Option<String>,
     pub allow_bypass: bool,              // false
+    pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen the permission mode's own and every stricter one (Bypass still needs allow_bypass, and is left out without it)
+    pub setting_sources: Option<Vec<SettingSource>>,   // None: Claude Code's default; `user`, `project`, `local`; an empty list loads none (`--setting-sources=`)
     pub max_acp_version: u64,            // 2 (1 or 2)
     pub max_sessions: u64,               // 8
     pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused
@@ -165,6 +167,7 @@ pub struct ProviderSettings {                                        // FromValu
     pub allow_client_plugins: bool,      // false
     pub client_mcp_servers: bool,        // true
 }
+#[non_exhaustive] pub enum SettingSource { User, Project, Local }   // ToValue, FromValue, Schema; written `user`, `project`, `local`; `as_str()` is the name `--setting-sources` takes
 pub mod accounts { pub fn catalog() -> AccountCatalog;  pub const LOGIN, CONSOLE, OAUTH_TOKEN, API_KEY, AUTH_TOKEN: &str; }
 ```
 

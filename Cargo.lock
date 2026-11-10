@@ -469,6 +469,7 @@ dependencies = [
  "coqui-acp-api",
  "coqui-acp-harness",
  "guatiao",
+ "guatiao-serde",
  "serde_json",
  "uuid",
 ]
@@ -482,6 +483,7 @@ dependencies = [
  "coqui-acp-api",
  "coqui-acp-harness",
  "guatiao",
+ "guatiao-serde",
  "serde_json",
  "uuid",
 ]
