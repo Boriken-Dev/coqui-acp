@@ -41,14 +41,14 @@ macro_rules! ensure {
     };
 }
 
-type Outcome = Result<(), String>;
+pub(super) type Outcome = Result<(), String>;
 
 pub(super) fn all(contract: &Contract, harness: &dyn AcpHarness) -> Vec<(&'static str, Outcome)> {
     let place = match Place::make() {
         Ok(place) => place,
         Err(why) => return vec![("the suite's directories", Err(why))],
     };
-    let checks: Vec<(&'static str, Outcome)> = vec![
+    let mut checks: Vec<(&'static str, Outcome)> = vec![
         ("describes itself", describes_itself(contract, harness)),
         ("requirements only narrow", requirements(contract, harness)),
         ("no environment value comes back", keeps_secrets(harness)),
@@ -106,6 +106,7 @@ pub(super) fn all(contract: &Contract, harness: &dyn AcpHarness) -> Vec<(&'stati
             super::transport::serves_the_client(harness, &place.root),
         ),
     ];
+    checks.extend(super::accounts::all(contract, harness, &place));
     place.remove();
     checks
 }
@@ -143,6 +144,13 @@ impl Place {
         })
     }
 
+    /// A new directory under the suite's own, for an account's files.
+    pub(super) fn scratch(&self) -> Result<PathBuf, String> {
+        let dir = self.base.join("accounts").join(fresh_uuid());
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {dir:?}: {e}"))?;
+        Ok(dir)
+    }
+
     fn remove(self) {
         if let Some(link) = &self.link {
             let _ = std::fs::remove_dir(link).or_else(|_| std::fs::remove_file(link));
@@ -152,7 +160,7 @@ impl Place {
 }
 
 /// A path as text, without the `\\?\` prefix a canonical Windows path carries.
-fn text(path: &Path) -> String {
+pub(super) fn text(path: &Path) -> String {
     let text = path.to_string_lossy();
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
 }
@@ -219,7 +227,7 @@ fn notification(method: &str, params: Value) -> Value {
     json!({"jsonrpc": "2.0", "method": method, "params": params})
 }
 
-fn initialize(id: u64, version: u16, client_capabilities: Value) -> Value {
+pub(super) fn initialize(id: u64, version: u16, client_capabilities: Value) -> Value {
     request(
         id,
         "initialize",
@@ -227,7 +235,7 @@ fn initialize(id: u64, version: u16, client_capabilities: Value) -> Value {
     )
 }
 
-fn new_session(id: u64, cwd: &str) -> Value {
+pub(super) fn new_session(id: u64, cwd: &str) -> Value {
     request(id, "session/new", json!({"cwd": cwd, "mcpServers": []}))
 }
 
@@ -251,7 +259,22 @@ fn open_session(
     cwd: &str,
     capabilities: Value,
 ) -> Result<(Conn, String), String> {
-    let mut conn = open(harness, request)?;
+    open_session_in(contract, harness, request, cwd, capabilities, None)
+}
+
+/// As [`open_session`], on a spawner that serves files in `root` when there is one.
+pub(super) fn open_session_in(
+    contract: &Contract,
+    harness: &dyn AcpHarness,
+    request: StartRequest,
+    cwd: &str,
+    capabilities: Value,
+    root: Option<&Path>,
+) -> Result<(Conn, String), String> {
+    let mut conn = match root {
+        Some(root) => host::open_in(harness, request, root)?,
+        None => open(harness, request)?,
+    };
     conn.send(&initialize(0, contract.version, capabilities))?;
     let answer = conn.answer(0)?;
     ensure!(

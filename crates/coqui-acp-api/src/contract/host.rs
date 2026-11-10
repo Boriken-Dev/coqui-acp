@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, UNIX_EPOCH};
 
 use guatiao::library::{Object, ProviderError};
 use guatiao::{Secret, Status};
@@ -518,11 +518,6 @@ impl Watch {
             .all(|killed| killed.load(Ordering::SeqCst))
     }
 
-    /// How many processes the spawner started.
-    pub(super) fn started(&self) -> usize {
-        self.0.lock().processes.len()
-    }
-
     /// The files written through the spawner, as `(path, content)`.
     pub(super) fn writes(&self) -> Vec<(String, Vec<u8>)> {
         self.0.lock().writes.clone()
@@ -563,31 +558,6 @@ impl Watch {
             .join("\n");
         text.push_str(&log.reason);
         text
-    }
-
-    /// Waits up to `patience` for `done` to hold of the log's keeper events.
-    pub(super) fn wait_for(
-        &self,
-        patience: Duration,
-        mut done: impl FnMut(&[AccountRenewal], &[AccountLoss]) -> bool,
-    ) -> bool {
-        let deadline = Instant::now() + patience;
-        let mut log = self.0.lock();
-        loop {
-            if done(&log.renewed, &log.lost) {
-                return true;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return false;
-            }
-            log = self
-                .0
-                .changed
-                .wait_timeout(log, deadline - now)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-        }
     }
 }
 

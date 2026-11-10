@@ -13,8 +13,10 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
-    AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport,
-    ProcessSpawner, Requirement, SessionExport, SessionImport, SessionQuery, Source, SpawnSpec,
+    AccountCatalog, AccountGrant, AccountKeeper, AccountLoss, AccountRef, AccountRenewal,
+    AcpHarness, Channel, ChannelSink, Environment, ExportPage, FileInfo, HarnessInfo, ImportReport,
+    LoginOutcome, LoginPrompter, LoginRequest, ModelsRequest, ProcessSpawner, RenewReport,
+    RenewRequest, Requirement, SessionExport, SessionImport, SessionQuery, Source, SpawnSpec,
     SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery, UsageReport, UsageSupport,
 };
 
@@ -77,7 +79,9 @@ fn what_a_provider_leaves_out_has_its_default() {
             .expect("answered"),
         None
     );
-    let models = harness.models(Secret::default()).expect("answered");
+    let models = harness
+        .models(ModelsRequest::new(), spawner(), keeper())
+        .expect("answered");
     assert!(models.known);
     assert_eq!(models.models[0].id, "echo");
 }
@@ -124,6 +128,23 @@ fn spawner() -> Object<dyn ProcessSpawner> {
     LocalSpawner.into_object()
 }
 
+fn keeper() -> Object<dyn AccountKeeper> {
+    Hears.into_object()
+}
+
+/// A keeper that hears nothing.
+struct Hears;
+
+impl AccountKeeper for Hears {
+    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}
+
 /// A spawner nobody uses: the echo starts nothing.
 struct LocalSpawner;
 
@@ -142,6 +163,31 @@ impl ProcessSpawner for LocalSpawner {
             "unused",
         ))
     }
+
+    fn write_file(
+        &self,
+        _path: &str,
+        _bytes: Secret<Vec<u8>>,
+        _private: bool,
+    ) -> Result<(), ProviderError> {
+        Err(no_files())
+    }
+
+    fn read_file(&self, _path: &str, _max_bytes: u64) -> Result<Secret<Vec<u8>>, ProviderError> {
+        Err(no_files())
+    }
+
+    fn file_info(&self, _path: &str) -> Result<Option<FileInfo>, ProviderError> {
+        Err(no_files())
+    }
+
+    fn remove_file(&self, _path: &str) -> Result<(), ProviderError> {
+        Err(no_files())
+    }
+}
+
+fn no_files() -> ProviderError {
+    ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, "no private files")
 }
 
 /// A history exported from one harness seeds a session in another, which exports it the same.
@@ -157,28 +203,32 @@ fn a_history_moves_between_harnesses() {
     );
     let first = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let report = here
-        .import_session(SessionImport::new(first, "/", history), spawner())
+        .import_session(SessionImport::new(first, "/", history), spawner(), keeper())
         .expect("seeded");
     assert_eq!(report.seeded_from.map(|point| point.line), Some(2));
     assert!(report.losses.is_empty() && !report.compacted);
     let exported = here
-        .export_session(SessionExport::new(first, "/"), spawner())
+        .export_session(SessionExport::new(first, "/"), spawner(), keeper())
         .expect("exported");
     assert_eq!(exported.next, None, "a short history is one page");
     let exported = exported.text;
     let second = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     there
-        .import_session(SessionImport::new(second, "/", exported.clone()), spawner())
+        .import_session(
+            SessionImport::new(second, "/", exported.clone()),
+            spawner(),
+            keeper(),
+        )
         .expect("seeded elsewhere");
     assert_eq!(
         there
-            .export_session(SessionExport::new(second, "/"), spawner())
+            .export_session(SessionExport::new(second, "/"), spawner(), keeper())
             .expect("exported")
             .text,
         exported
     );
     let missing = there
-        .export_session(SessionExport::new(first, "/"), spawner())
+        .export_session(SessionExport::new(first, "/"), spawner(), keeper())
         .expect_err("another harness's session is not this one's");
     assert_eq!(missing.status, Status::GUATIAO_ERR_NOT_FOUND);
 }
@@ -194,6 +244,7 @@ fn a_harness_that_cannot_import_refuses_with_a_reason() {
         .import_session(
             SessionImport::new("0f8fad5b-d9cb-469f-a165-70867728950e", "/", ""),
             spawner(),
+            keeper(),
         )
         .expect_err("it cannot import");
     assert_eq!(refused.status, Status::GUATIAO_ERR_UNSUPPORTED);
@@ -230,7 +281,11 @@ fn an_echo_that_reports_no_usage_says_so_with_a_reason() {
     let (_registry, harness) = loaded();
     assert!(!harness.describe().expect("described").usage.reports());
     let report = harness
-        .usage(UsageQuery::new().account("pool/alice"), spawner())
+        .usage(
+            UsageQuery::new().account(AccountGrant::new("pool/alice", "harness-login")),
+            spawner(),
+            keeper(),
+        )
         .expect("answered");
     assert!(!report.supported && report.buckets.is_empty());
     assert!(
@@ -259,21 +314,27 @@ fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
             Ok(info)
         }
 
+        fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
+            self.inner.accounts()
+        }
+
         fn start(
             &self,
             request: StartRequest,
             spawner: Object<dyn ProcessSpawner>,
             sink: Object<dyn ChannelSink>,
+            keeper: Object<dyn AccountKeeper>,
         ) -> Result<Object<dyn Channel>, ProviderError> {
-            self.inner.start(request, spawner, sink)
+            self.inner.start(request, spawner, sink, keeper)
         }
 
         fn refusal(
             &self,
             requirements: Vec<Requirement>,
             environment: Secret<Environment>,
+            account: Option<AccountRef>,
         ) -> Result<Option<String>, ProviderError> {
-            self.inner.refusal(requirements, environment)
+            self.inner.refusal(requirements, environment, account)
         }
 
         fn program(&self) -> Result<Option<String>, ProviderError> {
@@ -284,28 +345,48 @@ fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
             &self,
             session: SessionImport,
             spawner: Object<dyn ProcessSpawner>,
+            keeper: Object<dyn AccountKeeper>,
         ) -> Result<ImportReport, ProviderError> {
-            self.inner.import_session(session, spawner)
+            self.inner.import_session(session, spawner, keeper)
         }
 
         fn export_session(
             &self,
             export: SessionExport,
             spawner: Object<dyn ProcessSpawner>,
+            keeper: Object<dyn AccountKeeper>,
         ) -> Result<ExportPage, ProviderError> {
-            self.inner.export_session(export, spawner)
+            self.inner.export_session(export, spawner, keeper)
         }
 
         fn usage(
             &self,
             query: UsageQuery,
             spawner: Object<dyn ProcessSpawner>,
+            keeper: Object<dyn AccountKeeper>,
         ) -> Result<UsageReport, ProviderError> {
             if self.hides_in_describe {
-                return self.inner.usage(query, spawner);
+                return self.inner.usage(query, spawner, keeper);
             }
-            drop((query, spawner));
+            drop((query, spawner, keeper));
             Ok(UsageReport::unsupported("it says it has none"))
+        }
+
+        fn login(
+            &self,
+            request: LoginRequest,
+            spawner: Object<dyn ProcessSpawner>,
+            prompter: Object<dyn LoginPrompter>,
+        ) -> Result<LoginOutcome, ProviderError> {
+            self.inner.login(request, spawner, prompter)
+        }
+
+        fn renew(
+            &self,
+            request: RenewRequest,
+            spawner: Object<dyn ProcessSpawner>,
+        ) -> Result<RenewReport, ProviderError> {
+            self.inner.renew(request, spawner)
         }
     }
 

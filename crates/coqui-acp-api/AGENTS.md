@@ -14,11 +14,13 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 
 | kind | table | `FLOOR_HASH` | who implements it |
 | --- | --- | --- | --- |
-| `acp_harness` | `AcpHarnessVtable` | `1326996142` | the provider |
+| `acp_harness` | `AcpHarnessVtable` | `4111118208` | the provider |
 | `channel` | `ChannelVtable` | `3787630980` | the provider (Guatiao's, re-exported) |
 | `channel_sink` | `ChannelSinkVtable` | `4115266557` | the host (Guatiao's, re-exported) |
-| `process_spawner` | `ProcessSpawnerVtable` | `1466370631` | the host |
+| `process_spawner` | `ProcessSpawnerVtable` | `3394663830` | the host |
 | `spawned_process` | `SpawnedProcessVtable` | `3306532587` | the host |
+| `account_keeper` | `AccountKeeperVtable` | `708146915` | the host |
+| `login_prompter` | `LoginPrompterVtable` | `2606822037` | the host |
 
 The package holds all five as data in `include/coqui_acp_api.kinds.json`, every model's JSON Schema in `include/coqui_acp_api.schemas.json`, and the kinds for Python in `python/coqui_acp_api_kinds.py` (written by `python/write_kinds.py`).
 

@@ -26,6 +26,7 @@
 //! The `acp-harness-check` program runs the same suite on a library file or a source file, for a
 //! provider written in any language Guatiao loads.
 
+mod accounts;
 mod checks;
 mod host;
 mod json;
@@ -47,6 +48,8 @@ pub struct Contract {
     holds: Vec<Requirement>,
     message_limit: Option<usize>,
     imports: bool,
+    logins: bool,
+    account: Option<String>,
 }
 
 /// One rule a provider broke.
@@ -95,6 +98,8 @@ impl Contract {
             holds: alloc::vec![Requirement::new(READ_ONLY), Requirement::new(NO_COMMANDS)],
             message_limit: None,
             imports: true,
+            logins: true,
+            account: None,
         }
     }
 
@@ -122,6 +127,20 @@ impl Contract {
     /// `import_session` with `GUATIAO_ERR_UNSUPPORTED` and a reason.
     pub const fn imports(mut self, imports: bool) -> Self {
         self.imports = imports;
+        self
+    }
+
+    /// Whether the provider offers login methods (the default). One that does not must list none
+    /// in its catalog and refuse `login` with `GUATIAO_ERR_UNSUPPORTED` and a reason.
+    pub const fn logins(mut self, logins: bool) -> Self {
+        self.logins = logins;
+        self
+    }
+
+    /// Checks the account checks against this kind alone, in place of every kind the catalog
+    /// lists. The catalog checks still read all of them.
+    pub fn account(mut self, kind: impl Into<String>) -> Self {
+        self.account = Some(kind.into());
         self
     }
 

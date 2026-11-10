@@ -11,11 +11,15 @@ use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
-    AcpHarnessVtable, Bucket, ChannelSinkVtable, ChannelVtable, ErrorOutput, ExportPage,
-    HarnessInfo, HistoryLoss, ImportReport, LimitHit, LinkState, ModelInfo, ModelListing,
-    ModelSpend, NAMES, NonDefault, ProcessExit, ProcessSpawnerVtable, Requirement, SeedPoint,
-    SessionExport, SessionImport, SessionQuery, SessionRecordFile, SpawnSpec, SpawnedProcessVtable,
-    SpawnerInfo, Spend, StartRequest, Takes, TerminalSize, UsageQuery, UsageReport, UsageSupport,
+    AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo, AccountLoss, AccountRef,
+    AccountRenewal, AcpHarnessVtable, Bucket, CacheLifetime, ChannelSinkVtable, ChannelVtable,
+    Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HistoryLoss,
+    ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo, LoginOutcome,
+    LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, ModelsRequest, NAMES,
+    NonDefault, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement,
+    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, SpawnSpec,
+    SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize, UsageQuery,
+    UsageReport, UsageSupport,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -44,12 +48,14 @@ fn committed(path: &str, fresh: &str) {
 /// language has every kind its `start` names.
 fn rendered() -> String {
     let document = format!(
-        "{{\"kinds\":[{},{},{},{},{}]}}",
+        "{{\"kinds\":[{},{},{},{},{},{},{}]}}",
         AcpHarnessVtable::description(),
         ChannelVtable::description(),
         ChannelSinkVtable::description(),
         ProcessSpawnerVtable::description(),
-        SpawnedProcessVtable::description()
+        SpawnedProcessVtable::description(),
+        AccountKeeperVtable::description(),
+        LoginPrompterVtable::description()
     );
     pretty(&serde_json::from_str(&document).expect("a kind's description is JSON"))
 }
@@ -96,6 +102,25 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("Spend", schema_of::<Spend>()),
         ("ModelSpend", schema_of::<ModelSpend>()),
         ("UsageSupport", schema_of::<UsageSupport>()),
+        ("CacheLifetime", schema_of::<CacheLifetime>()),
+        ("FileInfo", schema_of::<FileInfo>()),
+        ("Credentials", schema_of::<Credentials>()),
+        ("AccountGrant", schema_of::<AccountGrant>()),
+        ("AccountRef", schema_of::<AccountRef>()),
+        ("AccountCatalog", schema_of::<AccountCatalog>()),
+        ("AccountKindInfo", schema_of::<AccountKindInfo>()),
+        ("EndpointSlot", schema_of::<EndpointSlot>()),
+        ("LoginMethodInfo", schema_of::<LoginMethodInfo>()),
+        ("LoginRequest", schema_of::<LoginRequest>()),
+        ("LoginOutcome", schema_of::<LoginOutcome>()),
+        ("RenewRequest", schema_of::<RenewRequest>()),
+        ("RenewReport", schema_of::<RenewReport>()),
+        ("ModelsRequest", schema_of::<ModelsRequest>()),
+        ("AccountRenewal", schema_of::<AccountRenewal>()),
+        ("AccountLoss", schema_of::<AccountLoss>()),
+        ("OpenUrl", schema_of::<OpenUrl>()),
+        ("LoginForm", schema_of::<LoginForm>()),
+        ("LoginAnswer", schema_of::<LoginAnswer>()),
     ]
 }
 
@@ -117,10 +142,16 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 27] = [
+    let pinned: [(&str, &[&str], &[&str]); 44] = [
         (
             "StartRequest",
-            &["account", "environment", "requirements", "working_roots"],
+            &[
+                "account",
+                "cache_lifetime",
+                "environment",
+                "requirements",
+                "working_roots",
+            ],
             &[],
         ),
         ("Requirement", &["name", "value"], &["name"]),
@@ -131,12 +162,19 @@ fn every_models_keys_are_pinned() {
         ),
         (
             "SessionImport",
-            &["environment", "history", "session_id", "working_directory"],
+            &[
+                "account",
+                "environment",
+                "history",
+                "session_id",
+                "working_directory",
+            ],
             &["session_id", "working_directory"],
         ),
         (
             "SessionExport",
             &[
+                "account",
                 "after",
                 "environment",
                 "max_bytes",
@@ -170,7 +208,14 @@ fn every_models_keys_are_pinned() {
         ("TerminalSize", &["cols", "rows"], &["cols", "rows"]),
         (
             "HarnessInfo",
-            &["resumes_wider", "takes", "title", "usage", "versions"],
+            &[
+                "cache_lifetime",
+                "resumes_wider",
+                "takes",
+                "title",
+                "usage",
+                "versions",
+            ],
             &["title", "versions"],
         ),
         (
@@ -209,6 +254,7 @@ fn every_models_keys_are_pinned() {
             &[
                 "arch",
                 "ends_with_host",
+                "files",
                 "kills_escaped",
                 "local",
                 "os",
@@ -305,8 +351,99 @@ fn every_models_keys_are_pinned() {
             &["needs_session", "needs_turn", "sources", "spend"],
             &[],
         ),
+        ("FileInfo", &["len", "modified_ms"], &["len", "modified_ms"]),
+        (
+            "AccountGrant",
+            &[
+                "credentials",
+                "id",
+                "kind",
+                "revision",
+                "settings",
+                "state_dir",
+            ],
+            &["id", "kind"],
+        ),
+        (
+            "AccountRef",
+            &["id", "kind", "revision", "settings", "state_dir"],
+            &["id", "kind"],
+        ),
+        (
+            "AccountCatalog",
+            &["credential_variables", "kinds", "logins"],
+            &[],
+        ),
+        (
+            "AccountKindInfo",
+            &[
+                "description",
+                "endpoints",
+                "history_portable",
+                "id",
+                "notices",
+                "renews",
+                "rotates",
+                "settings",
+                "state_dir",
+                "title",
+            ],
+            &["id", "title"],
+        ),
+        ("EndpointSlot", &["default", "key", "purpose"], &["purpose"]),
+        (
+            "LoginMethodInfo",
+            &[
+                "description",
+                "id",
+                "inputs",
+                "produces",
+                "remote",
+                "steps",
+                "title",
+            ],
+            &["id", "produces", "title"],
+        ),
+        (
+            "LoginRequest",
+            &["inputs", "method", "state_dir", "timeout_ms"],
+            &["method", "state_dir"],
+        ),
+        (
+            "LoginOutcome",
+            &[
+                "checked",
+                "credentials",
+                "expires_at",
+                "kind",
+                "label",
+                "settings",
+            ],
+            &["kind"],
+        ),
+        ("RenewRequest", &["account"], &["account"]),
+        (
+            "RenewReport",
+            &["credentials", "expires_at", "not_renewed_because"],
+            &[],
+        ),
+        ("ModelsRequest", &["account", "environment"], &[]),
+        (
+            "AccountRenewal",
+            &["credentials", "expires_at", "from_revision", "id"],
+            &["credentials", "from_revision", "id"],
+        ),
+        ("AccountLoss", &["id", "reason"], &["id", "reason"]),
+        (
+            "OpenUrl",
+            &["expires_ms", "url", "user_code"],
+            &["url"],
+        ),
+        ("LoginForm", &["schema", "title"], &["title"]),
+        ("LoginAnswer", &["secrets", "values"], &[]),
     ];
     let schemas = schemas();
+    assert_eq!(pinned.len(), 44);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()
@@ -336,6 +473,14 @@ fn every_models_keys_are_pinned() {
             .expect("described")
             .1["enum"],
         serde_json::json!(["separate", "merged", "discarded"])
+    );
+    assert_eq!(
+        schemas
+            .iter()
+            .find(|(n, _)| *n == "CacheLifetime")
+            .expect("described")
+            .1["enum"],
+        serde_json::json!(["default", "short", "long"])
     );
 }
 
@@ -373,6 +518,71 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     usage.set("account", "pool/alice");
     usage.set("refresh", true);
     assert!(UsageQuery::from_value(&Value::from(usage)).is_err());
+    let grant = |extra: Option<(&str, bool)>| {
+        let mut grant = Map::new();
+        grant.set("id", "account-1");
+        grant.set("kind", "harness-login");
+        if let Some((key, value)) = extra {
+            grant.set(key, value);
+        }
+        Value::from(grant)
+    };
+    assert!(AccountGrant::from_value(&grant(None)).is_ok());
+    assert!(AccountGrant::from_value(&grant(Some(("plaintext", true)))).is_err());
+    assert!(AccountRef::from_value(&grant(Some(("credentials", true)))).is_err());
+    let mut login = Map::new();
+    login.set("method", "subscription");
+    login.set("state_dir", "/tmp/login");
+    assert!(LoginRequest::from_value(&Value::from(login.clone())).is_ok());
+    login.set("browser", "firefox");
+    assert!(LoginRequest::from_value(&Value::from(login)).is_err());
+    let mut renew = Map::new();
+    renew.set("account", grant(None));
+    renew.set("force", true);
+    assert!(RenewRequest::from_value(&Value::from(renew)).is_err());
+    let mut models = Map::new();
+    models.set("filter", "all");
+    assert!(ModelsRequest::from_value(&Value::from(models)).is_err());
+}
+
+/// A credential is a secret wherever it crosses: its schema says so, for `redact` and forms, and
+/// its `Debug` names the keys and never a value.
+#[test]
+fn every_credential_is_marked_sensitive() {
+    for (name, schema) in schemas() {
+        for key in ["credentials", "secrets"] {
+            if let Some(credentials) = schema["properties"].get(key) {
+                assert_eq!(credentials["x-sensitive"], true, "{name}.{key}");
+                assert_eq!(credentials["writeOnly"], true, "{name}.{key}");
+                assert_eq!(
+                    credentials["additionalProperties"]["type"], "string",
+                    "{name}.{key}"
+                );
+            }
+        }
+    }
+    let grant = AccountGrant::new("account-1", "kind")
+        .credentials(Credentials::from_iter([("api_key", "do-not-print-me")]));
+    let shown = format!("{grant:?} {:?}", grant.credentials.expose());
+    assert!(!shown.contains("do-not-print-me"), "{shown}");
+    assert!(shown.contains("api_key"), "{shown}");
+}
+
+/// A grant and a catalog read back as they were written, credentials included.
+#[test]
+fn a_grant_crosses_whole() {
+    use coqui_acp_api::guatiao::ToValue;
+    let grant = AccountGrant::new("account-1", "echo-login")
+        .credentials(Credentials::from_iter([("auth_file", "{}")]))
+        .state_dir("/tmp/account-1")
+        .revision(7);
+    let value = grant.to_value().expect("written");
+    assert_eq!(AccountGrant::from_value(&value).expect("read"), grant);
+    let bare = Map::new();
+    assert!(
+        AccountGrant::from_value(&Value::from(bare)).is_err(),
+        "a grant needs an id and a kind"
+    );
 }
 
 /// The environment is a secret wherever it crosses: its schema says so, for `redact` and forms.
@@ -399,20 +609,26 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(ChannelSinkVtable::FLOOR_HASH, SINK_HASH);
     assert_eq!(ProcessSpawnerVtable::FLOOR_HASH, SPAWNER_HASH);
     assert_eq!(SpawnedProcessVtable::FLOOR_HASH, PROCESS_HASH);
+    assert_eq!(AccountKeeperVtable::FLOOR_HASH, KEEPER_HASH);
+    assert_eq!(LoginPrompterVtable::FLOOR_HASH, PROMPTER_HASH);
 }
 
-const HARNESS_HASH: u32 = 1326996142;
+const HARNESS_HASH: u32 = 4111118208;
 const CHANNEL_HASH: u32 = 3787630980;
 const SINK_HASH: u32 = 4115266557;
-const SPAWNER_HASH: u32 = 1466370631;
+const SPAWNER_HASH: u32 = 3394663830;
 const PROCESS_HASH: u32 = 3306532587;
+const KEEPER_HASH: u32 = 708146915;
+const PROMPTER_HASH: u32 = 2606822037;
 
-const HASHES: [(&str, u32); 5] = [
+const HASHES: [(&str, u32); 7] = [
     ("acp_harness", HARNESS_HASH),
     ("channel", CHANNEL_HASH),
     ("channel_sink", SINK_HASH),
     ("process_spawner", SPAWNER_HASH),
     ("spawned_process", PROCESS_HASH),
+    ("account_keeper", KEEPER_HASH),
+    ("login_prompter", PROMPTER_HASH),
 ];
 
 #[test]
