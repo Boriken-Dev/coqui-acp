@@ -107,9 +107,7 @@ fn the_suite_inside() {
     let outcome = Contract::new("claude")
         .program_agent(true)
         .imports(false)
-        .logins(false)
         .holds(vec![Requirement::new(NO_PROJECT_MCP)])
-        .account("harness-login")
         .run(&harness);
     drop(harness);
     drop(registry);
@@ -301,18 +299,18 @@ fn what_it_does_not_do_yet_is_refused_unsupported_with_a_reason() {
 }
 
 #[test]
-fn a_usage_read_for_an_account_it_does_not_apply_is_refused_like_a_models_call() {
+fn a_usage_read_for_an_account_checks_the_grant_like_a_start_does() {
     let spawner = || -> Object<dyn ProcessSpawner> { LocalSpawner::new().into_object() };
+    // A login with no credential or directory is not a grant the kind takes.
     let account = coqui_acp_api::AccountGrant::new("a", "claude-login");
     let error = provider()
         .usage(
-            coqui_acp_api::UsageQuery::new().account(account.clone()),
+            coqui_acp_api::UsageQuery::new().account(account),
             spawner(),
             Keeper.into_object(),
         )
         .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    assert!(error.message().contains("claude-login"));
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
     let error = provider()
         .usage(
             coqui_acp_api::UsageQuery::new()
@@ -325,7 +323,7 @@ fn a_usage_read_for_an_account_it_does_not_apply_is_refused_like_a_models_call()
 }
 
 #[test]
-fn it_lists_the_account_kinds_it_measured_and_applies_only_the_harness_login() {
+fn it_lists_the_account_kinds_it_measured_and_the_ways_to_sign_in() {
     let catalog = provider().accounts().expect("listed");
     let ids: Vec<&str> = catalog.kinds.iter().map(|k| k.id.as_str()).collect();
     assert_eq!(
@@ -339,20 +337,24 @@ fn it_lists_the_account_kinds_it_measured_and_applies_only_the_harness_login() {
             "anthropic-auth-token"
         ]
     );
-    assert!(catalog.logins.is_empty());
+    let methods: Vec<&str> = catalog.logins.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        methods,
+        ["subscription", "console", "api-key", "auth-token"]
+    );
     let login = catalog.kind("claude-login").expect("listed");
-    assert!(login.rotates && login.state_dir && !login.history_portable && !login.renews);
+    assert!(login.rotates && login.state_dir && !login.history_portable && login.renews);
     let key = catalog.kind("anthropic-api-key").expect("listed");
     assert!(!key.rotates && !key.state_dir && key.history_portable);
-    let grant = coqui_acp_api::AccountGrant::new("a", "claude-login").reference();
-    let refused = provider()
+    let grant = coqui_acp_api::AccountRef::new("a", "no-such-kind");
+    let error = provider()
         .refusal(
             Vec::new(),
             coqui_acp_api::guatiao::Secret::default(),
             Some(grant),
         )
-        .expect("answered");
-    assert!(refused.is_some_and(|why| why.contains("claude-login")));
+        .expect_err("a kind it does not list");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
 }
 
 fn settings_from(text: &str) -> Result<ProviderSettings, guatiao_serde::Error> {

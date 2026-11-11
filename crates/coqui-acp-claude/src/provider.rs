@@ -7,6 +7,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::time::Duration;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -19,12 +20,13 @@ use coqui_acp_api::{
     RenewRequest, Requirement, SessionExport, SessionImport, StartRequest, UsageQuery, UsageReport,
 };
 use coqui_acp_harness::Mode;
+use coqui_acp_harness::account::{Accounts, Files, Hold, same_name};
 use coqui_acp_harness::acp::Harness;
-use coqui_acp_harness::provider::{Reports, Serving, account_refusal, shared, takes_of};
+use coqui_acp_harness::provider::{Reports, Serving, shared, takes_of};
 use coqui_acp_harness::{Settings, ThroughSpawner};
 
-use crate::accounts;
 use crate::{ClaudeAgent, ClaudeLaunch, ClaudeSession, ClaudeSettings};
+use crate::{accounts, signin};
 
 /// What a connection with `cache_lifetime` short sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and its sub-agent twin to.
 const SHORT_TTL: &str = "5m";
@@ -106,6 +108,14 @@ pub struct ProviderSettings {
     /// Whether a client may give a session MCP servers, which start programs.
     #[map(default = true)]
     pub client_mcp_servers: bool,
+    /// How often, in milliseconds, a connection on an account that keeps its login in a file looks at the file for a
+    /// renewal or a loss; 0 looks only when a call is made on the account and when the connection closes.
+    #[map(default = 30_000)]
+    pub renew_poll_ms: u64,
+    /// The longest, in milliseconds, a command Claude Code is asked to run for an account (`auth status`) may take;
+    /// 0 ends it at once.
+    #[map(default = 60_000)]
+    pub command_timeout_ms: u64,
 }
 
 impl Default for ProviderSettings {
@@ -124,6 +134,8 @@ impl Default for ProviderSettings {
             max_message_bytes: 64 * 1024 * 1024,
             allow_client_plugins: false,
             client_mcp_servers: true,
+            renew_poll_ms: 30_000,
+            command_timeout_ms: 60_000,
         }
     }
 }
@@ -144,6 +156,8 @@ pub struct ClaudeProvider {
     settings: ProviderSettings,
     /// What the connections learned of each account's usage.
     reports: Arc<Reports>,
+    /// What the provider knows of its accounts' files, and who hears of them.
+    accounts: Arc<Accounts>,
 }
 
 impl From<ProviderSettings> for ClaudeProvider {
@@ -159,6 +173,7 @@ impl ClaudeProvider {
         Self {
             settings,
             reports: Arc::new(Reports::new()),
+            accounts: Arc::new(Accounts::new()),
         }
     }
 
@@ -246,11 +261,67 @@ fn unsupported(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, why)
 }
 
-/// Why a call that applies `account` cannot: `None` when it can.
-fn account_check(account: Option<&AccountRef>) -> Result<Option<String>, ProviderError> {
-    match account {
-        Some(account) => account_refusal(&accounts::catalog(), account),
-        None => Ok(None),
+/// What a call that applies an account holds: the account's files and who hears of them.
+struct Applying {
+    hold: Option<Hold>,
+}
+
+impl ClaudeProvider {
+    /// Applies `account` to `launch`: the variables Claude Code is given, every credential variable removed first, and
+    /// the files of a login placed in the account's directory through `files`.
+    ///
+    /// # Errors
+    ///
+    /// `BAD_VALUE` for a grant the kind refuses; `UNSUPPORTED` for a kind that needs files from a spawner with none.
+    fn apply(
+        &self,
+        account: Option<&AccountGrant>,
+        files: &Files,
+        keeper: Object<dyn AccountKeeper>,
+        launch: &mut ClaudeLaunch,
+    ) -> Result<Applying, ProviderError> {
+        let Some(grant) = account else {
+            return Ok(Applying { hold: None });
+        };
+        let mut applied = accounts::plan(grant)?;
+        if grant.kind == coqui_acp_api::HARNESS_LOGIN {
+            return Ok(Applying { hold: None });
+        }
+        if applied.dir.is_some() && !files.available() {
+            return Err(unsupported(
+                "this spawner serves no private files, which the login is kept in",
+            ));
+        }
+        // What the host's environment holds under a credential name does not reach Claude Code beside the account's.
+        launch.env.retain(|name, _| {
+            !applied
+                .remove
+                .iter()
+                .any(|v| same_name(&name.to_string_lossy(), v))
+        });
+        launch.remove_env = applied.remove.iter().map(OsString::from).collect();
+        for (name, value) in &applied.set {
+            launch.env.insert(name.into(), value.into());
+        }
+        if applied.watched.is_empty() {
+            // The person's own user settings (an apiKeyHelper, an env block) would outrank the credential: they are
+            // left out unless the entry says which sources to load.
+            if launch.setting_sources.is_none() {
+                launch.setting_sources = Some(vec!["project".to_string(), "local".to_string()]);
+            }
+            drop(keeper);
+            return Ok(Applying { hold: None });
+        }
+        let hold = self.accounts.hold(
+            files.clone(),
+            Some(keeper),
+            &grant.id,
+            applied.dir.as_deref().unwrap_or_default(),
+            grant.revision,
+            grant.credentials.expose(),
+            core::mem::take(&mut applied.watched),
+        )?;
+        Ok(Applying { hold: Some(hold) })
     }
 }
 
@@ -289,8 +360,7 @@ impl AcpHarness for ClaudeProvider {
         sink: Object<dyn ChannelSink>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
-        drop(keeper);
-        let (launch, refusal) = self.launch(
+        let (mut launch, refusal) = self.launch(
             request.environment.expose(),
             request.cache_lifetime,
             &request.requirements,
@@ -298,11 +368,11 @@ impl AcpHarness for ClaudeProvider {
         if let Some(why) = refusal {
             return Err(unsupported(&why));
         }
-        let account = request.account.as_ref().map(AccountGrant::reference);
-        if let Some(why) = account_check(account.as_ref())? {
-            return Err(unsupported(&why));
-        }
-        let account_id = account.map(|account| account.id);
+        let spawner = Arc::new(spawner);
+        let files = Files::new(Arc::clone(&spawner));
+        let applying = self.apply(request.account.as_ref(), &files, keeper, &mut launch)?;
+        drop(files);
+        let account_id = request.account.as_ref().map(|account| account.id.clone());
         let mut settings = Settings::new();
         settings.max_sessions = usize::try_from(self.settings.max_sessions).unwrap_or(usize::MAX);
         settings.max_requests = usize::try_from(self.settings.max_requests).unwrap_or(usize::MAX);
@@ -321,7 +391,16 @@ impl AcpHarness for ClaudeProvider {
         }));
         let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
         let plugins = self.settings.allow_client_plugins;
-        Serving::new(settings, limit).open(spawner, sink, move |spawn| {
+        let mut serving = Serving::new(settings, limit);
+        if let Some(hold) = applying.hold {
+            let watcher = (self.settings.renew_poll_ms > 0)
+                .then(|| hold.watch(Duration::from_millis(self.settings.renew_poll_ms)));
+            serving = serving.ending(move || {
+                drop(watcher);
+                hold.finish();
+            });
+        }
+        serving.open_shared(spawner, sink, move |spawn| {
             Ok(shared(
                 ClaudeAgent::new()
                     .defaults(launch)
@@ -341,7 +420,10 @@ impl AcpHarness for ClaudeProvider {
         if let Some(why) = narrow(&requirements, &mut launch)? {
             return Ok(Some(why));
         }
-        account_check(account.as_ref())
+        if let Some(account) = &account {
+            accounts::check(account)?;
+        }
+        Ok(None)
     }
 
     fn program(&self) -> Result<Option<String>, ProviderError> {
@@ -354,7 +436,9 @@ impl AcpHarness for ClaudeProvider {
         _spawner: Object<dyn ProcessSpawner>,
         _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
-        let _ = session;
+        if let Some(account) = &session.account {
+            accounts::plan(account)?;
+        }
         Err(unsupported(
             "this provider does not import a session into Claude Code yet",
         ))
@@ -366,7 +450,9 @@ impl AcpHarness for ClaudeProvider {
         _spawner: Object<dyn ProcessSpawner>,
         _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
-        let _ = export;
+        if let Some(account) = &export.account {
+            accounts::plan(account)?;
+        }
         Err(unsupported(
             "this provider does not export a Claude Code session yet",
         ))
@@ -376,44 +462,42 @@ impl AcpHarness for ClaudeProvider {
         &self,
         request: ModelsRequest,
         spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
+        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
-        if let Some(why) = account_check(
-            request
-                .account
-                .as_ref()
-                .map(AccountGrant::reference)
-                .as_ref(),
-        )? {
-            return Err(unsupported(&why));
-        }
-        let (launch, _) = self.launch(request.environment.expose(), CacheLifetime::Default, &[])?;
-        let spawn = ThroughSpawner::new(spawner);
-        let session = match ClaudeSession::start(&launch, &spawn, ClaudeSettings::new(), |_| true) {
-            Ok(session) => session,
-            Err(error) => {
-                return Ok(ModelListing::unknown(format!(
-                    "Claude Code could not be asked: {error}"
-                )));
+        let (mut launch, _) =
+            self.launch(request.environment.expose(), CacheLifetime::Default, &[])?;
+        let spawner = Arc::new(spawner);
+        let files = Files::new(Arc::clone(&spawner));
+        let applying = self.apply(request.account.as_ref(), &files, keeper, &mut launch)?;
+        drop(files);
+        let spawn = ThroughSpawner::shared(spawner);
+        let listing = match ClaudeSession::start(&launch, &spawn, ClaudeSettings::new(), |_| true) {
+            Ok(session) => {
+                let listing = session.models().map_or_else(
+                    || ModelListing::unknown("Claude Code listed no model"),
+                    |models| {
+                        ModelListing::of(
+                            models
+                                .into_iter()
+                                .map(|model| {
+                                    let mut info = ModelInfo::new(model.id);
+                                    info.name = Some(model.name);
+                                    info.description = model.description;
+                                    info
+                                })
+                                .collect(),
+                        )
+                    },
+                );
+                session.close();
+                listing
             }
+            Err(error) => ModelListing::unknown(format!("Claude Code could not be asked: {error}")),
         };
-        let listing = session.models().map_or_else(
-            || ModelListing::unknown("Claude Code listed no model"),
-            |models| {
-                ModelListing::of(
-                    models
-                        .into_iter()
-                        .map(|model| {
-                            let mut info = ModelInfo::new(model.id);
-                            info.name = Some(model.name);
-                            info.description = model.description;
-                            info
-                        })
-                        .collect(),
-                )
-            },
-        );
-        session.close();
+        // The last look: a refresh Claude Code made while it was asked is told before the call returns.
+        if let Some(hold) = applying.hold {
+            hold.finish();
+        }
         Ok(listing)
     }
 
@@ -424,10 +508,10 @@ impl AcpHarness for ClaudeProvider {
         _keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
         // Claude Code learns usage only during a turn: this is what the connections last saw.
-        let account = query.account.as_ref().map(AccountGrant::reference);
-        if let Some(why) = account_check(account.as_ref())? {
-            return Err(unsupported(&why));
+        if let Some(account) = &query.account {
+            accounts::plan(account)?;
         }
+        let account = query.account.as_ref().map(AccountGrant::reference);
         Ok(self
             .reports
             .report(&self.support(), account.as_ref().map(|a| a.id.as_str())))
@@ -435,21 +519,30 @@ impl AcpHarness for ClaudeProvider {
 
     fn login(
         &self,
-        _request: LoginRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-        _prompter: Object<dyn LoginPrompter>,
+        request: LoginRequest,
+        spawner: Object<dyn ProcessSpawner>,
+        prompter: Object<dyn LoginPrompter>,
     ) -> Result<LoginOutcome, ProviderError> {
-        Err(unsupported(
-            "this provider offers no way to sign in to Claude Code yet",
-        ))
+        signin::login(
+            &OsString::from(&self.settings.executable),
+            Duration::from_millis(self.settings.command_timeout_ms),
+            &request,
+            spawner,
+            prompter,
+        )
     }
 
     fn renew(
         &self,
         request: RenewRequest,
-        _spawner: Object<dyn ProcessSpawner>,
+        spawner: Object<dyn ProcessSpawner>,
     ) -> Result<RenewReport, ProviderError> {
-        account_check(Some(&request.account.reference()))?;
-        Err(unsupported("this provider renews no Claude Code login yet"))
+        signin::renew(
+            &self.accounts,
+            &OsString::from(&self.settings.executable),
+            Duration::from_millis(self.settings.command_timeout_ms),
+            &request,
+            spawner,
+        )
     }
 }

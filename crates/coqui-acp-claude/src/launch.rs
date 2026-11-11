@@ -76,6 +76,9 @@ pub struct ClaudeLaunch {
     pub partial_messages: bool,
     /// Variables set for Claude Code over the inherited environment.
     pub env: BTreeMap<OsString, OsString>,
+    /// Variables removed from the inherited environment before `env` is set, so a credential the caller's own environment
+    /// holds does not reach Claude Code.
+    pub remove_env: Vec<OsString>,
     /// Start Claude Code from an empty environment and `env` alone.
     pub clear_env: bool,
     /// More arguments, after all the others, each as given: the caller's own, unchecked.
@@ -100,6 +103,7 @@ impl core::fmt::Debug for ClaudeLaunch {
             .field("modes", &self.modes)
             .field("setting_sources", &self.setting_sources)
             .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("remove_env", &self.remove_env)
             .field("clear_env", &self.clear_env)
             .finish_non_exhaustive()
     }
@@ -129,6 +133,7 @@ impl ClaudeLaunch {
             max_budget_micro_usd: None,
             partial_messages: true,
             env: BTreeMap::new(),
+            remove_env: Vec::new(),
             clear_env: false,
             extra_args: Vec::new(),
         }
@@ -218,6 +223,7 @@ impl ClaudeLaunch {
             .cwd(self.cwd.clone())
             .clear_env(self.clear_env);
         launch.env.clone_from(&self.env);
+        launch.remove_env.clone_from(&self.remove_env);
         launch
     }
 }

@@ -12,6 +12,7 @@ pub mod parse;
 mod provider;
 mod replay;
 mod session;
+mod signin;
 mod tools;
 
 use alloc::string::String;

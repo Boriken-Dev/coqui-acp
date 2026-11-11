@@ -206,7 +206,16 @@ fn main() {
         println!("{VERSION} (Claude Code)");
         return;
     }
+    let mut logs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("COQUI_ACP_FAKE_CLAUDE_LOG") {
+        logs.push(path.into());
+    }
+    // Beside the configuration directory too, so a call that sets no variable of its own can still be read back.
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        let _ = std::fs::create_dir_all(&dir);
+        logs.push(Path::new(&dir).join("fake-claude.log"));
+    }
+    if !logs.is_empty() {
         let ttl: serde_json::Map<String, Value> = TTL_VARIABLES
             .iter()
             .filter_map(|name| {
@@ -216,16 +225,15 @@ fn main() {
             })
             .collect();
         let names: Vec<String> = std::env::vars().map(|(name, _)| name).collect();
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(
-                file,
-                "{}",
-                json!({"args": args, "env_names": names, "ttl": ttl})
-            );
+        let line = json!({"args": args, "env_names": names, "ttl": ttl, "config": std::env::var("CLAUDE_CONFIG_DIR").ok()});
+        for path in logs {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(file, "{line}");
+            }
         }
     }
     // Never in a real home: in the directory it is told, or in the home the contract suite gave it.
@@ -241,6 +249,9 @@ fn main() {
         );
         std::process::exit(2);
     };
+    if args.first().is_some_and(|first| first == "auth") {
+        std::process::exit(auth(&args, Path::new(&config)));
+    }
     let value_of = |flag: &str| {
         args.iter()
             .find_map(|arg| arg.strip_prefix(flag).map(str::to_string))
@@ -419,4 +430,154 @@ fn ask(fake: &Fake, lines: &mut impl Iterator<Item = String>) {
         return;
     }
     std::process::exit(0);
+}
+
+/// The login the stand-in keeps, as Claude Code's `.credentials.json` holds one.
+fn login_file(access: &str, refresh: &str, expires_ms: u64) -> Value {
+    json!({"claudeAiOauth": {
+        "accessToken": access,
+        "refreshToken": refresh,
+        "expiresAt": expires_ms,
+        "refreshTokenExpiresAt": expires_ms + 86_400_000,
+        "scopes": ["user:inference"],
+        "subscriptionType": "max",
+        "subscriptionTypeSource": "stand-in",
+        "rateLimitTier": "stand-in",
+    }})
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+}
+
+/// `claude auth login` and `claude auth status`, as recorded in `references/account_kinds`: the sign-in prints the page
+/// to open and waits for the code it shows; a status refreshes a login in its last five minutes.
+///
+/// A file named `fake-refresh` in the configuration directory scripts what a refresh does: `refuse-blank` blanks both
+/// tokens and `refuse-delete` deletes the file, as a refused refresh does; `fake-login` holding `refuse` refuses a
+/// code. Standard input is read for the code and never echoed or logged.
+fn auth(args: &[String], config: &Path) -> i32 {
+    let credentials = config.join(".credentials.json");
+    match args.get(1).map(String::as_str) {
+        Some("login") => {
+            println!("Opening browser to sign in\u{2026}");
+            let page = if args.iter().any(|arg| arg == "--console") {
+                "https://platform.claude.com/oauth/authorize?code=true&client_id=stand-in&state=stand-in"
+            } else {
+                "https://claude.com/cai/oauth/authorize?code=true&client_id=stand-in&state=stand-in"
+            };
+            println!(
+                "If the browser didn't open, visit: \u{1b}]8;;{page}\u{1b}\\{page}\u{1b}]8;;\u{1b}\\"
+            );
+            print!("Paste code here if prompted > ");
+            let _ = std::io::stdout().flush();
+            let mut code = String::new();
+            let _ = std::io::stdin().read_line(&mut code);
+            let refused = std::fs::read_to_string(config.join("fake-login"))
+                .is_ok_and(|s| s.trim() == "refuse");
+            if code.trim().is_empty() || refused {
+                eprintln!("Login failed: the code was not accepted");
+                return 1;
+            }
+            // The exchange with the sign-in service takes a moment.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = std::fs::create_dir_all(config);
+            let file = login_file(
+                "stand-in-access-1",
+                "stand-in-refresh-1",
+                now_ms() + 8 * 3_600_000,
+            );
+            let _ = std::fs::write(&credentials, file.to_string());
+            println!("\nLogin successful.");
+            0
+        }
+        Some("status") => {
+            // A status that takes long and leaves a mark when it ends, to see whether it was ended.
+            if config.join("fake-status-sleep").exists() {
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+                let _ = std::fs::write(config.join("status-finished"), "done");
+            }
+            for (variable, method) in [
+                ("ANTHROPIC_API_KEY", "api_key"),
+                ("ANTHROPIC_AUTH_TOKEN", "oauth_token"),
+                ("CLAUDE_CODE_OAUTH_TOKEN", "oauth_token"),
+            ] {
+                if std::env::var(variable).is_ok_and(|v| !v.is_empty()) {
+                    println!(
+                        "{}",
+                        json!({"loggedIn": true, "authMethod": method, "apiProvider": "firstParty"})
+                    );
+                    return 0;
+                }
+            }
+            let signed_out = || {
+                println!(
+                    "{}",
+                    json!({"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"})
+                );
+                1
+            };
+            let Ok(text) = std::fs::read_to_string(&credentials) else {
+                return signed_out();
+            };
+            if text.trim().is_empty() {
+                return signed_out();
+            }
+            let Ok(mut file) = serde_json::from_str::<Value>(&text) else {
+                // A login the stand-in did not make: signed in.
+                println!(
+                    "{}",
+                    json!({"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty"})
+                );
+                return 0;
+            };
+            let oauth = &file["claudeAiOauth"];
+            if oauth["accessToken"].as_str().is_none_or(str::is_empty)
+                && oauth["refreshToken"].as_str().is_none_or(str::is_empty)
+            {
+                return signed_out();
+            }
+            let ends = oauth["expiresAt"].as_u64().unwrap_or(u64::MAX);
+            if now_ms() + 300_000 >= ends {
+                match std::fs::read_to_string(config.join("fake-refresh"))
+                    .unwrap_or_default()
+                    .trim()
+                {
+                    "refuse-blank" => {
+                        file["claudeAiOauth"]["accessToken"] = json!("");
+                        file["claudeAiOauth"]["refreshToken"] = json!("");
+                        let _ = std::fs::write(&credentials, file.to_string());
+                        return signed_out();
+                    }
+                    "refuse-delete" => {
+                        let _ = std::fs::remove_file(&credentials);
+                        return signed_out();
+                    }
+                    _ => {
+                        // The refresh token is single use: the new login replaces both.
+                        let number = oauth["accessToken"]
+                            .as_str()
+                            .and_then(|t| t.rsplit('-').next())
+                            .and_then(|n| n.parse::<u64>().ok())
+                            .unwrap_or(0)
+                            + 1;
+                        let renewed = login_file(
+                            &format!("stand-in-access-{number}"),
+                            &format!("stand-in-refresh-{number}"),
+                            now_ms() + 8 * 3_600_000,
+                        );
+                        let _ = std::fs::write(&credentials, renewed.to_string());
+                    }
+                }
+            }
+            println!(
+                "{}",
+                json!({"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty"})
+            );
+            0
+        }
+        _ => 2,
+    }
 }
