@@ -127,7 +127,7 @@ The one process-wide state of the crate is the list of threads `provider` starte
 pub struct StdioProvider;                     // Debug; a provider of `acp_harness` under the id `stdio`
 pub fn StdioProvider::new(settings: StdioSettings) -> StdioProvider
 pub struct StdioSettings { pub harness: StdioHarness, pub executable: Option<String>, pub max_acp_version: u64 /* 1 */,
-    pub renew_poll_ms: u64 /* 30000 */, pub max_requests: u64 /* 32 */, pub max_message_bytes: u64 /* 67108864 */ }   // ToValue, FromValue, Schema
+    pub renew_poll_ms: u64 /* 30000, 0 looks only at calls and at close */, pub command_timeout_ms: u64 /* 60000 */, pub max_requests: u64 /* 32 */, pub max_message_bytes: u64 /* 67108864 */ }   // ToValue, FromValue, Schema
 pub const fn StdioSettings::new(harness: StdioHarness) -> StdioSettings
 #[non_exhaustive] pub enum StdioHarness { Grok, Antigravity, Pi }                      // written grok, antigravity, pi
 pub mod accounts { pub struct HarnessDef; pub struct KindDef; pub fn catalog(..); pub fn apply(..); pub fn known(..);

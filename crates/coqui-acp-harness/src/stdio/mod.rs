@@ -37,9 +37,6 @@ mod relay;
 
 use accounts::{Applied, HarnessDef};
 
-/// The longest a renewal may take before the program is ended.
-const RENEW_LIMIT: Duration = Duration::from_secs(60);
-
 /// The harness a provider fronts. Written as `grok`, `antigravity` and `pi`.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[map(crate = ::coqui_acp_api::guatiao, rename_all = "snake_case")]
@@ -75,9 +72,13 @@ pub struct StdioSettings {
     /// The highest ACP version the harness is said to answer: 1 or 2.
     #[map(default = 1)]
     pub max_acp_version: u64,
-    /// How often the account's login file is looked at while a connection runs, in milliseconds.
+    /// How often the account's login file is looked at while a connection runs, in milliseconds; 0 looks only at calls and
+    /// at close.
     #[map(default = 30_000)]
     pub renew_poll_ms: u64,
+    /// How long a command of the harness's own (a renewal) may run before it is ended, in milliseconds.
+    #[map(default = 60_000)]
+    pub command_timeout_ms: u64,
     /// Requests one connection may have in hand at once: a client that sends more is held back until the sink has taken
     /// answers.
     #[map(default = 32)]
@@ -96,6 +97,7 @@ impl StdioSettings {
             executable: None,
             max_acp_version: 1,
             renew_poll_ms: DEFAULT_POLL_MS,
+            command_timeout_ms: 60_000,
             max_requests: 32,
             max_message_bytes: 64 * 1024 * 1024,
         }
@@ -173,7 +175,7 @@ impl StdioProvider {
     }
 
     fn poll(&self) -> Duration {
-        Duration::from_millis(self.settings.renew_poll_ms.max(1))
+        Duration::from_millis(self.settings.renew_poll_ms)
     }
 
     /// Reads `grant` against the harness, and answers what applies it; `None` for `harness-login`.
@@ -469,7 +471,7 @@ impl StdioProvider {
             &ThroughSpawner::shared(Arc::clone(spawner)),
             &launch,
             None,
-            RENEW_LIMIT,
+            Duration::from_millis(self.settings.command_timeout_ms),
             4096,
         )
         .map_err(|_| {

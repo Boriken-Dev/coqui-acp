@@ -375,7 +375,7 @@ fn drain_errors(shared: &Shared) {
 /// What ending the connection takes, which the delivering thread owns.
 struct Ending {
     spawner: Arc<Object<dyn ProcessSpawner>>,
-    hold: Option<(Hold, Watcher)>,
+    hold: Option<(Hold, Option<Watcher>)>,
 }
 
 enum Step {
@@ -480,7 +480,9 @@ fn deliver(mut sink: Object<dyn ChannelSink>, shared: &Shared, ending: Ending) {
     wait_for(shared, |state| state.reader_done && state.errors_done);
     let Ending { spawner, hold } = ending;
     if let Some((hold, watcher)) = hold {
-        watcher.stop();
+        if let Some(watcher) = watcher {
+            watcher.stop();
+        }
         hold.finish();
     }
     let (status, reason) = {
@@ -554,7 +556,7 @@ pub(crate) fn open(params: Params) -> Result<Object<dyn Channel>, ProviderError>
     let ending = Ending {
         spawner,
         hold: hold.map(|(hold, poll)| {
-            let watcher = hold.watch(poll);
+            let watcher = (!poll.is_zero()).then(|| hold.watch(poll));
             (hold, watcher)
         }),
     };
