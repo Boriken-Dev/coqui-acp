@@ -19,6 +19,7 @@ use coqui_acp_api::{
 use serde_json::json;
 
 use super::{Credential, Endpoint, HarnessDef, KindDef, Setting};
+use crate::login::reason;
 use crate::process::{Exit, Launch};
 use crate::provider::schema;
 use crate::stdio::login::{self, Ctx};
@@ -244,7 +245,7 @@ struct Seen {
 }
 
 impl Seen {
-    fn line(&mut self, ctx: &Ctx, line: &str, device: bool) -> Result<(), ProviderError> {
+    fn line(&mut self, ctx: &Ctx<'_>, line: &str, device: bool) -> Result<(), ProviderError> {
         let text = line.trim();
         if self.url.is_none()
             && (text.starts_with("https://") || text.starts_with("http://"))
@@ -284,14 +285,14 @@ fn code_text(exit: &Exit) -> alloc::string::String {
 }
 
 /// `grok models` on the sign-in's directory, which asks nothing of a model and renews a login near its end.
-fn check(ctx: &Ctx, program: &str, dir: &str) -> Result<bool, ProviderError> {
+fn check(ctx: &Ctx<'_>, program: &str, dir: &str) -> Result<bool, ProviderError> {
     let mut child = ctx.spawn(&launch(program, &["models"], dir, &[]))?;
     let exit = child.run(ctx, |_| Ok(()))?;
     Ok(exit.code == Some(0))
 }
 
 fn browser_or_device(
-    ctx: &Ctx,
+    ctx: &Ctx<'_>,
     program: &str,
     dir: &str,
     device: bool,
@@ -328,7 +329,7 @@ fn browser_or_device(
     Ok(outcome)
 }
 
-fn api_key(ctx: &Ctx, program: &str, dir: &str) -> Result<LoginOutcome, ProviderError> {
+fn api_key(ctx: &Ctx<'_>, program: &str, dir: &str) -> Result<LoginOutcome, ProviderError> {
     let form = LoginForm::new(
         "xAI API key",
         schema(&json!({
@@ -356,14 +357,17 @@ fn api_key(ctx: &Ctx, program: &str, dir: &str) -> Result<LoginOutcome, Provider
         dir,
         &[("XAI_API_KEY", key.as_str())],
     ))?;
-    let exit = child.run(ctx, |_| Ok(()))?;
+    let mut last = alloc::string::String::new();
+    let exit = child.run(ctx, |line| {
+        if !line.trim().is_empty() {
+            last = line.to_string();
+        }
+        Ok(())
+    })?;
     if exit.code != Some(0) {
         return Err(ProviderError::new(
             Status::GUATIAO_ERR_BAD_VALUE,
-            &alloc::format!(
-                "login refused: Grok did not accept the key ({})",
-                code_text(&exit)
-            ),
+            &alloc::format!("login refused: {}", reason(&last, &key)),
         ));
     }
     let mut credentials = Credentials::new();

@@ -1,18 +1,10 @@
-//! Running a harness's own sign-in: the CLI through the spawner, what it prints relayed to the person, and the ends the
-//! kind names (cancelled, timed out, refused) answered within two seconds whatever the CLI or the prompter is doing.
-//!
-//! The sign-in runs on a thread of its own so that the caller can answer at the deadline or on a cancel while a prompter
-//! call or a read is still out; the thread lets go of what it was handed when it returns.
+//! Running a harness's own sign-in on top of the shared supervisor: the CLI through the spawner, what it prints relayed to
+//! the person, and the ends the kind names answered by [`crate::login::supervise`].
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
-use std::io;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
@@ -23,126 +15,56 @@ use coqui_acp_api::{
 use crate::ThroughSpawner;
 use crate::account::Files;
 use crate::cli::{Cli, Next, plain};
+use crate::login::{Job, asked, supervise};
 use crate::process::{Exit, Launch};
-use crate::provider::track;
 
-/// How often the caller looks at the prompter while the sign-in runs.
-const LOOK: Duration = Duration::from_millis(25);
-/// How long a cancelled sign-in is given to let go of what it was handed before the caller answers anyway.
-const LET_GO: Duration = Duration::from_millis(1500);
 /// How long a program that closed its output is given to exit.
 const EXIT_WAIT: Duration = Duration::from_secs(5);
 
-fn gone(why: &str) -> ProviderError {
-    ProviderError::new(Status::GUATIAO_ERR_GONE, why)
-}
-
-/// The programs a sign-in started, so that the caller can end them from another thread.
-#[derive(Default)]
-struct Running {
-    ended: AtomicBool,
-    programs: Mutex<Vec<Arc<Cli>>>,
-}
-
-impl Running {
-    fn kill_all(&self) {
-        self.ended.store(true, Ordering::SeqCst);
-        let programs: Vec<_> = self
-            .programs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        for program in programs {
-            program.kill();
-        }
-    }
-}
-
-/// What a sign-in works with: the spawner, the prompter and the deadline.
-pub struct Ctx {
+/// What a sign-in's work reaches: the spawner, the prompter and the supervisor's job.
+pub struct Ctx<'a> {
     spawn: ThroughSpawner,
     files: Files,
-    prompter: Arc<Object<dyn LoginPrompter>>,
-    deadline: Instant,
-    running: Arc<Running>,
+    prompter: &'a Object<dyn LoginPrompter>,
+    job: &'a Job,
 }
 
-impl Ctx {
-    /// Refuses once the sign-in has been cancelled or has run out of time.
+impl Ctx<'_> {
+    /// Refuses once the supervisor has answered.
     ///
     /// # Errors
     ///
-    /// `GUATIAO_ERR_GONE`, `login cancelled` or `login timed out`.
+    /// `GUATIAO_ERR_GONE`.
     pub fn check(&self) -> Result<(), ProviderError> {
-        if Instant::now() >= self.deadline {
-            return Err(gone("login timed out"));
-        }
-        if self.running.ended.load(Ordering::SeqCst) || self.prompter.cancelled().unwrap_or(false) {
-            return Err(gone("login cancelled"));
-        }
-        Ok(())
-    }
-
-    fn mapped<T>(&self, answer: Result<T, ProviderError>) -> Result<T, ProviderError> {
-        match answer {
-            Ok(value) => {
-                self.check()?;
-                Ok(value)
-            }
-            Err(error) if error.status == Status::GUATIAO_ERR_GONE => {
-                Err(gone(if Instant::now() >= self.deadline {
-                    "login timed out"
-                } else {
-                    "login cancelled"
-                }))
-            }
-            Err(error) => Err(error),
-        }
+        self.job.check()
     }
 
     /// Asks the person to open a page.
     ///
     /// # Errors
     ///
-    /// The person cancelled, or the sign-in ran out of time.
+    /// The person cancelled.
     pub fn open_url(&self, open: OpenUrl) -> Result<(), ProviderError> {
-        self.mapped(self.prompter.open_url(open))
+        asked(self.prompter.open_url(open))
     }
 
     /// Asks the person to fill a form.
     ///
     /// # Errors
     ///
-    /// As [`open_url`](Self::open_url).
+    /// The person cancelled.
     pub fn ask(&self, form: LoginForm) -> Result<LoginAnswer, ProviderError> {
-        self.mapped(self.prompter.ask(form))
+        asked(self.prompter.ask(form))
     }
 
-    /// Starts `launch` on the spawner. The program is ended with the sign-in.
+    /// Starts `launch` on the spawner; the supervisor ends it with the sign-in.
     ///
     /// # Errors
     ///
     /// The sign-in has ended, or the program could not be started.
     pub fn spawn(&self, launch: &Launch) -> Result<Child, ProviderError> {
-        self.check()?;
-        let cli = Cli::start(&self.spawn, launch).map_err(|error| {
-            let status = if error.kind() == io::ErrorKind::NotFound {
-                Status::GUATIAO_ERR_NOT_FOUND
-            } else {
-                Status::GUATIAO_ERR_INTERNAL
-            };
-            ProviderError::new(status, "the sign-in's program could not be started")
-        })?;
-        self.running
-            .programs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::clone(&cli));
-        if self.running.ended.load(Ordering::SeqCst) {
-            cli.kill();
-        }
         Ok(Child {
-            cli,
+            cli: self.job.start(&self.spawn, launch)?,
             out: Vec::new(),
             err: Vec::new(),
         })
@@ -186,10 +108,10 @@ impl Child {
     ///
     /// # Errors
     ///
-    /// The sign-in was cancelled or ran out of time, or `on_line` refused; the program is ended then.
+    /// The sign-in was ended, or `on_line` refused.
     pub fn run(
         &mut self,
-        ctx: &Ctx,
+        ctx: &Ctx<'_>,
         mut on_line: impl FnMut(&str) -> Result<(), ProviderError>,
     ) -> Result<Exit, ProviderError> {
         loop {
@@ -221,64 +143,31 @@ impl Child {
     }
 }
 
-/// Runs `work` as a sign-in on a thread of its own and answers its outcome, or a cancel or a timeout the moment they
-/// come.
+/// Runs `work` as a sign-in under the shared supervisor.
 ///
 /// # Errors
 ///
-/// What `work` refused; `GUATIAO_ERR_GONE` with `login cancelled` or `login timed out`; `GUATIAO_ERR_INTERNAL` when the
-/// thread could not start or died.
+/// What `work` refused; `GUATIAO_ERR_GONE` with `login cancelled` or `login timed out`.
 pub fn run(
     spawner: Object<dyn ProcessSpawner>,
     prompter: Object<dyn LoginPrompter>,
     timeout_ms: u64,
-    work: impl FnOnce(&Ctx) -> Result<LoginOutcome, ProviderError> + Send + 'static,
+    work: impl FnOnce(&Ctx<'_>) -> Result<LoginOutcome, ProviderError> + Send + 'static,
 ) -> Result<LoginOutcome, ProviderError> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let running = Arc::new(Running::default());
-    let prompter = Arc::new(prompter);
-    let spawner = Arc::new(spawner);
-    let ctx = Ctx {
-        files: Files::new(Arc::clone(&spawner)),
-        spawn: ThroughSpawner::shared(spawner),
-        prompter: Arc::clone(&prompter),
-        deadline,
-        running: Arc::clone(&running),
-    };
-    let killer = Arc::clone(&running);
-    let (tx, rx) = mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("coqui-acp-login".into())
-        .spawn(move || {
-            let outcome = work(&ctx);
-            ctx.running.kill_all();
-            drop(ctx);
-            let _ = tx.send(outcome);
-        })
-        .map_err(|_| ProviderError::new(Status::GUATIAO_ERR_INTERNAL, "no thread to sign in on"))?;
-    track(thread);
-    loop {
-        match rx.recv_timeout(LOOK) {
-            Ok(outcome) => return outcome,
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(ProviderError::new(
-                    Status::GUATIAO_ERR_INTERNAL,
-                    "the sign-in failed",
-                ));
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-        if Instant::now() >= deadline {
-            killer.kill_all();
-            return Err(gone("login timed out"));
-        }
-        if prompter.cancelled().unwrap_or(false) {
-            killer.kill_all();
-            // Given a moment to let go of what it was handed, then answered whatever it is doing.
-            let _ = rx.recv_timeout(LET_GO);
-            return Err(gone("login cancelled"));
-        }
-    }
+    supervise(
+        Arc::new(spawner),
+        prompter,
+        timeout_ms,
+        Box::new(move |spawner, prompter, job| {
+            let ctx = Ctx {
+                files: Files::new(Arc::clone(spawner)),
+                spawn: ThroughSpawner::shared(Arc::clone(spawner)),
+                prompter,
+                job,
+            };
+            work(&ctx)
+        }),
+    )
 }
 
 /// A credentials map holding one entry.
