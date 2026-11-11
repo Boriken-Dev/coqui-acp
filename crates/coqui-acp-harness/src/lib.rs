@@ -4,12 +4,19 @@
 
 extern crate alloc;
 
+#[cfg(feature = "kind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
+pub mod account;
 pub mod acp;
 #[cfg(feature = "antigravity")]
 #[cfg_attr(docsrs, doc(cfg(feature = "antigravity")))]
 pub mod antigravity;
+pub mod cli;
 pub mod event;
 pub mod lines;
+#[cfg(feature = "kind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
+pub mod login;
 pub mod mode;
 pub mod process;
 #[cfg(feature = "kind")]

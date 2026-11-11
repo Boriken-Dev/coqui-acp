@@ -58,10 +58,13 @@ impl Spawn for ThroughSpawner
 ## Provider (`coqui_acp_harness::provider`, feature `kind`)
 
 ```rust
-pub fn Serving::new(settings: Settings, max_message_bytes: usize) -> Serving       // Debug, Clone; #[must_use]
+pub fn Serving::new(settings: Settings, max_message_bytes: usize) -> Serving       // Debug; #[must_use]
 pub fn Serving::open(self, spawner: Object<dyn ProcessSpawner>, sink: Object<dyn ChannelSink>,
     harness: impl FnOnce(Arc<dyn Spawn>) -> Result<Arc<dyn Harness>, ProviderError>) -> Result<Object<dyn Channel>, ProviderError>
+pub fn Serving::open_shared(self, spawner: Arc<Object<dyn ProcessSpawner>>, sink, harness) -> ...   // as open; the spawner is shared (see Accounts)
+pub fn Serving::ending(self, f: impl FnOnce() + Send + 'static) -> Serving       // runs once after serve returned, before the spawner is released
 pub fn shared(harness: impl Harness) -> Arc<dyn Harness>
+pub fn track(thread: JoinHandle<()>);  pub fn to_json(&guatiao::Value) -> Value        // track: threads_done waits for it
 pub fn threads_done() -> Status                                                    // a library's `unload` hook
 pub struct Reports;                                                               // Debug, Default
 pub fn Reports::new() -> Reports
@@ -78,6 +81,37 @@ What a provider of `acp_harness` needs to front a harness that `serve` serves. `
 `Reports` is what a provider keeps for the kind's `usage` method, by account: `observe` takes a connection's report (give it `Settings::on_usage`), `read` a reading the provider made itself, and `report` answers the merged figures or, for an account nothing was learned of, an empty report naming the sources. A repeat changes nothing and the revision only grows.
 
 `account_refusal` is for a provider that applies nothing to the harness's environment yet: `GUATIAO_ERR_BAD_VALUE` for an id that is not an account id or a kind the catalog does not list, a reason for any listed kind but `harness-login`, `None` for that one.
+
+## Accounts (`coqui_acp_harness::{account, cli, login}`, feature `kind`; `cli` needs no feature)
+
+What a provider that applies an account to a harness started through a host's spawner needs.
+
+```rust
+pub struct Files;   // Clone; the held spawner's file methods
+Files::new(Arc<Object<dyn ProcessSpawner>>);  .available() -> bool;  .write(path, text);  .read(path) -> Result<Option<String>>;  .info(path) -> Result<Option<FileInfo>>;  .remove(path)
+#[non_exhaustive] pub struct Watched { pub path, pub key, pub usable: fn(&str) -> bool, pub expires: fn(&str) -> Option<String> }
+Watched::new(path, key) /* usable: not blank */ .usable(f) .expires(f)
+pub struct Accounts;   // one per provider; Accounts::new()
+pub fn Accounts::hold(self: &Arc<Self>, files: Files, keeper: Option<Object<dyn AccountKeeper>>, id: &str, dir: &str, revision: u64,
+    credentials: &Credentials, watched: Vec<Watched>) -> Result<Hold, ProviderError>
+pub struct Hold;   // Clone; #[must_use]
+Hold::look() -> Result<Looked { renewed: Vec<(Credentials, Option<String>)>, lost: Vec<String> }>;  .lost() -> Option<String>;  .credentials() -> Result<Credentials>;
+    .expires_at() -> Option<String>;  .finish();  .watch(poll: Duration) -> Watcher   // Watcher::stop(); dropping it stops it too
+pub fn rfc3339_ms(ms: i64) -> String;  pub const MAX_FILE_BYTES: u64;  pub const DEFAULT_POLL_MS: u64;
+```
+
+`hold` registers the keeper (a call with none hears nothing and tells the others) and places the files of `credentials` in `dir` (relative paths, through the spawner): absent with no record or no hold on it, the grant's copy is written; with no record and a file there, the same text is kept, one changed since the provider began is news (told, kept) and an older one replaced; with a record and no other hold, the recorded file is kept unless the grant is a newer revision with other credentials, one changed since the last look is news, an older one replaced; with another hold on it the file is kept (it may have been renewed) unless the grant is newer. A change found by any look is **recorded before anyone is told**, takes the next number of the account's one sequence and is told to every keeper live for the account, with no lock of the registry held; a text that is blank or that `usable` refuses is `lost`, once, and a login that appears again is `renewed`. `look` is for the caller to make after a call; `finish` (and drop) looks once more, lets go of the keeper (destroying it) and of the spawner. `Serving::open_shared(spawner, sink, build)` takes the spawner as an `Arc` so a hold can share it, and `Serving::ending(f)` runs `f` once on the serving thread after `serve` returned and before the spawner is released: stop the `Watcher` and call `finish` there.
+
+```rust
+pub fn cli::Cli::start(spawn: &dyn Spawn, launch: &Launch) -> io::Result<Arc<Cli>>;  .next(wait) -> Next { Piece(Piece { error, bytes }), Idle, Ended };  .write(bytes);  .close_input();  .exit() -> Option<Exit>;  .wait(wait) -> Option<Exit>;  .kill()
+pub fn cli::run(spawn, launch, input: Option<&[u8]>, limit: Duration, max_bytes: usize) -> io::Result<Done { exit, stdout, stderr, timed_out }>   // Done::succeeded()
+pub fn cli::plain(text) -> String;  pub fn cli::address_in(text) -> Option<String>   // OSC 8 link, else the first non-loopback http(s) address once something follows it
+pub fn login::supervise(spawner: Arc<Object<dyn ProcessSpawner>>, prompter: Object<dyn LoginPrompter>, timeout_ms: u64, work: Work) -> Result<LoginOutcome, ProviderError>
+pub struct login::Job;  Job::start(&dyn Spawn, &Launch) -> Result<Arc<Cli>>;  Job::check() -> Result<()>      // GONE once the supervisor has answered
+pub fn login::asked(result) -> result  // a prompter's GONE is `login cancelled`;  login::gone(why);  login::reason(output, typed) -> String   // a command's last line, no address, nothing typed
+```
+
+`supervise` runs the work on a thread of its own (tracked by `threads_done`) and answers when it does, or `GONE` `login cancelled` / `login timed out` when the person cancels or `timeout_ms` passes, after killing every command the work started through `Job::start`; the work asks and starts nothing more once it has answered, and what it was handed is let go before its own answer.
 
 The one process-wide state of the crate is the list of threads `provider` started; `threads_done` is `GUATIAO_ERR_BUSY` while one runs.
 

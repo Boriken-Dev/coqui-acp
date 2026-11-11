@@ -352,7 +352,7 @@ impl SpawnedProcess for LocalProcess {
 ///
 /// Standard error is kept apart. Reading waits through a link that is down, as the spawner keeps the output.
 pub struct ThroughSpawner {
-    spawner: Object<dyn ProcessSpawner>,
+    spawner: Arc<Object<dyn ProcessSpawner>>,
 }
 
 impl core::fmt::Debug for ThroughSpawner {
@@ -364,6 +364,14 @@ impl core::fmt::Debug for ThroughSpawner {
 impl ThroughSpawner {
     /// Starts programs through `spawner`.
     pub fn new(spawner: Object<dyn ProcessSpawner>) -> Self {
+        Self {
+            spawner: Arc::new(spawner),
+        }
+    }
+
+    /// Starts programs through a spawner someone else holds too (its file methods, say): it is destroyed when the last
+    /// holder lets go.
+    pub const fn shared(spawner: Arc<Object<dyn ProcessSpawner>>) -> Self {
         Self { spawner }
     }
 }
