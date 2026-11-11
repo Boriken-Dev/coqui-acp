@@ -120,6 +120,18 @@ With no boundary that has a summary, the seed is every body line. A later bounda
 
 The seed's starting point is reported as a line number (the boundary's, else line 2, the first body line) and the SHA-256 of that line in canonical spelling (below), so a later reader can tell it is the same history. A helper reports the latest whole turns that fit a size budget with the summary always kept; what to do when the seed does not fit (start from what fits and ask the harness to compact first) is the caller's policy.
 
+## The Claude Code and Codex codecs
+
+`coqui-acp-claude` and `coqui-acp-codex` read and write their harness's own session files (feature `history`; the programs' `history export` and `history import`; the providers' `export_session` and `import_session`). What they share:
+
+- **A tool call** is `tool_call` and `tool_call_update` with ACP version 2's `name` set to the harness's own tool name, which with the header's `origin.harness` is the key into the tool table; `kind`, `title` and `locations` as the harness's own driver tells them; `rawInput` the call's input and `rawOutput` its output exactly as the harness has them (a test holds every recorded call to this). `toolCallId` is the harness's call id.
+- **`_meta`** under `dev.boriken.history/native` is an object with `harness` (`claude` or `codex`) and what only that harness can use on a resume: Claude Code's message id, model, thinking signature; Codex's reasoning summary and encrypted content, the call's item type and argument text, a compaction's whole message. A codec reads it only when `harness` is its own and uses nothing from it but those values, so a history cannot put a line of its own into a transcript or a rollout through it.
+- **What is not part of a history** is not carried: Claude Code's system prompt, file-history snapshots, titles and subagent transcripts; Codex's base instructions, developer messages, environment context, tool list and turn settings. A harness adds its own on the next turn.
+- **An import writes the seed** (`Conversation::of`: the latest compaction summary into the target's slot for one, then what follows), ends what the history left open as cancelled, writes no permission as a grant and no snapshot, and names the session by the host's UUID in a place the host chose. Thinking and reasoning go across only to the harness that wrote them.
+- **Tools cross by the table**: Read, Write, Edit, Grep, Glob and WebFetch for Claude Code's rows, `shell` and `shell_command` and Bash for the shell, and `apply_patch` and Claude Code's Write and Edit as file changes (a whole file added, or one run of lines in one file replaced). A call the target has no tool for is a note of the call and its result, counted `tool_as_note`. The loss report also counts `thinking`, `attachment_by_digest`, `summary_missing` and `content_dropped` (content of a kind the target does not take).
+
+Moving the recorded Claude Code session of the tests to Codex reports `thinking` 1 and `tool_as_note` 3 (Read, Grep and the todo list); Codex's recorded script-tool session to Claude Code reports `thinking` 1 and `tool_as_note` 5 (every call of `exec`, Codex's script tool, has no equivalent).
+
 ## Size bounds
 
 Every bound is a setting with a default and no floor. A reader holds the file to them while it reads and refuses at the first line past one; it never holds more than one line. A writer holds what it writes to the same bounds and never cuts a line.
