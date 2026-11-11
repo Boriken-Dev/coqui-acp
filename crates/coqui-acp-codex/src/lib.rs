@@ -24,7 +24,7 @@ use core::fmt;
 use core::time::Duration;
 use std::io;
 
-pub use agent::{CodexAgent, DEFAULT};
+pub use agent::{CodexAgent, DEFAULT, Seeds};
 pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned};
 pub use launch::{
     ClientInfo, CodexLaunch, ThreadStart, toml_value, valid_config_key, valid_thread_id,

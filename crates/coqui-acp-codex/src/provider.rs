@@ -119,6 +119,8 @@ pub struct CodexProvider {
     accounts: Arc<Accounts>,
     /// For each home a key or token was saved in, a fingerprint of it.
     saved: std::sync::Mutex<alloc::collections::BTreeMap<String, u64>>,
+    /// The ids a host seeded with no history, and the thread Codex gave each once started.
+    seeds: crate::Seeds,
 }
 
 impl From<ProviderSettings> for CodexProvider {
@@ -136,6 +138,7 @@ impl CodexProvider {
             reports: Arc::new(Reports::new()),
             accounts: Arc::new(Accounts::new()),
             saved: std::sync::Mutex::new(alloc::collections::BTreeMap::new()),
+            seeds: crate::Seeds::default(),
         }
     }
 
@@ -374,8 +377,14 @@ impl AcpHarness for CodexProvider {
                 hold.finish();
             });
         }
+        let seeds = Arc::clone(&self.seeds);
         serving.open_shared(spawner, sink, move |spawn| {
-            Ok(shared(CodexAgent::new().defaults(launch).spawn(spawn)))
+            Ok(shared(
+                CodexAgent::new()
+                    .seeded_sessions(seeds)
+                    .defaults(launch)
+                    .spawn(spawn),
+            ))
         })
     }
 
@@ -409,7 +418,7 @@ impl AcpHarness for CodexProvider {
         }
         #[cfg(feature = "history")]
         {
-            crate::provider_history::import(&session, &spawner)
+            crate::provider_history::import(&session, &spawner, &self.seeds)
         }
         #[cfg(not(feature = "history"))]
         {
@@ -431,7 +440,7 @@ impl AcpHarness for CodexProvider {
         }
         #[cfg(feature = "history")]
         {
-            crate::provider_history::export(&export, &spawner)
+            crate::provider_history::export(&export, &spawner, &self.seeds)
         }
         #[cfg(not(feature = "history"))]
         {

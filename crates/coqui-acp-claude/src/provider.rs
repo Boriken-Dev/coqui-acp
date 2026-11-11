@@ -158,6 +158,8 @@ pub struct ClaudeProvider {
     reports: Arc<Reports>,
     /// What the provider knows of its accounts' files, and who hears of them.
     accounts: Arc<Accounts>,
+    /// The ids a host seeded with no history, which their first start makes sessions.
+    fresh: crate::FreshSessions,
 }
 
 impl From<ProviderSettings> for ClaudeProvider {
@@ -174,6 +176,7 @@ impl ClaudeProvider {
             settings,
             reports: Arc::new(Reports::new()),
             accounts: Arc::new(Accounts::new()),
+            fresh: crate::FreshSessions::default(),
         }
     }
 
@@ -400,9 +403,11 @@ impl AcpHarness for ClaudeProvider {
                 hold.finish();
             });
         }
+        let fresh = Arc::clone(&self.fresh);
         serving.open_shared(spawner, sink, move |spawn| {
             Ok(shared(
                 ClaudeAgent::new()
+                    .fresh_sessions(fresh)
                     .defaults(launch)
                     .spawn(spawn)
                     .client_plugins(plugins),
@@ -441,7 +446,7 @@ impl AcpHarness for ClaudeProvider {
         }
         #[cfg(feature = "history")]
         {
-            crate::provider_history::import(&session, &spawner)
+            crate::provider_history::import(&session, &spawner, &self.fresh)
         }
         #[cfg(not(feature = "history"))]
         {
@@ -463,7 +468,7 @@ impl AcpHarness for ClaudeProvider {
         }
         #[cfg(feature = "history")]
         {
-            crate::provider_history::export(&export, &spawner)
+            crate::provider_history::export(&export, &spawner, &self.fresh)
         }
         #[cfg(not(feature = "history"))]
         {

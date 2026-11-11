@@ -164,7 +164,9 @@ fn conversation_of(values: &[Value]) -> Vec<&Value> {
             .and_then(Value::as_str)
             .or_else(|| value.get("logicalParentUuid").and_then(Value::as_str));
         match parent {
-            None => break true,
+            // The root is the first message; a message that is a root further on is not chained to what came
+            // before it, so the file's order is all there is to follow.
+            None => break at == candidates[0] || values[at]["type"] == "system",
             Some(parent) => match index.get(parent) {
                 Some(&next) => at = next,
                 None => break false,

@@ -1323,7 +1323,22 @@ fn not_found() -> Error {
 /// [`Error::Refused`] when there is no such rollout, it is larger than `max_bytes`, or it is not a
 /// rollout.
 pub fn export_file(home: &Path, id: &str, max_bytes: u64) -> Result<Document, Error> {
-    let path = rollout(home, id)?;
+    export_file_named(home, id, id, max_bytes)
+}
+
+/// The history of thread `thread` from its rollout under `home`, named `id` (the host's UUID, which a provider
+/// maps to the thread Codex assigned).
+///
+/// # Errors
+///
+/// As [`export_file`].
+pub fn export_file_named(
+    home: &Path,
+    thread: &str,
+    id: &str,
+    max_bytes: u64,
+) -> Result<Document, Error> {
+    let path = rollout(home, thread)?;
     let file = std::fs::File::open(&path)
         .map_err(|_| refused("the thread's rollout could not be read"))?;
     let mut bytes = Vec::new();

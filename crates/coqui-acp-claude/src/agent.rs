@@ -40,7 +40,12 @@ pub struct ClaudeAgent {
     settings: ClaudeSettings,
     version: Arc<OnceLock<Option<String>>>,
     client_plugins: bool,
+    fresh: FreshSessions,
 }
+
+/// The ids a host seeded empty: a session of one is Claude Code's to start new under that id, when it has no
+/// transcript yet.
+pub type FreshSessions = Arc<std::sync::Mutex<alloc::collections::BTreeSet<String>>>;
 
 impl core::fmt::Debug for ClaudeAgent {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -67,6 +72,7 @@ impl ClaudeAgent {
             settings: ClaudeSettings::new(),
             version: Arc::new(OnceLock::new()),
             client_plugins: false,
+            fresh: FreshSessions::default(),
         }
     }
 
@@ -98,6 +104,14 @@ impl ClaudeAgent {
     #[must_use]
     pub fn settings(mut self, settings: ClaudeSettings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// The ids a host seeded with no history. Opening one of them that has no transcript starts a new Claude Code
+    /// session under that id (`--session-id`), where any other id is resumed (`--resume`).
+    #[must_use]
+    pub fn fresh_sessions(mut self, fresh: FreshSessions) -> Self {
+        self.fresh = fresh;
         self
     }
 
@@ -136,6 +150,7 @@ impl ClaudeAgent {
     fn launch_for(&self, request: &OpenRequest) -> Result<ClaudeLaunch, HarnessError> {
         let mut launch = self.defaults.clone();
         launch.cwd.clone_from(&request.cwd);
+        let config = replay::config_dir(&launch.env, launch.clear_env);
         launch.session = match &request.open {
             Open::New => SessionStart::New(uuid::Uuid::new_v4().to_string()),
             Open::Resume(id) | Open::Load(id) => {
@@ -144,7 +159,15 @@ impl ClaudeAgent {
                         "that is not a Claude Code session id".into(),
                     ));
                 }
-                SessionStart::Resume(id.clone())
+                let seeded = self.fresh.lock().is_ok_and(|fresh| fresh.contains(id))
+                    && config
+                        .as_ref()
+                        .is_none_or(|config| replay::transcript(config, &request.cwd, id).is_err());
+                if seeded {
+                    SessionStart::New(id.clone())
+                } else {
+                    SessionStart::Resume(id.clone())
+                }
             }
             _ => {
                 return Err(HarnessError::Refused(
@@ -251,7 +274,7 @@ impl Harness for ClaudeAgent {
         events: EventSink,
     ) -> Result<Box<dyn Conversation>, HarnessError> {
         let launch = self.launch_for(&request)?;
-        if let Open::Load(id) = &request.open {
+        if let (Open::Load(id), SessionStart::Resume(_)) = (&request.open, &launch.session) {
             let config = replay::config_dir(&launch.env, launch.clear_env).ok_or_else(|| {
                 HarnessError::Failed("Claude Code's configuration directory is not known".into())
             })?;

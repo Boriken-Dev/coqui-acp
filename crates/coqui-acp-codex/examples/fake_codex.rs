@@ -69,14 +69,110 @@ impl Fake {
         self.home.join("fake_threads").join(format!("{id}.json"))
     }
 
+    /// Where Codex keeps a thread's rollout, so that a history can be imported and exported through it.
+    fn rollout_file(&self, id: &str) -> PathBuf {
+        self.home
+            .join("sessions")
+            .join("2026")
+            .join("11")
+            .join("10")
+            .join(format!("rollout-2026-11-10T00-00-00-{id}.jsonl"))
+    }
+
     fn load(&self, id: &str) -> Option<Value> {
-        let text = std::fs::read_to_string(self.thread_file(id)).ok()?;
-        serde_json::from_str(&text).ok()
+        if let Ok(text) = std::fs::read_to_string(self.thread_file(id)) {
+            return serde_json::from_str(&text).ok();
+        }
+        self.from_rollout(id)
+    }
+
+    /// A thread made of a rollout nothing here wrote: the person's and the agent's messages, in turns.
+    fn from_rollout(&self, id: &str) -> Option<Value> {
+        let text = std::fs::read_to_string(self.rollout_file(id)).ok()?;
+        let mut cwd = Value::Null;
+        let mut turns = Vec::new();
+        let mut asked: Option<String> = None;
+        for line in text.lines() {
+            let Ok(line) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let payload = &line["payload"];
+            match line["type"].as_str() {
+                Some("session_meta") => cwd = payload["cwd"].clone(),
+                Some("response_item") if payload["type"] == "message" => {
+                    let said = payload["content"][0]["text"].as_str().unwrap_or_default();
+                    if payload["role"] == "user" && !said.starts_with('<') {
+                        asked = Some(said.to_string());
+                    } else if payload["role"] == "assistant" {
+                        let user = json!({"type": "userMessage", "id": uuid(), "clientId": null,
+                            "content": [{"type": "text", "text": asked.take().unwrap_or_default(), "text_elements": []}]});
+                        let item = json!({"type": "agentMessage", "id": uuid(), "text": said, "phase": null});
+                        turns.push(
+                            json!({"id": uuid(), "items": [user, item], "status": "completed"}),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(json!({"id": id, "sessionId": id, "cwd": cwd, "turns": turns}))
     }
 
     fn save(&self, id: &str, thread: &Value) {
         let _ = std::fs::create_dir_all(self.home.join("fake_threads"));
         let _ = std::fs::write(self.thread_file(id), thread.to_string());
+        self.save_rollout(id, thread);
+    }
+
+    /// The thread as Codex writes one to its rollout, in the older form every version reads.
+    fn save_rollout(&self, id: &str, thread: &Value) {
+        let at = "2026-11-10T00:00:00.000Z";
+        let mut out = String::new();
+        let mut push = |kind: &str, payload: Value| {
+            out.push_str(&json!({"timestamp": at, "type": kind, "payload": payload}).to_string());
+            out.push('\n');
+        };
+        push(
+            "session_meta",
+            json!({"id": id, "timestamp": at, "cwd": thread["cwd"], "originator": "fake_codex",
+                "cli_version": "0.166.0", "source": "vscode", "model_provider": "openai"}),
+        );
+        for turn in thread["turns"].as_array().into_iter().flatten() {
+            let turn_id = turn["id"].as_str().unwrap_or_default();
+            let user = turn["items"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            let agent = turn["items"][1]["text"].as_str().unwrap_or_default();
+            push(
+                "event_msg",
+                json!({"type": "task_started", "turn_id": turn_id, "started_at": 0}),
+            );
+            push(
+                "response_item",
+                json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": user}]}),
+            );
+            push(
+                "event_msg",
+                json!({"type": "user_message", "message": user, "images": [], "local_images": [], "text_elements": []}),
+            );
+            push(
+                "response_item",
+                json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": agent}]}),
+            );
+            push(
+                "event_msg",
+                json!({"type": "agent_message", "message": agent}),
+            );
+            push(
+                "event_msg",
+                json!({"type": "task_complete", "turn_id": turn_id, "last_agent_message": agent}),
+            );
+        }
+        let file = self.rollout_file(id);
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(file, out);
     }
 
     /// The five-hour window's used percent, as the last `quota` or `limit` left it.

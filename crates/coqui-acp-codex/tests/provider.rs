@@ -121,9 +121,7 @@ fn the_suite_inside() {
         .expect("the settings are taken");
     let outcome = Contract::new("codex")
         .program_agent(true)
-        // An empty history cannot be resumed, which the suite asks of an importer, so it checks the refusal;
-        // `tests/history.rs` holds the import and export of real histories.
-        .imports(false)
+        .imports(cfg!(feature = "history"))
         .holds(Vec::new())
         .run(&harness);
     drop(harness);

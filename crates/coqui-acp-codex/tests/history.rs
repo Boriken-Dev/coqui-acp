@@ -483,18 +483,34 @@ mod through_the_provider {
         let mut environment = Environment::new();
         environment.insert("CODEX_HOME", scratch.0.join("home").to_string_lossy());
         let provider = CodexProvider::new(ProviderSettings::default());
-        let nothing = provider
-            .import_session(
-                SessionImport::new(ID, work.to_string_lossy(), String::new())
+        // A host seeds a session at its own UUID with no history: it is taken, empty, and read back as a history with
+        // nothing in it. Starting it is the agent's business, which the contract suite holds to the kind.
+        let empty_id = "22222222-3333-4444-8555-666666666666";
+        let empty = |id: &str| {
+            provider.import_session(
+                SessionImport::new(id, work.to_string_lossy(), String::new())
                     .environment(environment.clone()),
                 spawner(),
                 keeper(),
             )
-            .expect_err("nothing to seed");
-        assert_eq!(
-            nothing.status,
-            coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED
+        };
+        assert!(
+            empty(empty_id)
+                .expect("an empty seed")
+                .seeded_from
+                .is_none()
         );
+        assert!(empty(empty_id).is_err(), "the id names a session now");
+        let header_only = provider
+            .export_session(
+                SessionExport::new(empty_id, work.to_string_lossy())
+                    .environment(environment.clone()),
+                spawner(),
+                keeper(),
+            )
+            .expect("an empty history");
+        assert_eq!(header_only.text.lines().count(), 1);
+        assert!(header_only.next.is_none());
         let doc = export(&fixture("turn.rollout.jsonl"), ID).unwrap();
         let text = doc.to_string().unwrap();
         let work_text = work.to_string_lossy().into_owned();

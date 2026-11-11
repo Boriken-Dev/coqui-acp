@@ -12,13 +12,13 @@ use coqui_acp_api::{
     AccountGrant, Environment, ExportPage, HistoryLoss, ImportReport, LINE_TOO_LARGE,
     ProcessSpawner, SeedPoint, SessionExport, SessionImport,
 };
-use coqui_acp_history::Document;
 use coqui_acp_history::conversation::is_uuid;
 use coqui_acp_history::paging::{PageError, page};
+use coqui_acp_history::{Document, Header, Origin};
 
 use crate::accounts;
 use crate::history::{
-    DEFAULT_MAX_BYTES, ImportOptions, codex_home, export_file, import_file, rollout,
+    DEFAULT_MAX_BYTES, ImportOptions, codex_home, export_file_named, import_file, rollout,
 };
 
 fn error(status: Status, why: &str) -> ProviderError {
@@ -76,6 +76,7 @@ fn place(
 pub(crate) fn import(
     session: &SessionImport,
     spawner: &Object<dyn ProcessSpawner>,
+    seeds: &crate::Seeds,
 ) -> Result<ImportReport, ProviderError> {
     let (config, cwd) = place(
         spawner,
@@ -84,18 +85,32 @@ pub(crate) fn import(
         session.environment.expose(),
         session.account.as_ref(),
     )?;
-    if session.history.trim().is_empty() {
-        // Codex resumes a session only from messages it holds: there is nothing to seed.
+    if rollout(&config, &session.session_id).is_ok()
+        || seeds
+            .lock()
+            .is_ok_and(|seeds| seeds.contains_key(&session.session_id))
+    {
         return Err(error(
-            Status::GUATIAO_ERR_UNSUPPORTED,
-            "Codex cannot resume a session with no messages: import a history with a prompt in it",
+            Status::GUATIAO_ERR_BAD_VALUE,
+            "the id names a session already",
         ));
     }
+    if session.history.trim().is_empty() {
+        // Nothing is written: Codex gives a thread an id of its own at the first start that opens this one, and the
+        // provider keeps which.
+        if let Ok(mut seeds) = seeds.lock() {
+            seeds.insert(session.session_id.clone(), None);
+        }
+        return Ok(ImportReport::new());
+    }
     let doc = Document::from_slice(session.history.as_bytes()).map_err(|why| {
-        error(
-            Status::GUATIAO_ERR_BAD_VALUE,
-            &format!("the history cannot be read: {why}"),
-        )
+        // A version this crate does not read is the harness not importing it, not a malformed history.
+        let status = if matches!(why, coqui_acp_history::HistoryError::UnknownVersion { .. }) {
+            Status::GUATIAO_ERR_UNSUPPORTED
+        } else {
+            Status::GUATIAO_ERR_BAD_VALUE
+        };
+        error(status, &format!("the history cannot be read: {why}"))
     })?;
     let imported = import_file(
         &config,
@@ -127,6 +142,7 @@ pub(crate) fn import(
 pub(crate) fn export(
     request: &SessionExport,
     spawner: &Object<dyn ProcessSpawner>,
+    seeds: &crate::Seeds,
 ) -> Result<ExportPage, ProviderError> {
     let (config, _) = place(
         spawner,
@@ -135,17 +151,32 @@ pub(crate) fn export(
         request.environment.expose(),
         request.account.as_ref(),
     )?;
-    if rollout(&config, &request.session_id).is_err() {
-        return Err(error(
-            Status::GUATIAO_ERR_NOT_FOUND,
-            "no session has this id",
-        ));
-    }
-    let text = export_file(&config, &request.session_id, DEFAULT_MAX_BYTES)
-        .and_then(|doc| {
-            doc.to_string()
-                .map_err(|why| crate::Error::Refused(why.to_string()))
-        })
+    let id = request.session_id.as_str();
+    let seeded = seeds.lock().ok().and_then(|seeds| seeds.get(id).cloned());
+    // A seeded session lives in the thread Codex gave it, when it has started one that kept something.
+    let thread = match &seeded {
+        Some(Some(thread)) if rollout(&config, thread).is_ok() => Some(thread.as_str()),
+        Some(_) => None,
+        None if rollout(&config, id).is_ok() => Some(id),
+        None => {
+            return Err(error(
+                Status::GUATIAO_ERR_NOT_FOUND,
+                "no session has this id",
+            ));
+        }
+    };
+    let doc = match thread {
+        Some(thread) => export_file_named(&config, thread, id, DEFAULT_MAX_BYTES)
+            .map_err(|why| error(Status::GUATIAO_ERR_BAD_VALUE, &why.to_string()))?,
+        None => {
+            let mut doc = Document::new(Header::new(id, Origin::new(crate::history::HARNESS)));
+            doc.seal()
+                .map_err(|why| error(Status::GUATIAO_ERR_BAD_VALUE, &why.to_string()))?;
+            doc
+        }
+    };
+    let text = doc
+        .to_string()
         .map_err(|why| error(Status::GUATIAO_ERR_BAD_VALUE, &why.to_string()))?;
     match page(&text, request.after.as_deref(), request.max_bytes) {
         Ok(page) => Ok(ExportPage::new(page.text, page.next)),
