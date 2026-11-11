@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-One Cargo feature, off by default: `secret` (the `secret` module below), which adds `hpke`, `p256`, `x25519-dalek`, `hkdf`, `hmac`, `sha2`, `subtle`, `zeroize`, `base64` and `data-encoding`. MSRV Rust 1.89. A default build depends on `agent-client-protocol`, `futures` and `serde_json`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
+One Cargo feature, off by default: `secret` (the `secret` module below), which adds `hpke`, `p256`, `x25519-dalek`, `hmac`, `sha2`, `zeroize`, `base64` and `data-encoding`. MSRV Rust 1.89. A default build depends on `agent-client-protocol`, `futures` and `serde_json`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: the crate root holds everything but `lines`. `coqui_acp::sdk` is the protocol's own crate, for its transports.
 
@@ -166,21 +166,26 @@ A transport over blocking I/O, such as a process's pipes, one JSON-RPC message p
 
 ## Secret prompts (`coqui_acp::secret`, feature `secret`)
 
-An agent asks the person for a secret, or shows them one, without the model, a transcript or a log holding the value: the host sends the frontend of the session's owner `_coqui/secret/request` or `_coqui/secret/show`, and each secret value travels sealed to a key only its receiver holds. The wire, the capability and the binding rules are `docs/secrets.md`; `vectors/secret.json` holds this module and the Dart client (`AcpSecret*`) to the same bytes. This module does the messages and the cryptography; the handle store, the tools and the person's approvals are the host's.
+An agent asks the person for a secret, or shows them one, without the model, a transcript or a log holding the value: the host sends the frontend of the session's owner `_coqui_acp/secret_request`, or `_coqui_acp/secret_show_open` and then `_coqui_acp/secret_show_deliver`, and each secret value travels sealed to a key only its receiver holds, from a sender the receiver expects. The wire, the capability and the binding rules are `docs/secrets.md`; `vectors/secret.json` holds this module and the Dart client (`package:coqui_acp/secret.dart`) to the same bytes. This module does the messages and the cryptography; the handle store, the tools and the person's approvals are the host's.
 
 ```rust
 pub const CAPABILITY: &str = "dev.boriken.coqui.acp/secrets";   // clientCapabilities._meta key
-pub const REQUEST_METHOD: &str = "_coqui/secret/request"; pub const SHOW_METHOD: &str = "_coqui/secret/show"; pub const VERSION: u64 = 1;
+pub const REQUEST_METHOD: &str = "_coqui_acp/secret_request";
+pub const SHOW_OPEN_METHOD: &str = "_coqui_acp/secret_show_open"; pub const SHOW_DELIVER_METHOD: &str = "_coqui_acp/secret_show_deliver";
+pub const VERSION: u64 = 1; pub const DEFAULT_LIFETIME: Duration;   // 240 s
 pub const BINDING_ECDSA: &str = "ecdsa-p256-sha256"; pub const BINDING_DH: &str = "x25519-hmac-sha256";
 
 pub struct Capability { pub request: bool, pub show: bool, pub bindings: Vec<String> }       // #[non_exhaustive]
 impl Capability { pub fn all() -> Self; pub fn to_value(&self) -> Value; pub fn from_meta(meta: &Map<String, Value>) -> Option<Self> }
 
+pub struct Context { pub session_id: String, pub request_id: String, pub message: String, pub schema: String, pub form: Option<String> }
+impl Context { pub fn digest(&self, method: Method) -> [u8; 32] }   // schema and form are the JSON text as sent; these bytes are hashed
+
 pub struct Limits { pub fields: usize, pub options: usize, pub schema_bytes: usize, pub name_bytes: usize, pub value_bytes: usize }   // 64, 256, 64 KiB, 128, 64 KiB; setters
 pub struct Form { pub title: Option<String>, pub description: Option<String>, pub fields: Vec<FormField> }
 pub struct FormField { pub field: Field, pub secret: bool, pub encoding: Option<String>, pub media_type: Option<String> }
 impl Form {
-    pub fn parse(schema: &Value, limits: &Limits) -> Result<Form, Error>;
+    pub fn parse_text(schema: &str, limits: &Limits) -> Result<Form, Error>;  pub fn parse(schema: &Value, limits: &Limits) -> Result<Form, Error>;
     pub fn field(&self, name: &str) -> Option<&FormField>;
     pub fn check_plain(&self, values: &Map<String, Value>) -> Result<(), Error>;
     pub fn check_sealed<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Result<(), Error>;
@@ -189,42 +194,51 @@ impl Form {
 
 pub enum Method { Request, Show }                                   // bound into every sealed field and binding
 pub struct IdentityId;                                              // sha256:<64 hex> of an SPKI; Display, FromStr, Ord
-pub struct Prover;                                                  // the receiver's identity key
+pub struct Prover;                                                  // an identity that signs or agrees on keys through functions the caller gives
 impl Prover {
-    pub fn ecdsa_p256(scalar: &[u8]) -> Result<Prover, Error>;  pub fn ecdsa_p256_pkcs8(der: &[u8]) -> Result<Prover, Error>;
-    pub fn x25519(secret: &[u8], collector_spki: &[u8]) -> Result<Prover, Error>;  pub fn x25519_pkcs8(der: &[u8], collector_spki: &[u8]) -> Result<Prover, Error>;
+    pub fn signing(spki: impl Into<Vec<u8>>, sign: impl Fn(&[u8]) -> Result<[u8; 64], Error> + Send + Sync + 'static) -> Result<Prover, Error>;   // P1363 ECDSA P-256/SHA-256
+    pub fn agreeing(spki: impl Into<Vec<u8>>, agree: impl Fn(&[u8; 32]) -> Result<[u8; 32], Error> + Send + Sync + 'static, collector_spki: &[u8]) -> Result<Prover, Error>;
     pub fn spki(&self) -> &[u8];  pub fn id(&self) -> IdentityId;
 }
-pub struct Verifier;                                                // the collector's side: identities it knows
+pub mod unprotected {   // raw keys in this process's memory: tests and tools only
+    pub fn ecdsa_p256(scalar: &[u8]) -> Result<Prover, Error>;  pub fn ecdsa_p256_pkcs8(der: &[u8]) -> Result<Prover, Error>;
+    pub fn x25519(secret: &[u8], collector_spki: &[u8]) -> Result<Prover, Error>;  pub fn x25519_pkcs8(der: &[u8], collector_spki: &[u8]) -> Result<Prover, Error>;
+    pub fn x25519_agreement(secret: &[u8]) -> Result<(Vec<u8> /* spki */, impl Fn(&[u8; 32]) -> Result<[u8; 32], Error>), Error>;
+}
+pub struct Verifier;                                                // a checker: its own id, the identities it knows
 impl Verifier {
-    pub fn builder() -> VerifierBuilder;   // .trust(id) .trust_spki(&[u8]) .x25519_identity(&[u8]) .max_lifetime(Duration) (5 min) .build()
-    pub fn collector(&self, method: Method, request_id: &str, form: &Form, recipient: &Recipient, now: u64) -> Result<Collector, Error>;
+    pub fn builder(own: IdentityId) -> VerifierBuilder;   // .trust(id) .trust_spki(&[u8]) .agreement(spki, fn)? .max_lifetime(Duration) (5 min) .skew(Duration) (30 s) .limits(Limits) .build()
+    pub fn collector(&self, expected: &IdentityId, method: Method, context: &Context, recipient: &Recipient, now: u64) -> Result<Collector, Error>;
+    pub const fn id(&self) -> IdentityId;
 }
 pub struct Receiver;
 impl Receiver {
-    pub fn new(method: Method, request_id: impl Into<String>, form: &Form, prover: &Prover, now: u64, lifetime: Duration) -> Result<Receiver, Error>;
+    pub fn new(method: Method, context: &Context, limits: &Limits, prover: &Prover, audience: &IdentityId, now: u64, lifetime: Duration) -> Result<Receiver, Error>;
     pub const fn recipient(&self) -> &Recipient;  pub fn request_id(&self) -> &str;
-    pub fn open(&self, name: &str, sealed: &Sealed) -> Result<SecretValue, Error>;
-    pub fn open_values(&self, plain: &Map<String, Value>, sealed: &BTreeMap<String, Sealed>) -> Result<Opened, Error>;
+    pub fn open_values(self, verifier: &Verifier, sender: &IdentityId, plain: &Map<String, Value>, sealed: &BTreeMap<String, Sealed>, auth: &Binding, now: u64) -> Result<Opened, Error>;   // once
 }
 pub struct Collector;
-impl Collector { pub const fn holder(&self) -> IdentityId; pub fn seal(&self, name: &str, value: &str) -> Result<Sealed, Error>; pub fn is_secret(&self, name: &str) -> bool }
+impl Collector {
+    pub const fn holder(&self) -> IdentityId;  pub const fn form(&self) -> &Form;  pub fn is_secret(&self, name: &str) -> bool;
+    pub fn seal(&self, name: &str, value: &str) -> Result<Sealed, Error>;
+    pub fn authenticate(&self, prover: &Prover, sealed: &BTreeMap<String, Sealed>, now: u64, lifetime: Duration) -> Result<Binding, Error>;
+}
 pub struct Recipient { pub key: [u8; 32], pub binding: Binding }    // to_value / from_value
-pub struct Binding { pub method: String, pub key: Vec<u8>, pub expires: u64, pub audience: Option<IdentityId>, pub proof: Vec<u8> }   // to_value / from_value
+pub struct Binding { pub method: String, pub key: Vec<u8>, pub expires: u64, pub audience: IdentityId, pub proof: Vec<u8> }   // to_value / from_value
 pub struct Sealed { pub enc: [u8; 32], pub ct: Vec<u8> }           // to_value / from_value
 pub struct Opened { pub plain: Map<String, Value>, pub secrets: BTreeMap<String, SecretValue> }
 pub struct SecretValue;  // expose() -> &[u8], expose_str() -> &str; zeroed on drop; Debug is "SecretValue(..)"
-// Messages, each with to_value / from_value: RequestParams, RequestReply (Accept { plain, sealed } | Decline | Cancel), ShowOpen,
-// ShowOpened (Ready(Recipient) | Decline | Cancel), ShowDeliver, ShowDone (Shown | Cancel)
+// Messages, each with to_value / from_value: RequestParams { context, recipient }, RequestReply (Accept { plain, sealed, auth } | Decline | Cancel),
+// ShowOpen { context, values }, ShowOpened (Ready(Recipient) | Decline | Cancel), ShowDeliver { session_id, request_id, sealed, auth }, ShowDone (Shown | Cancel)
 pub enum Error { Schema, Malformed, Unsupported, Key, UnknownIdentity, BadProof, Expired, WrongAudience, Field, Seal, Open, TooLarge }   // #[non_exhaustive], static reasons, never a value
 ```
 
-- **Roles.** The receiver of the secret values makes a key pair for the request (`Receiver::new`) and sends `recipient()`: the host for a `request`, the frontend (in answer to the `open` step) for a `show`. The collector (`Verifier::collector`) refuses the key unless its binding verifies against an identity the verifier was told to trust; it then seals each secret field (`Collector::seal`). Nothing is sealed to an unverified key, and `now` is an argument (Unix seconds): the module reads no clock.
-- **Sealing.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM, one message per field, no aad; the `info` is the extension's label, the method, the request id and the field name, each length-prefixed, so a ciphertext opens only for the field and request it was sealed for. A secret value is its text (UTF-8, or decimal for a number) and is never parsed as JSON.
-- **Forms.** A secret field is `writeOnly` or `x-sensitive`, must be text or a number, and may carry no `default`, `const`, `enum`, `oneOf` or `examples`. `check_plain` refuses a name the form lacks, a secret field holding a plain value, a missing required one, and a value that does not fit (as `Elicitor`'s answers must). `open_values` checks both halves before it opens anything.
-- **Bindings.** `ecdsa-p256-sha256` for an identity that signs (the `webcrypto` peer method); `x25519-hmac-sha256` for one that cannot (the `noise` method), which needs `Verifier::x25519_identity` and a `Prover::x25519` made for that collector. A binding ends at the receiver's `lifetime`; the verifier refuses one that ended or lasts past its `max_lifetime`.
-- **Secrets in memory.** Plaintexts, the per-request private key, the identity keys and the derived MAC key are zeroed on drop (`zeroize`); no `Debug` prints a value, key or proof. Copies a move leaves on the stack and `serde_json` intermediate strings of plain values are not zeroed.
-- **Not here.** The handle store, the use and show tools, approvals, output scrubbing, routing to the owner's frontend, and certificate chains for `tls` identities.
+- **Roles.** The receiver of the secret values makes a key pair for the request (`Receiver::new`) and sends `recipient()`: the host for a `request`, the frontend (in answer to `secret_show_open`) for a `show`. The collector (`Verifier::collector`) is told which identity the request must come from and refuses the key unless its binding verifies for that identity, for this verifier's own id, and for the digest of the `Context` it received; it then seals each secret field and authenticates the set (`Collector::authenticate`). The receiver opens the answer once (`open_values` consumes it) and only after it verified the sender. `now` is an argument (Unix seconds): the module reads no clock. The owner of receivers remembers request ids for the verifier's `max_lifetime` plus `skew`.
+- **Sealing.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM, one message per field, no aad; the `info` is the extension's label, the method, the request id, the context digest and the field name, each length-prefixed, so a ciphertext opens only for the field and request it was sealed for. A secret value is its text (UTF-8, or JSON number grammar for a number) and is never parsed as JSON.
+- **Forms.** A secret field is `writeOnly` or `x-sensitive` (a non-boolean is refused), must be text or a number, and may carry none of `default`, `const`, `enum`, `oneOf`, `examples`, `anyOf`, `allOf`, `pattern`, `if`, `then`, `else`, `not`, `$ref`, `dependentSchemas`; `format: "password"` needs the mark; whole-number bounds stay within 2^53 - 1. A frontend masks from `FormField::secret` alone. `check_plain` refuses a name the form lacks, a secret field holding a plain value, a missing required one, and a value that does not fit. `open_values` checks both halves before it opens anything.
+- **Bindings.** `ecdsa-p256-sha256` for an identity that signs (the `webcrypto` peer method; `s` low, a high `s` is refused and a signer's is normalized); `x25519-hmac-sha256` for one that cannot (the `noise` method), which needs `VerifierBuilder::agreement` and a `Prover::agreeing` made for that one collector. Every binding names its audience; a verifier refuses one made for another id. Proof bytes are not identifiers. The Diffie-Hellman proof is not transferable and whoever holds the checker's static key can forge it to the checker. A binding ends at the maker's `lifetime` (`DEFAULT_LIFETIME` 240 s); a verifier takes it that long plus `skew` (30 s) after it ended and refuses one beyond `max_lifetime` (5 min) plus `skew` from now.
+- **Secrets in memory.** Plaintexts, the per-request private key and the MAC key and HMAC state are zeroed on drop (`zeroize`); no `Debug` prints a value, key or proof. The identity key is the caller's: this module only calls the signer or key agreement it was given. Copies a move leaves on the stack and `serde_json` strings of plain values are not zeroed.
+- **Not here.** The handle store, the use and show tools, approvals, output scrubbing, routing to the owner's frontend, the frontend's pending-open table, request-id memory, certificate chains for `tls` identities, and the integrity of plain values in an answer (they are not secret; the sealed ones are covered).
 
 ## Errors
 

@@ -1,53 +1,52 @@
-//! Binding a per-request key to the identity that holds it, so a collector seals only to a key a peer it already knows stands behind.
+//! Binding a per-request key, and the values sealed to it, to the identity that holds them, so a collector seals only to a key a peer
+//! it already knows stands behind, and a receiver opens only what that peer sent.
 //!
-//! A binding proves, for one request, that the holder of an identity made the key. Two proofs cover the peer identity methods:
-//! an ECDSA signature (P-256, SHA-256, IEEE P1363) by an identity that signs, and a Diffie-Hellman proof (HMAC under a key derived
-//! from the two X25519 static keys) by one that cannot, such as a Noise static key.
+//! A binding proves, for one request, that the holder of an identity made a statement. Two proofs cover the peer identity methods:
+//! an ECDSA signature (P-256, SHA-256, IEEE P1363, low s) by an identity that signs, and a Diffie-Hellman proof (HMAC under a key
+//! derived from the two X25519 static keys) by one that cannot, such as a Noise static key. The identity's private key is never
+//! handed to this crate: a [`Prover`] calls a signer or a key agreement the caller supplies, which is how a platform key store or a
+//! WebCrypto key is used.
 
 use super::error::Error;
 use super::{b64u, b64u_decode};
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
 use core::time::Duration;
-use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
-use p256::ecdsa::signature::{Signer, Verifier as _};
-use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
-use p256::pkcs8::DecodePrivateKey;
+use p256::ecdsa::signature::Verifier as _;
+use p256::ecdsa::{Signature, VerifyingKey};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 use zeroize::Zeroizing;
 
 /// The binding method for an identity that signs: ECDSA over P-256 and SHA-256, the signature in IEEE P1363 form (`r` then `s`, 64
-/// bytes), as the `webcrypto` peer method signs. The key is the identity's SPKI.
+/// bytes, `s` low), as the `webcrypto` peer method signs. The key is the identity's SPKI.
 pub const BINDING_ECDSA: &str = "ecdsa-p256-sha256";
 /// The binding method for an X25519 identity: HMAC-SHA-256 under a key derived from the Diffie-Hellman of the holder's static key
 /// and the collector's, so only those two can make it. The key is the identity's SPKI.
 pub const BINDING_DH: &str = "x25519-hmac-sha256";
 
-const STATEMENT_LABEL: &[u8] = b"dev.boriken.coqui.acp/secret/v1 binding";
+const KEY_LABEL: &[u8] = b"dev.boriken.coqui.acp/secret/v1 binding";
+const VALUES_LABEL: &[u8] = b"dev.boriken.coqui.acp/secret/v1 values";
 const DH_LABEL: &[u8] = b"dev.boriken.coqui.acp/secret/v1 dh";
 
 /// `SubjectPublicKeyInfo` of a P-256 key before its 65-byte uncompressed point.
-const P256_SPKI_PREFIX: [u8; 26] = [
+pub(crate) const P256_SPKI_PREFIX: [u8; 26] = [
     0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
     0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
 ];
 /// `SubjectPublicKeyInfo` of an X25519 key before its 32 bytes (RFC 8410).
-const X25519_SPKI_PREFIX: [u8; 12] = [
+pub(crate) const X25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21, 0x00,
-];
-/// The PKCS#8 `PrivateKeyInfo` of an X25519 key before its 32 bytes (RFC 8410).
-const X25519_PKCS8_PREFIX: [u8; 16] = [
-    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20,
 ];
 
 /// An identity as the peer methods name it: the SHA-256 of its public key's encoding (its `SubjectPublicKeyInfo`), written
-/// `sha256:` and 64 lower-case hexadecimal digits.
+/// `sha256:` and 64 lower-case hexadecimal digits. A proof's bytes are not an identifier of anything: an ECDSA signature may be
+/// re-encoded by someone who has seen it, so nothing may key a table or a replay set by it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IdentityId([u8; 32]);
 
@@ -82,15 +81,12 @@ impl FromStr for IdentityId {
 
     /// Reads `sha256:` and 64 hexadecimal digits, either case.
     fn from_str(text: &str) -> Result<Self, Error> {
-        let hex = text.strip_prefix("sha256:").ok_or(Error::Malformed(
-            "an identity is sha256: and 64 hexadecimal digits",
-        ))?;
+        const WHY: &str = "an identity is sha256: and 64 hexadecimal digits";
+        let hex = text.strip_prefix("sha256:").ok_or(Error::Malformed(WHY))?;
         let bytes = data_encoding::HEXLOWER_PERMISSIVE
             .decode(hex.as_bytes())
-            .map_err(|_| Error::Malformed("an identity is sha256: and 64 hexadecimal digits"))?;
-        Ok(Self(bytes.try_into().map_err(|_| {
-            Error::Malformed("an identity is sha256: and 64 hexadecimal digits")
-        })?))
+            .map_err(|_| Error::Malformed(WHY))?;
+        Ok(Self(bytes.try_into().map_err(|_| Error::Malformed(WHY))?))
     }
 }
 
@@ -114,7 +110,16 @@ impl Method {
     }
 }
 
-/// A key binding as it travels.
+/// What a binding is a statement about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// The receiver's per-request public key.
+    Key,
+    /// The sealed values a collector sends back.
+    Values,
+}
+
+/// A binding as it travels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Binding {
@@ -124,26 +129,24 @@ pub struct Binding {
     pub key: Vec<u8>,
     /// When the binding ends, in Unix seconds.
     pub expires: u64,
-    /// The collector it was made for, when the maker knew one: required by [`BINDING_DH`].
-    pub audience: Option<IdentityId>,
+    /// The identity the binding was made for. A verifier refuses a binding made for anyone but itself.
+    pub audience: IdentityId,
     /// The signature or the tag.
     pub proof: Vec<u8>,
 }
 
 impl Binding {
-    /// The binding as JSON: `{"method", "key", "expires", "audience"?, "proof"}`, bytes in unpadded base64url.
+    /// The binding as JSON: `{"method", "key", "expires", "audience", "proof"}`, bytes in unpadded base64url.
     #[must_use]
     pub fn to_value(&self) -> Value {
         let mut map = Map::new();
         map.insert("method".into(), Value::String(self.method.clone()));
         map.insert("key".into(), Value::String(b64u(&self.key)));
         map.insert("expires".into(), Value::from(self.expires));
-        if let Some(audience) = &self.audience {
-            map.insert(
-                "audience".into(),
-                Value::String(alloc::format!("{audience}")),
-            );
-        }
+        map.insert(
+            "audience".into(),
+            Value::String(alloc::format!("{}", self.audience)),
+        );
         map.insert("proof".into(), Value::String(b64u(&self.proof)));
         Value::Object(map)
     }
@@ -156,27 +159,21 @@ impl Binding {
         let map = value
             .as_object()
             .ok_or(Error::Malformed("a binding is not an object"))?;
-        let text = |key: &str| map.get(key).and_then(Value::as_str);
+        let text = |key: &str, why| {
+            map.get(key)
+                .and_then(Value::as_str)
+                .ok_or(Error::Malformed(why))
+        };
         Ok(Self {
-            method: text("method")
-                .ok_or(Error::Malformed("a binding has no method"))?
-                .into(),
-            key: b64u_decode(text("key").ok_or(Error::Malformed("a binding has no key"))?)?,
+            method: text("method", "a binding has no method")?.into(),
+            key: b64u_decode(text("key", "a binding has no key")?)?,
             expires: map
                 .get("expires")
                 .and_then(Value::as_u64)
                 .ok_or(Error::Malformed("a binding has no end"))?,
-            audience: text_audience(map)?,
-            proof: b64u_decode(text("proof").ok_or(Error::Malformed("a binding has no proof"))?)?,
+            audience: text("audience", "a binding has no audience")?.parse()?,
+            proof: b64u_decode(text("proof", "a binding has no proof")?)?,
         })
-    }
-}
-
-fn text_audience(map: &Map<String, Value>) -> Result<Option<IdentityId>, Error> {
-    match map.get("audience") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => text.parse().map(Some),
-        Some(_) => Err(Error::Malformed("a binding's audience is not text")),
     }
 }
 
@@ -185,34 +182,37 @@ fn push(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// The bytes a binding proves: the label, the method, the request, the key, the end and the collector, each with a 4-byte length.
-pub(crate) fn statement(
-    method: Method,
-    request_id: &str,
-    key: &[u8; 32],
-    expires: u64,
-    audience: Option<&IdentityId>,
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    push(&mut out, STATEMENT_LABEL);
-    push(&mut out, method.as_str().as_bytes());
-    push(&mut out, request_id.as_bytes());
-    push(&mut out, key);
-    push(&mut out, &expires.to_be_bytes());
-    push(&mut out, audience.map_or(&[][..], |id| &id.0[..]));
-    out
+/// The bytes a binding proves: the label of its kind, the method, the request, the digest of what the person is asked, the receiver's
+/// key, the payload (the sealed values' digest for [`Kind::Values`]), the end and the audience, each with a 4-byte length.
+pub(crate) struct Statement<'a> {
+    pub(crate) kind: Kind,
+    pub(crate) method: Method,
+    pub(crate) request_id: &'a str,
+    pub(crate) digest: &'a [u8; 32],
+    pub(crate) key: &'a [u8; 32],
+    pub(crate) payload: &'a [u8],
 }
 
-fn p256_spki(key: &VerifyingKey) -> Vec<u8> {
-    let mut spki = P256_SPKI_PREFIX.to_vec();
-    spki.extend_from_slice(key.to_sec1_point(false).as_bytes());
-    spki
-}
-
-fn x25519_spki(public: &[u8; 32]) -> Vec<u8> {
-    let mut spki = X25519_SPKI_PREFIX.to_vec();
-    spki.extend_from_slice(public);
-    spki
+impl Statement<'_> {
+    pub(crate) fn bytes(&self, expires: u64, audience: &IdentityId) -> Vec<u8> {
+        let mut out = Vec::new();
+        push(
+            &mut out,
+            if self.kind == Kind::Key {
+                KEY_LABEL
+            } else {
+                VALUES_LABEL
+            },
+        );
+        push(&mut out, self.method.as_str().as_bytes());
+        push(&mut out, self.request_id.as_bytes());
+        push(&mut out, self.digest);
+        push(&mut out, self.key);
+        push(&mut out, self.payload);
+        push(&mut out, &expires.to_be_bytes());
+        push(&mut out, &audience.0);
+        out
+    }
 }
 
 fn x25519_of_spki(spki: &[u8]) -> Result<[u8; 32], Error> {
@@ -221,46 +221,55 @@ fn x25519_of_spki(spki: &[u8]) -> Result<[u8; 32], Error> {
         .ok_or(Error::Key("not an X25519 SubjectPublicKeyInfo"))
 }
 
-/// The MAC key two X25519 static keys share: HKDF-SHA-256 of their Diffie-Hellman, bound to both public keys, holder first.
-fn dh_key(
-    secret: &StaticSecret,
-    other: &[u8; 32],
-    holder: &[u8; 32],
-    collector: &[u8; 32],
-) -> Result<Zeroizing<[u8; 32]>, Error> {
-    let shared = secret.diffie_hellman(&X25519Public::from(*other));
-    if !shared.was_contributory() {
-        return Err(Error::Key("a Diffie-Hellman key of low order"));
-    }
-    let mut info = DH_LABEL.to_vec();
-    info.extend_from_slice(holder);
-    info.extend_from_slice(collector);
-    let mut key = Zeroizing::new([0u8; 32]);
-    Hkdf::<Sha256>::new(None, shared.as_bytes())
-        .expand(&info, &mut *key)
-        .map_err(|_| Error::Seal)?;
-    Ok(key)
-}
-
-fn tag(key: &[u8; 32], statement: &[u8]) -> Result<Hmac<Sha256>, Error> {
+fn mac(key: &[u8], parts: &[&[u8]]) -> Result<Hmac<Sha256>, Error> {
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|_| Error::Seal)?;
-    mac.update(statement);
+    for part in parts {
+        mac.update(part);
+    }
     Ok(mac)
 }
 
-/// The holder's side of a binding: the identity's private key, and for an X25519 identity the collector it will talk to.
+fn mac_over(key: &[u8], parts: &[&[u8]]) -> Result<Zeroizing<[u8; 32]>, Error> {
+    let mac = mac(key, parts)?;
+    let mut out = Zeroizing::new([0u8; 32]);
+    out.copy_from_slice(&mac.finalize().into_bytes());
+    Ok(out)
+}
+
+/// The MAC key two X25519 static keys share: HKDF-SHA-256 (RFC 5869, no salt, one output block) of their Diffie-Hellman, bound to
+/// both public keys, holder first.
+fn dh_key(
+    shared: &[u8; 32],
+    holder: &[u8; 32],
+    collector: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, Error> {
+    if shared.iter().fold(0u8, |all, byte| all | byte) == 0 {
+        return Err(Error::Key("a Diffie-Hellman key of low order"));
+    }
+    let prk = mac_over(&[0u8; 32], &[shared])?;
+    mac_over(&*prk, &[DH_LABEL, holder, collector, &[1]])
+}
+
+/// A signer: the 64-byte IEEE P1363 ECDSA P-256 signature of SHA-256 of the message, by the identity's key.
+type Signer = Box<dyn Fn(&[u8]) -> Result<[u8; 64], Error> + Send + Sync>;
+/// A key agreement: the X25519 Diffie-Hellman of the identity's static key and a peer's public key.
+type Agreement = Box<dyn Fn(&[u8; 32]) -> Result<[u8; 32], Error> + Send + Sync>;
+
+/// The holder's side of a binding: an identity that signs or agrees on keys through functions the caller supplies, so the private key
+/// can stay in a platform key store, a browser's WebCrypto or a device. Keys held in this process's memory are made by the
+/// [`unprotected`](super::unprotected) helpers, which are for tests and tools.
 pub struct Prover {
     kind: ProverKind,
 }
 
 enum ProverKind {
-    Ecdsa {
-        key: SigningKey,
+    Signing {
         spki: Vec<u8>,
+        sign: Signer,
     },
-    Dh {
-        secret: StaticSecret,
+    Agreeing {
         spki: Vec<u8>,
+        agree: Agreement,
         collector: [u8; 32],
         audience: IdentityId,
     },
@@ -273,72 +282,52 @@ impl fmt::Debug for Prover {
 }
 
 impl Prover {
-    /// An identity that signs, from its P-256 private scalar (32 bytes).
+    /// An identity that signs. `spki` is its P-256 `SubjectPublicKeyInfo`; `sign` returns the 64-byte IEEE P1363 signature (ECDSA,
+    /// SHA-256) of the message it is given, deterministic or randomized, with `s` high or low: the binding takes the low form.
     ///
     /// # Errors
-    /// [`Error::Key`] for a scalar that is no key.
-    pub fn ecdsa_p256(scalar: &[u8]) -> Result<Self, Error> {
-        let key =
-            SigningKey::from_slice(scalar).map_err(|_| Error::Key("not a P-256 private scalar"))?;
-        let spki = p256_spki(key.verifying_key());
+    /// [`Error::Key`] for an `spki` that is no P-256 key.
+    pub fn signing(
+        spki: impl Into<Vec<u8>>,
+        sign: impl Fn(&[u8]) -> Result<[u8; 64], Error> + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
+        let spki = spki.into();
+        p256_key_of_spki(&spki)?;
         Ok(Self {
-            kind: ProverKind::Ecdsa { key, spki },
-        })
-    }
-
-    /// An identity that signs, from its PKCS#8 private key (`-----BEGIN PRIVATE KEY-----`'s bytes), as the `webcrypto` peer method
-    /// writes it.
-    ///
-    /// # Errors
-    /// [`Error::Key`] for what is not a P-256 PKCS#8 key.
-    pub fn ecdsa_p256_pkcs8(der: &[u8]) -> Result<Self, Error> {
-        let key =
-            SigningKey::from_pkcs8_der(der).map_err(|_| Error::Key("not a P-256 PKCS#8 key"))?;
-        let spki = p256_spki(key.verifying_key());
-        Ok(Self {
-            kind: ProverKind::Ecdsa { key, spki },
-        })
-    }
-
-    /// An X25519 identity, from its private key (32 bytes), for the collector whose `SubjectPublicKeyInfo` is `collector_spki`
-    /// (the app's identity, which the holder knows by pairing).
-    ///
-    /// # Errors
-    /// [`Error::Key`] for a key of another length, or a collector that is no X25519 key.
-    pub fn x25519(secret: &[u8], collector_spki: &[u8]) -> Result<Self, Error> {
-        let secret: [u8; 32] = secret
-            .try_into()
-            .map_err(|_| Error::Key("an X25519 private key is 32 bytes"))?;
-        let secret = StaticSecret::from(secret);
-        let collector = x25519_of_spki(collector_spki)?;
-        let spki = x25519_spki(X25519Public::from(&secret).as_bytes());
-        Ok(Self {
-            kind: ProverKind::Dh {
-                secret,
+            kind: ProverKind::Signing {
                 spki,
-                collector,
-                audience: IdentityId::of(collector_spki),
+                sign: Box::new(sign),
             },
         })
     }
 
-    /// An X25519 identity from its PKCS#8 private key, as the `noise` peer method writes it (RFC 8410, 48 bytes).
+    /// An X25519 identity, for the one collector whose `SubjectPublicKeyInfo` is `collector_spki` (the peer it is paired with). `agree`
+    /// returns the Diffie-Hellman of the identity's static key and the public key it is given.
     ///
     /// # Errors
-    /// [`Error::Key`].
-    pub fn x25519_pkcs8(der: &[u8], collector_spki: &[u8]) -> Result<Self, Error> {
-        let key = der
-            .strip_prefix(&X25519_PKCS8_PREFIX[..])
-            .filter(|key| key.len() == 32)
-            .ok_or(Error::Key("not an X25519 PKCS#8 key"))?;
-        Self::x25519(key, collector_spki)
+    /// [`Error::Key`] for an `spki` or a collector that is no X25519 key.
+    pub fn agreeing(
+        spki: impl Into<Vec<u8>>,
+        agree: impl Fn(&[u8; 32]) -> Result<[u8; 32], Error> + Send + Sync + 'static,
+        collector_spki: &[u8],
+    ) -> Result<Self, Error> {
+        let spki = spki.into();
+        x25519_of_spki(&spki)?;
+        Ok(Self {
+            kind: ProverKind::Agreeing {
+                spki,
+                agree: Box::new(agree),
+                collector: x25519_of_spki(collector_spki)?,
+                audience: IdentityId::of(collector_spki),
+            },
+        })
     }
 
     /// The identity's public key as `SubjectPublicKeyInfo`.
     #[must_use]
     pub fn spki(&self) -> &[u8] {
         match &self.kind {
-            ProverKind::Ecdsa { spki, .. } | ProverKind::Dh { spki, .. } => spki,
+            ProverKind::Signing { spki, .. } | ProverKind::Agreeing { spki, .. } => spki,
         }
     }
 
@@ -348,87 +337,93 @@ impl Prover {
         IdentityId::of(self.spki())
     }
 
-    /// Binds `key`, the receiver's per-request public key, to this identity for one request, until `expires`.
+    /// Makes the binding of `statement`.
     pub(crate) fn bind(
         &self,
-        method: Method,
-        request_id: &str,
-        key: &[u8; 32],
+        statement: &Statement<'_>,
         expires: u64,
+        audience: &IdentityId,
     ) -> Result<Binding, Error> {
+        let bytes = statement.bytes(expires, audience);
         match &self.kind {
-            ProverKind::Ecdsa { key: signing, spki } => {
-                let signed: Signature =
-                    signing.sign(&statement(method, request_id, key, expires, None));
-                // Low s, so one request has one signature in every language; a verifier takes either.
-                let proof = signed.normalize_s();
+            ProverKind::Signing { spki, sign } => {
+                let signature = Signature::from_slice(&sign(&bytes)?).map_err(|_| Error::Seal)?;
                 Ok(Binding {
                     method: BINDING_ECDSA.into(),
                     key: spki.clone(),
                     expires,
-                    audience: None,
-                    proof: proof.to_bytes().to_vec(),
+                    audience: *audience,
+                    proof: signature.normalize_s().to_bytes().to_vec(),
                 })
             }
-            ProverKind::Dh {
-                secret,
+            ProverKind::Agreeing {
                 spki,
+                agree,
                 collector,
-                audience,
+                audience: only,
             } => {
-                let holder = x25519_of_spki(spki)?;
-                let mac = dh_key(secret, collector, &holder, collector)?;
-                let proof = tag(
-                    &mac,
-                    &statement(method, request_id, key, expires, Some(audience)),
-                )?
-                .finalize()
-                .into_bytes();
+                if audience != only {
+                    return Err(Error::WrongAudience);
+                }
+                let shared = Zeroizing::new(agree(collector)?);
+                let key = dh_key(&shared, &x25519_of_spki(spki)?, collector)?;
                 Ok(Binding {
                     method: BINDING_DH.into(),
                     key: spki.clone(),
                     expires,
-                    audience: Some(*audience),
-                    proof: proof.to_vec(),
+                    audience: *only,
+                    proof: mac_over(&*key, &[&bytes])?.to_vec(),
                 })
             }
         }
     }
 }
 
-/// The collector's side: the identities it knows by pairing or pinning, and its own X25519 key when it takes [`BINDING_DH`].
-#[derive(Debug)]
+fn p256_key_of_spki(spki: &[u8]) -> Result<VerifyingKey, Error> {
+    spki.strip_prefix(&P256_SPKI_PREFIX[..])
+        .filter(|_| spki.len() == 91)
+        .and_then(|point| VerifyingKey::from_sec1_bytes(point).ok())
+        .ok_or(Error::Key("not a P-256 SubjectPublicKeyInfo"))
+}
+
+/// The collector's side: the identities it knows by pairing or pinning, its own id, and its key agreement when it takes
+/// [`BINDING_DH`].
 pub struct Verifier {
-    pub(crate) known: BTreeSet<IdentityId>,
-    own: Option<Own>,
+    known: BTreeSet<IdentityId>,
+    own: IdentityId,
+    agreement: Option<OwnAgreement>,
     max_lifetime: Duration,
+    skew: Duration,
+    pub(crate) limits: super::Limits,
 }
 
-struct Own {
-    secret: StaticSecret,
-    id: IdentityId,
+struct OwnAgreement {
     public: [u8; 32],
+    agree: Agreement,
 }
 
-impl fmt::Debug for Own {
+impl fmt::Debug for Verifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Own({})", self.id)
+        write!(f, "Verifier({}, {} known)", self.own, self.known.len())
     }
 }
 
 /// Builds a [`Verifier`].
-#[derive(Debug)]
 #[must_use]
 pub struct VerifierBuilder {
-    known: BTreeSet<IdentityId>,
-    own: Option<Own>,
-    max_lifetime: Duration,
+    verifier: Verifier,
+}
+
+impl fmt::Debug for VerifierBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.verifier.fmt(f)
+    }
 }
 
 impl VerifierBuilder {
     /// Knows an identity by its id: one the person paired or pinned. A key whose holder is not known is refused, whatever it carries.
     pub fn trust(mut self, id: IdentityId) -> Self {
-        self.known.insert(id);
+        self.verifier.known.insert(id);
         self
     }
 
@@ -437,69 +432,87 @@ impl VerifierBuilder {
         self.trust(IdentityId::of(spki))
     }
 
-    /// Gives the collector's own X25519 identity, which [`BINDING_DH`] needs: its private key (32 bytes). Without it that method is
-    /// refused.
+    /// Gives the collector's own X25519 identity, which [`BINDING_DH`] needs: its `SubjectPublicKeyInfo`, which must be the identity
+    /// the verifier was built for, and the key agreement. Without it that method is refused.
     ///
     /// # Errors
-    /// [`Error::Key`] for a key of another length.
-    pub fn x25519_identity(mut self, secret: &[u8]) -> Result<Self, Error> {
-        let secret: [u8; 32] = secret
-            .try_into()
-            .map_err(|_| Error::Key("an X25519 private key is 32 bytes"))?;
-        let secret = StaticSecret::from(secret);
-        let public = *X25519Public::from(&secret).as_bytes();
-        self.own = Some(Own {
-            id: IdentityId::of(&x25519_spki(&public)),
+    /// [`Error::Key`] for an `spki` that is no X25519 key or is not this verifier's identity.
+    pub fn agreement(
+        mut self,
+        spki: &[u8],
+        agree: impl Fn(&[u8; 32]) -> Result<[u8; 32], Error> + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
+        let public = x25519_of_spki(spki)?;
+        if IdentityId::of(spki) != self.verifier.own {
+            return Err(Error::Key(
+                "the key agreement is not this verifier's identity",
+            ));
+        }
+        self.verifier.agreement = Some(OwnAgreement {
             public,
-            secret,
+            agree: Box::new(agree),
         });
         Ok(self)
     }
 
     /// The longest a binding may last from now, 5 minutes by default; any value is taken.
     pub const fn max_lifetime(mut self, lifetime: Duration) -> Self {
-        self.max_lifetime = lifetime;
+        self.verifier.max_lifetime = lifetime;
+        self
+    }
+
+    /// How far the peer's clock may differ from this one's, 30 seconds by default: a binding is taken that long after it ended and
+    /// that much beyond the longest it may last. Any value is taken.
+    pub const fn skew(mut self, skew: Duration) -> Self {
+        self.verifier.skew = skew;
+        self
+    }
+
+    /// What forms this verifier takes.
+    pub const fn limits(mut self, limits: super::Limits) -> Self {
+        self.verifier.limits = limits;
         self
     }
 
     /// Builds the collector's verifier.
     #[must_use]
     pub fn build(self) -> Verifier {
-        Verifier {
-            known: self.known,
-            own: self.own,
-            max_lifetime: self.max_lifetime,
-        }
+        self.verifier
     }
 }
 
 impl Verifier {
-    /// Starts a verifier that knows no one.
-    pub fn builder() -> VerifierBuilder {
+    /// Starts a verifier that is `own` and knows no one. A binding is taken only if it was made for `own`.
+    pub fn builder(own: IdentityId) -> VerifierBuilder {
         VerifierBuilder {
-            known: BTreeSet::new(),
-            own: None,
-            max_lifetime: Duration::from_secs(300),
+            verifier: Self {
+                known: BTreeSet::new(),
+                own,
+                agreement: None,
+                max_lifetime: Duration::from_secs(300),
+                skew: Duration::from_secs(30),
+                limits: super::Limits::new(),
+            },
         }
     }
 
-    /// Checks that `binding` binds `key` to a known identity for this request, at `now` (Unix seconds); returns that identity.
+    /// This verifier's own identity.
+    #[must_use]
+    pub const fn id(&self) -> IdentityId {
+        self.own
+    }
+
+    /// Checks that `binding` makes `statement`'s claim for a known identity at `now` (Unix seconds); returns that identity.
     ///
-    /// The order is: the method and the key's shape, whether the holder is known, the end, the collector, and last the proof, so a
+    /// The order is: the method and the key's shape, whether the holder is known, the end, the audience, and last the proof, so a
     /// peer nobody knows costs one hash.
-    ///
-    /// # Errors
-    /// [`Error::Unsupported`], [`Error::Key`], [`Error::UnknownIdentity`], [`Error::Expired`], [`Error::WrongAudience`],
-    /// [`Error::BadProof`].
     pub(crate) fn verify(
         &self,
-        method: Method,
-        request_id: &str,
-        key: &[u8; 32],
+        statement: &Statement<'_>,
         binding: &Binding,
         now: u64,
     ) -> Result<IdentityId, Error> {
-        let is_ecdsa = match binding.method.as_str() {
+        let ecdsa = match binding.method.as_str() {
             BINDING_ECDSA => true,
             BINDING_DH => false,
             _ => {
@@ -508,51 +521,46 @@ impl Verifier {
                 ));
             }
         };
-        if is_ecdsa {
-            if binding.key.len() != 91 || !binding.key.starts_with(&P256_SPKI_PREFIX) {
-                return Err(Error::Key("not a P-256 SubjectPublicKeyInfo"));
-            }
+        let point = if ecdsa {
+            Some(p256_key_of_spki(&binding.key)?)
         } else {
             x25519_of_spki(&binding.key)?;
-        }
+            None
+        };
         let holder = IdentityId::of(&binding.key);
         if !self.known.contains(&holder) {
             return Err(Error::UnknownIdentity);
         }
-        if now > binding.expires
-            || binding.expires > now.saturating_add(self.max_lifetime.as_secs())
+        let skew = self.skew.as_secs();
+        if now > binding.expires.saturating_add(skew)
+            || binding.expires
+                > now
+                    .saturating_add(self.max_lifetime.as_secs())
+                    .saturating_add(skew)
         {
             return Err(Error::Expired);
         }
-        if let (Some(audience), Some(own)) = (&binding.audience, &self.own)
-            && *audience != own.id
-        {
+        if binding.audience != self.own {
             return Err(Error::WrongAudience);
         }
-        let signed = statement(
-            method,
-            request_id,
-            key,
-            binding.expires,
-            binding.audience.as_ref(),
-        );
-        if is_ecdsa {
-            let verifying = VerifyingKey::from_sec1_bytes(&binding.key[P256_SPKI_PREFIX.len()..])
-                .map_err(|_| Error::Key("not a P-256 point"))?;
+        let signed = statement.bytes(binding.expires, &binding.audience);
+        if let Some(verifying) = point {
             let signature = Signature::from_slice(&binding.proof).map_err(|_| Error::BadProof)?;
+            // One statement has one signature: a high s is the same signature written the other way.
+            if signature.normalize_s() != signature {
+                return Err(Error::BadProof);
+            }
             verifying
                 .verify(&signed, &signature)
                 .map_err(|_| Error::BadProof)?;
         } else {
-            let own = self.own.as_ref().ok_or(Error::Unsupported(
+            let own = self.agreement.as_ref().ok_or(Error::Unsupported(
                 "this collector has no X25519 identity of its own",
             ))?;
-            if binding.audience != Some(own.id) {
-                return Err(Error::WrongAudience);
-            }
             let holder_key = x25519_of_spki(&binding.key)?;
-            let mac = dh_key(&own.secret, &holder_key, &holder_key, &own.public)?;
-            tag(&mac, &signed)?
+            let shared = Zeroizing::new((own.agree)(&holder_key)?);
+            let key = dh_key(&shared, &holder_key, &own.public)?;
+            mac(&*key, &[&signed])?
                 .verify_slice(&binding.proof)
                 .map_err(|_| Error::BadProof)?;
         }

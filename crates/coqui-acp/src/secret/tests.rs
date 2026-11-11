@@ -1,14 +1,17 @@
-//! `vectors/secret.json`: RFC 9180's base-mode vector run through this crate's suite, and the extension's own bytes (key bindings,
-//! sealed fields, refusals) that the Dart client must reproduce or refuse alike.
+//! `vectors/secret.json`: RFC 9180's base-mode vector run through this crate's suite, and the extension's own bytes (context digests,
+//! key bindings, sealed fields, value bindings, refusals) that the Dart client must reproduce or refuse alike.
 //!
 //! The RFC section is copied from the RFC. The rest is written by `vectors_are_current` when `COQUI_ACP_WRITE_VECTORS` is set, from
 //! the fixed inputs below, and is read back and checked independently of how it was made.
 
-use super::binding::{Method, Prover, Verifier, statement};
-use super::form::{Form, Limits};
-use super::seal::testing::{field_info, key_pair, open_raw, seal_raw, seal_with};
-use super::seal::{Receiver, Recipient, Sealed};
-use super::{Error, IdentityId};
+use super::binding::{Kind, Method, Prover, Statement, Verifier};
+use super::context::Context;
+use super::form::{Form, Limits, base64_canonical, base64url_canonical, json_integer, json_number};
+use super::seal::testing::{key_pair, open_raw, open_with, seal_raw, seal_with};
+use super::seal::{Receiver, Recipient, Sealed, values_digest};
+use super::unprotected;
+use super::{DEFAULT_LIFETIME, Error, IdentityId};
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -22,7 +25,7 @@ fn hex(text: &str) -> Vec<u8> {
     HEXLOWER.decode(text.as_bytes()).expect("hex")
 }
 
-fn kind(error: &Error) -> &'static str {
+pub(crate) fn kind(error: &Error) -> &'static str {
     match error {
         Error::Schema(_) => "schema",
         Error::Malformed(_) => "malformed",
@@ -39,7 +42,7 @@ fn kind(error: &Error) -> &'static str {
     }
 }
 
-fn schema() -> Value {
+fn schema_text() -> String {
     json!({
         "type": "object",
         "title": "Registry login",
@@ -51,190 +54,334 @@ fn schema() -> Value {
         },
         "required": ["user", "password"]
     })
+    .to_string()
 }
 
-/// A scalar and keys the cases below use; none is secret, all are published test values (RFC 6979 and RFC 7748).
-const ECDSA_SCALAR: &str = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721";
-const NOISE_HOLDER: &str = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
-const NOISE_COLLECTOR: &str = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
+/// Published test keys (RFC 6979's P-256 key, RFC 7748's two X25519 keys, and a second P-256 scalar); none protects anything.
+const ECDSA_RECEIVER: &str = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721";
+const ECDSA_SENDER: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+const X25519_RECEIVER: &str = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+const X25519_SENDER: &str = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
 const NOW: u64 = 1_700_000_000;
-const LIFETIME: u64 = 300;
+const LIFETIME: u64 = 240;
 
 fn ikm(start: u8) -> Vec<u8> {
     (start..start + 32).collect()
 }
 
-fn x25519_spki(public: &[u8]) -> Vec<u8> {
-    let mut spki = hex("302a300506032b656e032100");
-    spki.extend_from_slice(public);
-    spki
+fn context(method: &str, request_id: &str) -> Context {
+    Context {
+        session_id: "s1".into(),
+        request_id: request_id.into(),
+        message: if method == "show" {
+            "Your new key"
+        } else {
+            "The deploy needs a login"
+        }
+        .into(),
+        schema: schema_text(),
+        form: Some(r#"{"sections":[]}"#.into()),
+    }
 }
 
-fn x25519_public(secret: &[u8]) -> Vec<u8> {
-    let secret: [u8; 32] = secret.try_into().unwrap();
-    x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret))
-        .as_bytes()
-        .to_vec()
+fn method_of(text: &str) -> Method {
+    if text == "show" {
+        Method::Show
+    } else {
+        Method::Request
+    }
 }
 
-struct Case {
-    name: &'static str,
-    prover: Prover,
-    method: Method,
-    request_id: &'static str,
+/// The kinds of identity a case uses: the receiver's and the sender's private keys.
+fn provers(case: &Value) -> (Prover, Prover) {
+    let (receiver, sender) = (
+        hex(case["receiver_private"].as_str().unwrap()),
+        hex(case["sender_private"].as_str().unwrap()),
+    );
+    if case["kind"] == "ecdsa" {
+        return (
+            unprotected::ecdsa_p256(&receiver).unwrap(),
+            unprotected::ecdsa_p256(&sender).unwrap(),
+        );
+    }
+    let (receiver_spki, _) = unprotected::x25519_agreement(&receiver).unwrap();
+    let (sender_spki, _) = unprotected::x25519_agreement(&sender).unwrap();
+    (
+        unprotected::x25519(&receiver, &sender_spki).unwrap(),
+        unprotected::x25519(&sender, &receiver_spki).unwrap(),
+    )
 }
 
-fn cases() -> Vec<Case> {
-    let ecdsa = Prover::ecdsa_p256(&hex(ECDSA_SCALAR)).unwrap();
-    let collector_spki = x25519_spki(&x25519_public(&hex(NOISE_COLLECTOR)));
-    let noise = Prover::x25519(&hex(NOISE_HOLDER), &collector_spki).unwrap();
-    vec![
-        Case {
-            name: "a webcrypto identity signs a request's key",
-            prover: ecdsa,
-            method: Method::Request,
-            request_id: "6f1c8b6e-2d0e-4a52-9a43-0a6d3a8b8d11",
-        },
-        Case {
-            name: "a noise identity proves a show's key by Diffie-Hellman",
-            prover: noise,
-            method: Method::Show,
-            request_id: "show-1",
-        },
-    ]
+/// What a test changes about a verifier.
+#[derive(Default)]
+struct Tuning {
+    own: Option<IdentityId>,
+    trusts: Option<IdentityId>,
+    no_agreement: bool,
+    max_lifetime: Option<u64>,
+    skew: Option<u64>,
 }
 
-fn form() -> Form {
-    Form::parse(&schema(), &Limits::new()).unwrap()
+/// The verifier of the side whose private key is `private`: it is itself (or `own`), knows `trusts`, and for X25519 holds its agreement.
+fn verifier(kind: &str, private: &str, tuning: &Tuning) -> Verifier {
+    let secret = hex(private);
+    let (spki, agree) = unprotected::x25519_agreement(&secret).unwrap();
+    let me = if kind == "ecdsa" {
+        unprotected::ecdsa_p256(&secret).unwrap().id()
+    } else {
+        IdentityId::of(&spki)
+    };
+    let mut builder = Verifier::builder(tuning.own.unwrap_or(me));
+    if kind != "ecdsa" && tuning.own.is_none() && !tuning.no_agreement {
+        builder = builder.agreement(&spki, agree).unwrap();
+    }
+    if let Some(trusts) = tuning.trusts {
+        builder = builder.trust(trusts);
+    }
+    if let Some(seconds) = tuning.max_lifetime {
+        builder = builder.max_lifetime(Duration::from_secs(seconds));
+    }
+    if let Some(seconds) = tuning.skew {
+        builder = builder.skew(Duration::from_secs(seconds));
+    }
+    builder.build()
 }
 
-fn sealed_values() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("password", "correct horse"),
-        ("token", "c2VjcmV0LXRva2Vu"),
-        ("pin", "4821"),
-    ]
-}
-
-/// The vectors this crate writes: everything but the RFC's section.
-fn generate() -> Map<String, Value> {
-    let form = form();
-    let mut bindings = Vec::new();
-    let mut sealed = Vec::new();
-    for case in cases() {
+fn base_cases() -> Vec<Value> {
+    let mut out = Vec::new();
+    for (name, kind, receiver, sender, method, request_id) in [
+        (
+            "a webcrypto identity signs a request's key",
+            "ecdsa",
+            ECDSA_RECEIVER,
+            ECDSA_SENDER,
+            "request",
+            "6f1c8b6e-2d0e-4a52-9a43-0a6d3a8b8d11",
+        ),
+        (
+            "a noise identity proves a show's key by Diffie-Hellman",
+            "dh",
+            X25519_RECEIVER,
+            X25519_SENDER,
+            "show",
+            "show-1",
+        ),
+    ] {
+        let case = json!({"name": name, "kind": kind, "receiver_private": receiver, "sender_private": sender});
+        let (prover_r, prover_s) = provers(&case);
+        let (id_r, id_s) = (prover_r.id(), prover_s.id());
+        let ctx = context(method, request_id);
+        let digest = ctx.digest(method_of(method));
         let (private, public) = key_pair(&ikm(0));
-        let receiver = Receiver::from_key_pair(
-            case.method,
-            case.request_id.into(),
-            &form,
-            &case.prover,
+        let made_receiver = Receiver::from_key_pair(
+            method_of(method),
+            &ctx,
+            &Limits::new(),
+            &prover_r,
+            &id_s,
             NOW,
-            Duration::from_secs(LIFETIME),
+            DEFAULT_LIFETIME,
             private,
             &public,
         )
         .unwrap();
-        let recipient = receiver.recipient().clone();
-        let expires = recipient.binding.expires;
-        let signed = statement(
-            case.method,
-            case.request_id,
-            &recipient.key,
-            expires,
-            recipient.binding.audience.as_ref(),
-        );
-        bindings.push(json!({
-            "name": case.name,
-            "kind": if recipient.binding.method == super::BINDING_ECDSA { "ecdsa" } else { "dh" },
-            "private": if recipient.binding.method == super::BINDING_ECDSA { ECDSA_SCALAR } else { NOISE_HOLDER },
-            "collector_private": if recipient.binding.method == super::BINDING_ECDSA { Value::Null } else { Value::from(NOISE_COLLECTOR) },
-            "method": case.method.as_str(),
-            "request_id": case.request_id,
-            "recipient_ikm": HEXLOWER.encode(&ikm(0)),
-            "now": NOW,
-            "lifetime": LIFETIME,
-            "identity": case.prover.id().to_string(),
-            "statement": HEXLOWER.encode(&signed),
-            "recipient": recipient.to_value(),
-        }));
+        let recipient = made_receiver.recipient().clone();
+        let key_statement = Statement {
+            kind: Kind::Key,
+            method: method_of(method),
+            request_id,
+            digest: &digest,
+            key: &recipient.key,
+            payload: &[],
+        }
+        .bytes(recipient.binding.expires, &id_s);
+        let mut sealed = BTreeMap::new();
         let mut fields = Vec::new();
-        for (name, value) in sealed_values() {
+        for (field, value) in [
+            ("password", "correct horse"),
+            ("token", "c2VjcmV0LXRva2Vu"),
+            ("pin", "4821"),
+        ] {
             let made = seal_with(
                 &recipient.key,
-                case.method,
-                case.request_id,
-                name,
+                method_of(method),
+                request_id,
+                &digest,
+                field,
                 value.as_bytes(),
                 &ikm(32),
             );
-            fields.push(json!({"field": name, "value": value, "ephemeral_ikm": HEXLOWER.encode(&ikm(32)), "sealed": made.to_value()}));
+            fields.push(json!({"field": field, "value": value, "ephemeral_ikm": HEXLOWER.encode(&ikm(32)), "sealed": made.to_value()}));
+            sealed.insert(field.to_string(), made);
         }
-        sealed.push(
-            json!({"name": case.name, "binding": case.name, "schema": schema(), "fields": fields}),
-        );
+        let payload = values_digest(&sealed);
+        let values_statement = Statement {
+            kind: Kind::Values,
+            method: method_of(method),
+            request_id,
+            digest: &digest,
+            key: &recipient.key,
+            payload: &payload,
+        }
+        .bytes(NOW + LIFETIME, &id_r);
+        let auth = prover_s
+            .bind(
+                &Statement {
+                    kind: Kind::Values,
+                    method: method_of(method),
+                    request_id,
+                    digest: &digest,
+                    key: &recipient.key,
+                    payload: &payload,
+                },
+                NOW + LIFETIME,
+                &id_r,
+            )
+            .unwrap();
+        out.push(json!({
+            "name": name, "kind": kind, "receiver_private": receiver, "sender_private": sender,
+            "method": method, "context": {"session_id": ctx.session_id, "request_id": ctx.request_id, "message": ctx.message, "schema": ctx.schema, "form": ctx.form},
+            "context_digest": HEXLOWER.encode(&digest),
+            "recipient_ikm": HEXLOWER.encode(&ikm(0)), "now": NOW, "lifetime": LIFETIME,
+            "receiver_id": id_r.to_string(), "sender_id": id_s.to_string(),
+            "key_statement": HEXLOWER.encode(&key_statement), "recipient": recipient.to_value(),
+            "plain": {"user": "ana"}, "fields": fields,
+            "values_digest": HEXLOWER.encode(&payload), "values_statement": HEXLOWER.encode(&values_statement), "auth": auth.to_value(),
+        }));
     }
-    let mut out = Map::new();
-    out.insert("info".into(), json!([
-        {"method": "request", "request_id": "r1", "field": "password", "info": HEXLOWER.encode(&field_info(Method::Request, "r1", "password"))},
-        {"method": "show", "request_id": "r1", "field": "password", "info": HEXLOWER.encode(&field_info(Method::Show, "r1", "password"))},
-        {"method": "request", "request_id": "r1", "field": "user", "info": HEXLOWER.encode(&field_info(Method::Request, "r1", "user"))},
-    ]));
-    out.insert("bindings".into(), Value::Array(bindings));
-    out.insert("sealed".into(), Value::Array(sealed));
-    out.insert("forms".into(), forms());
-    out.insert("refusals".into(), refusals());
     out
 }
 
+fn grammar() -> Value {
+    json!([
+        {"kind": "integer", "text": "0", "valid": true},
+        {"kind": "integer", "text": "-0", "valid": true},
+        {"kind": "integer", "text": "4821", "valid": true},
+        {"kind": "integer", "text": "9007199254740991", "valid": true},
+        {"kind": "integer", "text": "-9007199254740991", "valid": true},
+        {"kind": "integer", "text": "9007199254740992", "valid": false},
+        {"kind": "integer", "text": "+5", "valid": false},
+        {"kind": "integer", "text": "05", "valid": false},
+        {"kind": "integer", "text": " 5", "valid": false},
+        {"kind": "integer", "text": "5 ", "valid": false},
+        {"kind": "integer", "text": "5.0", "valid": false},
+        {"kind": "integer", "text": "", "valid": false},
+        {"kind": "integer", "text": "-", "valid": false},
+        {"kind": "integer", "text": "0x10", "valid": false},
+        {"kind": "number", "text": "1.5", "valid": true},
+        {"kind": "number", "text": "-0.25e3", "valid": true},
+        {"kind": "number", "text": "10E+2", "valid": true},
+        {"kind": "number", "text": "0", "valid": true},
+        {"kind": "number", "text": ".5", "valid": false},
+        {"kind": "number", "text": "5.", "valid": false},
+        {"kind": "number", "text": "+1", "valid": false},
+        {"kind": "number", "text": "01", "valid": false},
+        {"kind": "number", "text": "1e", "valid": false},
+        {"kind": "number", "text": "1e999", "valid": false},
+        {"kind": "number", "text": "NaN", "valid": false},
+        {"kind": "number", "text": "Infinity", "valid": false},
+        {"kind": "number", "text": " 1", "valid": false},
+        {"kind": "base64url", "text": "", "valid": true},
+        {"kind": "base64url", "text": "AA", "valid": true},
+        {"kind": "base64url", "text": "AQID", "valid": true},
+        {"kind": "base64url", "text": "AA==", "valid": false},
+        {"kind": "base64url", "text": "AB", "valid": false},
+        {"kind": "base64url", "text": "A", "valid": false},
+        {"kind": "base64url", "text": "A+/A", "valid": false},
+        {"kind": "base64", "text": "AA==", "valid": true},
+        {"kind": "base64", "text": "AQID", "valid": true},
+        {"kind": "base64", "text": "AA", "valid": false},
+        {"kind": "base64", "text": "AB==", "valid": false},
+        {"kind": "base64", "text": "A-_A", "valid": false}
+    ])
+}
+
 fn forms() -> Value {
-    let flat = |property: Value| json!({"type": "object", "properties": {"f": property}});
+    let flat =
+        |property: Value| json!({"type": "object", "properties": {"f": property}}).to_string();
     json!({
         "accepted": [
-            {"name": "plain and secret fields", "schema": schema(), "secret": ["password", "token", "pin"], "plain": ["user"]},
+            {"name": "plain and secret fields", "schema": schema_text(), "secret": ["password", "token", "pin"], "plain": ["user"]},
             {"name": "a secret marked x-sensitive", "schema": flat(json!({"type": "string", "x-sensitive": true})), "secret": ["f"], "plain": []},
-            {"name": "a plain choice", "schema": flat(json!({"type": "string", "oneOf": [{"const": "a", "title": "A"}]})), "secret": [], "plain": ["f"]}
+            {"name": "a plain choice", "schema": flat(json!({"type": "string", "oneOf": [{"const": "a", "title": "A"}]})), "secret": [], "plain": ["f"]},
+            {"name": "writeOnly false is plain", "schema": flat(json!({"type": "string", "writeOnly": false})), "secret": [], "plain": ["f"]}
         ],
         "refused": [
-            {"name": "not an object", "schema": [], "kind": "schema"},
-            {"name": "no properties", "schema": {"type": "object"}, "kind": "schema"},
-            {"name": "no questions", "schema": {"type": "object", "properties": {}}, "kind": "schema"},
-            {"name": "a type that is not object", "schema": {"type": "array", "properties": {"f": {"type": "string"}}}, "kind": "schema"},
-            {"name": "a property that is not an object", "schema": {"properties": {"f": 3}}, "kind": "schema"},
+            {"name": "not JSON", "schema": "{", "kind": "schema"},
+            {"name": "not an object", "schema": "[]", "kind": "schema"},
+            {"name": "no properties", "schema": "{\"type\":\"object\"}", "kind": "schema"},
+            {"name": "no questions", "schema": "{\"type\":\"object\",\"properties\":{}}", "kind": "schema"},
+            {"name": "a type that is not object", "schema": "{\"type\":\"array\",\"properties\":{\"f\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a property that is not an object", "schema": "{\"properties\":{\"f\":3}}", "kind": "schema"},
             {"name": "a type no control shows", "schema": flat(json!({"type": "object"})), "kind": "schema"},
-            {"name": "an empty name", "schema": {"properties": {"": {"type": "string"}}}, "kind": "schema"},
-            {"name": "required names a missing property", "schema": {"properties": {"f": {"type": "string"}}, "required": ["g"]}, "kind": "schema"},
-            {"name": "required is not a list", "schema": {"properties": {"f": {"type": "string"}}, "required": "f"}, "kind": "schema"},
+            {"name": "an empty name", "schema": "{\"properties\":{\"\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "required names a missing property", "schema": "{\"properties\":{\"f\":{\"type\":\"string\"}},\"required\":[\"g\"]}", "kind": "schema"},
+            {"name": "required is not a list", "schema": "{\"properties\":{\"f\":{\"type\":\"string\"}},\"required\":\"f\"}", "kind": "schema"},
             {"name": "a secret choice", "schema": flat(json!({"type": "string", "writeOnly": true, "enum": ["a", "b"]})), "kind": "schema"},
             {"name": "a secret flag", "schema": flat(json!({"type": "boolean", "writeOnly": true})), "kind": "schema"},
             {"name": "a secret with a default", "schema": flat(json!({"type": "string", "writeOnly": true, "default": "hunter2"})), "kind": "schema"},
             {"name": "a secret with a const", "schema": flat(json!({"type": "string", "x-sensitive": true, "const": "x"})), "kind": "schema"},
-            {"name": "a secret with examples", "schema": flat(json!({"type": "string", "writeOnly": true, "examples": ["x"]})), "kind": "schema"}
+            {"name": "a secret with examples", "schema": flat(json!({"type": "string", "writeOnly": true, "examples": ["x"]})), "kind": "schema"},
+            {"name": "a secret with anyOf", "schema": flat(json!({"type": "string", "writeOnly": true, "anyOf": [{"minLength": 1}]})), "kind": "schema"},
+            {"name": "a secret with allOf", "schema": flat(json!({"type": "string", "writeOnly": true, "allOf": []})), "kind": "schema"},
+            {"name": "a secret with a pattern", "schema": flat(json!({"type": "string", "writeOnly": true, "pattern": "^a"})), "kind": "schema"},
+            {"name": "a secret with a conditional", "schema": flat(json!({"type": "string", "writeOnly": true, "if": {}})), "kind": "schema"},
+            {"name": "a secret with not", "schema": flat(json!({"type": "string", "writeOnly": true, "not": {}})), "kind": "schema"},
+            {"name": "a secret with a reference", "schema": flat(json!({"type": "string", "writeOnly": true, "$ref": "#/x"})), "kind": "schema"},
+            {"name": "a secret with dependent schemas", "schema": flat(json!({"type": "string", "writeOnly": true, "dependentSchemas": {}})), "kind": "schema"},
+            {"name": "writeOnly that is not a boolean", "schema": flat(json!({"type": "string", "writeOnly": "yes"})), "kind": "schema"},
+            {"name": "x-sensitive that is not a boolean", "schema": flat(json!({"type": "string", "x-sensitive": 1})), "kind": "schema"},
+            {"name": "a password format with no mark", "schema": flat(json!({"type": "string", "format": "password"})), "kind": "schema"},
+            {"name": "a password format marked not secret", "schema": flat(json!({"type": "string", "format": "password", "writeOnly": false})), "kind": "schema"},
+            {"name": "an integer bound past 2^53", "schema": flat(json!({"type": "integer", "maximum": 9007199254740992i64})), "kind": "schema"}
         ]
     })
 }
 
 fn refusals() -> Value {
+    let a = "a webcrypto identity signs a request's key";
+    let b = "a noise identity proves a show's key by Diffie-Hellman";
     json!([
-        {"case": "verify", "name": "an identity nobody knows", "base": "a webcrypto identity signs a request's key", "change": {"trusted": false}, "expect": "unknown_identity"},
-        {"case": "verify", "name": "a key changed after it was bound", "base": "a webcrypto identity signs a request's key", "change": {"flip_key": true}, "expect": "bad_proof"},
-        {"case": "verify", "name": "a proof changed", "base": "a webcrypto identity signs a request's key", "change": {"flip_proof": true}, "expect": "bad_proof"},
-        {"case": "verify", "name": "a binding for another request", "base": "a webcrypto identity signs a request's key", "change": {"request_id": "another"}, "expect": "bad_proof"},
-        {"case": "verify", "name": "a binding for the other method", "base": "a webcrypto identity signs a request's key", "change": {"method": "show"}, "expect": "bad_proof"},
-        {"case": "verify", "name": "a binding that ended", "base": "a webcrypto identity signs a request's key", "change": {"now": NOW + LIFETIME + 1}, "expect": "expired"},
-        {"case": "verify", "name": "a binding that lasts too long", "base": "a webcrypto identity signs a request's key", "change": {"max_lifetime": 299}, "expect": "expired"},
-        {"case": "verify", "name": "a binding method nobody has", "base": "a webcrypto identity signs a request's key", "change": {"binding_method": "rsa"}, "expect": "unsupported"},
-        {"case": "verify", "name": "a key of another shape", "base": "a webcrypto identity signs a request's key", "change": {"truncate_binding_key": true}, "expect": "key"},
-        {"case": "verify", "name": "a noise proof changed", "base": "a noise identity proves a show's key by Diffie-Hellman", "change": {"flip_proof": true}, "expect": "bad_proof"},
-        {"case": "verify", "name": "a noise proof for another request", "base": "a noise identity proves a show's key by Diffie-Hellman", "change": {"request_id": "another"}, "expect": "bad_proof"},
-        {"case": "verify", "name": "a noise proof for another collector", "base": "a noise identity proves a show's key by Diffie-Hellman", "change": {"collector_private": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}, "expect": "wrong_audience"},
-        {"case": "verify", "name": "a collector with no identity of its own", "base": "a noise identity proves a show's key by Diffie-Hellman", "change": {"no_own_identity": true}, "expect": "unsupported"},
-        {"case": "open", "name": "a ciphertext moved to another field", "base": "a webcrypto identity signs a request's key", "field": "password", "change": {"as_field": "token"}, "expect": "open"},
-        {"case": "open", "name": "a ciphertext moved to another request", "base": "a webcrypto identity signs a request's key", "field": "password", "change": {"request_id": "another"}, "expect": "open"},
-        {"case": "open", "name": "a ciphertext of the other method", "base": "a webcrypto identity signs a request's key", "field": "password", "change": {"method": "show"}, "expect": "open"},
-        {"case": "open", "name": "a ciphertext changed", "base": "a webcrypto identity signs a request's key", "field": "password", "change": {"flip_ct": true}, "expect": "open"},
-        {"case": "open", "name": "an encapsulated key changed", "base": "a webcrypto identity signs a request's key", "field": "password", "change": {"flip_enc": true}, "expect": "open"},
-        {"case": "open", "name": "a ciphertext for another receiver", "base": "a webcrypto identity signs a request's key", "field": "password", "change": {"other_receiver": true}, "expect": "open"},
-        {"case": "open", "name": "a value that does not fit its question", "base": "a webcrypto identity signs a request's key", "field": "pin", "change": {"seal_value": "not a number"}, "expect": "field"}
+        {"case": "verify", "name": "an identity nobody knows", "base": a, "change": {"trusted": false}, "expect": "unknown_identity"},
+        {"case": "verify", "name": "a known identity that is not the one expected", "base": a, "change": {"expected": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}, "expect": "unknown_identity"},
+        {"case": "verify", "name": "a key changed after it was bound", "base": a, "change": {"flip_key": true}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a proof changed", "base": a, "change": {"flip_proof": true}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a signature written with a high s", "base": a, "change": {"high_s": true}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a binding for another request", "base": a, "change": {"request_id": "another"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a binding for the other method", "base": a, "change": {"method": "show"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a form changed on the way: a secret made plain", "base": a, "change": {"schema": schema_text().replace("\"writeOnly\":true", "\"writeOnly\":false")}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a form changed on the way: the schema re-serialized", "base": a, "change": {"schema": serde_json::to_string_pretty(&serde_json::from_str::<Value>(&schema_text()).unwrap()).unwrap()}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a message changed on the way", "base": a, "change": {"message": "Send the money"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a session changed on the way", "base": a, "change": {"session_id": "s2"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a layout changed on the way", "base": a, "change": {"form": "{\"sections\":[{\"id\":\"x\"}]}"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a layout taken off", "base": a, "change": {"form": null}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a binding that ended", "base": a, "change": {"now": NOW + LIFETIME + 31}, "expect": "expired"},
+        {"case": "verify", "name": "a binding at the edge of the skew is taken", "base": a, "change": {"now": NOW + LIFETIME + 30}, "expect": "ok"},
+        {"case": "verify", "name": "a binding that lasts too long", "base": a, "change": {"max_lifetime": 209, "skew": 0}, "expect": "expired"},
+        {"case": "verify", "name": "a binding that lasts exactly as long as allowed", "base": a, "change": {"max_lifetime": 240, "skew": 0}, "expect": "ok"},
+        {"case": "verify", "name": "a binding made for someone else", "base": a, "change": {"own_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, "expect": "wrong_audience"},
+        {"case": "verify", "name": "a binding method nobody has", "base": a, "change": {"binding_method": "rsa"}, "expect": "unsupported"},
+        {"case": "verify", "name": "a key of another shape", "base": a, "change": {"truncate_binding_key": true}, "expect": "key"},
+        {"case": "verify", "name": "a noise proof changed", "base": b, "change": {"flip_proof": true}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a noise proof for another request", "base": b, "change": {"request_id": "another"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a noise proof for another collector", "base": b, "change": {"own_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, "expect": "wrong_audience"},
+        {"case": "verify", "name": "a collector with no key agreement of its own", "base": b, "change": {"no_agreement": true}, "expect": "unsupported"},
+        {"case": "open", "name": "values untouched are opened", "base": a, "change": {}, "expect": "ok"},
+        {"case": "open", "name": "a ciphertext changed after it was authenticated", "base": a, "change": {"flip_ct": "password"}, "expect": "bad_proof"},
+        {"case": "open", "name": "an encapsulated key changed after it was authenticated", "base": a, "change": {"flip_enc": "password"}, "expect": "bad_proof"},
+        {"case": "open", "name": "two ciphertexts swapped after they were authenticated", "base": a, "change": {"swap": ["password", "token"]}, "expect": "bad_proof"},
+        {"case": "open", "name": "a value removed after it was authenticated", "base": a, "change": {"drop": "pin"}, "expect": "bad_proof"},
+        {"case": "open", "name": "values authenticated for another request", "base": a, "change": {"receiver_request_id": "another"}, "expect": "bad_proof"},
+        {"case": "open", "name": "values from a sender nobody expected", "base": a, "change": {"expected_sender": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}, "expect": "unknown_identity"},
+        {"case": "open", "name": "values authenticated by a sender nobody knows", "base": a, "change": {"trusted": false}, "expect": "unknown_identity"},
+        {"case": "open", "name": "values for another receiver key", "base": a, "change": {"other_receiver": true}, "expect": "bad_proof"},
+        {"case": "open", "name": "an authenticated ciphertext made for another field", "base": a, "change": {"reseal_as_field": "token"}, "expect": "open"},
+        {"case": "open", "name": "an authenticated ciphertext made for another request", "base": a, "change": {"reseal_request_id": "another"}, "expect": "open"},
+        {"case": "open", "name": "an authenticated ciphertext made for the other method", "base": a, "change": {"reseal_method": "show"}, "expect": "open"},
+        {"case": "open", "name": "an authenticated ciphertext made for another form", "base": a, "change": {"reseal_message": "Send the money"}, "expect": "open"},
+        {"case": "open", "name": "an authenticated value that does not fit its question", "base": a, "change": {"seal_value": "not a number"}, "expect": "field"},
+        {"case": "open", "name": "values for a noise receiver, untouched", "base": b, "change": {}, "expect": "ok"},
+        {"case": "open", "name": "a noise ciphertext changed after it was authenticated", "base": b, "change": {"flip_ct": "token"}, "expect": "bad_proof"}
     ])
 }
 
@@ -253,151 +400,212 @@ fn find<'a>(items: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no case {name}"))
 }
 
-fn method_of(text: &str) -> Method {
-    if text == "show" {
-        Method::Show
-    } else {
-        Method::Request
+fn context_of(case: &Value, change: &Value) -> Context {
+    let pick = |key: &str| {
+        change
+            .get(key)
+            .map_or_else(|| case["context"][key].clone(), Clone::clone)
+    };
+    Context {
+        session_id: pick("session_id").as_str().unwrap().into(),
+        request_id: pick("request_id").as_str().unwrap().into(),
+        message: pick("message").as_str().unwrap().into(),
+        schema: pick("schema").as_str().unwrap().into(),
+        form: pick("form").as_str().map(String::from),
     }
 }
 
-/// A binding case of the vectors, rebuilt for a verification with `change` applied.
-fn verify_case(doc: &Value, case: &Value) -> Result<IdentityId, Error> {
-    let base = find(&doc["bindings"], case["base"].as_str().unwrap());
-    let change = &case["change"];
-    let mut recipient = Recipient::from_value(&base["recipient"]).unwrap();
-    let identity: IdentityId = base["identity"].as_str().unwrap().parse().unwrap();
-    let mut builder = Verifier::builder();
-    if change["trusted"] != false {
-        builder = builder.trust(identity);
-    }
-    let own = match (
-        base["collector_private"].as_str(),
-        change["collector_private"].as_str(),
-        change["no_own_identity"].as_bool(),
-    ) {
-        (_, _, Some(true)) | (None, None, _) => None,
-        (_, Some(other), _) => Some(other.to_string()),
-        (Some(own), None, _) => Some(own.to_string()),
+fn id_of(text: &str) -> IdentityId {
+    text.parse().unwrap()
+}
+
+/// The sender's side verifies the receiver's key binding.
+fn verify_case(case: &Value, change: &Value) -> Result<IdentityId, Error> {
+    let ctx = context_of(case, change);
+    let method = method_of(
+        change["method"]
+            .as_str()
+            .unwrap_or_else(|| case["method"].as_str().unwrap()),
+    );
+    let kind_name = case["kind"].as_str().unwrap();
+    let tuning = Tuning {
+        own: change["own_id"].as_str().map(id_of),
+        trusts: (change["trusted"] != false).then(|| id_of(case["receiver_id"].as_str().unwrap())),
+        no_agreement: change["no_agreement"] == true,
+        max_lifetime: change["max_lifetime"].as_u64(),
+        skew: change["skew"].as_u64(),
     };
-    if let Some(own) = own {
-        builder = builder.x25519_identity(&hex(&own)).unwrap();
-    }
-    if let Some(seconds) = change["max_lifetime"].as_u64() {
-        builder = builder.max_lifetime(Duration::from_secs(seconds));
-    }
+    let builder_verifier = verifier(kind_name, case["sender_private"].as_str().unwrap(), &tuning);
+    let mut recipient = Recipient::from_value(&case["recipient"]).unwrap();
     if change["flip_key"] == true {
         recipient.key = flipped(recipient.key.to_vec()).try_into().unwrap();
     }
     if change["flip_proof"] == true {
         recipient.binding.proof = flipped(recipient.binding.proof.clone());
     }
-    if let Some(method) = change["binding_method"].as_str() {
-        recipient.binding.method = method.into();
+    if change["high_s"] == true {
+        // The same signature written with s' = n - s.
+        let signature = p256::ecdsa::Signature::from_slice(&recipient.binding.proof).unwrap();
+        let (r, s) = signature.split_scalars();
+        recipient.binding.proof = p256::ecdsa::Signature::from_scalars(r, -*s)
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+    }
+    if let Some(name) = change["binding_method"].as_str() {
+        recipient.binding.method = name.into();
     }
     if change["truncate_binding_key"] == true {
         recipient.binding.key.truncate(10);
     }
-    let request_id = change["request_id"]
+    let expected = change["expected"]
         .as_str()
-        .unwrap_or_else(|| base["request_id"].as_str().unwrap());
-    let method = change["method"]
-        .as_str()
-        .unwrap_or_else(|| base["method"].as_str().unwrap());
+        .map_or_else(|| id_of(case["receiver_id"].as_str().unwrap()), id_of);
     let now = change["now"]
         .as_u64()
-        .unwrap_or_else(|| base["now"].as_u64().unwrap());
-    builder.build().verify(
-        method_of(method),
-        request_id,
-        &recipient.key,
-        &recipient.binding,
-        now,
-    )
+        .unwrap_or_else(|| case["now"].as_u64().unwrap());
+    builder_verifier
+        .collector(&expected, method, &ctx, &recipient, now)
+        .map(|collector| collector.holder())
 }
 
-fn open_case(doc: &Value, case: &Value) -> Result<(), Error> {
-    let sealed_case = find(&doc["sealed"], case["base"].as_str().unwrap());
-    let base = find(&doc["bindings"], case["base"].as_str().unwrap());
-    let change = &case["change"];
-    let name = case["field"].as_str().unwrap();
-    let form = Form::parse(&sealed_case["schema"], &Limits::new()).unwrap();
-    let prover = prover_of(base);
-    let request_id = base["request_id"].as_str().unwrap();
-    let method = method_of(base["method"].as_str().unwrap());
+/// The receiver's side opens the sender's values.
+fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
+    let method = method_of(case["method"].as_str().unwrap());
+    let kind_name = case["kind"].as_str().unwrap();
+    let ctx = context_of(case, &json!({}));
+    let digest = ctx.digest(method);
+    let (prover_r, prover_s) = provers(case);
+    let (id_r, id_s) = (prover_r.id(), prover_s.id());
     let ikm_r = if change["other_receiver"] == true {
         ikm(100)
     } else {
-        hex(base["recipient_ikm"].as_str().unwrap())
+        hex(case["recipient_ikm"].as_str().unwrap())
     };
     let (private, public) = key_pair(&ikm_r);
+    let receiver_ctx = if let Some(id) = change["receiver_request_id"].as_str() {
+        Context {
+            request_id: id.into(),
+            ..ctx.clone()
+        }
+    } else {
+        ctx.clone()
+    };
     let receiver = Receiver::from_key_pair(
         method,
-        request_id.into(),
-        &form,
-        &prover,
+        &receiver_ctx,
+        &Limits::new(),
+        &prover_r,
+        &id_s,
         NOW,
-        Duration::from_secs(LIFETIME),
+        DEFAULT_LIFETIME,
         private,
         &public,
-    )
-    .unwrap();
-    let field = sealed_case["fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|field| field["field"] == name)
-        .unwrap();
-    let mut sealed = Sealed::from_value(&field["sealed"]).unwrap();
-    if change["flip_ct"] == true {
-        sealed.ct = flipped(sealed.ct);
-    }
-    if change["flip_enc"] == true {
-        sealed.enc = flipped(sealed.enc.to_vec()).try_into().unwrap();
-    }
-    if let Some(value) = change["seal_value"].as_str() {
-        let base_recipient = Recipient::from_value(&base["recipient"]).unwrap();
-        sealed = seal_with(
-            &base_recipient.key,
-            method,
-            request_id,
-            name,
-            value.as_bytes(),
-            &ikm(32),
+    )?;
+    let own_recipient = Recipient::from_value(&case["recipient"]).unwrap();
+    let tuning = Tuning {
+        trusts: (change["trusted"] != false).then_some(id_s),
+        ..Tuning::default()
+    };
+    let verifier_r = verifier(
+        kind_name,
+        case["receiver_private"].as_str().unwrap(),
+        &tuning,
+    );
+
+    let mut sealed = BTreeMap::new();
+    for field in case["fields"].as_array().unwrap() {
+        sealed.insert(
+            field["field"].as_str().unwrap().to_string(),
+            Sealed::from_value(&field["sealed"]).unwrap(),
         );
     }
-    let opened_as = change["as_field"].as_str().unwrap_or(name);
-    if change["request_id"].is_string() || change["method"].is_string() {
-        // The receiver is for another request: the ciphertext must not open there.
-        let other = Receiver::from_key_pair(
-            method_of(
-                change["method"]
-                    .as_str()
-                    .unwrap_or(base["method"].as_str().unwrap()),
-            ),
-            change["request_id"].as_str().unwrap_or(request_id).into(),
-            &form,
-            &prover,
-            NOW,
-            Duration::from_secs(LIFETIME),
-            key_pair(&ikm_r).0,
-            &key_pair(&ikm_r).1,
-        )
-        .unwrap();
-        return other.open(opened_as, &sealed).map(|_| ());
-    }
-    receiver.open(opened_as, &sealed).map(|_| ())
-}
-
-fn prover_of(base: &Value) -> Prover {
-    let private = hex(base["private"].as_str().unwrap());
-    match base["kind"].as_str().unwrap() {
-        "ecdsa" => Prover::ecdsa_p256(&private).unwrap(),
-        _ => {
-            let collector = hex(base["collector_private"].as_str().unwrap());
-            Prover::x25519(&private, &x25519_spki(&x25519_public(&collector))).unwrap()
+    let reseal = change.as_object().is_some_and(|map| {
+        map.keys()
+            .any(|key| key.starts_with("reseal_") || key == "seal_value")
+    });
+    let mut auth = super::Binding::from_value(&case["auth"]).unwrap();
+    if reseal {
+        // An authenticated sender who sealed the wrong thing: the binding is valid, the ciphertext is not for this field.
+        let (as_field, request_id, seal_method, seal_digest) = (
+            change["reseal_as_field"].as_str(),
+            change["reseal_request_id"]
+                .as_str()
+                .unwrap_or(&ctx.request_id),
+            change["reseal_method"].as_str().map_or(method, method_of),
+            change["reseal_message"].as_str().map_or(digest, |message| {
+                Context {
+                    message: message.into(),
+                    ..ctx.clone()
+                }
+                .digest(method)
+            }),
+        );
+        for (name, value) in case["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (f["field"].as_str().unwrap(), f["value"].as_str().unwrap()))
+        {
+            let target = if name == "password" {
+                as_field.unwrap_or(name)
+            } else {
+                name
+            };
+            let value = if name == "pin" {
+                change["seal_value"].as_str().unwrap_or(value)
+            } else {
+                value
+            };
+            let made = seal_with(
+                &own_recipient.key,
+                seal_method,
+                request_id,
+                &seal_digest,
+                target,
+                value.as_bytes(),
+                &ikm(32),
+            );
+            sealed.insert(name.to_string(), made);
         }
+        let payload = values_digest(&sealed);
+        auth = prover_s
+            .bind(
+                &Statement {
+                    kind: Kind::Values,
+                    method,
+                    request_id: &ctx.request_id,
+                    digest: &digest,
+                    key: &own_recipient.key,
+                    payload: &payload,
+                },
+                NOW + LIFETIME,
+                &id_r,
+            )
+            .unwrap();
     }
+    if let Some(name) = change["flip_ct"].as_str() {
+        let value = sealed.get_mut(name).unwrap();
+        value.ct = flipped(value.ct.clone());
+    }
+    if let Some(name) = change["flip_enc"].as_str() {
+        let value = sealed.get_mut(name).unwrap();
+        value.enc = flipped(value.enc.to_vec()).try_into().unwrap();
+    }
+    if let Some(pair) = change["swap"].as_array() {
+        let (x, y) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+        let (vx, vy) = (sealed[x].clone(), sealed[y].clone());
+        sealed.insert(x.into(), vy);
+        sealed.insert(y.into(), vx);
+    }
+    if let Some(name) = change["drop"].as_str() {
+        sealed.remove(name);
+    }
+    let expected = change["expected_sender"].as_str().map_or(id_s, id_of);
+    let plain = case["plain"].as_object().unwrap().clone();
+    receiver
+        .open_values(&verifier_r, &expected, &plain, &sealed, &auth, NOW)
+        .map(|_| ())
 }
 
 /// Everything the vectors say, checked from the file alone.
@@ -437,106 +645,116 @@ fn check(doc: &Value) {
         "the aad is bound"
     );
 
-    for item in doc["info"].as_array().unwrap() {
-        let info = field_info(
-            method_of(item["method"].as_str().unwrap()),
-            item["request_id"].as_str().unwrap(),
-            item["field"].as_str().unwrap(),
-        );
-        assert_eq!(HEXLOWER.encode(&info), item["info"].as_str().unwrap());
+    for item in doc["grammar"].as_array().unwrap() {
+        let text = item["text"].as_str().unwrap();
+        let valid = match item["kind"].as_str().unwrap() {
+            "integer" => json_integer(text).is_some(),
+            "number" => json_number(text).is_some(),
+            "base64url" => base64url_canonical(text),
+            _ => base64_canonical(text),
+        };
+        assert_eq!(valid, item["valid"], "{} {text:?}", item["kind"]);
     }
 
-    for base in doc["bindings"].as_array().unwrap() {
-        let recipient = Recipient::from_value(&base["recipient"]).unwrap();
-        let method = method_of(base["method"].as_str().unwrap());
-        let request_id = base["request_id"].as_str().unwrap();
+    for case in doc["bindings"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let method = method_of(case["method"].as_str().unwrap());
+        let ctx = context_of(case, &json!({}));
         assert_eq!(
-            recipient.to_value(),
-            base["recipient"],
-            "a recipient reads back as it was written"
+            HEXLOWER.encode(&ctx.digest(method)),
+            case["context_digest"].as_str().unwrap(),
+            "{name}"
         );
-        let signed = statement(
-            method,
-            request_id,
-            &recipient.key,
-            recipient.binding.expires,
-            recipient.binding.audience.as_ref(),
+        let (prover_r, prover_s) = provers(case);
+        assert_eq!(
+            prover_r.id().to_string(),
+            case["receiver_id"].as_str().unwrap()
         );
         assert_eq!(
-            HEXLOWER.encode(&signed),
-            base["statement"].as_str().unwrap()
+            prover_s.id().to_string(),
+            case["sender_id"].as_str().unwrap()
         );
-        let prover = prover_of(base);
-        assert_eq!(prover.id().to_string(), base["identity"].as_str().unwrap());
-        let case = json!({"base": base["name"], "change": {}});
-        assert_eq!(verify_case(doc, &case).unwrap(), prover.id());
-        // The same bytes from the same inputs: the signature is deterministic, the Diffie-Hellman proof always is.
-        let (private, public) = key_pair(&hex(base["recipient_ikm"].as_str().unwrap()));
+
+        // The receiver's key binding is the bytes the vector holds, and verifies at the sender.
+        let (private, public) = key_pair(&hex(case["recipient_ikm"].as_str().unwrap()));
         let remade = Receiver::from_key_pair(
             method,
-            request_id.into(),
-            &form(),
-            &prover,
+            &ctx,
+            &Limits::new(),
+            &prover_r,
+            &prover_s.id(),
             NOW,
-            Duration::from_secs(LIFETIME),
+            DEFAULT_LIFETIME,
             private,
             &public,
         )
         .unwrap();
-        assert_eq!(remade.recipient().to_value(), base["recipient"]);
-    }
+        assert_eq!(remade.recipient().to_value(), case["recipient"], "{name}");
+        assert_eq!(
+            verify_case(case, &json!({})).unwrap(),
+            prover_r.id(),
+            "{name}"
+        );
+        open_case(case, &json!({})).unwrap_or_else(|error| panic!("{name}: {error}"));
 
-    for entry in doc["sealed"].as_array().unwrap() {
-        let base = find(&doc["bindings"], entry["binding"].as_str().unwrap());
-        let form = Form::parse(&entry["schema"], &Limits::new()).unwrap();
-        let method = method_of(base["method"].as_str().unwrap());
-        let request_id = base["request_id"].as_str().unwrap();
-        let (private, public) = key_pair(&hex(base["recipient_ikm"].as_str().unwrap()));
-        let receiver = Receiver::from_key_pair(
-            method,
-            request_id.into(),
-            &form,
-            &prover_of(base),
-            NOW,
-            Duration::from_secs(LIFETIME),
-            private,
-            &public,
-        )
-        .unwrap();
-        let verifier = Verifier::builder()
-            .trust(base["identity"].as_str().unwrap().parse().unwrap())
-            .x25519_identity(&hex(base["collector_private"]
-                .as_str()
-                .unwrap_or(NOISE_COLLECTOR)))
-            .unwrap()
-            .build();
-        let collector = verifier
-            .collector(method, request_id, &form, receiver.recipient(), NOW)
+        // Sealing again with the same ephemeral keys, and authenticating again, gives the same bytes.
+        let tuning = Tuning {
+            trusts: Some(prover_r.id()),
+            ..Tuning::default()
+        };
+        let verifier_s = verifier(
+            case["kind"].as_str().unwrap(),
+            case["sender_private"].as_str().unwrap(),
+            &tuning,
+        );
+        let collector = verifier_s
+            .collector(&prover_r.id(), method, &ctx, remade.recipient(), NOW)
             .unwrap();
-        for field in entry["fields"].as_array().unwrap() {
-            let name = field["field"].as_str().unwrap();
-            let value = field["value"].as_str().unwrap();
-            let sealed = Sealed::from_value(&field["sealed"]).unwrap();
-            assert_eq!(
-                receiver.open(name, &sealed).unwrap().expose_str(),
-                value,
-                "{name}"
+        let mut sealed = BTreeMap::new();
+        for field in case["fields"].as_array().unwrap() {
+            let (field_name, value) = (
+                field["field"].as_str().unwrap(),
+                field["value"].as_str().unwrap(),
             );
-            // A fresh sealing opens too, though its bytes differ with the ephemeral key.
-            let fresh = collector.seal(name, value).unwrap();
-            assert_eq!(receiver.open(name, &fresh).unwrap().expose_str(), value);
-            assert_ne!(fresh, sealed);
+            let stored = Sealed::from_value(&field["sealed"]).unwrap();
+            let fresh = collector.seal(field_name, value).unwrap();
+            assert_ne!(fresh, stored, "a fresh sealing uses a fresh ephemeral key");
+            sealed.insert(field_name.to_string(), stored);
         }
+        assert_eq!(
+            HEXLOWER.encode(&values_digest(&sealed)),
+            case["values_digest"].as_str().unwrap()
+        );
+        let auth = collector
+            .authenticate(&prover_s, &sealed, NOW, DEFAULT_LIFETIME)
+            .unwrap();
+        assert_eq!(auth.to_value(), case["auth"], "{name}");
+        // The values open for the receiver.
+        let (private, public) = key_pair(&hex(case["recipient_ikm"].as_str().unwrap()));
+        let digest = ctx.digest(method);
+        for field in case["fields"].as_array().unwrap() {
+            let opened = open_with(
+                &private,
+                method,
+                &ctx.request_id,
+                &digest,
+                field["field"].as_str().unwrap(),
+                &Sealed::from_value(&field["sealed"]).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(opened, field["value"].as_str().unwrap().as_bytes());
+        }
+        let _ = public;
     }
 
     for item in doc["forms"]["accepted"].as_array().unwrap() {
-        let form = Form::parse(&item["schema"], &Limits::new())
+        let form = Form::parse_text(item["schema"].as_str().unwrap(), &Limits::new())
             .unwrap_or_else(|error| panic!("{}: {error}", item["name"]));
         let names = |secret: bool| -> Vec<String> {
             form.fields
                 .iter()
-                .filter(|field| field.secret == secret)
-                .map(|field| field.field.name.clone())
+                .filter(|f| f.secret == secret)
+                .map(|f| f.field.name.clone())
                 .collect()
         };
         assert_eq!(
@@ -559,8 +777,8 @@ fn check(doc: &Value) {
         );
     }
     for item in doc["forms"]["refused"].as_array().unwrap() {
-        let error =
-            Form::parse(&item["schema"], &Limits::new()).expect_err(item["name"].as_str().unwrap());
+        let error = Form::parse_text(item["schema"].as_str().unwrap(), &Limits::new())
+            .expect_err(item["name"].as_str().unwrap());
         assert_eq!(
             kind(&error),
             item["kind"].as_str().unwrap(),
@@ -570,17 +788,30 @@ fn check(doc: &Value) {
     }
 
     for item in doc["refusals"].as_array().unwrap() {
-        let error = match item["case"].as_str().unwrap() {
-            "verify" => verify_case(doc, item).expect_err(item["name"].as_str().unwrap()),
-            _ => open_case(doc, item).expect_err(item["name"].as_str().unwrap()),
+        let case = find(&doc["bindings"], item["base"].as_str().unwrap());
+        let result = if item["case"] == "verify" {
+            verify_case(case, &item["change"]).map(|_| ())
+        } else {
+            open_case(case, &item["change"])
         };
-        assert_eq!(
-            kind(&error),
-            item["expect"].as_str().unwrap(),
-            "{}: {error}",
-            item["name"]
-        );
+        let name = item["name"].as_str().unwrap();
+        match (item["expect"].as_str().unwrap(), result) {
+            ("ok", Ok(())) => {}
+            ("ok", Err(error)) => panic!("{name}: refused: {error}"),
+            (_, Ok(())) => panic!("{name}: taken"),
+            (want, Err(error)) => assert_eq!(kind(&error), want, "{name}: {error}"),
+        }
     }
+}
+
+/// The vectors this crate writes: everything but the RFC's section.
+fn generate() -> Map<String, Value> {
+    let mut out = Map::new();
+    out.insert("grammar".into(), grammar());
+    out.insert("bindings".into(), Value::Array(base_cases()));
+    out.insert("forms".into(), forms());
+    out.insert("refusals".into(), refusals());
+    out
 }
 
 #[test]
@@ -595,6 +826,8 @@ fn vectors_are_current() {
         serde_json::from_str(VECTORS).expect("vectors/secret.json is JSON");
     let made = generate();
     if std::env::var_os("COQUI_ACP_WRITE_VECTORS").is_some() {
+        doc.remove("sealed");
+        doc.remove("info");
         for (key, value) in made {
             doc.insert(key, value);
         }

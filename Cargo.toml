@@ -62,13 +62,10 @@ hpke = { version = "0.15.1", default-features = false, features = ["alloc", "get
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8"] }
 # The extension's Diffie-Hellman proof for a peer identity that cannot sign (the noise method's X25519 static key), at hpke's version.
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
-# The proof's key derivation and tag.
-hkdf = { version = "0.13", default-features = false }
-hmac = { version = "0.13", default-features = false }
+# The proof's key derivation (HKDF, RFC 5869, is two HMACs here) and tag; its state is zeroed when dropped.
+hmac = { version = "0.13", default-features = false, features = ["zeroize"] }
 # Secrets that are zeroed when dropped.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-# Constant-time tag comparison.
-subtle = { version = "2", default-features = false }
 
 # `antigravity`: the one RFC 3339 reader this workspace uses.
 time = { version = "0.3", default-features = false, features = ["parsing"] }

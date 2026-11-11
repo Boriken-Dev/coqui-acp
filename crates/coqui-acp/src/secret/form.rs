@@ -106,20 +106,107 @@ pub struct Form {
     limits: Limits,
 }
 
-/// Standard base64, with or without its padding.
+/// Standard base64, canonical: padded, with zero trailing bits.
 const BASE64: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
 );
 
+/// The largest whole number every language the extension is written in holds exactly: 2^53 - 1.
+const MAX_SAFE: i64 = 9_007_199_254_740_991;
+
+/// A whole number as text: an optional minus, then `0` or a digit 1 to 9 and more digits, within `MAX_SAFE`.
+pub(crate) fn json_integer(text: &str) -> Option<i64> {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let plain = !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'));
+    if !plain || digits.len() > 16 {
+        return None;
+    }
+    text.parse::<i64>().ok().filter(|at| at.abs() <= MAX_SAFE)
+}
+
+/// A number as text in JSON's grammar (an integer part as above, an optional fraction of digits, an optional exponent), finite.
+pub(crate) fn json_number(text: &str) -> Option<f64> {
+    let rest = text.strip_prefix('-').unwrap_or(text);
+    let int_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let int = &rest[..int_len];
+    if int.is_empty() || (int.len() > 1 && int.starts_with('0')) {
+        return None;
+    }
+    let mut rest = &rest[int_len..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let len = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if len == 0 {
+            return None;
+        }
+        rest = &fraction[len..];
+    }
+    if let Some(exponent) = rest.strip_prefix(['e', 'E']) {
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        if exponent.is_empty() || !exponent.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        rest = "";
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    text.parse::<f64>().ok().filter(|at| at.is_finite())
+}
+
+/// Canonical unpadded base64url: no padding, an alphabet of its own, zero trailing bits.
+pub(crate) fn base64url_canonical(text: &str) -> bool {
+    general_purpose::URL_SAFE_NO_PAD.decode(text).is_ok()
+}
+
+/// Canonical standard base64.
+pub(crate) fn base64_canonical(text: &str) -> bool {
+    BASE64.decode(text).is_ok()
+}
+
+/// The keywords that would let a secret field's schema say more than what it is, or make a frontend draw it as something else.
+const SECRET_DENIED: [&str; 14] = [
+    "default",
+    "const",
+    "enum",
+    "oneOf",
+    "examples",
+    "anyOf",
+    "allOf",
+    "pattern",
+    "if",
+    "then",
+    "else",
+    "not",
+    "$ref",
+    "dependentSchemas",
+];
+
 impl Form {
-    /// Reads a schema, or says which rule it breaks. The schema is the agent's, untrusted.
+    /// Reads a schema from the JSON text that was sent, or says which rule it breaks. The schema is the agent's, untrusted. Only a
+    /// field's own `secret` mark says it is secret: a frontend masks or hides a value from [`FormField::secret`] alone, never from
+    /// `format`, a title or a name.
     ///
     /// # Errors
     /// [`Error::Schema`] for a schema that is not an object with properties, one over a limit, a name that is empty, long or holds a
     /// control character, a property that is no object or whose type no control can show, a `required` that is no list of the
     /// properties' names, and a secret field that is a choice, a flag or a list, or carries a `default`, `const`, `enum`,
     /// `oneOf` or `examples` (the form would put a value in the agent's text).
+    pub fn parse_text(schema: &str, limits: &Limits) -> Result<Self, Error> {
+        if schema.len() > limits.schema_bytes {
+            return Err(Error::Schema("the schema is larger than the limit"));
+        }
+        let value: Value =
+            serde_json::from_str(schema).map_err(|_| Error::Schema("the schema is not JSON"))?;
+        Self::parse(&value, limits)
+    }
+
+    /// Reads a schema already parsed; see [`Form::parse_text`], which is what a message's text is read with.
+    ///
+    /// # Errors
+    /// The same as [`Form::parse_text`].
     pub fn parse(schema: &Value, limits: &Limits) -> Result<Self, Error> {
         let schema = schema
             .as_object()
@@ -184,7 +271,22 @@ impl Form {
                     "a property's type is one no control can show",
                 ));
             }
-            let secret = flag(property, "writeOnly") || flag(property, "x-sensitive");
+            let secret = flag(property, "writeOnly")? | flag(property, "x-sensitive")?;
+            if !secret && property.get("format").and_then(Value::as_str) == Some("password") {
+                return Err(Error::Schema(
+                    "a password format without writeOnly or x-sensitive",
+                ));
+            }
+            if let FieldKind::Integer {
+                minimum, maximum, ..
+            } = &kind
+                && minimum
+                    .iter()
+                    .chain(maximum.iter())
+                    .any(|bound| bound.abs() > MAX_SAFE)
+            {
+                return Err(Error::Schema("a whole-number bound beyond 2^53 - 1"));
+            }
             if secret {
                 if !matches!(
                     kind,
@@ -192,10 +294,7 @@ impl Form {
                 ) {
                     return Err(Error::Schema("a secret field is not text or a number"));
                 }
-                if ["default", "const", "enum", "oneOf", "examples"]
-                    .iter()
-                    .any(|key| property.contains_key(*key))
-                {
+                if SECRET_DENIED.iter().any(|key| property.contains_key(*key)) {
                     return Err(Error::Schema(
                         "a secret field carries a value or a choice in the schema",
                     ));
@@ -312,24 +411,20 @@ impl Form {
                 min_length.is_none_or(|least| length >= least)
                     && max_length.is_none_or(|most| length <= most)
                     && match field.encoding.as_deref() {
-                        Some("base64") => BASE64.decode(text).is_ok(),
-                        Some("base64url") => general_purpose::URL_SAFE_NO_PAD
-                            .decode(text.trim_end_matches('='))
-                            .is_ok(),
+                        Some("base64") => base64_canonical(text),
+                        Some("base64url") => base64url_canonical(text),
                         _ => true,
                     }
             }
             FieldKind::Integer {
                 minimum, maximum, ..
-            } => text.parse::<i64>().is_ok_and(|at| {
+            } => json_integer(text).is_some_and(|at| {
                 minimum.is_none_or(|least| at >= least) && maximum.is_none_or(|most| at <= most)
             }),
             FieldKind::Number {
                 minimum, maximum, ..
-            } => text.parse::<f64>().is_ok_and(|at| {
-                at.is_finite()
-                    && minimum.is_none_or(|least| at >= least)
-                    && maximum.is_none_or(|most| at <= most)
+            } => json_number(text).is_some_and(|at| {
+                minimum.is_none_or(|least| at >= least) && maximum.is_none_or(|most| at <= most)
             }),
             _ => false,
         };
@@ -341,6 +436,10 @@ impl Form {
     }
 }
 
-fn flag(property: &Map<String, Value>, key: &str) -> bool {
-    property.get(key).and_then(Value::as_bool) == Some(true)
+fn flag(property: &Map<String, Value>, key: &str) -> Result<bool, Error> {
+    match property.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(set)) => Ok(*set),
+        Some(_) => Err(Error::Schema("writeOnly or x-sensitive is not a boolean")),
+    }
 }

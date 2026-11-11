@@ -1,10 +1,12 @@
 //! Sealing a secret field to a per-request key, and opening it, by HPKE (RFC 9180) in base mode with DHKEM(X25519, HKDF-SHA256),
-//! HKDF-SHA256 and AES-128-GCM. The `info` of each field names the extension, the method, the request and the field, so a
-//! ciphertext opens only for the field and request it was made for.
+//! HKDF-SHA256 and AES-128-GCM. The `info` of each field names the extension, the method, the request, the digest of what the
+//! person was asked, and the field, so a ciphertext opens only for the field and request it was made for. The sealed values are
+//! then bound, as a set, to the identity that sent them.
 
-use super::binding::{Binding, Method, Prover, Verifier};
+use super::binding::{Binding, IdentityId, Kind, Method, Prover, Statement, Verifier};
+use super::context::Context;
 use super::error::Error;
-use super::form::Form;
+use super::form::{Form, Limits};
 use super::{b64u, b64u_decode};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -17,6 +19,7 @@ use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 type Kem = X25519HkdfSha256;
@@ -25,7 +28,12 @@ type PublicKey = <Kem as KemTrait>::PublicKey;
 type EncappedKey = <Kem as KemTrait>::EncappedKey;
 
 const INFO_LABEL: &[u8] = b"dev.boriken.coqui.acp/secret/v1 field";
+const VALUES_DIGEST_LABEL: &[u8] = b"dev.boriken.coqui.acp/secret/v1 values digest";
 const TAG_BYTES: usize = 16;
+
+/// How long a receiver's binding lasts by default: well under the 5 minutes a collector accepts, so a binding made now still
+/// verifies at a peer whose clock is behind by the default skew.
+pub const DEFAULT_LIFETIME: Duration = Duration::from_secs(240);
 
 /// A sealed field as it travels: HPKE's encapsulated key and the ciphertext with its tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,7 +111,7 @@ impl fmt::Debug for SecretValue {
 pub struct Recipient {
     /// The X25519 public key the fields are sealed to.
     pub key: [u8; 32],
-    /// Why the collector may believe the key is the receiver's.
+    /// Why the collector may believe the key is the receiver's, for this request and what the person is asked.
     pub binding: Binding,
 }
 
@@ -151,19 +159,40 @@ pub struct Opened {
     pub secrets: BTreeMap<String, SecretValue>,
 }
 
-/// The `info` of one field: the extension, the method, the request and the field, each with a 4-byte length.
-fn info(method: Method, request_id: &str, field: &str) -> Vec<u8> {
+fn lp(out: &mut Vec<u8>, part: &[u8]) {
+    out.extend_from_slice(&(part.len() as u32).to_be_bytes());
+    out.extend_from_slice(part);
+}
+
+/// The `info` of one field: the extension, the method, the request, the digest of what was asked, and the field, each with a
+/// 4-byte length.
+pub(crate) fn info(method: Method, request_id: &str, digest: &[u8; 32], field: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for part in [
         INFO_LABEL,
         method.as_str().as_bytes(),
         request_id.as_bytes(),
+        digest,
         field.as_bytes(),
     ] {
-        out.extend_from_slice(&(part.len() as u32).to_be_bytes());
-        out.extend_from_slice(part);
+        lp(&mut out, part);
     }
     out
+}
+
+/// The digest of a set of sealed values, in the order of their names: what the sender's binding covers.
+pub(crate) fn values_digest(sealed: &BTreeMap<String, Sealed>) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update((VALUES_DIGEST_LABEL.len() as u32).to_be_bytes());
+    hash.update(VALUES_DIGEST_LABEL);
+    for (name, value) in sealed {
+        hash.update((name.len() as u32).to_be_bytes());
+        hash.update(name.as_bytes());
+        hash.update(value.enc);
+        hash.update((value.ct.len() as u32).to_be_bytes());
+        hash.update(&value.ct);
+    }
+    hash.finalize().into()
 }
 
 fn seal_buffer(
@@ -218,11 +247,23 @@ fn open(private: &PrivateKey, info: &[u8], sealed: &Sealed) -> Result<Zeroizing<
     Ok(buffer)
 }
 
+fn check_id(request_id: &str) -> Result<(), Error> {
+    if request_id.is_empty() || request_id.len() > 128 || request_id.chars().any(char::is_control) {
+        return Err(Error::Malformed(
+            "a request id is 1 to 128 bytes with no control character",
+        ));
+    }
+    Ok(())
+}
+
 /// The receiving side of one request: it holds the per-request private key, and gives the collector the public key with a binding.
-/// The host is the receiver of a `request`, the frontend of a `show`.
+/// The host is the receiver of a `request`, the frontend of a `show`. It opens one answer: [`Receiver::open_values`] consumes it, and
+/// whoever owns a receiver remembers the request id for as long as a binding can verify (the verifier's `max_lifetime` and `skew`)
+/// so that the same request is not answered twice.
 pub struct Receiver {
     method: Method,
     request_id: String,
+    digest: [u8; 32],
     form: Form,
     private: PrivateKey,
     recipient: Recipient,
@@ -238,58 +279,62 @@ impl fmt::Debug for Receiver {
 }
 
 impl Receiver {
-    /// Makes a key pair for one request and binds the public key to `prover`'s identity until `now` plus `lifetime` (Unix seconds).
+    /// Makes a key pair for one request and binds the public key to `prover`'s identity, for what `context` asks, until `now` plus
+    /// `lifetime` (Unix seconds; [`DEFAULT_LIFETIME`]), for the collector `audience`.
     ///
     /// # Errors
-    /// [`Error::Malformed`] for an empty or over-long request id; [`Error::Seal`] when the binding cannot be made.
+    /// [`Error::Schema`] for a schema that is no secret form under `limits`; [`Error::Malformed`] for a request id that is empty,
+    /// long or holds a control character; [`Error::WrongAudience`] for an audience a Diffie-Hellman identity was not paired with;
+    /// [`Error::Seal`] when the binding cannot be made.
     pub fn new(
         method: Method,
-        request_id: impl Into<String>,
-        form: &Form,
+        context: &Context,
+        limits: &Limits,
         prover: &Prover,
+        audience: &IdentityId,
         now: u64,
         lifetime: Duration,
     ) -> Result<Self, Error> {
         let (private, public) = Kem::gen_keypair();
         Self::from_key_pair(
-            method,
-            request_id.into(),
-            form,
-            prover,
-            now,
-            lifetime,
-            private,
-            &public,
+            method, context, limits, prover, audience, now, lifetime, private, &public,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_key_pair(
         method: Method,
-        request_id: String,
-        form: &Form,
+        context: &Context,
+        limits: &Limits,
         prover: &Prover,
+        audience: &IdentityId,
         now: u64,
         lifetime: Duration,
         private: PrivateKey,
         public: &PublicKey,
     ) -> Result<Self, Error> {
-        check_id(&request_id)?;
+        check_id(&context.request_id)?;
+        let form = Form::parse_text(&context.schema, limits)?;
+        let digest = context.digest(method);
         let key: [u8; 32] = public
             .to_bytes()
             .as_slice()
             .try_into()
             .map_err(|_| Error::Seal)?;
-        let binding = prover.bind(
+        let statement = Statement {
+            kind: Kind::Key,
             method,
-            &request_id,
-            &key,
-            now.saturating_add(lifetime.as_secs()),
-        )?;
+            request_id: &context.request_id,
+            digest: &digest,
+            key: &key,
+            payload: &[],
+        };
+        let binding = prover.bind(&statement, now.saturating_add(lifetime.as_secs()), audience)?;
         Ok(Self {
             method,
-            request_id,
-            form: form.clone(),
+            request_id: context.request_id.clone(),
+            digest,
+            form,
             private,
             recipient: Recipient { key, binding },
         })
@@ -308,38 +353,54 @@ impl Receiver {
     }
 
     /// Opens one secret field.
-    ///
-    /// # Errors
-    /// [`Error::Field`] for a name that is no secret question; [`Error::Open`] for a ciphertext made for another request or field
-    /// or another key, or damaged; [`Error::Field`] again for a value that does not fit its question.
-    pub fn open(&self, name: &str, sealed: &Sealed) -> Result<SecretValue, Error> {
+    pub(crate) fn open_field(&self, name: &str, sealed: &Sealed) -> Result<SecretValue, Error> {
         if !self.form.field(name).is_some_and(|field| field.secret) {
             return Err(Error::Field("not a secret question of the form"));
         }
         let plain = open(
             &self.private,
-            &info(self.method, &self.request_id, name),
+            &info(self.method, &self.request_id, &self.digest, name),
             sealed,
         )?;
         self.form.check_secret(name, &plain)?;
         Ok(SecretValue(plain))
     }
 
-    /// Opens an answer: checks the plain values against the form and opens every sealed one.
+    /// Opens an answer, once: checks that `sender`, an identity `verifier` knows, sent these sealed values (`auth` binds them, as a
+    /// set, to this request and key), checks the plain values against the form, and opens every sealed one. Nothing is opened before
+    /// the sender is verified.
     ///
     /// # Errors
-    /// Any of [`Receiver::open`]'s, and [`Error::Field`] for a name the form lacks, a plain value for a secret question, a sealed one
-    /// for a plain question, or a required question left out.
+    /// The refusals of the binding ([`Error::UnknownIdentity`] for a sender other than `sender`, [`Error::BadProof`] for sealed
+    /// values that are not the ones `auth` covers, [`Error::Expired`], [`Error::WrongAudience`], ...); [`Error::Field`] for a name the
+    /// form lacks, a plain value for a secret question, a sealed one for a plain question, a required question left out or a value that
+    /// does not fit; [`Error::Open`] for a ciphertext made for another request, field or key, or damaged.
     pub fn open_values(
-        &self,
+        self,
+        verifier: &Verifier,
+        sender: &IdentityId,
         plain: &Map<String, Value>,
         sealed: &BTreeMap<String, Sealed>,
+        auth: &Binding,
+        now: u64,
     ) -> Result<Opened, Error> {
         self.form.check_plain(plain)?;
         self.form.check_sealed(sealed.keys().map(String::as_str))?;
+        let payload = values_digest(sealed);
+        let statement = Statement {
+            kind: Kind::Values,
+            method: self.method,
+            request_id: &self.request_id,
+            digest: &self.digest,
+            key: &self.recipient.key,
+            payload: &payload,
+        };
+        if verifier.verify(&statement, auth, now)? != *sender {
+            return Err(Error::UnknownIdentity);
+        }
         let secrets = sealed
             .iter()
-            .map(|(name, value)| Ok((name.clone(), self.open(name, value)?)))
+            .map(|(name, value)| Ok((name.clone(), self.open_field(name, value)?)))
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
         Ok(Opened {
             plain: plain.clone(),
@@ -348,46 +409,55 @@ impl Receiver {
     }
 }
 
-fn check_id(request_id: &str) -> Result<(), Error> {
-    if request_id.is_empty() || request_id.len() > 128 || request_id.chars().any(char::is_control) {
-        return Err(Error::Malformed(
-            "a request id is 1 to 128 bytes with no control character",
-        ));
-    }
-    Ok(())
-}
-
 /// The collecting side of one request, after it checked the receiver's key: it seals each secret value to that key.
 #[derive(Debug)]
 pub struct Collector {
     method: Method,
     request_id: String,
+    digest: [u8; 32],
     form: Form,
     key: [u8; 32],
-    holder: super::binding::IdentityId,
+    holder: IdentityId,
 }
 
 impl Verifier {
-    /// Checks the receiver's key and its binding at `now` (Unix seconds), and returns the collector that seals to it.
+    /// Checks what the person is asked and the receiver's key and its binding at `now` (Unix seconds), and returns the collector that
+    /// seals to it. The binding covers the digest of `context` as this side received it, so a form changed on the way is refused here
+    /// before it is drawn. Only `expected`, the identity this request must come from, is taken: another that this verifier knows is
+    /// refused.
     ///
     /// # Errors
-    /// The refusals of the binding ([`Error::UnknownIdentity`], [`Error::BadProof`], [`Error::Expired`], [`Error::WrongAudience`], ...).
+    /// The refusals of the binding ([`Error::UnknownIdentity`], [`Error::BadProof`], [`Error::Expired`], [`Error::WrongAudience`], ...)
+    /// and [`Error::Schema`] for a form this verifier's limits do not take.
     pub fn collector(
         &self,
+        expected: &IdentityId,
         method: Method,
-        request_id: &str,
-        form: &Form,
+        context: &Context,
         recipient: &Recipient,
         now: u64,
     ) -> Result<Collector, Error> {
-        check_id(request_id)?;
-        let holder = self.verify(method, request_id, &recipient.key, &recipient.binding, now)?;
+        check_id(&context.request_id)?;
+        let digest = context.digest(method);
+        let statement = Statement {
+            kind: Kind::Key,
+            method,
+            request_id: &context.request_id,
+            digest: &digest,
+            key: &recipient.key,
+            payload: &[],
+        };
+        let holder = self.verify(&statement, &recipient.binding, now)?;
+        if holder != *expected {
+            return Err(Error::UnknownIdentity);
+        }
         PublicKey::from_bytes(&recipient.key)
             .map_err(|_| Error::Key("not an X25519 public key"))?;
         Ok(Collector {
             method,
-            request_id: request_id.into(),
-            form: form.clone(),
+            request_id: context.request_id.clone(),
+            digest,
+            form: Form::parse_text(&context.schema, &self.limits)?,
             key: recipient.key,
             holder,
         })
@@ -397,8 +467,14 @@ impl Verifier {
 impl Collector {
     /// The identity that stands behind the key.
     #[must_use]
-    pub const fn holder(&self) -> super::binding::IdentityId {
+    pub const fn holder(&self) -> IdentityId {
         self.holder
+    }
+
+    /// The form this collector draws or sends, read from the context its binding covers.
+    #[must_use]
+    pub const fn form(&self) -> &Form {
+        &self.form
     }
 
     /// Seals the value of secret field `name`: UTF-8 text, or a number as decimal text.
@@ -409,8 +485,36 @@ impl Collector {
         self.form.check_secret(name, value.as_bytes())?;
         seal(
             &self.key,
-            &info(self.method, &self.request_id, name),
+            &info(self.method, &self.request_id, &self.digest, name),
             value.as_bytes(),
+        )
+    }
+
+    /// Binds the sealed values, as a set, to `prover`'s identity for this request and key until `now` plus `lifetime`: what the
+    /// receiver verifies before it opens anything. `sealed` is every sealed value of the answer.
+    ///
+    /// # Errors
+    /// [`Error::WrongAudience`] for a Diffie-Hellman identity not paired with the receiver's; [`Error::Seal`].
+    pub fn authenticate(
+        &self,
+        prover: &Prover,
+        sealed: &BTreeMap<String, Sealed>,
+        now: u64,
+        lifetime: Duration,
+    ) -> Result<Binding, Error> {
+        let payload = values_digest(sealed);
+        let statement = Statement {
+            kind: Kind::Values,
+            method: self.method,
+            request_id: &self.request_id,
+            digest: &self.digest,
+            key: &self.key,
+            payload: &payload,
+        };
+        prover.bind(
+            &statement,
+            now.saturating_add(lifetime.as_secs()),
+            &self.holder,
         )
     }
 
@@ -452,30 +556,6 @@ pub(crate) mod testing {
 
     pub(crate) fn key_pair(ikm: &[u8]) -> (PrivateKey, PublicKey) {
         Kem::derive_keypair(ikm)
-    }
-
-    pub(crate) fn seal_with(
-        key: &[u8; 32],
-        method: Method,
-        request_id: &str,
-        field: &str,
-        value: &[u8],
-        ikm: &[u8],
-    ) -> Sealed {
-        let pk = PublicKey::from_bytes(key).unwrap();
-        let info = info(method, request_id, field);
-        seal_buffer(value, |buffer| {
-            hpke::single_shot_seal_inout_detached_with_rng::<AesGcm128, HkdfSha256, Kem>(
-                &OpModeS::Base,
-                &pk,
-                &info,
-                InOutBuf::from(buffer),
-                &[],
-                &mut Fixed(ikm),
-            )
-            .map_err(|_| Error::Seal)
-        })
-        .unwrap()
     }
 
     pub(crate) fn seal_raw(
@@ -523,7 +603,37 @@ pub(crate) mod testing {
         Ok(buffer)
     }
 
-    pub(crate) fn field_info(method: Method, request_id: &str, field: &str) -> Vec<u8> {
-        info(method, request_id, field)
+    pub(crate) fn seal_with(
+        key: &[u8; 32],
+        method: Method,
+        request_id: &str,
+        digest: &[u8; 32],
+        field: &str,
+        value: &[u8],
+        ikm: &[u8],
+    ) -> Sealed {
+        seal_raw(
+            key,
+            &info(method, request_id, digest, field),
+            value,
+            &[],
+            ikm,
+        )
+    }
+
+    pub(crate) fn open_with(
+        private: &PrivateKey,
+        method: Method,
+        request_id: &str,
+        digest: &[u8; 32],
+        field: &str,
+        sealed: &Sealed,
+    ) -> Result<Vec<u8>, Error> {
+        open_raw(
+            private,
+            &info(method, request_id, digest, field),
+            &[],
+            sealed,
+        )
     }
 }
