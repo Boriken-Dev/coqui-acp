@@ -548,6 +548,7 @@ final class AcpSecretContext {
     required this.message,
     required this.schema,
     this.form,
+    this.values,
   });
 
   final String sessionId, requestId, message;
@@ -558,7 +559,11 @@ final class AcpSecretContext {
   /// The layout as the JSON text that was sent, when there is one.
   final String? form;
 
-  /// SHA-256 of the method and every part, each with a 4-byte length, and a byte that says whether a layout was sent.
+  /// For a show: the values that are not secret, as the JSON object text that was sent, covered like the rest.
+  final String? values;
+
+  /// SHA-256 of the method and every part, each with a 4-byte length, a byte that says whether a layout was sent and one that says
+  /// whether plain values were.
   Uint8List digest(AcpSecretMethod method) => _sha256(
     _concat([
       _lp(ascii.encode('dev.boriken.coqui.acp/secret/v1 context')),
@@ -569,6 +574,8 @@ final class AcpSecretContext {
       _lp(utf8.encode(schema)),
       _lp([if (form != null) 1 else 0]),
       _lp(utf8.encode(form ?? '')),
+      _lp([if (values != null) 1 else 0]),
+      _lp(utf8.encode(values ?? '')),
     ]),
   );
 }
@@ -757,8 +764,29 @@ Uint8List _statement(
   _lp(audience.bytes),
 ]);
 
-/// The digest of a set of sealed values, in the byte order of their names: what the sender's binding covers.
-Uint8List _valuesDigest(Map<String, AcpSealed> sealed) {
+/// The plain values of an answer or a show, from the JSON object text that was sent.
+Map<String, Object?> _plainValues(String text) {
+  final Object? value;
+  try {
+    value = jsonDecode(text);
+  } on FormatException {
+    throw _fail(
+      AcpSecretFailure.malformed,
+      'the plain values are not a JSON object',
+    );
+  }
+  if (value is! Map) {
+    throw _fail(
+      AcpSecretFailure.malformed,
+      'the plain values are not a JSON object',
+    );
+  }
+  return value.cast<String, Object?>();
+}
+
+/// The digest of a whole answer: the plain values as the JSON object text that was sent, then the sealed values in the byte order of
+/// their names. It is what the sender's binding covers.
+Uint8List _valuesDigest(String plain, Map<String, AcpSealed> sealed) {
   final names = sealed.keys.toList()
     ..sort((a, b) {
       final x = utf8.encode(a), y = utf8.encode(b);
@@ -772,6 +800,10 @@ Uint8List _valuesDigest(Map<String, AcpSealed> sealed) {
     _concat([
       (ByteData(4)..setUint32(0, label.length)).buffer.asUint8List(),
       label,
+      (ByteData(
+        4,
+      )..setUint32(0, utf8.encode(plain).length)).buffer.asUint8List(),
+      utf8.encode(plain),
       for (final name in names) ...[
         (ByteData(
           4,
@@ -1192,10 +1224,12 @@ final class AcpSecretCollector {
     }
   }
 
-  /// Binds the sealed values, as a set, to [prover]'s identity for this request and key until [now] plus [lifetime]: what the receiver
-  /// verifies before it opens anything. [sealed] is every sealed value of the answer.
+  /// Binds the whole answer to [prover]'s identity for this request and key until [now] plus [lifetime]: what the receiver verifies
+  /// before it reads or opens anything. [plain] is the JSON object text of the plain values exactly as it will be sent (for a show, the
+  /// open step's values), and [sealed] is every sealed value of the answer.
   Future<AcpSecretBinding> authenticate(
     AcpSecretProver prover,
+    String plain,
     Map<String, AcpSealed> sealed,
     int now, {
     Duration lifetime = acpSecretDefaultLifetime,
@@ -1205,7 +1239,7 @@ final class AcpSecretCollector {
     requestId,
     _digest,
     _key,
-    _valuesDigest(sealed),
+    _valuesDigest(plain, sealed),
     now + lifetime.inSeconds,
     holder,
   );
@@ -1326,13 +1360,14 @@ final class AcpSecretReceiver {
     return AcpSecretValue(plain);
   }
 
-  /// Opens an answer, once: checks that [sender], an identity [verifier] knows, sent these sealed values ([auth] binds them, as a set,
-  /// to this request and key), checks the plain values against the form, and opens every sealed one. Nothing is opened before the
-  /// sender is verified. The private key is overwritten whatever the outcome.
+  /// Opens an answer, once: checks that [sender], an identity [verifier] knows, sent this answer ([auth] binds the plain values, as
+  /// the JSON object text that was sent, and the sealed ones, to this request and key), checks the plain values against the form, and
+  /// opens every sealed one. Nothing is read or opened before the sender is verified. For a show, [plain] is the text of the open
+  /// step's values. The private key is overwritten whatever the outcome.
   Future<AcpOpened> openValues(
     AcpSecretVerifier verifier,
     AcpIdentityId sender,
-    Map<String, Object?> plain,
+    String plain,
     Map<String, AcpSealed> sealed,
     AcpSecretBinding auth,
     int now,
@@ -1346,7 +1381,6 @@ final class AcpSecretReceiver {
     _used = true;
     final secrets = <String, AcpSecretValue>{};
     try {
-      form.checkPlain(plain);
       form.checkSealed(sealed.keys);
       final holder = await verifier._verify(
         _Kind.answer,
@@ -1354,15 +1388,17 @@ final class AcpSecretReceiver {
         requestId,
         _digest,
         recipient.key,
-        _valuesDigest(sealed),
+        _valuesDigest(plain, sealed),
         auth,
         now,
       );
       if (holder != sender) throw _fail(AcpSecretFailure.unknownIdentity);
+      final values = _plainValues(plain);
+      form.checkPlain(values);
       for (final MapEntry(:key, :value) in sealed.entries) {
         secrets[key] = await _open(key, value);
       }
-      return AcpOpened(Map.of(plain), secrets);
+      return AcpOpened(values, secrets);
     } on Object {
       for (final secret in secrets.values) {
         secret.clear();
@@ -1433,6 +1469,14 @@ AcpSecretContext _contextOf(Map map) => AcpSecretContext(
       'the form overlay is not JSON text',
     ),
   },
+  values: switch (map['values']) {
+    null => null,
+    final String values => values,
+    _ => throw _fail(
+      AcpSecretFailure.malformed,
+      'the values are not JSON text',
+    ),
+  },
 );
 
 Map<String, Object?> _contextJson(AcpSecretContext context) => {
@@ -1441,6 +1485,7 @@ Map<String, Object?> _contextJson(AcpSecretContext context) => {
   'message': context.message,
   'schema': context.schema,
   if (context.form != null) 'form': context.form,
+  if (context.values != null) 'values': context.values,
 };
 
 /// [acpSecretRequestMethod]'s parameters. The schema and the layout are JSON text, and these exact bytes are what the receiver's
@@ -1487,17 +1532,18 @@ sealed class AcpSecretRequestReply {
         return const AcpSecretCancelled();
       case 'accept':
         final values = _mapOf(map['values'], 'the values are not an object');
-        final plain = <String, Object?>{};
         final sealed = <String, AcpSealed>{};
         for (final MapEntry(:key, :value) in values.entries) {
-          if (isSecret(key)) {
-            sealed[key] = AcpSealed.fromJson(value);
-          } else {
-            plain[key] = value;
+          if (!isSecret(key)) {
+            throw _fail(
+              AcpSecretFailure.malformed,
+              'a plain value outside the plain text',
+            );
           }
+          sealed[key] = AcpSealed.fromJson(value);
         }
         return AcpSecretAccepted(
-          plain,
+          _textOf(map, 'plain', 'the answer has no plain values'),
           sealed,
           AcpSecretBinding.fromJson(map['auth']),
         );
@@ -1512,17 +1558,18 @@ sealed class AcpSecretRequestReply {
 final class AcpSecretAccepted extends AcpSecretRequestReply {
   const AcpSecretAccepted(this.plain, this.sealed, this.auth);
 
-  final Map<String, Object?> plain;
+  /// The plain answers as the JSON object text that is sent: these exact bytes are what [auth] covers.
+  final String plain;
   final Map<String, AcpSealed> sealed;
 
-  /// The sender's binding of [sealed], from [AcpSecretCollector.authenticate].
+  /// The sender's binding of the whole answer, from [AcpSecretCollector.authenticate].
   final AcpSecretBinding auth;
 
   @override
   Map<String, Object?> toJson() => {
     'action': 'accept',
+    'plain': plain,
     'values': {
-      ...plain,
       for (final MapEntry(:key, :value) in sealed.entries) key: value.toJson(),
     },
     'auth': auth.toJson(),
@@ -1545,21 +1592,19 @@ final class AcpSecretCancelled extends AcpSecretRequestReply {
 
 /// [acpSecretShowOpenMethod]'s parameters.
 final class AcpSecretShowOpen {
-  const AcpSecretShowOpen({required this.context, required this.values});
+  const AcpSecretShowOpen({required this.context});
 
+  /// What the person is shown; its `values` are the values that are not secret, as the JSON object text that was sent.
   final AcpSecretContext context;
 
-  /// The values that are not secret.
-  final Map<String, Object?> values;
-
-  Map<String, Object?> toJson() => {..._contextJson(context), 'values': values};
+  Map<String, Object?> toJson() => _contextJson(context);
 
   factory AcpSecretShowOpen.fromJson(Object? json) {
-    final map = _mapOf(json, 'the show is not an object');
-    return AcpSecretShowOpen(
-      context: _contextOf(map),
-      values: _mapOf(map['values'], 'the show has no values'),
-    );
+    final context = _contextOf(_mapOf(json, 'the show is not an object'));
+    if (context.values == null) {
+      throw _fail(AcpSecretFailure.malformed, 'the show has no values');
+    }
+    return AcpSecretShowOpen(context: context);
   }
 }
 
@@ -1705,6 +1750,7 @@ Uint8List secretValuesStatement(
   String requestId,
   List<int> digest,
   List<int> key,
+  String plain,
   Map<String, AcpSealed> sealed,
   int expires,
   AcpIdentityId audience,
@@ -1714,14 +1760,14 @@ Uint8List secretValuesStatement(
   requestId,
   digest,
   key,
-  _valuesDigest(sealed),
+  _valuesDigest(plain, sealed),
   expires,
   audience,
 );
 
-/// The digest of a set of sealed values.
-Uint8List secretValuesDigest(Map<String, AcpSealed> sealed) =>
-    _valuesDigest(sealed);
+/// The digest of a whole answer.
+Uint8List secretValuesDigest(String plain, Map<String, AcpSealed> sealed) =>
+    _valuesDigest(plain, sealed);
 
 /// The grammar of a whole number, a number and the two base64 forms, as text.
 bool secretGrammar(String kind, String text) => switch (kind) {

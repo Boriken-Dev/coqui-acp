@@ -47,6 +47,7 @@ AcpSecretContext contextOf(
     message: pick('message')! as String,
     schema: pick('schema')! as String,
     form: pick('form') as String?,
+    values: pick('values') as String?,
   );
 }
 
@@ -228,7 +229,12 @@ Future<void> openCase(
       recipient,
       now,
     );
-    auth = await collector.authenticate(proverS, sealed, now);
+    auth = await collector.authenticate(
+      proverS,
+      base['plain'] as String,
+      sealed,
+      now,
+    );
   }
   if (change['flip_ct'] != null) {
     final name = change['flip_ct'] as String;
@@ -250,7 +256,7 @@ Future<void> openCase(
     change['expected_sender'] == null
         ? idS
         : AcpIdentityId.parse(change['expected_sender'] as String),
-    (base['plain'] as Map).cast<String, Object?>(),
+    (change['plain'] ?? base['plain']) as String,
     sealed,
     auth,
     now,
@@ -361,7 +367,11 @@ void main() {
         expect(again.toJson(), field['sealed'], reason: '$name $fieldName');
         sealed[fieldName] = again;
       }
-      expect(hex(hooks.secretValuesDigest(sealed)), base['values_digest']);
+      final plain = base['plain'] as String;
+      expect(
+        hex(hooks.secretValuesDigest(plain, sealed)),
+        base['values_digest'],
+      );
       expect(
         hex(
           hooks.secretValuesStatement(
@@ -369,6 +379,7 @@ void main() {
             context.requestId,
             context.digest(method),
             receiver.recipient.key,
+            plain,
             sealed,
             now + 240,
             proverR.id,
@@ -376,7 +387,7 @@ void main() {
         ),
         base['values_statement'],
       );
-      final auth = await collector.authenticate(proverS, sealed, now);
+      final auth = await collector.authenticate(proverS, plain, sealed, now);
       expect(auth.toJson(), base['auth'], reason: name);
       await openCase(base, const {});
     }
@@ -617,10 +628,11 @@ void main() {
     final sealed = {
       'password': await collector.seal('password', 'correct horse'),
     };
+    const plain = '{"user":"ana"}';
     final reply = AcpSecretAccepted(
-      {'user': 'ana'},
+      plain,
       sealed,
-      await collector.authenticate(frontend, sealed, now),
+      await collector.authenticate(frontend, plain, sealed, now),
     );
     final text = jsonEncode(reply.toJson());
     expect(text, isNot(contains('correct horse')));
