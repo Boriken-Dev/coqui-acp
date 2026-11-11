@@ -110,6 +110,10 @@ offered, no session, no form, more than `maxElicitationFields` questions (64) or
 the form, every required field there and each value of its type within its bounds; otherwise `cancel` and an `AcpBlocked`. The
 Rust client does the same, as `vectors/elicitation.json` says. Everything in a form is the agent's text: show it as data.
 
+## Secrets
+
+The secret-prompt extension (`docs/secrets.md` in the repository) is `AcpSecret*`: `AcpSecretForm.parse` reads a JSON Schema form whose secret properties are `writeOnly` or `x-sensitive`; `AcpSecretReceiver.create` makes a key pair for one request and `recipient` is what the collector is sent, bound to the receiver's identity by an `AcpSecretProver` (`ecdsaP256` or `x25519`); `AcpSecretVerifier` checks that binding against the identities it knows and `collector` seals each secret field (`AcpSecretCollector.seal`); `receiver.openValues` opens an answer. `AcpSecretRequestParams`, `AcpSecretRequestReply`, `AcpSecretShowOpen`, `AcpSecretShowOpened`, `AcpSecretShowDeliver` and `AcpSecretsCapability` read and write the messages. Dart cannot zero memory, so `AcpSecretValue.clear` overwrites the bytes it holds and nothing prints them; ECDSA runs in pure Dart and is not constant-time. `vectors/secret.json` holds this and the Rust crate to the same bytes.
+
 ## Development
 
 ```sh
