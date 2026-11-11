@@ -1,25 +1,42 @@
-part of '../coqui_acp.dart';
+/// The secret-prompt extension, `docs/secrets.md`: a form whose secret fields travel sealed (HPKE, RFC 9180) to a per-request key that
+/// is bound to an identity the collector already knows, and sealed values the receiver opens only from the identity that sent them.
+/// The Rust crate holds the same, and vectors/secret.json holds both to it.
+library;
 
-// The secret-prompt extension, `docs/secrets.md`: a form whose secret fields travel sealed (HPKE, RFC 9180) to a per-request key that
-// is bound to an identity the collector already knows. The Rust crate holds the same, and vectors/secret.json holds both to it.
+import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:pointycastle/export.dart' as pc;
+
+import '../coqui_acp.dart';
+import 'hpke.dart' as hpke;
 
 /// The `_meta` key in which a frontend says it takes the extension.
 const acpSecretsCapability = 'dev.boriken.coqui.acp/secrets';
 
 /// The request that asks the person for values, some of them secret.
-const acpSecretRequestMethod = '_coqui/secret/request';
+const acpSecretRequestMethod = '_coqui_acp/secret_request';
 
-/// The request that shows the person values, some of them secret.
-const acpSecretShowMethod = '_coqui/secret/show';
+/// The first step of showing the person values: the host says what it will show, the frontend answers with its key.
+const acpSecretShowOpenMethod = '_coqui_acp/secret_show_open';
+
+/// The second step: the secret values, sealed to the key the first step gave. A frontend answers it only for a session and request id
+/// it has an open step pending for, and once.
+const acpSecretShowDeliverMethod = '_coqui_acp/secret_show_deliver';
 
 /// The extension's version.
 const acpSecretsVersion = 1;
 
-/// The binding method for an identity that signs: ECDSA over P-256 and SHA-256, IEEE P1363.
+/// The binding method for an identity that signs: ECDSA over P-256 and SHA-256, IEEE P1363, `s` low.
 const acpBindingEcdsa = 'ecdsa-p256-sha256';
 
 /// The binding method for an X25519 identity: HMAC-SHA-256 under a key derived from the two static keys' Diffie-Hellman.
 const acpBindingDh = 'x25519-hmac-sha256';
+
+/// How long a receiver's binding lasts by default: well under the 5 minutes a collector accepts, so it still verifies at a peer whose
+/// clock is behind by the default skew.
+const acpSecretDefaultLifetime = Duration(seconds: 240);
 
 /// Why a secret message was refused; the same names as the Rust crate's error kinds.
 enum AcpSecretFailure {
@@ -53,7 +70,7 @@ final class AcpSecretException implements Exception {
   String toString() => 'AcpSecretException(${failure.kind}: $reason)';
 }
 
-AcpSecretException _secretFailure(AcpSecretFailure failure, String reason) =>
+AcpSecretException _fail(AcpSecretFailure failure, [String reason = '']) =>
     AcpSecretException(failure, reason);
 
 /// How much of a form is taken; every value from 0 up is taken.
@@ -81,7 +98,8 @@ final class AcpSecretField {
   /// The question as a plain form has it.
   final AcpField field;
 
-  /// Whether its value is a secret: sealed on the way.
+  /// Whether its value is a secret: sealed on the way. A frontend masks or hides a value from this alone, never from `format`, a
+  /// title or a name.
   final bool secret;
 
   /// The schema's `contentEncoding`.
@@ -90,6 +108,105 @@ final class AcpSecretField {
   /// The schema's `contentMediaType`.
   final String? mediaType;
 }
+
+/// The largest whole number every language the extension is written in holds exactly: 2^53 - 1.
+const _maxSafe = 9007199254740991;
+
+bool _digitsOnly(String text) =>
+    text.isNotEmpty &&
+    text.codeUnits.every((unit) => unit >= 0x30 && unit <= 0x39);
+
+/// A whole number as text: an optional minus, then `0` or a digit 1 to 9 and more digits, within 2^53 - 1.
+int? _jsonInteger(String text) {
+  final digits = text.startsWith('-') ? text.substring(1) : text;
+  if (!_digitsOnly(digits) ||
+      (digits != '0' && digits.startsWith('0')) ||
+      digits.length > 16) {
+    return null;
+  }
+  final value = int.tryParse(text);
+  return value != null && value.abs() <= _maxSafe ? value : null;
+}
+
+/// A number as text in JSON's grammar, finite.
+double? _jsonNumber(String text) {
+  var rest = text.startsWith('-') ? text.substring(1) : text;
+  var length = 0;
+  while (length < rest.length && _digitsOnly(rest[length])) {
+    length++;
+  }
+  final whole = rest.substring(0, length);
+  if (whole.isEmpty || (whole.length > 1 && whole.startsWith('0'))) return null;
+  rest = rest.substring(length);
+  if (rest.startsWith('.')) {
+    var fraction = 1;
+    while (fraction < rest.length && _digitsOnly(rest[fraction])) {
+      fraction++;
+    }
+    if (fraction == 1) return null;
+    rest = rest.substring(fraction);
+  }
+  if (rest.startsWith('e') || rest.startsWith('E')) {
+    var exponent = rest.substring(1);
+    if (exponent.startsWith('+') || exponent.startsWith('-')) {
+      exponent = exponent.substring(1);
+    }
+    if (!_digitsOnly(exponent)) return null;
+    rest = '';
+  }
+  if (rest.isNotEmpty) return null;
+  final value = double.tryParse(text);
+  return value != null && value.isFinite ? value : null;
+}
+
+/// Canonical base64 (standard alphabet when [url] is false, padded) or base64url (unpadded): no other padding, no other alphabet,
+/// zero trailing bits.
+bool _base64Canonical(String text, {required bool url}) {
+  final alphabet = url
+      ? RegExp(r'^[A-Za-z0-9_-]*$')
+      : RegExp(r'^[A-Za-z0-9+/]*={0,2}$');
+  if (!alphabet.hasMatch(text)) return false;
+  if (url ? text.length % 4 == 1 : text.length % 4 != 0) return false;
+  try {
+    final bytes = url
+        ? base64Url.decode(text.padRight((text.length + 3) ~/ 4 * 4, '='))
+        : base64.decode(text);
+    final again = url ? _b64u(bytes) : base64.encode(bytes);
+    return again == text;
+  } on FormatException {
+    return false;
+  }
+}
+
+const _secretDenied = [
+  'default',
+  'const',
+  'enum',
+  'oneOf',
+  'examples',
+  'anyOf',
+  'allOf',
+  'pattern',
+  'if',
+  'then',
+  'else',
+  'not',
+  r'$ref',
+  'dependentSchemas',
+];
+
+bool _flag(Map property, String key) {
+  if (!property.containsKey(key)) return false;
+  final value = property[key];
+  if (value is bool) return value;
+  throw _fail(
+    AcpSecretFailure.schema,
+    'writeOnly or x-sensitive is not a boolean',
+  );
+}
+
+String? _text(Map map, String key) =>
+    map[key] is String ? map[key] as String : null;
 
 /// A form read from a schema whose secret properties are `writeOnly` or `x-sensitive`.
 final class AcpSecretForm {
@@ -100,13 +217,32 @@ final class AcpSecretForm {
   final List<AcpSecretField> fields;
   final AcpSecretLimits limits;
 
-  /// Reads a schema, or throws [AcpSecretException] (`schema`) naming the rule it breaks.
+  /// Reads a schema from the JSON text that was sent, or throws [AcpSecretException] (`schema`) naming the rule it breaks.
+  factory AcpSecretForm.parseText(
+    String schema, [
+    AcpSecretLimits limits = const AcpSecretLimits(),
+  ]) {
+    if (utf8.encode(schema).length > limits.schemaBytes) {
+      throw _fail(
+        AcpSecretFailure.schema,
+        'the schema is larger than the limit',
+      );
+    }
+    final Object? value;
+    try {
+      value = jsonDecode(schema);
+    } on FormatException {
+      throw _fail(AcpSecretFailure.schema, 'the schema is not JSON');
+    }
+    return AcpSecretForm.parse(value, limits);
+  }
+
+  /// Reads a schema already parsed.
   factory AcpSecretForm.parse(
     Object? schema, [
     AcpSecretLimits limits = const AcpSecretLimits(),
   ]) {
-    AcpSecretException bad(String why) =>
-        _secretFailure(AcpSecretFailure.schema, why);
+    AcpSecretException bad(String why) => _fail(AcpSecretFailure.schema, why);
     if (schema is! Map) throw bad('the schema is not an object');
     if (utf8.encode(jsonEncode(schema)).length > limits.schemaBytes) {
       throw bad('the schema is larger than the limit');
@@ -147,7 +283,11 @@ final class AcpSecretForm {
         );
       }
       if (value is! Map) throw bad('a property is not an object');
-      final field = _field(name, value, required.contains(name));
+      final field = acpFieldFromSchema(
+        name,
+        value,
+        required: required.contains(name),
+      );
       final options = switch (field) {
         AcpChoiceField(:final options) ||
         AcpChoicesField(:final options) => options.length,
@@ -159,18 +299,23 @@ final class AcpSecretForm {
       if (field is AcpUnsupportedField) {
         throw bad("a property's type is one no control can show");
       }
-      final secret = value['writeOnly'] == true || value['x-sensitive'] == true;
+      final secret = _flag(value, 'writeOnly') | _flag(value, 'x-sensitive');
+      if (!secret && value['format'] == 'password') {
+        throw bad('a password format without writeOnly or x-sensitive');
+      }
+      if (field is AcpNumberField &&
+          field.integer &&
+          [
+            field.minimum,
+            field.maximum,
+          ].any((bound) => bound != null && bound.abs() > _maxSafe)) {
+        throw bad('a whole-number bound beyond 2^53 - 1');
+      }
       if (secret) {
         if (field is! AcpTextField && field is! AcpNumberField) {
           throw bad('a secret field is not text or a number');
         }
-        if (const [
-          'default',
-          'const',
-          'enum',
-          'oneOf',
-          'examples',
-        ].any(value.containsKey)) {
+        if (_secretDenied.any(value.containsKey)) {
           throw bad('a secret field carries a value or a choice in the schema');
         }
       }
@@ -178,14 +323,14 @@ final class AcpSecretForm {
         AcpSecretField(
           field,
           secret: secret,
-          encoding: _string(value, 'contentEncoding'),
-          mediaType: _string(value, 'contentMediaType'),
+          encoding: _text(value, 'contentEncoding'),
+          mediaType: _text(value, 'contentMediaType'),
         ),
       );
     }
     return AcpSecretForm._(
-      _string(schema, 'title'),
-      _string(schema, 'description'),
+      _text(schema, 'title'),
+      _text(schema, 'description'),
       fields,
       limits,
     );
@@ -205,13 +350,13 @@ final class AcpSecretForm {
     for (final name in values.keys) {
       final field = this.field(name);
       if (field == null) {
-        throw _secretFailure(
+        throw _fail(
           AcpSecretFailure.field,
           'a value for a question the form lacks',
         );
       }
       if (field.secret) {
-        throw _secretFailure(
+        throw _fail(
           AcpSecretFailure.field,
           'a secret field holds a plain value',
         );
@@ -225,8 +370,8 @@ final class AcpSecretForm {
           if (!field.secret) field.field,
       ],
     );
-    if (_misfit(plain, values) != null) {
-      throw _secretFailure(
+    if (acpMisfit(plain, values) != null) {
+      throw _fail(
         AcpSecretFailure.field,
         'a plain value does not fit its question',
       );
@@ -238,7 +383,7 @@ final class AcpSecretForm {
     final given = names.toList();
     for (final name in given) {
       if (!(field(name)?.secret ?? false)) {
-        throw _secretFailure(
+        throw _fail(
           AcpSecretFailure.field,
           'a sealed value for a question that is not secret',
         );
@@ -250,34 +395,28 @@ final class AcpSecretForm {
           field.field.required &&
           !given.contains(field.field.name),
     )) {
-      throw _secretFailure(
+      throw _fail(
         AcpSecretFailure.field,
         'a required secret question has no value',
       );
     }
   }
 
-  /// Throws unless [value] fits secret question [name]: UTF-8 text of its length, a number as decimal text within its bounds,
-  /// and base64 when the schema says so.
+  /// Throws unless [value] fits secret question [name]: UTF-8 text of its length, a number as text in JSON's grammar within its
+  /// bounds, and canonical base64 when the schema says so.
   void checkSecret(String name, List<int> value) {
     final question = field(name);
     if (question == null || !question.secret) {
-      throw _secretFailure(
-        AcpSecretFailure.field,
-        'not a secret question of the form',
-      );
+      throw _fail(AcpSecretFailure.field, 'not a secret question of the form');
     }
     if (value.length > limits.valueBytes) {
-      throw _secretFailure(AcpSecretFailure.tooLarge, 'a secret value');
+      throw _fail(AcpSecretFailure.tooLarge, 'a secret value');
     }
     final String text;
     try {
       text = utf8.decode(value);
     } on FormatException {
-      throw _secretFailure(
-        AcpSecretFailure.field,
-        'a secret value is not text',
-      );
+      throw _fail(AcpSecretFailure.field, 'a secret value is not text');
     }
     bool within(num at, num? least, num? most) =>
         (least == null || at >= least) && (most == null || at <= most);
@@ -285,24 +424,19 @@ final class AcpSecretForm {
       AcpTextField(:final minLength, :final maxLength) =>
         within(text.runes.length, minLength, maxLength) &&
             switch (question.encoding) {
-              'base64' => _base64Text(text, url: false),
-              'base64url' => _base64Text(text, url: true),
+              'base64' => _base64Canonical(text, url: false),
+              'base64url' => _base64Canonical(text, url: true),
               _ => true,
             },
       AcpNumberField(:final integer, :final minimum, :final maximum) =>
-        (integer
-                ? RegExp(r'^[+-]?[0-9]+$').hasMatch(text) &&
-                      int.tryParse(text) != null
-                : double.tryParse(text)?.isFinite ?? false) &&
-            within(
-              integer ? int.parse(text) : double.parse(text),
-              minimum,
-              maximum,
-            ),
+        switch (integer ? _jsonInteger(text) : _jsonNumber(text)) {
+          final num at => within(at, minimum, maximum),
+          null => false,
+        },
       _ => false,
     };
     if (!fits) {
-      throw _secretFailure(
+      throw _fail(
         AcpSecretFailure.field,
         'a secret value does not fit its question',
       );
@@ -310,30 +444,15 @@ final class AcpSecretForm {
   }
 }
 
-/// Whether [text] is base64 (or base64url), with or without its padding.
-bool _base64Text(String text, {required bool url}) {
-  final body = text.replaceFirst(RegExp(r'=+$'), '');
-  final pattern = url
-      ? RegExp(r'^[A-Za-z0-9_-]*$')
-      : RegExp(r'^[A-Za-z0-9+/]*$');
-  return pattern.hasMatch(body) && body.length % 4 != 1;
-}
-
 String _b64u(List<int> bytes) => base64Url.encode(bytes).replaceAll('=', '');
 
 Uint8List _b64uDecode(String text) {
-  if (text.contains('=') ||
-      !RegExp(r'^[A-Za-z0-9_-]*$').hasMatch(text) ||
-      text.length % 4 == 1) {
-    throw _secretFailure(AcpSecretFailure.malformed, 'not unpadded base64url');
+  if (!_base64Canonical(text, url: true)) {
+    throw _fail(AcpSecretFailure.malformed, 'not unpadded base64url');
   }
-  final padded = text.padRight((text.length + 3) ~/ 4 * 4, '=');
-  final bytes = Uint8List.fromList(base64Url.decode(padded));
-  // Trailing bits must be zero: the canonical text is the only one.
-  if (_b64u(bytes) != text) {
-    throw _secretFailure(AcpSecretFailure.malformed, 'not unpadded base64url');
-  }
-  return bytes;
+  return Uint8List.fromList(
+    base64Url.decode(text.padRight((text.length + 3) ~/ 4 * 4, '=')),
+  );
 }
 
 String _hex(List<int> bytes) =>
@@ -346,9 +465,7 @@ Uint8List _unhex(String text) => Uint8List.fromList([
 
 Uint8List _concat(Iterable<List<int>> parts) {
   final out = BytesBuilder(copy: false);
-  for (final part in parts) {
-    out.add(part);
-  }
+  parts.forEach(out.add);
   return out.toBytes();
 }
 
@@ -356,6 +473,14 @@ Uint8List _lp(List<int> bytes) => _concat([
   (ByteData(4)..setUint32(0, bytes.length)).buffer.asUint8List(),
   bytes,
 ]);
+
+/// A number as 8 big-endian bytes, written as two 32-bit words so it also runs where `int` is a JavaScript number.
+Uint8List _u64(int value) {
+  final data = ByteData(8)
+    ..setUint32(0, value ~/ 0x100000000)
+    ..setUint32(4, value % 0x100000000);
+  return data.buffer.asUint8List();
+}
 
 bool _sameBytes(List<int> a, List<int> b) {
   if (a.length != b.length) return false;
@@ -366,17 +491,20 @@ bool _sameBytes(List<int> a, List<int> b) {
   return diff == 0;
 }
 
-/// An identity's id as the peer methods write it: `sha256:` and the lower-case hexadecimal SHA-256 of its `SubjectPublicKeyInfo`.
+Uint8List _sha256(List<int> data) =>
+    pc.SHA256Digest().process(Uint8List.fromList(data));
+
+/// An identity's id as the peer methods write it: `sha256:` and the lower-case hexadecimal SHA-256 of its `SubjectPublicKeyInfo`. A
+/// proof's bytes are not an identifier of anything: an ECDSA signature may be re-encoded by someone who has seen it.
 final class AcpIdentityId implements Comparable<AcpIdentityId> {
   AcpIdentityId._(this.bytes);
 
   /// The id of the public key whose encoding is [spki].
-  factory AcpIdentityId.of(List<int> spki) =>
-      AcpIdentityId._(pc.SHA256Digest().process(Uint8List.fromList(spki)));
+  factory AcpIdentityId.of(List<int> spki) => AcpIdentityId._(_sha256(spki));
 
   /// Reads `sha256:` and 64 hexadecimal digits, either case.
   factory AcpIdentityId.parse(String text) {
-    final failure = _secretFailure(
+    final failure = _fail(
       AcpSecretFailure.malformed,
       'an identity is sha256: and 64 hexadecimal digits',
     );
@@ -411,14 +539,48 @@ enum AcpSecretMethod {
   final String text;
 }
 
+/// What the person is asked or shown, exactly as the host sent it. A binding and every sealed field cover the digest of these bytes,
+/// so a form changed on the way fails the binding instead of being drawn.
+final class AcpSecretContext {
+  const AcpSecretContext({
+    required this.sessionId,
+    required this.requestId,
+    required this.message,
+    required this.schema,
+    this.form,
+  });
+
+  final String sessionId, requestId, message;
+
+  /// The questions as the JSON Schema text that was sent: these exact bytes are hashed, never a re-serialization.
+  final String schema;
+
+  /// The layout as the JSON text that was sent, when there is one.
+  final String? form;
+
+  /// SHA-256 of the method and every part, each with a 4-byte length, and a byte that says whether a layout was sent.
+  Uint8List digest(AcpSecretMethod method) => _sha256(
+    _concat([
+      _lp(ascii.encode('dev.boriken.coqui.acp/secret/v1 context')),
+      _lp(ascii.encode(method.text)),
+      _lp(utf8.encode(sessionId)),
+      _lp(utf8.encode(requestId)),
+      _lp(utf8.encode(message)),
+      _lp(utf8.encode(schema)),
+      _lp([if (form != null) 1 else 0]),
+      _lp(utf8.encode(form ?? '')),
+    ]),
+  );
+}
+
 /// A key binding as it travels.
 final class AcpSecretBinding {
   const AcpSecretBinding({
     required this.method,
     required this.key,
     required this.expires,
+    required this.audience,
     required this.proof,
-    this.audience,
   });
 
   /// [acpBindingEcdsa] or [acpBindingDh].
@@ -430,8 +592,8 @@ final class AcpSecretBinding {
   /// When it ends, in Unix seconds.
   final int expires;
 
-  /// The collector it was made for, when known; required by [acpBindingDh].
-  final AcpIdentityId? audience;
+  /// The identity it was made for: a verifier refuses a binding made for anyone but itself.
+  final AcpIdentityId audience;
 
   /// The signature or the tag.
   final Uint8List proof;
@@ -440,37 +602,28 @@ final class AcpSecretBinding {
     'method': method,
     'key': _b64u(key),
     'expires': expires,
-    if (audience != null) 'audience': audience.toString(),
+    'audience': audience.toString(),
     'proof': _b64u(proof),
   };
 
   factory AcpSecretBinding.fromJson(Object? json) {
     if (json is! Map) {
-      throw _secretFailure(
-        AcpSecretFailure.malformed,
-        'a binding is not an object',
-      );
+      throw _fail(AcpSecretFailure.malformed, 'a binding is not an object');
     }
     String need(String key, String why) => json[key] is String
         ? json[key] as String
-        : throw _secretFailure(AcpSecretFailure.malformed, why);
+        : throw _fail(AcpSecretFailure.malformed, why);
     final expires = json['expires'];
     if (expires is! int || expires < 0) {
-      throw _secretFailure(AcpSecretFailure.malformed, 'a binding has no end');
+      throw _fail(AcpSecretFailure.malformed, 'a binding has no end');
     }
-    final audience = json['audience'];
     return AcpSecretBinding(
       method: need('method', 'a binding has no method'),
       key: _b64uDecode(need('key', 'a binding has no key')),
       expires: expires,
-      audience: switch (audience) {
-        null => null,
-        final String text => AcpIdentityId.parse(text),
-        _ => throw _secretFailure(
-          AcpSecretFailure.malformed,
-          "a binding's audience is not text",
-        ),
-      },
+      audience: AcpIdentityId.parse(
+        need('audience', 'a binding has no audience'),
+      ),
       proof: _b64uDecode(need('proof', 'a binding has no proof')),
     );
   }
@@ -489,23 +642,25 @@ final class AcpSealed {
   Map<String, Object?> toJson() => {'enc': _b64u(enc), 'ct': _b64u(ct)};
 
   factory AcpSealed.fromJson(Object? json) {
-    const shape = 'a sealed value is not {enc, ct}';
     if (json is! Map ||
         json.length != 2 ||
         json['enc'] is! String ||
         json['ct'] is! String) {
-      throw _secretFailure(AcpSecretFailure.malformed, shape);
+      throw _fail(
+        AcpSecretFailure.malformed,
+        'a sealed value is not {enc, ct}',
+      );
     }
     final enc = _b64uDecode(json['enc'] as String);
     final ct = _b64uDecode(json['ct'] as String);
     if (ct.length < 16) {
-      throw _secretFailure(
+      throw _fail(
         AcpSecretFailure.malformed,
         'a sealed value is shorter than its tag',
       );
     }
     if (enc.length != 32) {
-      throw _secretFailure(
+      throw _fail(
         AcpSecretFailure.malformed,
         "a sealed value's key is not 32 bytes",
       );
@@ -528,14 +683,14 @@ final class AcpSecretRecipient {
 
   factory AcpSecretRecipient.fromJson(Object? json) {
     if (json is! Map || json['key'] is! String || json['binding'] == null) {
-      throw _secretFailure(
+      throw _fail(
         AcpSecretFailure.malformed,
         'a recipient has no key or binding',
       );
     }
     final key = _b64uDecode(json['key'] as String);
     if (key.length != 32) {
-      throw _secretFailure(
+      throw _fail(
         AcpSecretFailure.malformed,
         "a recipient's key is not 32 bytes",
       );
@@ -544,8 +699,8 @@ final class AcpSecretRecipient {
   }
 }
 
-/// A secret value held for its use. Dart cannot zero memory it has handed to the garbage collector, so [clear] overwrites the
-/// bytes this object holds, and nothing prints it.
+/// A secret value held for its use. Dart cannot zero memory it has handed to the garbage collector, so [clear] overwrites the bytes
+/// this object holds, and nothing prints it.
 final class AcpSecretValue {
   AcpSecretValue(this._bytes);
 
@@ -572,13 +727,78 @@ final class AcpOpened {
   final Map<String, AcpSecretValue> secrets;
 }
 
-Uint8List _fieldInfo(AcpSecretMethod method, String requestId, String field) =>
+// ---- Statements.
+
+enum _Kind { key, answer }
+
+Uint8List _statement(
+  _Kind kind,
+  AcpSecretMethod method,
+  String requestId,
+  List<int> digest,
+  List<int> key,
+  List<int> payload,
+  int expires,
+  AcpIdentityId audience,
+) => _concat([
+  _lp(
+    ascii.encode(
+      kind == _Kind.key
+          ? 'dev.boriken.coqui.acp/secret/v1 binding'
+          : 'dev.boriken.coqui.acp/secret/v1 values',
+    ),
+  ),
+  _lp(ascii.encode(method.text)),
+  _lp(utf8.encode(requestId)),
+  _lp(digest),
+  _lp(key),
+  _lp(payload),
+  _lp(_u64(expires)),
+  _lp(audience.bytes),
+]);
+
+/// The digest of a set of sealed values, in the byte order of their names: what the sender's binding covers.
+Uint8List _valuesDigest(Map<String, AcpSealed> sealed) {
+  final names = sealed.keys.toList()
+    ..sort((a, b) {
+      final x = utf8.encode(a), y = utf8.encode(b);
+      for (var i = 0; i < x.length && i < y.length; i++) {
+        if (x[i] != y[i]) return x[i] - y[i];
+      }
+      return x.length - y.length;
+    });
+  final label = ascii.encode('dev.boriken.coqui.acp/secret/v1 values digest');
+  return _sha256(
     _concat([
-      _lp(ascii.encode('dev.boriken.coqui.acp/secret/v1 field')),
-      _lp(ascii.encode(method.text)),
-      _lp(utf8.encode(requestId)),
-      _lp(utf8.encode(field)),
-    ]);
+      (ByteData(4)..setUint32(0, label.length)).buffer.asUint8List(),
+      label,
+      for (final name in names) ...[
+        (ByteData(
+          4,
+        )..setUint32(0, utf8.encode(name).length)).buffer.asUint8List(),
+        utf8.encode(name),
+        sealed[name]!.enc,
+        (ByteData(
+          4,
+        )..setUint32(0, sealed[name]!.ct.length)).buffer.asUint8List(),
+        sealed[name]!.ct,
+      ],
+    ]),
+  );
+}
+
+Uint8List _fieldInfo(
+  AcpSecretMethod method,
+  String requestId,
+  List<int> digest,
+  String field,
+) => _concat([
+  _lp(ascii.encode('dev.boriken.coqui.acp/secret/v1 field')),
+  _lp(ascii.encode(method.text)),
+  _lp(utf8.encode(requestId)),
+  _lp(digest),
+  _lp(utf8.encode(field)),
+]);
 
 void _checkRequestId(String requestId) {
   if (requestId.isEmpty ||
@@ -586,7 +806,7 @@ void _checkRequestId(String requestId) {
       requestId.runes.any(
         (rune) => rune < 0x20 || (rune >= 0x7f && rune < 0xa0),
       )) {
-    throw _secretFailure(
+    throw _fail(
       AcpSecretFailure.malformed,
       'a request id is 1 to 128 bytes with no control character',
     );
@@ -601,21 +821,6 @@ final _p256SpkiPrefix = _unhex(
 );
 final _x25519SpkiPrefix = _unhex('302a300506032b656e032100');
 final _dhLabel = ascii.encode('dev.boriken.coqui.acp/secret/v1 dh');
-
-Uint8List _statement(
-  AcpSecretMethod method,
-  String requestId,
-  List<int> key,
-  int expires,
-  AcpIdentityId? audience,
-) => _concat([
-  _lp(ascii.encode('dev.boriken.coqui.acp/secret/v1 binding')),
-  _lp(ascii.encode(method.text)),
-  _lp(utf8.encode(requestId)),
-  _lp(key),
-  _lp((ByteData(8)..setUint64(0, expires)).buffer.asUint8List()),
-  _lp(audience?.bytes ?? const <int>[]),
-]);
 
 Uint8List _bigBytes(BigInt value) {
   final out = Uint8List(32);
@@ -632,260 +837,305 @@ BigInt _bigOf(List<int> bytes) =>
 Uint8List _x25519OfSpki(List<int> spki) {
   if (spki.length != 44 ||
       !_sameBytes(spki.sublist(0, 12), _x25519SpkiPrefix)) {
-    throw _secretFailure(
-      AcpSecretFailure.key,
-      'not an X25519 SubjectPublicKeyInfo',
-    );
+    throw _fail(AcpSecretFailure.key, 'not an X25519 SubjectPublicKeyInfo');
   }
   return Uint8List.fromList(spki.sublist(12));
 }
 
+pc.ECPoint _p256PointOfSpki(List<int> spki) {
+  final point =
+      spki.length == 91 && _sameBytes(spki.sublist(0, 26), _p256SpkiPrefix)
+      ? _p256.curve.decodePoint(spki.sublist(26))
+      : null;
+  if (point == null) {
+    throw _fail(AcpSecretFailure.key, 'not a P-256 SubjectPublicKeyInfo');
+  }
+  return point;
+}
+
+/// The Diffie-Hellman of the identity's static key and a peer's, from the caller's key agreement; a refusal of the suite is a key
+/// failure.
+Future<Uint8List> _agreeChecked(
+  AcpSecretAgreement agree,
+  Uint8List peer,
+) async {
+  final shared = await agree(peer);
+  if (shared.length != 32 || shared.every((byte) => byte == 0)) {
+    throw _fail(AcpSecretFailure.key, 'a Diffie-Hellman key of low order');
+  }
+  return shared;
+}
+
 Future<Uint8List> _dhMacKey(
-  List<int> secret,
-  List<int> other,
+  Uint8List shared,
   List<int> holder,
   List<int> collector,
 ) async {
-  final dh = await hpke.x25519Dh(secret, other);
-  final prk = await hpke.hmacSha256(Uint8List(32), dh);
-  return hpke.expandOne(prk, [..._dhLabel, ...holder, ...collector], 32);
+  final prk = await hpke.hmacSha256(Uint8List(32), shared);
+  final key = await hpke.expandOne(prk, [
+    ..._dhLabel,
+    ...holder,
+    ...collector,
+  ], 32);
+  prk.fillRange(0, prk.length, 0);
+  shared.fillRange(0, shared.length, 0);
+  return key;
 }
 
-/// The holder's side of a binding: the identity's private key.
+/// Signs a message with an identity's P-256 key: the 64-byte IEEE P1363 signature (ECDSA, SHA-256), deterministic or randomized, with
+/// `s` high or low. The key can stay in a platform key store or in WebCrypto.
+typedef AcpSecretSigner = Future<Uint8List> Function(Uint8List message);
+
+/// The X25519 Diffie-Hellman of an identity's static key and a peer's public key, 32 bytes.
+typedef AcpSecretAgreement = Future<Uint8List> Function(Uint8List peerPublic);
+
+/// The holder's side of a binding: an identity that signs or agrees on keys through functions the caller supplies, so its private key
+/// never enters this library. Raw keys held in memory are made by `package:coqui_acp/secret_unprotected.dart`, for tests and tools.
 final class AcpSecretProver {
-  AcpSecretProver._ecdsa(BigInt scalar, this.spki)
-    : _scalar = scalar,
-      _dhSecret = null,
-      _collector = null,
-      _audience = null;
+  /// An identity that signs; [spki] is its P-256 `SubjectPublicKeyInfo`.
+  AcpSecretProver.signing({
+    required List<int> spki,
+    required AcpSecretSigner sign,
+  }) : spki = Uint8List.fromList(spki),
+       _sign = sign,
+       _agree = null,
+       _collector = null,
+       _audience = null {
+    _p256PointOfSpki(spki);
+  }
 
-  AcpSecretProver._dh(
-    this._dhSecret,
-    this.spki,
-    this._collector,
-    this._audience,
-  ) : _scalar = null;
-
-  final BigInt? _scalar;
-  final Uint8List? _dhSecret;
-  final Uint8List? _collector;
-  final AcpIdentityId? _audience;
+  /// An X25519 identity for the one collector whose `SubjectPublicKeyInfo` is [collectorSpki]; [agree] is its key agreement.
+  AcpSecretProver.agreeing({
+    required List<int> spki,
+    required AcpSecretAgreement agree,
+    required List<int> collectorSpki,
+  }) : spki = Uint8List.fromList(spki),
+       _sign = null,
+       _agree = agree,
+       _collector = _x25519OfSpki(collectorSpki),
+       _audience = AcpIdentityId.of(collectorSpki) {
+    _x25519OfSpki(spki);
+  }
 
   /// The identity's public key as `SubjectPublicKeyInfo`.
   final Uint8List spki;
+  final AcpSecretSigner? _sign;
+  final AcpSecretAgreement? _agree;
+  final Uint8List? _collector;
+  final AcpIdentityId? _audience;
 
   /// The identity's id.
   AcpIdentityId get id => AcpIdentityId.of(spki);
 
-  /// An identity that signs, from its P-256 private scalar (32 bytes).
-  factory AcpSecretProver.ecdsaP256(List<int> scalar) {
-    final d = _bigOf(scalar);
-    if (scalar.length != 32 || d == BigInt.zero || d >= _p256.n) {
-      throw _secretFailure(AcpSecretFailure.key, 'not a P-256 private scalar');
-    }
-    final point = (_p256.G * d)!;
-    return AcpSecretProver._ecdsa(
-      d,
-      _concat([_p256SpkiPrefix, point.getEncoded(false)]),
-    );
-  }
-
-  /// An X25519 identity, from its private key (32 bytes), for the collector whose `SubjectPublicKeyInfo` is [collectorSpki].
-  static Future<AcpSecretProver> x25519(
-    List<int> secret,
-    List<int> collectorSpki,
-  ) async {
-    if (secret.length != 32) {
-      throw _secretFailure(
-        AcpSecretFailure.key,
-        'an X25519 private key is 32 bytes',
-      );
-    }
-    final collector = _x25519OfSpki(collectorSpki);
-    final publicKey = await hpke.x25519Public(secret);
-    return AcpSecretProver._dh(
-      Uint8List.fromList(secret),
-      _concat([_x25519SpkiPrefix, publicKey]),
-      collector,
-      AcpIdentityId.of(collectorSpki),
-    );
-  }
-
   Future<AcpSecretBinding> _bind(
+    _Kind kind,
     AcpSecretMethod method,
     String requestId,
-    Uint8List key,
+    List<int> digest,
+    List<int> key,
+    List<int> payload,
     int expires,
+    AcpIdentityId audience,
   ) async {
-    if (_scalar != null) {
-      final signer = pc.ECDSASigner(
-        pc.SHA256Digest(),
-        pc.HMac(pc.SHA256Digest(), 64),
-      )..init(true, pc.PrivateKeyParameter(pc.ECPrivateKey(_scalar, _p256)));
-      final signature =
-          signer.generateSignature(
-                _statement(method, requestId, key, expires, null),
-              )
-              as pc.ECSignature;
-      // Low s, as the Rust crate writes it; a verifier takes either.
-      final s = signature.s > _p256.n >> 1
-          ? _p256.n - signature.s
-          : signature.s;
+    final statement = _statement(
+      kind,
+      method,
+      requestId,
+      digest,
+      key,
+      payload,
+      expires,
+      audience,
+    );
+    if (_sign != null) {
+      final signature = await _sign(statement);
+      if (signature.length != 64) {
+        throw _fail(AcpSecretFailure.seal, 'a signature is not 64 bytes');
+      }
+      final r = _bigOf(signature.sublist(0, 32));
+      var s = _bigOf(signature.sublist(32));
+      // Low s, so one statement has one signature; a verifier refuses the other.
+      if (s > _p256.n >> 1) s = _p256.n - s;
       return AcpSecretBinding(
         method: acpBindingEcdsa,
         key: spki,
         expires: expires,
-        proof: _concat([_bigBytes(signature.r), _bigBytes(s)]),
+        audience: audience,
+        proof: _concat([_bigBytes(r), _bigBytes(s)]),
       );
     }
-    final holder = _x25519OfSpki(spki);
-    final mac = await _dhMacKey(_dhSecret!, _collector!, holder, _collector);
-    final proof = await hpke.hmacSha256(
-      mac,
-      _statement(method, requestId, key, expires, _audience),
-    );
+    if (audience != _audience) {
+      throw _fail(AcpSecretFailure.wrongAudience);
+    }
+    final shared = await _agreeChecked(_agree!, _collector!);
+    final mac = await _dhMacKey(shared, _x25519OfSpki(spki), _collector);
+    final proof = await hpke.hmacSha256(mac, statement);
+    mac.fillRange(0, mac.length, 0);
     return AcpSecretBinding(
       method: acpBindingDh,
       key: spki,
       expires: expires,
-      audience: _audience,
+      audience: audience,
       proof: proof,
     );
   }
 }
 
-/// The collector's side: the identities it knows by pairing or pinning, and its own X25519 key when it takes [acpBindingDh].
+/// The collector's side: the identities it knows by pairing or pinning, its own id, and its key agreement when it takes
+/// [acpBindingDh].
 final class AcpSecretVerifier {
+  /// A verifier that is [own], knows [known], and accepts a binding only if it was made for [own]. [agreementSpki] and [agree] are
+  /// its own X25519 identity, which must be [own]; without them [acpBindingDh] is refused.
   AcpSecretVerifier({
+    required this.own,
     Iterable<AcpIdentityId> known = const [],
-    List<int>? x25519Identity,
+    List<int>? agreementSpki,
+    AcpSecretAgreement? agree,
     this.maxLifetime = const Duration(minutes: 5),
+    this.skew = const Duration(seconds: 30),
+    this.limits = const AcpSecretLimits(),
   }) : _known = {for (final id in known) id.toString()},
-       _own = x25519Identity == null
-           ? null
-           : Uint8List.fromList(x25519Identity);
+       _agree = agree,
+       _public = agreementSpki == null ? null : _x25519OfSpki(agreementSpki) {
+    if ((agreementSpki == null) != (agree == null)) {
+      throw _fail(
+        AcpSecretFailure.key,
+        'a key agreement needs both its identity and its function',
+      );
+    }
+    if (agreementSpki != null && AcpIdentityId.of(agreementSpki) != own) {
+      throw _fail(
+        AcpSecretFailure.key,
+        "the key agreement is not this verifier's identity",
+      );
+    }
+  }
 
+  /// This verifier's own identity.
+  final AcpIdentityId own;
   final Set<String> _known;
-  final Uint8List? _own;
+  final AcpSecretAgreement? _agree;
+  final Uint8List? _public;
 
   /// The longest a binding may last from now.
   final Duration maxLifetime;
 
-  /// Knows an identity by its `SubjectPublicKeyInfo`.
-  void trustSpki(List<int> spki) =>
-      _known.add(AcpIdentityId.of(spki).toString());
+  /// How far the peer's clock may differ from this one's: a binding is taken that long after it ended and that much beyond the longest
+  /// it may last.
+  final Duration skew;
+
+  /// What forms this verifier takes.
+  final AcpSecretLimits limits;
 
   /// Knows an identity by its id.
   void trust(AcpIdentityId id) => _known.add(id.toString());
 
-  /// Checks that [binding] binds [key] to a known identity for this request at [now] (Unix seconds); returns that identity. The
-  /// order is the Rust crate's: method and key shape, whether the holder is known, the end, the collector, last the proof.
-  Future<AcpIdentityId> verify(
+  /// Knows an identity by its `SubjectPublicKeyInfo`.
+  void trustSpki(List<int> spki) => trust(AcpIdentityId.of(spki));
+
+  /// The order is the Rust crate's: method and key shape, whether the holder is known, the end, the audience, last the proof.
+  Future<AcpIdentityId> _verify(
+    _Kind kind,
     AcpSecretMethod method,
     String requestId,
-    Uint8List key,
+    List<int> digest,
+    List<int> key,
+    List<int> payload,
     AcpSecretBinding binding,
     int now,
   ) async {
     final ecdsa = switch (binding.method) {
       acpBindingEcdsa => true,
       acpBindingDh => false,
-      _ => throw _secretFailure(
+      _ => throw _fail(
         AcpSecretFailure.unsupported,
         'a binding method this side does not have',
       ),
     };
-    if (ecdsa) {
-      if (binding.key.length != 91 ||
-          !_sameBytes(binding.key.sublist(0, 26), _p256SpkiPrefix)) {
-        throw _secretFailure(
-          AcpSecretFailure.key,
-          'not a P-256 SubjectPublicKeyInfo',
-        );
-      }
-    } else {
-      _x25519OfSpki(binding.key);
-    }
+    final point = ecdsa ? _p256PointOfSpki(binding.key) : null;
+    if (!ecdsa) _x25519OfSpki(binding.key);
     final holder = AcpIdentityId.of(binding.key);
     if (!_known.contains(holder.toString())) {
-      throw _secretFailure(AcpSecretFailure.unknownIdentity, '');
+      throw _fail(AcpSecretFailure.unknownIdentity);
     }
-    if (now > binding.expires ||
-        binding.expires > now + maxLifetime.inSeconds) {
-      throw _secretFailure(AcpSecretFailure.expired, '');
+    final slack = skew.inSeconds;
+    if (now > binding.expires + slack ||
+        binding.expires > now + maxLifetime.inSeconds + slack) {
+      throw _fail(AcpSecretFailure.expired);
     }
-    final ownId = _own == null
-        ? null
-        : AcpIdentityId.of(
-            _concat([_x25519SpkiPrefix, await hpke.x25519Public(_own)]),
-          );
-    if (binding.audience != null &&
-        ownId != null &&
-        binding.audience != ownId) {
-      throw _secretFailure(AcpSecretFailure.wrongAudience, '');
-    }
+    if (binding.audience != own) throw _fail(AcpSecretFailure.wrongAudience);
     final signed = _statement(
+      kind,
       method,
       requestId,
+      digest,
       key,
+      payload,
       binding.expires,
       binding.audience,
     );
     if (ecdsa) {
-      final point = _p256.curve.decodePoint(binding.key.sublist(26));
-      if (point == null || binding.proof.length != 64) {
-        throw _secretFailure(AcpSecretFailure.badProof, '');
-      }
+      if (binding.proof.length != 64) throw _fail(AcpSecretFailure.badProof);
+      final r = _bigOf(binding.proof.sublist(0, 32));
+      final s = _bigOf(binding.proof.sublist(32));
+      // One statement has one signature: a high s is the same signature written the other way.
+      if (s > _p256.n >> 1) throw _fail(AcpSecretFailure.badProof);
       final verifier = pc.ECDSASigner(pc.SHA256Digest())
-        ..init(false, pc.PublicKeyParameter(pc.ECPublicKey(point, _p256)));
-      final signature = pc.ECSignature(
-        _bigOf(binding.proof.sublist(0, 32)),
-        _bigOf(binding.proof.sublist(32)),
-      );
-      if (!verifier.verifySignature(signed, signature)) {
-        throw _secretFailure(AcpSecretFailure.badProof, '');
+        ..init(false, pc.PublicKeyParameter(pc.ECPublicKey(point!, _p256)));
+      if (!verifier.verifySignature(signed, pc.ECSignature(r, s))) {
+        throw _fail(AcpSecretFailure.badProof);
       }
     } else {
-      if (_own == null) {
-        throw _secretFailure(
+      if (_agree == null) {
+        throw _fail(
           AcpSecretFailure.unsupported,
           'this collector has no X25519 identity of its own',
         );
       }
-      if (binding.audience != ownId) {
-        throw _secretFailure(AcpSecretFailure.wrongAudience, '');
-      }
       final holderKey = _x25519OfSpki(binding.key);
-      final mac = await _dhMacKey(
-        _own,
-        holderKey,
-        holderKey,
-        await hpke.x25519Public(_own),
-      );
-      if (!_sameBytes(await hpke.hmacSha256(mac, signed), binding.proof)) {
-        throw _secretFailure(AcpSecretFailure.badProof, '');
+      final shared = await _agreeChecked(_agree, holderKey);
+      final mac = await _dhMacKey(shared, holderKey, _public!);
+      final tag = await hpke.hmacSha256(mac, signed);
+      mac.fillRange(0, mac.length, 0);
+      if (!_sameBytes(tag, binding.proof)) {
+        throw _fail(AcpSecretFailure.badProof);
       }
     }
     return holder;
   }
 
-  /// Checks the receiver's key and binding at [now], and returns the collector that seals to it.
+  /// Checks what the person is asked and the receiver's key and its binding at [now] (Unix seconds), and returns the collector that
+  /// seals to it. The binding covers the digest of [context] as this side received it, so a form changed on the way is refused here
+  /// before it is drawn. Only [expected], the identity this request must come from, is taken: another that this verifier knows is
+  /// refused.
   Future<AcpSecretCollector> collector(
+    AcpIdentityId expected,
     AcpSecretMethod method,
-    String requestId,
-    AcpSecretForm form,
+    AcpSecretContext context,
     AcpSecretRecipient recipient,
     int now,
   ) async {
-    _checkRequestId(requestId);
-    final holder = await verify(
+    _checkRequestId(context.requestId);
+    final digest = context.digest(method);
+    final holder = await _verify(
+      _Kind.key,
       method,
-      requestId,
+      context.requestId,
+      digest,
       recipient.key,
+      const [],
       recipient.binding,
       now,
     );
-    return AcpSecretCollector._(method, requestId, form, recipient.key, holder);
+    if (holder != expected) throw _fail(AcpSecretFailure.unknownIdentity);
+    return AcpSecretCollector._(
+      method,
+      context.requestId,
+      digest,
+      AcpSecretForm.parseText(context.schema, limits),
+      recipient.key,
+      holder,
+    );
   }
 }
 
@@ -894,6 +1144,7 @@ final class AcpSecretCollector {
   AcpSecretCollector._(
     this.method,
     this.requestId,
+    this._digest,
     this.form,
     this._key,
     this.holder,
@@ -901,6 +1152,9 @@ final class AcpSecretCollector {
 
   final AcpSecretMethod method;
   final String requestId;
+  final Uint8List _digest;
+
+  /// The form this collector draws or sends, read from the context its binding covers.
   final AcpSecretForm form;
   final Uint8List _key;
 
@@ -910,75 +1164,122 @@ final class AcpSecretCollector {
   /// Whether the field is one this collector would seal.
   bool isSecret(String name) => form.field(name)?.secret ?? false;
 
-  /// Seals the value of secret field [name]: UTF-8 text, or a number as decimal text. [random] is for tests.
-  Future<AcpSealed> seal(String name, String value, {Random? random}) async {
-    final bytes = utf8.encode(value);
-    form.checkSecret(name, bytes);
-    final source = random ?? Random.secure();
+  /// Seals the value of secret field [name]: UTF-8 text, or a number as decimal text.
+  Future<AcpSealed> seal(String name, String value) {
+    final source = Random.secure();
     final ikm = Uint8List.fromList([
       for (var i = 0; i < 32; i++) source.nextInt(256),
     ]);
-    final made = await hpke.hpkeSeal(
-      _key,
-      _fieldInfo(method, requestId, name),
-      const [],
-      bytes,
-      ikm,
-    );
-    return AcpSealed(made.enc, made.ct);
+    return _seal(name, value, ikm);
   }
+
+  Future<AcpSealed> _seal(String name, String value, List<int> ikm) async {
+    final bytes = utf8.encode(value);
+    try {
+      form.checkSecret(name, bytes);
+      final made = await hpke.hpkeSeal(
+        _key,
+        _fieldInfo(method, requestId, _digest, name),
+        const [],
+        bytes,
+        ikm,
+      );
+      return AcpSealed(made.enc, made.ct);
+    } on hpke.HpkeFailure {
+      throw _fail(AcpSecretFailure.seal);
+    } finally {
+      bytes.fillRange(0, bytes.length, 0);
+    }
+  }
+
+  /// Binds the sealed values, as a set, to [prover]'s identity for this request and key until [now] plus [lifetime]: what the receiver
+  /// verifies before it opens anything. [sealed] is every sealed value of the answer.
+  Future<AcpSecretBinding> authenticate(
+    AcpSecretProver prover,
+    Map<String, AcpSealed> sealed,
+    int now, {
+    Duration lifetime = acpSecretDefaultLifetime,
+  }) => prover._bind(
+    _Kind.answer,
+    method,
+    requestId,
+    _digest,
+    _key,
+    _valuesDigest(sealed),
+    now + lifetime.inSeconds,
+    holder,
+  );
 }
 
 /// The receiving side of one request: it holds the per-request private key and gives the collector the public key with a binding.
+/// It opens one answer: [openValues] consumes it. Whoever owns a receiver remembers the request id for as long as a binding can
+/// verify (the verifier's `maxLifetime` and `skew`) so that the same request is not answered twice.
 final class AcpSecretReceiver {
   AcpSecretReceiver._(
     this.method,
     this.requestId,
+    this._digest,
     this.form,
     this._secret,
     this.recipient,
   );
 
-  /// Makes a key pair for one request and binds the public key to [prover]'s identity until [now] plus [lifetime]. [random] is for
-  /// tests.
+  /// Makes a key pair for one request and binds the public key to [prover]'s identity, for what [context] asks, until [now] plus
+  /// [lifetime] (Unix seconds), for the collector [audience].
   static Future<AcpSecretReceiver> create(
     AcpSecretMethod method,
-    String requestId,
-    AcpSecretForm form,
+    AcpSecretContext context,
     AcpSecretProver prover,
-    int now,
-    Duration lifetime, {
-    Random? random,
-  }) async {
-    final source = random ?? Random.secure();
+    AcpIdentityId audience,
+    int now, {
+    Duration lifetime = acpSecretDefaultLifetime,
+    AcpSecretLimits limits = const AcpSecretLimits(),
+  }) {
+    final source = Random.secure();
     final ikm = Uint8List.fromList([
       for (var i = 0; i < 32; i++) source.nextInt(256),
     ]);
-    return fromIkm(method, requestId, form, prover, now, lifetime, ikm);
+    return _fromIkm(
+      method,
+      context,
+      prover,
+      audience,
+      now,
+      lifetime,
+      limits,
+      ikm,
+    );
   }
 
-  /// As [create], the key pair derived from [ikm] (RFC 9180's DeriveKeyPair).
-  static Future<AcpSecretReceiver> fromIkm(
+  static Future<AcpSecretReceiver> _fromIkm(
     AcpSecretMethod method,
-    String requestId,
-    AcpSecretForm form,
+    AcpSecretContext context,
     AcpSecretProver prover,
+    AcpIdentityId audience,
     int now,
     Duration lifetime,
+    AcpSecretLimits limits,
     List<int> ikm,
   ) async {
-    _checkRequestId(requestId);
+    _checkRequestId(context.requestId);
+    final form = AcpSecretForm.parseText(context.schema, limits);
+    final digest = context.digest(method);
     final secret = await hpke.deriveKey(ikm);
     final publicKey = await hpke.x25519Public(secret);
     final binding = await prover._bind(
+      _Kind.key,
       method,
-      requestId,
+      context.requestId,
+      digest,
       publicKey,
+      const [],
       now + lifetime.inSeconds,
+      audience,
     );
     return AcpSecretReceiver._(
       method,
-      requestId,
+      context.requestId,
+      digest,
       form,
       secret,
       AcpSecretRecipient(publicKey, binding),
@@ -987,30 +1288,31 @@ final class AcpSecretReceiver {
 
   final AcpSecretMethod method;
   final String requestId;
+  final Uint8List _digest;
   final AcpSecretForm form;
   final Uint8List _secret;
+  var _used = false;
 
   /// What to send the collector.
   final AcpSecretRecipient recipient;
 
-  /// Opens one secret field.
-  Future<AcpSecretValue> open(String name, AcpSealed sealed) async {
+  /// Overwrites the private key this receiver holds. [openValues] does it.
+  void clear() => _secret.fillRange(0, _secret.length, 0);
+
+  Future<AcpSecretValue> _open(String name, AcpSealed sealed) async {
     if (!(form.field(name)?.secret ?? false)) {
-      throw _secretFailure(
-        AcpSecretFailure.field,
-        'not a secret question of the form',
-      );
+      throw _fail(AcpSecretFailure.field, 'not a secret question of the form');
     }
     final Uint8List plain;
     try {
       plain = await hpke.hpkeOpen(
         _secret,
-        _fieldInfo(method, requestId, name),
+        _fieldInfo(method, requestId, _digest, name),
         const [],
         hpke.HpkeSealed(sealed.enc, sealed.ct),
       );
     } on hpke.HpkeFailure {
-      throw _secretFailure(
+      throw _fail(
         AcpSecretFailure.open,
         'the value cannot be opened for this request and field',
       );
@@ -1024,25 +1326,51 @@ final class AcpSecretReceiver {
     return AcpSecretValue(plain);
   }
 
-  /// Opens an answer: checks the plain values against the form and opens every sealed one.
+  /// Opens an answer, once: checks that [sender], an identity [verifier] knows, sent these sealed values ([auth] binds them, as a set,
+  /// to this request and key), checks the plain values against the form, and opens every sealed one. Nothing is opened before the
+  /// sender is verified. The private key is overwritten whatever the outcome.
   Future<AcpOpened> openValues(
+    AcpSecretVerifier verifier,
+    AcpIdentityId sender,
     Map<String, Object?> plain,
     Map<String, AcpSealed> sealed,
+    AcpSecretBinding auth,
+    int now,
   ) async {
-    form.checkPlain(plain);
-    form.checkSealed(sealed.keys);
+    if (_used) {
+      throw _fail(
+        AcpSecretFailure.open,
+        'this receiver already opened an answer',
+      );
+    }
+    _used = true;
     final secrets = <String, AcpSecretValue>{};
     try {
+      form.checkPlain(plain);
+      form.checkSealed(sealed.keys);
+      final holder = await verifier._verify(
+        _Kind.answer,
+        method,
+        requestId,
+        _digest,
+        recipient.key,
+        _valuesDigest(sealed),
+        auth,
+        now,
+      );
+      if (holder != sender) throw _fail(AcpSecretFailure.unknownIdentity);
       for (final MapEntry(:key, :value) in sealed.entries) {
-        secrets[key] = await open(key, value);
+        secrets[key] = await _open(key, value);
       }
+      return AcpOpened(Map.of(plain), secrets);
     } on Object {
       for (final secret in secrets.values) {
         secret.clear();
       }
       rethrow;
+    } finally {
+      clear();
     }
-    return AcpOpened(Map.of(plain), secrets);
   }
 }
 
@@ -1086,54 +1414,55 @@ final class AcpSecretsCapability {
 
 Map<String, Object?> _mapOf(Object? value, String why) => value is Map
     ? value.cast<String, Object?>()
-    : throw _secretFailure(AcpSecretFailure.malformed, why);
+    : throw _fail(AcpSecretFailure.malformed, why);
 
 String _textOf(Map map, String key, String why) => map[key] is String
     ? map[key] as String
-    : throw _secretFailure(AcpSecretFailure.malformed, why);
+    : throw _fail(AcpSecretFailure.malformed, why);
 
-Map<String, Object?>? _formOverlay(Map map) => switch (map['form']) {
-  null => null,
-  final Map form => form.cast<String, Object?>(),
-  _ => throw _secretFailure(
-    AcpSecretFailure.malformed,
-    'the form overlay is not an object',
-  ),
+AcpSecretContext _contextOf(Map map) => AcpSecretContext(
+  sessionId: _textOf(map, 'sessionId', 'the message has no session'),
+  requestId: _textOf(map, 'requestId', 'the message has no id'),
+  message: _textOf(map, 'message', 'the message has no message'),
+  schema: _textOf(map, 'schema', 'the schema is not JSON text'),
+  form: switch (map['form']) {
+    null => null,
+    final String form => form,
+    _ => throw _fail(
+      AcpSecretFailure.malformed,
+      'the form overlay is not JSON text',
+    ),
+  },
+);
+
+Map<String, Object?> _contextJson(AcpSecretContext context) => {
+  'sessionId': context.sessionId,
+  'requestId': context.requestId,
+  'message': context.message,
+  'schema': context.schema,
+  if (context.form != null) 'form': context.form,
 };
 
-/// `_coqui/secret/request`'s parameters.
+/// [acpSecretRequestMethod]'s parameters. The schema and the layout are JSON text, and these exact bytes are what the receiver's
+/// binding covers.
 final class AcpSecretRequestParams {
   const AcpSecretRequestParams({
-    required this.sessionId,
-    required this.requestId,
-    required this.message,
-    required this.schema,
+    required this.context,
     required this.recipient,
-    this.form,
   });
 
-  final String sessionId, requestId, message;
-  final Map<String, Object?> schema;
-  final Map<String, Object?>? form;
+  final AcpSecretContext context;
   final AcpSecretRecipient recipient;
 
   Map<String, Object?> toJson() => {
-    'sessionId': sessionId,
-    'requestId': requestId,
-    'message': message,
-    'schema': schema,
-    if (form != null) 'form': form,
+    ..._contextJson(context),
     'recipient': recipient.toJson(),
   };
 
   factory AcpSecretRequestParams.fromJson(Object? json) {
     final map = _mapOf(json, 'the request is not an object');
     return AcpSecretRequestParams(
-      sessionId: _textOf(map, 'sessionId', 'the request has no session'),
-      requestId: _textOf(map, 'requestId', 'the request has no id'),
-      message: _textOf(map, 'message', 'the request has no message'),
-      schema: _mapOf(map['schema'], 'the request has no schema'),
-      form: _formOverlay(map),
+      context: _contextOf(map),
       recipient: AcpSecretRecipient.fromJson(map['recipient']),
     );
   }
@@ -1167,9 +1496,13 @@ sealed class AcpSecretRequestReply {
             plain[key] = value;
           }
         }
-        return AcpSecretAccepted(plain, sealed);
+        return AcpSecretAccepted(
+          plain,
+          sealed,
+          AcpSecretBinding.fromJson(map['auth']),
+        );
     }
-    throw _secretFailure(
+    throw _fail(
       AcpSecretFailure.malformed,
       "the answer's action is not accept, decline or cancel",
     );
@@ -1177,10 +1510,13 @@ sealed class AcpSecretRequestReply {
 }
 
 final class AcpSecretAccepted extends AcpSecretRequestReply {
-  const AcpSecretAccepted(this.plain, this.sealed);
+  const AcpSecretAccepted(this.plain, this.sealed, this.auth);
 
   final Map<String, Object?> plain;
   final Map<String, AcpSealed> sealed;
+
+  /// The sender's binding of [sealed], from [AcpSecretCollector.authenticate].
+  final AcpSecretBinding auth;
 
   @override
   Map<String, Object?> toJson() => {
@@ -1189,6 +1525,7 @@ final class AcpSecretAccepted extends AcpSecretRequestReply {
       ...plain,
       for (final MapEntry(:key, :value) in sealed.entries) key: value.toJson(),
     },
+    'auth': auth.toJson(),
   };
 }
 
@@ -1206,51 +1543,27 @@ final class AcpSecretCancelled extends AcpSecretRequestReply {
   Map<String, Object?> toJson() => {'action': 'cancel'};
 }
 
-/// `_coqui/secret/show` with `"step": "open"`.
+/// [acpSecretShowOpenMethod]'s parameters.
 final class AcpSecretShowOpen {
-  const AcpSecretShowOpen({
-    required this.sessionId,
-    required this.requestId,
-    required this.message,
-    required this.schema,
-    required this.values,
-    this.form,
-  });
+  const AcpSecretShowOpen({required this.context, required this.values});
 
-  final String sessionId, requestId, message;
-  final Map<String, Object?> schema, values;
-  final Map<String, Object?>? form;
+  final AcpSecretContext context;
 
-  Map<String, Object?> toJson() => {
-    'step': 'open',
-    'sessionId': sessionId,
-    'requestId': requestId,
-    'message': message,
-    'schema': schema,
-    if (form != null) 'form': form,
-    'values': values,
-  };
+  /// The values that are not secret.
+  final Map<String, Object?> values;
+
+  Map<String, Object?> toJson() => {..._contextJson(context), 'values': values};
 
   factory AcpSecretShowOpen.fromJson(Object? json) {
     final map = _mapOf(json, 'the show is not an object');
-    if (map['step'] != 'open') {
-      throw _secretFailure(
-        AcpSecretFailure.malformed,
-        "the show's step is not open",
-      );
-    }
     return AcpSecretShowOpen(
-      sessionId: _textOf(map, 'sessionId', 'the show has no session'),
-      requestId: _textOf(map, 'requestId', 'the show has no id'),
-      message: _textOf(map, 'message', 'the show has no message'),
-      schema: _mapOf(map['schema'], 'the show has no schema'),
-      form: _formOverlay(map),
+      context: _contextOf(map),
       values: _mapOf(map['values'], 'the show has no values'),
     );
   }
 }
 
-/// The answer to an `open` step: [recipient] when ready, else null with [action] `decline` or `cancel`.
+/// The answer to an open step: [recipient] when ready, else null with [action] `decline` or `cancel`.
 final class AcpSecretShowOpened {
   const AcpSecretShowOpened.ready(AcpSecretRecipient this.recipient)
     : action = 'ready';
@@ -1273,7 +1586,7 @@ final class AcpSecretShowOpened {
       ),
       'decline' => const AcpSecretShowOpened.declined(),
       'cancel' => const AcpSecretShowOpened.cancelled(),
-      _ => throw _secretFailure(
+      _ => throw _fail(
         AcpSecretFailure.malformed,
         "the answer's action is not ready, decline or cancel",
       ),
@@ -1281,34 +1594,32 @@ final class AcpSecretShowOpened {
   }
 }
 
-/// `_coqui/secret/show` with `"step": "deliver"`.
+/// [acpSecretShowDeliverMethod]'s parameters.
 final class AcpSecretShowDeliver {
   const AcpSecretShowDeliver({
     required this.sessionId,
     required this.requestId,
     required this.sealed,
+    required this.auth,
   });
 
   final String sessionId, requestId;
   final Map<String, AcpSealed> sealed;
 
+  /// The host's binding of [sealed], from [AcpSecretCollector.authenticate].
+  final AcpSecretBinding auth;
+
   Map<String, Object?> toJson() => {
-    'step': 'deliver',
     'sessionId': sessionId,
     'requestId': requestId,
     'values': {
       for (final MapEntry(:key, :value) in sealed.entries) key: value.toJson(),
     },
+    'auth': auth.toJson(),
   };
 
   factory AcpSecretShowDeliver.fromJson(Object? json) {
     final map = _mapOf(json, 'the show is not an object');
-    if (map['step'] != 'deliver') {
-      throw _secretFailure(
-        AcpSecretFailure.malformed,
-        "the show's step is not deliver",
-      );
-    }
     final values = _mapOf(map['values'], 'the show has no values');
     return AcpSecretShowDeliver(
       sessionId: _textOf(map, 'sessionId', 'the show has no session'),
@@ -1317,22 +1628,151 @@ final class AcpSecretShowDeliver {
         for (final MapEntry(:key, :value) in values.entries)
           key: AcpSealed.fromJson(value),
       },
+      auth: AcpSecretBinding.fromJson(map['auth']),
     );
   }
 }
 
-/// The answer to a `deliver` step: `shown` when the person saw the values, else `cancel`.
+/// The answer to a deliver step: `shown` when the person saw the values, else `cancel`.
 Map<String, Object?> acpSecretShowDone({required bool shown}) => {
   'action': shown ? 'shown' : 'cancel',
 };
 
-/// Reads the answer to a `deliver` step: true for `shown`.
+/// Reads the answer to a deliver step: true for `shown`.
 bool acpSecretShowDoneFromJson(Object? json) =>
     switch (_mapOf(json, 'the answer is not an object')['action']) {
       'shown' => true,
       'cancel' => false,
-      _ => throw _secretFailure(
+      _ => throw _fail(
         AcpSecretFailure.malformed,
         "the answer's action is not shown or cancel",
       ),
     };
+
+// ---- Hooks for the vector tests. They are not exported by `package:coqui_acp/secret.dart`.
+
+/// A receiver whose key pair is derived from [ikm] (RFC 9180's DeriveKeyPair).
+Future<AcpSecretReceiver> secretReceiverFromIkm(
+  AcpSecretMethod method,
+  AcpSecretContext context,
+  AcpSecretProver prover,
+  AcpIdentityId audience,
+  int now,
+  Duration lifetime,
+  List<int> ikm, {
+  AcpSecretLimits limits = const AcpSecretLimits(),
+}) => AcpSecretReceiver._fromIkm(
+  method,
+  context,
+  prover,
+  audience,
+  now,
+  lifetime,
+  limits,
+  ikm,
+);
+
+/// Seals with the ephemeral key derived from [ikm].
+Future<AcpSealed> secretSealWithIkm(
+  AcpSecretCollector collector,
+  String name,
+  String value,
+  List<int> ikm,
+) => collector._seal(name, value, ikm);
+
+/// The statement of a key binding.
+Uint8List secretKeyStatement(
+  AcpSecretMethod method,
+  String requestId,
+  List<int> digest,
+  List<int> key,
+  int expires,
+  AcpIdentityId audience,
+) => _statement(
+  _Kind.key,
+  method,
+  requestId,
+  digest,
+  key,
+  const [],
+  expires,
+  audience,
+);
+
+/// The statement of a values binding.
+Uint8List secretValuesStatement(
+  AcpSecretMethod method,
+  String requestId,
+  List<int> digest,
+  List<int> key,
+  Map<String, AcpSealed> sealed,
+  int expires,
+  AcpIdentityId audience,
+) => _statement(
+  _Kind.answer,
+  method,
+  requestId,
+  digest,
+  key,
+  _valuesDigest(sealed),
+  expires,
+  audience,
+);
+
+/// The digest of a set of sealed values.
+Uint8List secretValuesDigest(Map<String, AcpSealed> sealed) =>
+    _valuesDigest(sealed);
+
+/// The grammar of a whole number, a number and the two base64 forms, as text.
+bool secretGrammar(String kind, String text) => switch (kind) {
+  'integer' => _jsonInteger(text) != null,
+  'number' => _jsonNumber(text) != null,
+  'base64url' => _base64Canonical(text, url: true),
+  _ => _base64Canonical(text, url: false),
+};
+
+/// Replaces a binding's proof; for tests that change one thing about a binding.
+AcpSecretBinding secretWithProof(AcpSecretBinding binding, Uint8List proof) =>
+    AcpSecretBinding(
+      method: binding.method,
+      key: binding.key,
+      expires: binding.expires,
+      audience: binding.audience,
+      proof: proof,
+    );
+
+/// The same signature written with the other s (n - s).
+Uint8List secretHighS(Uint8List proof) => _concat([
+  proof.sublist(0, 32),
+  _bigBytes(_p256.n - _bigOf(proof.sublist(32))),
+]);
+
+/// The HPKE info of a field.
+Uint8List secretFieldInfo(
+  AcpSecretMethod method,
+  String requestId,
+  List<int> digest,
+  String field,
+) => _fieldInfo(method, requestId, digest, field);
+
+/// A recipient for any public [key], bound as a receiver would: for a test of how a collector treats a key of low order.
+Future<AcpSecretRecipient> secretBindKey(
+  AcpSecretProver prover,
+  AcpSecretMethod method,
+  AcpSecretContext context,
+  AcpIdentityId audience,
+  List<int> key,
+  int now,
+) async => AcpSecretRecipient(
+  Uint8List.fromList(key),
+  await prover._bind(
+    _Kind.key,
+    method,
+    context.requestId,
+    context.digest(method),
+    key,
+    const [],
+    now + 240,
+    audience,
+  ),
+);

@@ -409,3 +409,11 @@ String? _misfit(AcpElicitation request, Map<String, Object?> content) {
   }
   return null;
 }
+
+/// One question of a JSON Schema `properties` map, as [AcpElicitation] reads it: for a library that reads forms of its own.
+AcpField acpFieldFromSchema(String name, Map schema, {bool required = false}) =>
+    _field(name, schema, required);
+
+/// Why [content] is not an answer to the questions [request] holds, or null when it is.
+String? acpMisfit(AcpElicitation request, Map<String, Object?> content) =>
+    _misfit(request, content);

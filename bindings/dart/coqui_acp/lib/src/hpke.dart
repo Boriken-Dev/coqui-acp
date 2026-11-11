@@ -102,12 +102,21 @@ Future<Uint8List> x25519Public(List<int> secret) async {
 
 /// The X25519 Diffie-Hellman of [secret] and [publicKey]; a result of low order is refused.
 Future<Uint8List> x25519Dh(List<int> secret, List<int> publicKey) async {
-  final pair = await _x25519.newKeyPairFromSeed(secret);
-  final shared = await _x25519.sharedSecretKey(
-    keyPair: pair,
-    remotePublicKey: cr.SimplePublicKey(publicKey, type: cr.KeyPairType.x25519),
-  );
-  final bytes = Uint8List.fromList(await shared.extractBytes());
+  final Uint8List bytes;
+  try {
+    final pair = await _x25519.newKeyPairFromSeed(secret);
+    final shared = await _x25519.sharedSecretKey(
+      keyPair: pair,
+      remotePublicKey: cr.SimplePublicKey(
+        publicKey,
+        type: cr.KeyPairType.x25519,
+      ),
+    );
+    bytes = Uint8List.fromList(await shared.extractBytes());
+  } on Object {
+    // A browser's WebCrypto refuses a key of low order by throwing; the pure Dart code returns zeros.
+    throw const HpkeFailure('a Diffie-Hellman key of low order');
+  }
   if (bytes.every((byte) => byte == 0)) {
     throw const HpkeFailure('a Diffie-Hellman key of low order');
   }
