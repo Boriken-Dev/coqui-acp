@@ -51,8 +51,11 @@ final class FakeConnection extends ChatConnection {
     prompts.add(text);
     calls.add('prompt:$text');
     attachmentNames.add([for (final item in attachments) item.name]);
+    // A v1 prompt answers when its turn ends, which a test says by giving onPrompt a future of its own.
     return onPrompt?.call(text) ??
-        Future.value(version == 1 ? null : 'm${prompts.length}');
+        (version == 1
+            ? Completer<String?>().future
+            : Future.value('m${prompts.length}'));
   }
 
   @override
@@ -198,3 +201,7 @@ Map<String, Object?> state(String state, {String? reason}) => {
 /// Applies one update to [session] directly, which is what its connection's stream does.
 void feed(ChatSession session, Map<String, Object?> raw) =>
     session.apply(AcpSessionUpdate('s1', Map<String, dynamic>.of(raw)));
+
+/// [text] with the id it comes under, for a closure that has a parameter of its own called `text`.
+Map<String, Object?> text0(String kind, String body, String id) =>
+    text(kind, body, id: id);

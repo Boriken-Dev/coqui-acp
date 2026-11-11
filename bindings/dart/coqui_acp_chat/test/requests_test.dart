@@ -2,6 +2,7 @@
 // connection a request belongs to, several clients answering (the first wins), and a request whose connection is gone.
 import 'package:coqui_acp/coqui_acp.dart';
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
+import 'package:coqui_acp_chat/experimental.dart';
 import 'package:test/test.dart';
 
 import 'support/fakes.dart';
@@ -236,10 +237,8 @@ void main() {
           }),
         );
         expect(session.inBypass, isFalse);
-        session.pending['mode'] = const PendingChoice(
-          'mode',
-          OptionRole.mode,
-          'bypassPermissions',
+        session.holdChoice(
+          const PendingChoice('mode', OptionRole.mode, 'bypassPermissions'),
         );
         expect(session.inBypass, isFalse);
         expect(session.mode, 'bypassPermissions', reason: 'shown as chosen');
@@ -312,7 +311,7 @@ void main() {
         expect(session.pendingPermissions, hasLength(2));
         expect(
           session.messages.last.text,
-          contains('more questions than the 2'),
+          contains('more requests than the 2'),
         );
         store.askQuestion(_form('s1'), agent);
         expect(
@@ -481,6 +480,7 @@ void main() {
       'a request settled elsewhere is settled here too, with the answer the agent is given',
       () async {
         final (:store, :session, :agent) = started();
+        session.attachClient('hub-phone');
         final answer = store.askPermission(request(1), agent);
         expect(
           session.settleElsewhere(
@@ -523,8 +523,7 @@ void main() {
       'after the agent went away is not shown, its line is stopped, and nobody is told anything',
       () async {
         final (:store, :session, :agent) = started();
-        var answered = false;
-        store.askPermission(request(11), agent).then((_) => answered = true);
+        final answer = store.askPermission(request(11), agent);
         expect(session.toolEntries['t11']!.tool!.status, ToolStatus.pending);
         final question = session.pendingPermissions.single;
         await agent.drop();
@@ -540,9 +539,10 @@ void main() {
         expect(session.answerPermission(allow: true), isFalse);
         await settle();
         expect(
-          answered,
-          isFalse,
-          reason: 'nobody was told anything for a request nobody can answer',
+          await answer,
+          isA<AcpCancel>(),
+          reason:
+              'the agent is told, so it never waits for an answer nobody can give',
         );
         store.dispose();
       },
@@ -552,8 +552,7 @@ void main() {
       'after the conversation was connected to another agent likewise, and a late answer sends nothing',
       () async {
         final (:store, :session, :agent) = started();
-        var answered = false;
-        store.askPermission(request(12), agent).then((_) => answered = true);
+        final answer = store.askPermission(request(12), agent);
         final question = session.pendingPermissions.single;
         final again = FakeConnection();
         session.attach(again);
@@ -562,7 +561,7 @@ void main() {
         expect(session.settle(question, const AcpAllow()), isFalse);
         expect(session.choosePermission(allowOnce), isFalse);
         await settle();
-        expect(answered, isFalse);
+        expect(await answer, isA<AcpCancel>());
         // The new connection's own requests are the conversation's now, and the old one's are not.
         store.askPermission(request(13), again);
         expect(await store.askPermission(request(14), agent), isA<AcpDeny>());
@@ -577,7 +576,11 @@ void main() {
         final (:store, :session, :agent) = started();
         store.askPermission(request(13), agent);
         session.answerPermission(allow: true);
-        session.toolEntries['t13']!.tool!.status = ToolStatus.done;
+        feed(session, {
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': 't13',
+          'status': 'completed',
+        });
         store.askPermission(request(14), agent);
         await agent.drop();
         await settle();

@@ -188,7 +188,7 @@ void main() {
     'a v1 turn shows its message at once and ends with the answer to its prompt',
     () async {
       final (:agent, :store, :session, :connection) = await _connected();
-      final sent = session.send('Say hello');
+      await session.send('Say hello');
       await settle();
       expect(session.status, ChatStatus.working);
       expect(session.messages.single.text, 'Say hello');
@@ -197,7 +197,6 @@ void main() {
       await session.send('And then this');
       expect(session.queue.single.text, 'And then this');
       agent.reply(prompt['id'], {'stopReason': 'end_turn'});
-      await sent;
       await settle();
       expect(
         agent.received.where((m) => m['method'] == 'session/prompt'),

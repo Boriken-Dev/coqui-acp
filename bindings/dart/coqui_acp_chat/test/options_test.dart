@@ -127,7 +127,7 @@ void main() {
       expect(await session.choose(model, 'b'), isFalse);
       await session.choose(effort, 'high');
       await session.choose(effort, null);
-      expect(session.pending.keys, ['model']);
+      expect(session.pendingChoices.keys, ['model']);
       expect(agent.calls, [
         'prompt:go',
       ], reason: 'nothing goes while a turn runs');
@@ -135,7 +135,7 @@ void main() {
       feed(session, state('idle', reason: 'end_turn'));
       await settle();
       expect(agent.calls, ['prompt:go', 'config:model=b', 'prompt:next']);
-      expect(session.pending, isEmpty);
+      expect(session.pendingChoices, isEmpty);
       store.dispose();
     },
   );
@@ -145,15 +145,9 @@ void main() {
     () async {
       final (:store, :session, :agent) = started();
       _offering(session);
-      session.pending['model'] = const PendingChoice(
-        'model',
-        OptionRole.model,
-        'zz',
-      );
-      session.pending['mode'] = const PendingChoice(
-        'mode',
-        OptionRole.mode,
-        'custom',
+      session.holdChoice(const PendingChoice('model', OptionRole.model, 'zz'));
+      session.holdChoice(
+        const PendingChoice('mode', OptionRole.mode, 'custom'),
       );
       await session.send('hello');
       expect(agent.calls, ['prompt:hello']);
@@ -170,11 +164,7 @@ void main() {
     () async {
       final (:store, :session, :agent) = started();
       _offering(session);
-      session.pending['llm'] = const PendingChoice(
-        'llm',
-        OptionRole.model,
-        'b',
-      );
+      session.holdChoice(const PendingChoice('llm', OptionRole.model, 'b'));
       await session.send('hello');
       expect(agent.calls, ['config:model=b', 'prompt:hello']);
       session.applyOpened(
@@ -187,10 +177,8 @@ void main() {
           },
         }),
       );
-      session.pending['mode'] = const PendingChoice(
-        'mode',
-        OptionRole.mode,
-        'manual',
+      session.holdChoice(
+        const PendingChoice('mode', OptionRole.mode, 'manual'),
       );
       await session.send('again');
       expect(agent.calls.sublist(2), ['mode:manual', 'prompt:again']);

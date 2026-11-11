@@ -118,13 +118,24 @@ ToolBlock? _toolBlock(Object? raw, ChatLimits limits) {
 final class ToolCall {
   ToolCall(this.id);
   final String id;
-  String title = 'A tool';
-  String? kind;
-  ToolStatus status = ToolStatus.pending;
-  List<ToolBlock> blocks = const [];
+  String _title = 'A tool';
+  String? _kind;
+  ToolStatus _status = ToolStatus.pending;
+  List<ToolBlock> _blocks = const [];
+  List<String> _locations = const [];
+
+  String get title => _title;
+  String? get kind => _kind;
+  ToolStatus get status => _status;
+  List<ToolBlock> get blocks => _blocks;
 
   /// Where it works, as `path` or `path:line`.
-  List<String> locations = const [];
+  List<String> get locations => _locations;
+
+  /// Marks a call that was waiting or running as stopped: nothing can finish it now. A call that has finished stays as it was.
+  void stop() {
+    if (isOpen) _status = ToolStatus.stopped;
+  }
 
   /// Whether it is waiting or running, which a connection that ended leaves for [ToolStatus.stopped].
   bool get isOpen =>
@@ -141,18 +152,20 @@ final class ToolCall {
   }.toList();
 
   void apply(Map<String, dynamic> raw, ChatLimits limits) {
-    title =
+    _title =
         shortText(raw['title'], limits) ??
-        (title == 'A tool' ? shortText(raw['name'], limits) ?? title : title);
-    kind = shortText(raw['kind'], limits) ?? kind;
-    status = _toolStatus(raw['status']) ?? status;
+        (_title == 'A tool'
+            ? shortText(raw['name'], limits) ?? _title
+            : _title);
+    _kind = shortText(raw['kind'], limits) ?? _kind;
+    _status = _toolStatus(raw['status']) ?? _status;
     final content = raw['content'];
     if (raw['sessionUpdate'] == 'tool_call_content_chunk') {
       // One more item after what came before; past the limit the oldest goes.
       final block = _toolBlock(content, limits);
       if (block != null) {
-        final all = [...blocks, block];
-        blocks = all.length > limits.toolBlocks
+        final all = [..._blocks, block];
+        _blocks = all.length > limits.toolBlocks
             ? all.sublist(all.length - limits.toolBlocks)
             : all;
       }
@@ -163,11 +176,11 @@ final class ToolCall {
           .whereType<ToolBlock>()
           .toList();
       // An update with an empty list is how one starts, not a request to forget what came before.
-      if (parsed.isNotEmpty) blocks = parsed;
+      if (parsed.isNotEmpty) _blocks = parsed;
     }
     final places = raw['locations'];
     if (places is List && places.isNotEmpty) {
-      locations = places
+      _locations = places
           .take(limits.locations)
           .whereType<Map>()
           .map((place) {
@@ -235,39 +248,43 @@ String terminalText(String data) {
 
 /// A command the agent ran, as it reports it. The output keeps its end, which is where a failure says why.
 final class TerminalView {
-  String? command;
-  String output = '';
-  int? exitCode;
+  TerminalView(ChatLimits limits)
+    : _output = BoundedText.tail(limits.terminalOutput);
+
+  final BoundedText _output;
+  String? _command;
+  int? _exitCode;
+
+  String? get command => _command;
+  String get output => _output.value;
+  int? get exitCode => _exitCode;
+
+  /// Whether the command has not reported that it ended.
+  bool get isRunning => _exitCode == null;
 
   /// A `terminal_update`, whose output replaces what came before, or a `terminal_output_chunk`, which adds to it.
   void apply(Map<String, dynamic> raw, ChatLimits limits) {
-    command = shortText(raw['command'], limits) ?? command;
+    _command = shortText(raw['command'], limits) ?? _command;
     final said = raw['output'];
     if (said is Map && said['data'] is String) {
-      output = boundedTail(
-        terminalText(said['data'] as String),
-        limits.terminalOutput,
-      );
+      _output.set(terminalText(said['data'] as String));
     }
     if (raw['sessionUpdate'] == 'terminal_output_chunk' &&
         raw['data'] is String) {
-      output = boundedTail(
-        output + terminalText(raw['data'] as String),
-        limits.terminalOutput,
-      );
+      _output.append(terminalText(raw['data'] as String));
     }
     final exit = raw['exitStatus'];
     if (exit is Map && exit['exitCode'] is int) {
-      exitCode = exit['exitCode'] as int;
+      _exitCode = exit['exitCode'] as int;
     }
   }
 
   Map<String, Object?> toUpdate(String id) => {
     'sessionUpdate': 'terminal_update',
     'terminalId': id,
-    'command': ?command,
+    'command': ?_command,
     'output': {'data': base64.encode(utf8.encode(output))},
-    if (exitCode != null) 'exitStatus': {'exitCode': exitCode},
+    if (_exitCode != null) 'exitStatus': {'exitCode': _exitCode},
   };
 }
 
@@ -324,18 +341,20 @@ String _texts(Iterable<Object?> blocks) => blocks
 
 /// One compaction of the agent's context, built up from its `compaction_update`s and `compaction_summary_chunk`s.
 final class Compaction {
-  Compaction(this.id);
+  Compaction(this.id, ChatLimits limits)
+    : _summary = BoundedText.head(limits.toolText);
   final String id;
-  CompactionStatus status = CompactionStatus.running;
-  String summary = '';
-  String? error;
+  CompactionStatus _status = CompactionStatus.running;
+  final BoundedText _summary;
+  String? _error;
+
+  CompactionStatus get status => _status;
+  String get summary => _summary.value;
+  String? get error => _error;
 
   void apply(Map<String, dynamic> raw, ChatLimits limits) {
     if (raw['sessionUpdate'] == 'compaction_summary_chunk') {
-      summary = boundedHead(
-        summary + _texts([raw['content']]),
-        limits.toolText,
-      );
+      _summary.append(_texts([raw['content']]));
       return;
     }
     final now = switch (raw['status']) {
@@ -345,13 +364,13 @@ final class Compaction {
       'cancelled' => CompactionStatus.cancelled,
       _ => null,
     };
-    status = now ?? status;
+    _status = now ?? _status;
     // Both are patches: a field left out keeps its value, and null clears it.
     if (raw.containsKey('summary')) {
       final said = raw['summary'];
-      summary = said is List ? boundedHead(_texts(said), limits.toolText) : '';
+      _summary.set(said is List ? _texts(said) : '');
     }
-    if (raw.containsKey('error')) error = shortText(raw['error'], limits);
+    if (raw.containsKey('error')) _error = shortText(raw['error'], limits);
   }
 
   Map<String, Object?> toUpdate() => {
@@ -366,7 +385,7 @@ final class Compaction {
     'summary': [
       if (summary.isNotEmpty) {'type': 'text', 'text': summary},
     ],
-    'error': error,
+    'error': _error,
   };
 }
 

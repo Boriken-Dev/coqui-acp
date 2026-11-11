@@ -3,11 +3,13 @@ import 'dart:convert';
 
 import 'package:coqui_acp/coqui_acp.dart';
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
+import 'package:coqui_acp_chat/experimental.dart';
 import 'package:test/test.dart';
 
 import 'support/fakes.dart';
 
 void main() {
+  _more();
   test(
     'what a conversation replays, another builds again: messages, tools with diffs and terminals, plan, commands, usage, title',
     () {
@@ -115,15 +117,14 @@ void main() {
       });
 
       final other = ChatSession(id: 'phone', sessionId: 's1');
-      for (final update in session.replay()) {
-        // Through JSON, as a wire would carry it.
-        other.apply(
+      other.applyReplay([
+        for (final update in session.replay())
+          // Through JSON, as a wire would carry it.
           AcpSessionUpdate(
             update.sessionId,
             jsonDecode(jsonEncode(update.raw)) as Map<String, dynamic>,
           ),
-        );
-      }
+      ]);
 
       expect(
         other.messages.map((m) => (m.role, m.text, m.messageId, m.sentBy)),
@@ -218,4 +219,133 @@ void main() {
       store.dispose();
     },
   );
+}
+
+void _more() {
+  test(
+    'a replay keeps the turns with their times and how they ended, the times of entries, the naming and a v1 mode',
+    () {
+      var now = DateTime.utc(2026, 11, 12, 9);
+      final store = ChatStore(clock: () => now);
+      final session = store.add(title: 'Fix it', agent: 'A', sessionId: 's1');
+      session.applyOpened(
+        AcpOpenedSession('s1', {
+          'modes': {
+            'currentModeId': 'auto',
+            'availableModes': [
+              {'id': 'manual', 'name': 'Manual'},
+              {'id': 'auto', 'name': 'Auto'},
+            ],
+          },
+        }),
+      );
+      session.rename('Mine');
+      feed(session, state('running'));
+      now = now.add(const Duration(seconds: 2));
+      feed(session, text('agent_message', 'First', id: 'a1'));
+      now = now.add(const Duration(seconds: 8));
+      feed(session, state('idle', reason: 'end_turn'));
+      now = now.add(const Duration(minutes: 5));
+      feed(session, state('running'));
+      now = now.add(const Duration(seconds: 3));
+      feed(session, state('idle', reason: 'cancelled'));
+
+      var later = DateTime.utc(2026, 11, 13);
+      final other = ChatSession(
+        id: 'phone',
+        sessionId: 's1',
+        clock: () => later,
+      );
+      final told = <ChatEvent>[];
+      other.events.listen(told.add);
+      other.applyReplay(session.replay());
+
+      expect(other.turns.map((t) => t.outcome), [
+        TurnOutcome.completed,
+        TurnOutcome.cancelled,
+      ]);
+      expect(other.turns.map((t) => t.duration(later)), [
+        const Duration(seconds: 10),
+        const Duration(seconds: 3),
+      ]);
+      expect(other.turns.first.startedAt, DateTime.utc(2026, 11, 12, 9));
+      expect(
+        other.messages.firstWhere((m) => m.text == 'First').at,
+        DateTime.utc(2026, 11, 12, 9, 0, 2),
+      );
+      expect(
+        other.messages.firstWhere((m) => m.text == 'First').turn,
+        other.turns.first.id,
+      );
+      expect(other.title, 'Mine');
+      expect(other.agentNames, isFalse);
+      other.applyReplay([
+        AcpSessionUpdate('s1', {
+          'sessionUpdate': 'session_info_update',
+          'title': 'Agent says',
+        }),
+      ]);
+      expect(other.title, 'Mine', reason: 'the person had named it');
+      expect(other.options.single.isMode, isTrue);
+      expect(other.mode, 'auto');
+      later = later.add(const Duration(hours: 1));
+      return Future<void>.delayed(const Duration(milliseconds: 10)).then((_) {
+        expect(
+          told.whereType<AttentionEvent>(),
+          isEmpty,
+          reason: 'history is not news',
+        );
+        expect(told.whereType<TurnEvent>(), isEmpty);
+        store.dispose();
+      });
+    },
+  );
+
+  test(
+    'a time an agent puts in an update is not believed outside a replay',
+    () {
+      final session = ChatSession(
+        id: 'x',
+        sessionId: 's1',
+        clock: () => DateTime.utc(2026, 1, 1),
+      );
+      feed(session, {
+        'sessionUpdate': 'agent_message',
+        'messageId': 'm',
+        'content': {'type': 'text', 'text': 'hi'},
+        '_meta': {'dev.boriken.coqui.acp/at': '1999-01-01T00:00:00Z'},
+      });
+      expect(session.messages.single.at, DateTime.utc(2026, 1, 1));
+    },
+  );
+
+  test('a sender an update names is one clean line', () {
+    final session = ChatSession(
+      id: 'x',
+      sessionId: 's1',
+      limits: const ChatLimits(shortText: 6),
+    );
+    feed(session, {
+      'sessionUpdate': 'user_message',
+      'messageId': 'm',
+      'content': {'type': 'text', 'text': 'hi'},
+      '_meta': {chatClientMetaKey: 'tv\nroom-with-a-long-name'},
+    });
+    expect(session.messages.single.sentBy, 'tv roo…');
+  });
+
+  test('settling elsewhere needs the client to be attached', () {
+    final (:store, :session, :agent) = started();
+    store.askPermission(request(1), agent);
+    expect(
+      () => session.settleElsewhere(
+        session.pendingPermissions.single,
+        by: 'ghost',
+        optionId: 'reject',
+      ),
+      throwsStateError,
+    );
+    expect(session.pendingPermissions, hasLength(1));
+    store.dispose();
+  });
 }

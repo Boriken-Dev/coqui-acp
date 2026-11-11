@@ -34,6 +34,7 @@ void main() {
         limits.listShapes,
         limits.shapeDepth,
         limits.titleLength,
+        limits.usageBuckets,
       ],
       [
         5000,
@@ -59,6 +60,7 @@ void main() {
         8,
         8,
         60,
+        64,
       ],
     );
   });
@@ -90,6 +92,7 @@ void main() {
         listShapes: 0,
         shapeDepth: 0,
         titleLength: 0,
+        usageBuckets: 0,
       );
       final (:store, :session, :agent) = started(limits: zero);
       feed(session, state('running'));

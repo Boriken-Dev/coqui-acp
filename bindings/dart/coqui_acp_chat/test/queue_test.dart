@@ -285,22 +285,25 @@ void main() {
 
   group('under v1, whose turn ends with the answer to its prompt', () {
     test(
-      'the message shows and the turn starts when it is sent, and the next goes when the turn ends',
+      'send completes when the prompt is under way, the message shows and the turn starts, and the next goes when the turn ends',
       () async {
         final (:store, :session, :agent) = started(version: 1);
         final turn = Completer<String?>();
         agent.onPrompt = (_) => turn.future;
-        final sent = session.send('Fix the test');
-        await settle();
+        await session.send('Fix the test');
         expect(session.status, ChatStatus.working);
         expect(_users(session), ['Fix the test']);
         expect(session.currentTurn, isNotNull);
+        expect(
+          session.messages.single.turn,
+          session.currentTurn!.id,
+          reason: 'the prompt belongs to the turn it starts',
+        );
         await session.send('And then this');
         expect(session.queue.single.text, 'And then this');
         agent.onPrompt = null;
-        agent.event(const AcpCompleted('end_turn'));
+        agent.event(const AcpCompleted('end_turn', sessionId: 's1'));
         turn.complete(null);
-        await sent;
         await settle();
         expect(agent.prompts, ['Fix the test', 'And then this']);
         expect(session.turns.first.outcome, TurnOutcome.completed);
@@ -315,11 +318,10 @@ void main() {
         final (:store, :session, :agent) = started(version: 1);
         final turn = Completer<String?>();
         agent.onPrompt = (_) => turn.future;
-        final sent = session.send('one');
+        await session.send('one');
         await session.send('two');
-        agent.event(const AcpCancelled());
+        agent.event(const AcpCancelled(sessionId: 's1'));
         turn.complete(null);
-        await sent;
         await settle();
         expect(session.queueHeld, 'the turn was stopped');
         expect(session.messages.map((m) => m.text), contains('Stopped.'));
@@ -337,11 +339,10 @@ void main() {
         store.attention.listen((a) => seen.add(a.kind));
         final turn = Completer<String?>();
         agent.onPrompt = (_) => turn.future;
-        final sent = session.send('one');
+        await session.send('one');
         await session.send('two');
-        agent.event(const AcpFailed('Rate limit reached'));
+        agent.event(const AcpFailed('Rate limit reached', sessionId: 's1'));
         turn.complete(null);
-        await sent;
         await settle();
         expect(
           session.messages
@@ -356,13 +357,65 @@ void main() {
     );
 
     test(
-      'a prompt that fails without the agent saying so ends the turn, or the chat would wait for it for good',
+      'an answer to the prompt with no event ends the turn as completed',
+      () async {
+        final (:store, :session, :agent) = started(version: 1);
+        final turn = Completer<String?>();
+        agent.onPrompt = (_) => turn.future;
+        await session.send('one');
+        expect(session.status, ChatStatus.working);
+        turn.complete(null);
+        await settle();
+        expect(session.status, ChatStatus.connected);
+        expect(session.turns.single.outcome, TurnOutcome.completed);
+        store.dispose();
+      },
+    );
+
+    test(
+      'a prompt refused at once is refused to the caller and leaves no message behind, so a retry shows one',
       () async {
         final (:store, :session, :agent) = started(version: 1);
         agent.onPrompt = (_) async => throw const AcpFailure('lost');
         await expectLater(session.send('one'), throwsA(isA<AcpFailure>()));
         expect(session.status, ChatStatus.connected);
         expect(session.turns.single.outcome, TurnOutcome.failed);
+        expect(
+          _users(session),
+          isEmpty,
+          reason: 'nothing was taken, so nothing is shown',
+        );
+        agent.onPrompt = null;
+        await session.send('one');
+        expect(_users(session), ['one']);
+        store.dispose();
+      },
+    );
+
+    test(
+      'a queued message that is refused stays queued, and sending it again after the fault shows it once',
+      () async {
+        final (:store, :session, :agent) = started(version: 1);
+        final turn = Completer<String?>();
+        agent.onPrompt = (_) => turn.future;
+        await session.send('first');
+        await session.send(
+          'second',
+          attachments: [AcpAttachment.text('n.txt', 'hi')],
+        );
+        agent.onPrompt = (_) async => throw const AcpFailure('offline');
+        agent.event(const AcpCompleted('end_turn', sessionId: 's1'));
+        turn.complete(null);
+        await settle();
+        expect(session.queue.single.text, 'second');
+        expect(_users(session), ['first']);
+        agent.onPrompt = null;
+        await session.sendQueued();
+        expect(_users(session), ['first', 'second']);
+        expect(
+          session.messages.where((m) => m.text == 'Sent with this: n.txt'),
+          hasLength(1),
+        );
         store.dispose();
       },
     );
@@ -373,7 +426,8 @@ void main() {
         final (:store, :session, :agent) = started(version: 1);
         agent.event(const AcpOutputLost(lines: 1, bytes: 40));
         agent.event(const AcpOutputLost(lines: 3, bytes: 900));
-        agent.event(const AcpBlocked('no form'));
+        agent.event(const AcpBlocked('no form', sessionId: 's1'));
+        agent.event(const AcpBlocked('not for this one', sessionId: 'other'));
         await settle();
         expect(session.messages.map((m) => m.text), [
           'While nobody was connected, 1 message from the agent (40 bytes) were dropped, so something it said or did is missing here.',
@@ -384,10 +438,179 @@ void main() {
       },
     );
   });
-  _concurrent();
-}
 
-void _concurrent() {
+  group('two sessions on one v1 connection', () {
+    test(
+      'the end of one session\'s turn is not the end of the other\'s, and an end for one that is not working is ignored',
+      () async {
+        final store = ChatStore();
+        final agent = FakeConnection(version: 1);
+        final one = store.add(title: 'one', agent: 'A', sessionId: 's1')
+          ..attach(agent);
+        final two = store.add(title: 'two', agent: 'A', sessionId: 's2')
+          ..attach(agent);
+        agent.onPrompt = (_) => Completer<String?>().future;
+        await one.send('a');
+        await two.send('b');
+        await one.send('queued behind a');
+        agent.event(const AcpCompleted('end_turn', sessionId: 's2'));
+        await settle();
+        expect(two.status, ChatStatus.connected);
+        expect(one.status, ChatStatus.working, reason: 'its turn goes on');
+        expect(
+          one.queue.single.text,
+          'queued behind a',
+          reason: 'and its queue waits for it',
+        );
+        expect(agent.prompts, ['a', 'b']);
+        // An end for a session that is not working is nothing.
+        agent.event(const AcpCancelled(sessionId: 's2'));
+        await settle();
+        expect(two.messages.map((m) => m.text), ['b']);
+        expect(two.turns.single.outcome, TurnOutcome.completed);
+        store.dispose();
+      },
+    );
+  });
+
+  group('the person\'s message and the agent\'s answer', () {
+    test(
+      'a turn so fast that the agent has answered before it acknowledges the prompt still shows the message first',
+      () async {
+        final (:store, :session, :agent) = started();
+        agent.onPrompt = (text) async {
+          feed(session, state('running'));
+          feed(session, text0('agent_message', 'Done.', 'a1'));
+          feed(session, state('idle', reason: 'end_turn'));
+          return 'm1';
+        };
+        await session.send('Do it');
+        expect(session.messages.map((m) => (m.role, m.text)), [
+          (MessageRole.user, 'Do it'),
+          (MessageRole.agent, 'Done.'),
+        ]);
+        expect(session.messages.first.messageId, 'm1');
+        expect(
+          session.messages.first.turn,
+          session.turns.single.id,
+          reason: 'the prompt belongs to the turn it starts',
+        );
+        expect(session.messages.last.turn, session.turns.single.id);
+        store.dispose();
+      },
+    );
+
+    test(
+      'the agent\'s echo of it before the acknowledgement is the same message, not a second',
+      () async {
+        final (:store, :session, :agent) = started();
+        agent.onPrompt = (text) async {
+          feed(session, text0('user_message', text, 'e1'));
+          return 'e1';
+        };
+        await session.send('Hello');
+        expect(
+          session.messages.where((m) => m.role == MessageRole.user),
+          hasLength(1),
+        );
+        expect(session.messages.single.messageId, 'e1');
+        store.dispose();
+      },
+    );
+
+    test('a prompt the agent refuses leaves no message behind', () async {
+      final (:store, :session, :agent) = started();
+      agent.onPrompt = (_) async => throw const AcpFailure('no');
+      await expectLater(session.send('Hello'), throwsA(isA<AcpFailure>()));
+      expect(session.messages, isEmpty);
+      store.dispose();
+    });
+
+    test(
+      'a message and a reply with the same id are two messages, for an id is the agent\'s per role',
+      () {
+        final session = ChatSession(id: 'x', sessionId: 's1');
+        feed(session, text0('user_message', 'question', 'same'));
+        feed(session, text0('agent_message', 'answer', 'same'));
+        feed(session, text0('agent_message_chunk', ' more', 'same'));
+        expect(session.messages.map((m) => (m.role, m.text)), [
+          (MessageRole.user, 'question'),
+          (MessageRole.agent, 'answer more'),
+        ]);
+      },
+    );
+  });
+
+  group('turn ends and steering', () {
+    test(
+      'every turn end is told, a cancelled one too, and history opened again ends none',
+      () async {
+        final (:store, :session, :agent) = started();
+        final ended = <TurnOutcome?>[];
+        session.events
+            .where((e) => e is TurnEvent)
+            .listen((e) => ended.add((e as TurnEvent).turn.outcome));
+        feed(session, state('running'));
+        feed(session, state('idle', reason: 'end_turn'));
+        feed(session, state('running'));
+        feed(session, state('idle', reason: 'cancelled'));
+        feed(session, state('running'));
+        feed(session, state('idle', reason: 'refusal'));
+        await session.reopen(() async {
+          feed(session, state('running'));
+          feed(session, state('idle', reason: 'end_turn'));
+          return AcpOpenedSession('s1', {}, replayed: true);
+        });
+        await settle();
+        expect(ended, [
+          TurnOutcome.completed,
+          TurnOutcome.cancelled,
+          TurnOutcome.failed,
+        ]);
+        store.dispose();
+      },
+    );
+
+    test(
+      'a steer that was under way when the connection ended does not release the queue after a later stop',
+      () async {
+        final (:store, :session, :agent) = started();
+        await session.send('job');
+        feed(session, state('running'));
+        await session.send('later');
+        await session.steer('now');
+        await agent.drop();
+        await settle();
+        final again = FakeConnection();
+        session.attach(again);
+        feed(session, state('running'));
+        feed(session, state('idle', reason: 'cancelled'));
+        await settle();
+        expect(session.queueHeld, 'the turn was stopped');
+        expect(again.prompts, isEmpty);
+        store.dispose();
+      },
+    );
+
+    test(
+      'a steer is never refused for want of room in a queue the limit makes none',
+      () async {
+        final (:store, :session, :agent) = started(
+          limits: const ChatLimits(queued: 0),
+        );
+        await session.send('job');
+        feed(session, state('running'));
+        await expectLater(session.send('queued'), throwsStateError);
+        await session.steer('now');
+        expect(agent.cancels, ['s1']);
+        feed(session, state('idle', reason: 'cancelled'));
+        await settle();
+        expect(agent.prompts, ['job', 'now']);
+        store.dispose();
+      },
+    );
+  });
+
   group('messages written in the same moment', () {
     test(
       'the second waits for the first to be handed over, whichever version',
@@ -405,13 +628,15 @@ void _concurrent() {
           expect(agent.prompts, ['one'], reason: 'v$version');
           agent.onPrompt = null;
           if (version == 1) {
-            agent.event(const AcpCompleted('end_turn'));
+            agent.event(const AcpCompleted('end_turn', sessionId: 's1'));
+            hold.complete(null);
+            await first;
           } else {
             feed(session, state('running'));
+            hold.complete('m1');
+            await first;
+            feed(session, state('idle', reason: 'end_turn'));
           }
-          hold.complete(version == 1 ? null : 'm1');
-          await first;
-          if (version == 2) feed(session, state('idle', reason: 'end_turn'));
           await settle();
           expect(agent.prompts, ['one', 'two'], reason: 'v$version');
           store.dispose();

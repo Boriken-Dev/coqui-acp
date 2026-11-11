@@ -22,6 +22,8 @@ class ChatNotifier {
     Object? error;
     StackTrace? trace;
     for (final listener in [..._listeners]) {
+      // One removed by an earlier listener of this round is not told.
+      if (!_listeners.contains(listener)) continue;
       try {
         listener();
       } catch (thrown, stack) {

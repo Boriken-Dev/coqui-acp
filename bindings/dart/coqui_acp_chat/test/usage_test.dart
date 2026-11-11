@@ -1,5 +1,5 @@
 // What a conversation keeps of the usage an agent reports: the newest report by revision, the spend that is its own, a read after
-// each turn, and the words a usage control shows it in.
+// each turn, and the bounds on what the agent sends.
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:test/test.dart';
 
@@ -47,7 +47,8 @@ void main() {
         expect(session.reportsUsage, isTrue);
         expect(session.usageReport!.buckets.single.used, 100);
         expect(session.usageReport!.spend, isNull);
-        expect(spendText(session.spend), r'1.5k tokens · $0.05');
+        expect(session.spend!.input + session.spend!.output, 1540);
+        expect(session.spend!.costMicroUsd, 48500);
         store.dispose();
       },
     );
@@ -57,7 +58,7 @@ void main() {
         ..report = _report(100, spend: _spend('s1'));
       final (:store, :session, agent: _) = started(connection: agent);
       await settle();
-      expect(spendText(session.spend), '1.5k tokens');
+      expect(session.spend!.costMicroUsd, isNull);
       store.dispose();
     });
 
@@ -80,8 +81,8 @@ void main() {
           reason: 'the older report does not replace it',
         );
         expect(
-          spendText(session.spend),
-          r'1.5k tokens · $2.00',
+          session.spend!.costMicroUsd,
+          2000000,
           reason: 'but a spend is kept whatever its revision',
         );
         agent.notice(
@@ -146,69 +147,55 @@ void main() {
     });
   });
 
-  group('the text', () {
-    test('counts are compact', () {
-      expect(
-        [0, 950, 1000, 1500, 120000, 2400000, 3000000000].map(compactCount),
-        ['0', '950', '1k', '1.5k', '120k', '2.4M', '3G'],
-      );
-    });
-
-    test('money rounds to cents', () {
-      expect([0, 4999, 5000, 1200000, 5000000].map(dollars), [
-        r'$0.00',
-        r'$0.00',
-        r'$0.01',
-        r'$1.20',
-        r'$5.00',
-      ]);
-    });
-
-    test('a span is its two largest units', () {
-      expect([30, 60, 600, 4800, 7200, 90000, 100000].map(spanText), [
-        '30 s',
-        '1 m',
-        '10 m',
-        '1 h 20 m',
-        '2 h',
-        '1 d 1 h',
-        '1 d 3 h',
-      ]);
-    });
-
-    test('a bucket gives its level against the threshold', () {
-      UsageBucket at(int used, {String status = 'ok'}) =>
-          UsageBucket(id: 'b', used: used, limit: 1000, status: status);
-      expect(levelOf(at(799), 0), UsageLevel.calm);
-      expect(levelOf(at(800), 0), UsageLevel.warn);
-      expect(levelOf(at(799), 0, warnPermille: 500), UsageLevel.warn);
-      expect(
-        levelOf(at(100, status: 'warning'), 0),
-        UsageLevel.warn,
-        reason: 'the agent said so',
-      );
-      expect(levelOf(at(1000, status: 'exhausted'), 0), UsageLevel.danger);
-    });
-
-    test(
-      'the bucket that matters most is shown, an exhausted one before the rest',
-      () {
-        final report = UsageReport(
-          supported: true,
-          buckets: [
-            const UsageBucket(id: 'a', label: 'Day', used: 900, limit: 1000),
-            const UsageBucket(
-              id: 'b',
-              label: 'Week',
-              used: 100,
-              limit: 1000,
-              status: 'exhausted',
-            ),
+  group('what an agent sends', () {
+    test('is read as lines a person can be shown, and cut at the limits', () {
+      final cr = String.fromCharCode(0x202e);
+      final report = UsageReport.parse({
+        'supported': true,
+        'sources': ['reported', 5, 'a', 'b', 'c'],
+        'account': 'acct\n$cr${'x' * 40}',
+        'buckets': [
+          for (var i = 0; i < 6; i++)
+            {
+              'id': 'b$i',
+              'label': 'Label\u0007$i ${'y' * 40}',
+              'models': {
+                'kind': 'only',
+                'models': ['m1', 'm2', 'm3', 'm4'],
+              },
+              'unit': 'tokens',
+              'status': 'ok',
+              'source': 'reported',
+            },
+          {'id': '   ', 'unit': 'tokens'},
+        ],
+        'spend': {
+          'session_id': 's',
+          'by_model': [
+            for (var i = 0; i < 5; i++) {'model': 'model$i'},
           ],
-        );
-        expect(pillText(report, 0), 'Week · 10%');
-        expect(pillText(const UsageReport(supported: true), 0), 'No usage yet');
-      },
-    );
+        },
+      }, const ChatLimits(shortText: 12, usageBuckets: 3))!;
+      expect(report.sources, [
+        'reported',
+        'a',
+      ], reason: 'three looked at, one of them no text');
+      expect(report.account, 'acct  ${'x' * 6}…');
+      expect(report.buckets.map((b) => b.id), ['b0', 'b1', 'b2']);
+      expect(report.buckets.first.label, 'Label 0 yyyy…');
+      expect(report.buckets.first.models.models, ['m1', 'm2', 'm3']);
+      expect(report.spend!.byModel, hasLength(3));
+    });
+
+    test('a bucket without a usable id is not read', () {
+      final report = UsageReport.parse({
+        'supported': true,
+        'buckets': [
+          {'id': '\n'},
+          {'id': 7},
+        ],
+      })!;
+      expect(report.buckets, isEmpty);
+    });
   });
 }

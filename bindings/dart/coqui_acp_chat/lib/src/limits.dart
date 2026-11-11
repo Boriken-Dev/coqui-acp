@@ -25,6 +25,7 @@ final class ChatLimits {
     this.listShapes = 8,
     this.shapeDepth = 8,
     this.titleLength = 60,
+    this.usageBuckets = 64,
   }) : assert(
          entries >= 0 &&
              messageText >= 0 &&
@@ -48,7 +49,8 @@ final class ChatLimits {
              hostNotices >= 0 &&
              listShapes >= 0 &&
              shapeDepth >= 0 &&
-             titleLength >= 0,
+             titleLength >= 0 &&
+             usageBuckets >= 0,
        );
 
   /// The most entries (messages, tool lines, compactions) a conversation keeps; the oldest go first. Default 5000.
@@ -119,4 +121,7 @@ final class ChatLimits {
 
   /// The longest title [titleFrom] makes of a first message, in characters. Default 60.
   final int titleLength;
+
+  /// The most buckets, models and sources a usage report keeps of each. Default 64.
+  final int usageBuckets;
 }

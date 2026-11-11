@@ -1,14 +1,11 @@
 // Every update a real agent sent in a coding task, recorded as its kind and shape and never its text, plus the v2 kinds that
 // run lacked, reaches a rendering of its own in a conversation: a kind that reached the fallback would show nothing.
-@TestOn('vm')
-library;
-
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:test/test.dart';
 
+import 'support/embedded.dart';
 import 'support/fakes.dart';
 
 /// A shape made an update again, with a stand-in for each value.
@@ -27,9 +24,7 @@ Object? _filled(Object? shape) => switch (shape) {
 
 void main() {
   final fixture = [
-    for (final line in File(
-      'test/fixtures/coding_task_updates.jsonl',
-    ).readAsLinesSync())
+    for (final line in const LineSplitter().convert(codingTaskUpdates))
       if (line.trim().isNotEmpty) jsonDecode(line) as Map<String, dynamic>,
   ];
 

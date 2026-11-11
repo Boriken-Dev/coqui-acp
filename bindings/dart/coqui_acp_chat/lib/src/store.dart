@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:coqui_acp/coqui_acp.dart';
 
@@ -31,12 +32,11 @@ class ChatStore extends ChatNotifier implements ChatRequests {
 
   final DateTime Function()? _clock;
   final List<ChatSession> _sessions = [];
-  final Map<ChatSession, StreamSubscription<ChatEvent>> _watching = {};
   final _attention = StreamController<Attention>.broadcast();
   int _nextId = 0;
   String? _selectedId;
 
-  List<ChatSession> get sessions => List.unmodifiable(_sessions);
+  List<ChatSession> get sessions => UnmodifiableListView(_sessions);
   String? get selectedId => _selectedId;
 
   ChatSession? get selected {
@@ -74,15 +74,15 @@ class ChatStore extends ChatNotifier implements ChatRequests {
       clock: _clock,
     );
     session.onChange = notifyListeners;
-    _watching[session] = session.events.listen((event) {
-      if (event is! AttentionEvent) return;
-      if (event.kind == AttentionKind.finished && session.id != _selectedId) {
+    // Marked at once, so the listeners told of the same change already see it.
+    session.onAttention = (kind) {
+      if (kind == AttentionKind.finished && session.id != _selectedId) {
         session.unread = true;
       }
       if (!_attention.isClosed) {
-        _attention.add((session: session, kind: event.kind));
+        _attention.add((session: session, kind: kind));
       }
-    });
+    };
     _sessions.insert(0, session);
     _selectedId = session.id;
     notifyListeners();
@@ -134,11 +134,12 @@ class ChatStore extends ChatNotifier implements ChatRequests {
     return target.askQuestion(request);
   }
 
-  /// Takes a conversation out of the list. The agent still has it, and its connection stays with whoever else uses it.
+  /// Takes a conversation out of the list. The agent still has it, and its connection stays with whoever else uses it. What the
+  /// conversation still asked of the person is withdrawn.
   void forget(ChatSession session) {
     session.detach();
-    unawaited(_watching.remove(session)?.cancel());
     session.onChange = null;
+    session.onAttention = null;
     _sessions.remove(session);
     if (_selectedId == session.id) {
       _selectedId = _sessions.isEmpty ? null : _sessions.first.id;
@@ -162,12 +163,9 @@ class ChatStore extends ChatNotifier implements ChatRequests {
   void dispose() {
     for (final session in [..._sessions]) {
       session.onChange = null;
+      session.onAttention = null;
       session.dispose();
     }
-    for (final subscription in _watching.values) {
-      unawaited(subscription.cancel());
-    }
-    _watching.clear();
     _sessions.clear();
     unawaited(_attention.close());
     super.dispose();

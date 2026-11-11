@@ -344,7 +344,24 @@ void main() {
     );
 
     test(
-      'keep the output of at most the most commands the limit says, the oldest going first',
+      'keep the output of at most the most commands the limit says, the oldest that ended going first',
+      () {
+        final session = fresh(limits: const ChatLimits(terminals: 2));
+        Map<String, Object?> ended(String id) => {
+          'sessionUpdate': 'terminal_update',
+          'terminalId': id,
+          'command': id,
+          'exitStatus': {'exitCode': 0},
+        };
+        feed(session, ended('a'));
+        feed(session, ended('b'));
+        feed(session, ended('c'));
+        expect(session.terminals.keys, ['b', 'c']);
+      },
+    );
+
+    test(
+      'never drop a command still running to make room, and keep no more than the limit',
       () {
         final session = fresh(limits: const ChatLimits(terminals: 2));
         for (final id in ['a', 'b', 'c']) {
@@ -354,6 +371,17 @@ void main() {
             'command': id,
           });
         }
+        expect(session.terminals.keys, ['a', 'b']);
+        feed(session, {
+          'sessionUpdate': 'terminal_update',
+          'terminalId': 'a',
+          'exitStatus': {'exitCode': 0},
+        });
+        feed(session, {
+          'sessionUpdate': 'terminal_update',
+          'terminalId': 'c',
+          'command': 'c',
+        });
         expect(session.terminals.keys, ['b', 'c']);
       },
     );

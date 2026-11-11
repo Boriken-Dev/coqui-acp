@@ -27,6 +27,7 @@ void main() {
           final target = match.group(1)!;
           final allowed =
               target == 'dart:async' ||
+              target == 'dart:collection' ||
               target == 'dart:convert' ||
               target == 'package:coqui_acp/coqui_acp.dart' ||
               target == 'package:coqui_acp_chat/coqui_acp_chat.dart' ||

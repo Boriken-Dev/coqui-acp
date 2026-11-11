@@ -1,5 +1,8 @@
+import 'limits.dart';
+import 'text.dart';
+
 // How much of each usage allowance an account has used and when it refills: coqui-acp's usage model (`coqui_acp_api::usage`,
-// held to the same vectors in `vectors/usage.json`), and the words a usage control shows it in.
+// held to the same vectors in `vectors/usage.json`). Words for a person to read it in are the UI's.
 
 /// The `_meta` key of the usage extension in the capabilities of an agent and of a client.
 const String usageCapability = 'dev.boriken.coqui.acp/usage';
@@ -324,22 +327,24 @@ final class UsageReport {
 
   /// Reads a report leniently, as the model's JSON spells it: what a newer writer added is ignored, and a unit, status, source,
   /// refill or coverage it named reads as its `other` and the report is still read. Null when [json] is not a report at all.
-  static UsageReport? parse(Object? json) {
+  static UsageReport? parse(
+    Object? json, [
+    ChatLimits limits = const ChatLimits(),
+  ]) {
     if (json is! Map || json['supported'] is! bool) return null;
     return UsageReport(
       supported: json['supported'] as bool,
-      unsupportedBecause: _text(json['unsupported_because']),
-      sources: _texts(json['sources']),
-      account: _text(json['account']),
+      unsupportedBecause: _text(json['unsupported_because'], limits),
+      sources: _texts(json['sources'], limits),
+      account: _text(json['account'], limits),
       revision: _count(json['revision']) ?? 0,
       observedAt: _count(json['observed_at']) ?? 0,
       buckets: [
-        for (final bucket
-            in json['buckets'] is List ? json['buckets'] as List : const [])
-          ?_bucket(bucket),
+        for (final bucket in _list(json['buckets'], limits))
+          ?_bucket(bucket, limits),
       ],
-      limit: _limit(json['limit']),
-      spend: _spend(json['spend']),
+      limit: _limit(json['limit'], limits),
+      spend: _spend(json['spend'], limits),
     );
   }
 }
@@ -362,12 +367,15 @@ final class UsageSupport {
   /// Whether it learns usage only during a turn, so a read gives what the connection last saw.
   final bool needsTurn;
 
-  static UsageSupport? parse(Object? meta) {
+  static UsageSupport? parse(
+    Object? meta, [
+    ChatLimits limits = const ChatLimits(),
+  ]) {
     final said = meta is Map ? meta[usageCapability] : null;
     if (said is! Map) return null;
     return UsageSupport(
       version: _count(said['version']) ?? 1,
-      sources: _texts(said['sources']),
+      sources: _texts(said['sources'], limits),
       spend: said['spend'] == true,
       needsTurn: said['needs_turn'] == true,
     );
@@ -392,29 +400,38 @@ int? _count(Object? value) => value is int
           ? value.toInt()
           : null);
 
-String? _text(Object? value) => value is String ? value : null;
+// Every string an agent sends is shown to a person, so it is one clean line cut at ChatLimits.shortText, and every list is cut at
+// ChatLimits.usageBuckets.
+String? _text(Object? value, ChatLimits limits) => shortText(value, limits);
 
-List<String> _texts(Object? value) => [
-  for (final item in value is List ? value : const [])
-    if (item is String) item,
+List<String> _texts(Object? value, ChatLimits limits) => [
+  for (final item in (value is List ? value : const []).take(
+    limits.usageBuckets,
+  ))
+    ?_text(item, limits),
 ];
 
-UsageBucket? _bucket(Object? json) {
-  if (json is! Map || json['id'] is! String) return null;
+List<Object?> _list(Object? value, ChatLimits limits) =>
+    (value is List ? value : const []).take(limits.usageBuckets).toList();
+
+UsageBucket? _bucket(Object? json, ChatLimits limits) {
+  if (json is! Map) return null;
+  final id = _text(json['id'], limits);
+  if (id == null) return null;
   final models = json['models'];
   final refill = json['refill'];
   return UsageBucket(
-    id: json['id'] as String,
-    label: _text(json['label']),
+    id: id,
+    label: _text(json['label'], limits),
     models: models is Map
         ? switch (models['kind']) {
             'all' => UsageCoverage.all,
             'unknown' => UsageCoverage.unknown,
-            'only' => UsageCoverage('only', _texts(models['models'])),
+            'only' => UsageCoverage('only', _texts(models['models'], limits)),
             _ => UsageCoverage.other,
           }
         : UsageCoverage.unknown,
-    unit: UsageUnit(_text(json['unit']) ?? 'other'),
+    unit: UsageUnit(_text(json['unit'], limits) ?? 'other'),
     used: _count(json['used']),
     limit: _count(json['limit']),
     remaining: _count(json['remaining']),
@@ -436,29 +453,31 @@ UsageBucket? _bucket(Object? json) {
             _ => const UsageRefill('other'),
           }
         : const UsageRefill('unknown'),
-    status: _text(json['status']) ?? 'unknown',
+    status: _text(json['status'], limits) ?? 'unknown',
     observedAt: _count(json['observed_at']) ?? 0,
-    source: _text(json['source']) ?? 'other',
-    evidence: _text(json['evidence']),
+    source: _text(json['source'], limits) ?? 'other',
+    evidence: _text(json['evidence'], limits),
   );
 }
 
-UsageLimitHit? _limit(Object? json) {
+UsageLimitHit? _limit(Object? json, ChatLimits limits) {
   if (json is! Map) return null;
   return UsageLimitHit(
-    bucket: _text(json['bucket']),
+    bucket: _text(json['bucket'], limits),
     resetsAt: _count(json['resets_at']),
     retryAfter: _length(json['retry_after']),
-    source: _text(json['source']) ?? 'other',
-    text: _text(json['text']),
+    source: _text(json['source'], limits) ?? 'other',
+    text: _text(json['text'], limits),
     observedAt: _count(json['observed_at']) ?? 0,
   );
 }
 
-UsageSpend? _spend(Object? json) {
-  if (json is! Map || json['session_id'] is! String) return null;
+UsageSpend? _spend(Object? json, ChatLimits limits) {
+  if (json is! Map) return null;
+  final session = _text(json['session_id'], limits);
+  if (session == null) return null;
   return UsageSpend(
-    json['session_id'] as String,
+    session,
     input: _count(json['input']) ?? 0,
     output: _count(json['output']) ?? 0,
     cacheRead: _count(json['cache_read']) ?? 0,
@@ -466,11 +485,10 @@ UsageSpend? _spend(Object? json) {
     reasoning: _count(json['reasoning']),
     costMicroUsd: _count(json['cost_micro_usd']),
     byModel: [
-      for (final model
-          in json['by_model'] is List ? json['by_model'] as List : const [])
-        if (model is Map && model['model'] is String)
+      for (final model in _list(json['by_model'], limits))
+        if (model is Map && _text(model['model'], limits) != null)
           UsageModelSpend(
-            model['model'] as String,
+            _text(model['model'], limits)!,
             input: _count(model['input']) ?? 0,
             output: _count(model['output']) ?? 0,
             cacheRead: _count(model['cache_read']) ?? 0,
@@ -479,193 +497,4 @@ UsageSpend? _spend(Object? json) {
           ),
     ],
   );
-}
-
-/// The `[usage] warn_permille` default: the fraction from which the control shows a status.
-const int defaultWarnPermille = 800;
-
-/// A count in a few characters: `950`, `1.5k`, `120k`, `2.4M`.
-String compactCount(int count) {
-  String scaled(double value, String suffix) {
-    final text = value >= 100 || value == value.roundToDouble()
-        ? value.round().toString()
-        : value.toStringAsFixed(1);
-    return '$text$suffix';
-  }
-
-  if (count < 1000) return '$count';
-  if (count < 1000000) return scaled(count / 1000, 'k');
-  if (count < 1000000000) return scaled(count / 1000000, 'M');
-  return scaled(count / 1000000000, 'G');
-}
-
-/// Millionths of a US dollar as money: `$1.20`.
-String dollars(int microUsd) {
-  final cents = (microUsd + 5000) ~/ 10000;
-  return '\$${cents ~/ 100}.${(cents % 100).toString().padLeft(2, '0')}';
-}
-
-/// A length of time in its two largest units: `1 h 20 m`, `3 d 4 h`, `45 s`.
-String spanText(int seconds) {
-  if (seconds < 60) return seconds <= 0 ? '0 s' : '$seconds s';
-  final days = seconds ~/ 86400,
-      hours = seconds % 86400 ~/ 3600,
-      minutes = seconds % 3600 ~/ 60;
-  if (days > 0) return hours == 0 ? '$days d' : '$days d $hours h';
-  if (hours > 0) return minutes == 0 ? '$hours h' : '$hours h $minutes m';
-  return '$minutes m';
-}
-
-/// How long ago, as the menu says it: `just now`, `4 min ago`, `2 h ago`.
-String agoText(int seconds) {
-  if (seconds < 45) return 'just now';
-  if (seconds < 3600) return '${(seconds / 60).round()} min ago';
-  if (seconds < 86400) return '${(seconds / 3600).round()} h ago';
-  return '${(seconds / 86400).round()} d ago';
-}
-
-/// The unit's words after a count: `tokens`, `requests`; none for money and percentages.
-String? _unitWords(UsageUnit unit) => switch (unit) {
-  UsageUnit.tokens => 'tokens',
-  UsageUnit.requests => 'requests',
-  UsageUnit.microUsd || UsageUnit.permille => null,
-  _ => unit.name,
-};
-
-/// How much of [bucket] is used, as a person reads it: `62%`, `120k / 400k tokens`, `$1.20 / $5.00`. Null when the bucket gives
-/// no figure at all.
-String? figureOf(UsageBucket bucket) {
-  final fraction = bucket.fractionPermille;
-  if (bucket.unit == UsageUnit.permille) {
-    return fraction == null ? null : '${fraction ~/ 10}%';
-  }
-  final limit = bucket.limit;
-  final used =
-      bucket.used ??
-      (limit != null && bucket.remaining != null
-          ? (bucket.remaining! >= limit ? 0 : limit - bucket.remaining!)
-          : null);
-  String count(int value) =>
-      bucket.unit == UsageUnit.microUsd ? dollars(value) : compactCount(value);
-  final words = _unitWords(bucket.unit);
-  final tail = words == null ? '' : ' $words';
-  if (used != null && limit != null) {
-    return '${count(used)} / ${count(limit)}$tail';
-  }
-  if (used != null) return '${count(used)}$tail used';
-  if (bucket.remaining != null) return '${count(bucket.remaining!)}$tail left';
-  return fraction == null ? null : '${fraction ~/ 10}%';
-}
-
-/// When [bucket] comes back, as the control says it: `resets in 1 h 20 m`, `40k tokens/min`, or that its window has ended
-/// and the agent has not yet said so. Null for a balance, a refill that is not known and a window with no known end.
-String? refillOf(UsageBucket bucket, int now) {
-  final refill = bucket.refill;
-  if (refill.isFixedWindow) {
-    final left = bucket.resetsIn(now);
-    if (left == null) return null;
-    return left == 0
-        ? 'reset, not yet reported'
-        : 'resets in ${spanText(left)}';
-  }
-  if (refill.isTokenBucket) {
-    final per = refill.per!;
-    if (per <= Duration.zero) return null;
-    final words = _unitWords(bucket.unit);
-    final perSecond = refill.amount! * 1000000 / per.inMicroseconds;
-    final (rate, span) = per >= const Duration(hours: 1)
-        ? (perSecond * 3600, 'h')
-        : (perSecond * 60, 'min');
-    final amount = bucket.unit == UsageUnit.microUsd
-        ? dollars(rate.round())
-        : compactCount(rate.round());
-    return '$amount${words == null ? '' : ' $words'}/$span';
-  }
-  return null;
-}
-
-/// The coverage in words: `every model`, `opus`, `models not known`.
-String coverageOf(UsageCoverage models) => switch (models.kind) {
-  'all' => 'every model',
-  'only' => models.models.isEmpty ? 'some models' : models.models.join(', '),
-  _ => 'models not known',
-};
-
-/// A bucket's place in the order the control uses: an exhausted one first, then the highest fraction used, and last a bucket whose
-/// window has ended (its figures are of the window before) or that gives no fraction. Larger comes first.
-int _rank(UsageBucket bucket, int now) {
-  if (bucket.pastReset(now)) return -2;
-  if (bucket.isExhausted) return 2000;
-  return bucket.fractionPermille ?? -1;
-}
-
-/// The buckets in the order the control lists them.
-List<UsageBucket> ordered(UsageReport report, int now) {
-  final indexed = report.buckets.indexed.toList()
-    ..sort((a, b) {
-      final byRank = _rank(b.$2, now).compareTo(_rank(a.$2, now));
-      return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
-    });
-  return [for (final (_, bucket) in indexed) bucket];
-}
-
-/// What the control shows: the bucket that matters most, or none when nothing was reported.
-UsageBucket? headlineOf(UsageReport report, int now) =>
-    ordered(report, now).firstOrNull;
-
-/// How the control looks: nothing wrong, close to the limit (a status), or out of it (danger).
-enum UsageLevel { calm, warn, danger }
-
-/// The level of [bucket]: exhausted is danger; from [warnPermille] used, or a status the agent itself named `warning`, is warn.
-/// A window that has ended is calm: what it shows is of the window before.
-UsageLevel levelOf(
-  UsageBucket bucket,
-  int now, {
-  int warnPermille = defaultWarnPermille,
-}) {
-  if (bucket.pastReset(now)) return UsageLevel.calm;
-  if (bucket.isExhausted) return UsageLevel.danger;
-  if (bucket.status == 'warning' ||
-      (bucket.fractionPermille ?? 0) >= warnPermille) {
-    return UsageLevel.warn;
-  }
-  return UsageLevel.calm;
-}
-
-/// The control's text for [report]: `No usage yet` when it holds no bucket, else the headline bucket's name, figure and refill.
-String pillText(UsageReport report, int now) {
-  final bucket = headlineOf(report, now);
-  if (bucket == null) return 'No usage yet';
-  final figure = bucket.pastReset(now)
-      ? null
-      : figureOf(bucket) ?? (bucket.isExhausted ? 'limit reached' : null);
-  final refill = refillOf(bucket, now);
-  return [bucket.name, ?figure, ?refill].join(' · ');
-}
-
-/// One line of the control's menu for [bucket]: name and figure, then how it refills.
-String bucketLine(UsageBucket bucket, int now) {
-  final figure = bucket.pastReset(now)
-      ? null
-      : figureOf(bucket) ?? (bucket.isExhausted ? 'limit reached' : null);
-  return [bucket.name, ?figure, ?refillOf(bucket, now)].join(' · ');
-}
-
-/// What else the menu says of [bucket], a line each: that it is inferred, which models it covers, and as of when.
-List<String> bucketDetails(UsageBucket bucket, int now) => [
-  if (bucket.inferred)
-    'inferred from ${bucket.evidence == null ? 'an error' : '"${bucket.evidence}"'}, not reported by the agent',
-  'covers ${coverageOf(bucket.models)}',
-  if (bucket.observedAt > 0) 'as of ${agoText(now - bucket.observedAt)}',
-];
-
-/// The session's spend as the transcript's header writes it: tokens, and cost when the agent reported one. A cost it did not
-/// report stays absent.
-String? spendText(UsageSpend? spend) {
-  if (spend == null) return null;
-  final tokens = spend.input + spend.output;
-  return [
-    if (tokens > 0) '${compactCount(tokens)} tokens',
-    if (spend.costMicroUsd != null) dollars(spend.costMicroUsd!),
-  ].join(' · ');
 }
