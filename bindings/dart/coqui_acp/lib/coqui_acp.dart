@@ -165,21 +165,29 @@ final class AcpPermission extends AcpEvent {
 
 final class AcpCompleted extends AcpEvent {
   final String stop;
-  const AcpCompleted(this.stop);
+
+  /// The session whose turn ended; null when the event was made without one.
+  final String? sessionId;
+  const AcpCompleted(this.stop, {this.sessionId});
   @override
   String toString() => 'AcpCompleted($stop)';
 }
 
 final class AcpFailed extends AcpEvent {
   final String message;
-  const AcpFailed(this.message);
+
+  /// The session whose turn failed; null when the event was made without one.
+  final String? sessionId;
+  const AcpFailed(this.message, {this.sessionId});
   @override
   String toString() => 'AcpFailed($message)';
 }
 
 /// The agent ended the turn as cancelled, whether asked to or by itself.
 final class AcpCancelled extends AcpEvent {
-  const AcpCancelled();
+  /// The session whose turn was cancelled; null when the event was made without one.
+  final String? sessionId;
+  const AcpCancelled({this.sessionId});
   @override
   String toString() => 'AcpCancelled()';
 }
@@ -187,7 +195,10 @@ final class AcpCancelled extends AcpEvent {
 /// A permission request could not be answered, so the agent was told it was cancelled. The turn goes on until the agent ends it.
 final class AcpBlocked extends AcpEvent {
   final String message;
-  const AcpBlocked(this.message);
+
+  /// The session the request was for, when it named one.
+  final String? sessionId;
+  const AcpBlocked(this.message, {this.sessionId});
   @override
   String toString() => 'AcpBlocked($message)';
 }
@@ -730,7 +741,7 @@ final class AcpClient {
       case 'state_update':
         if (raw['state'] == 'idle') {
           final stop = raw['stopReason'];
-          _endTurn(stop is String ? stop : 'end_turn');
+          _endTurn(stop is String ? stop : 'end_turn', update.sessionId);
         }
     }
   }
@@ -742,17 +753,28 @@ final class AcpClient {
     _emit(AcpOutputLost(lines: count('lines'), bytes: count('bytes')));
   }
 
-  void _endTurn(String stop) {
+  void _endTurn(String stop, String sessionId) {
     _flush();
     _emit(switch (stop) {
-      'end_turn' || 'max_tokens' || 'max_turn_requests' => AcpCompleted(stop),
-      'cancelled' => const AcpCancelled(),
-      'refusal' => const AcpFailed('the agent refused to continue'),
-      _ => AcpFailed('the agent ended the turn with $stop'),
+      'end_turn' ||
+      'max_tokens' ||
+      'max_turn_requests' => AcpCompleted(stop, sessionId: sessionId),
+      'cancelled' => AcpCancelled(sessionId: sessionId),
+      'refusal' => AcpFailed(
+        'the agent refused to continue',
+        sessionId: sessionId,
+      ),
+      _ => AcpFailed(
+        'the agent ended the turn with $stop',
+        sessionId: sessionId,
+      ),
     });
   }
 
   Future<void> _answerPermission(Object id, Object? params) async {
+    final sid = params is Map && params['sessionId'] is String
+        ? params['sessionId'] as String
+        : null;
     // Another session's, such as one an earlier connection left waiting: the decider answers for this client's sessions only.
     if (params is Map &&
         params['sessionId'] is String &&
@@ -767,8 +789,9 @@ final class AcpClient {
     // An agent has been seen to go ahead with the tool on an error answer, so what cannot be asked is cancelled, and said.
     if (params is! Map || params['options'] is! List) {
       _emit(
-        const AcpBlocked(
+        AcpBlocked(
           'the agent asked leave in a form this client cannot read',
+          sessionId: sid,
         ),
       );
       _reply(id, {
@@ -811,6 +834,7 @@ final class AcpClient {
         _emit(
           AcpBlocked(
             'the agent asked leave for $tool with two options of the same id',
+            sessionId: sid,
           ),
         );
         _reply(id, {
@@ -879,6 +903,7 @@ final class AcpClient {
         _emit(
           AcpBlocked(
             'the answer for $tool chose $chosen, which the agent did not offer',
+            sessionId: sid,
           ),
         );
         _reply(id, {
@@ -925,6 +950,7 @@ final class AcpClient {
     _emit(
       AcpBlocked(
         'the agent asked leave for $tool and offered no $wanted option',
+        sessionId: sid,
       ),
     );
     _reply(id, {
@@ -938,6 +964,9 @@ final class AcpClient {
   /// be put to a person, or an answer that does not fit its form, is cancelled and said in an [AcpBlocked]. Never an error, as
   /// with a permission request.
   Future<void> _answerElicitation(Object id, Object? params) async {
+    final sid = params is Map && params['sessionId'] is String
+        ? params['sessionId'] as String
+        : null;
     void answer(Map<String, Object?> result) => _reply(id, {'result': result});
     const cancel = {'action': 'cancel'};
     if (params is Map &&
@@ -952,7 +981,7 @@ final class AcpClient {
     );
     if (request == null) {
       _flush();
-      _emit(AcpBlocked(why!));
+      _emit(AcpBlocked(why!, sessionId: sid));
       return answer(cancel);
     }
     AcpElicitationAnswer said;
@@ -966,7 +995,7 @@ final class AcpClient {
         final misfit = _misfit(request, content);
         if (misfit != null) {
           _flush();
-          _emit(AcpBlocked(misfit));
+          _emit(AcpBlocked(misfit, sessionId: sid));
           return answer(cancel);
         }
         answer({'action': 'accept', 'content': content});
@@ -1467,11 +1496,11 @@ final class AcpClient {
       try {
         final reply = await _request('session/prompt', params, limited: false);
         final stop = reply['stopReason'];
-        _endTurn(stop is String ? stop : 'none');
+        _endTurn(stop is String ? stop : 'none', sessionId);
       } on AcpFailure catch (error) {
         if (!_closed) {
           _flush();
-          _emit(AcpFailed(error.message));
+          _emit(AcpFailed(error.message, sessionId: sessionId));
         }
       }
       return null;
