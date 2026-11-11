@@ -73,6 +73,164 @@ final class AcpSecretException implements Exception {
 AcpSecretException _fail(AcpSecretFailure failure, [String reason = '']) =>
     AcpSecretException(failure, reason);
 
+/// Whether [text] holds a surrogate that is not half of a pair. UTF-8 cannot carry one: the encoder replaces it with U+FFFD, and two
+/// different strings would then hash alike.
+bool _hasLoneSurrogate(String text) {
+  final units = text.codeUnits;
+  for (var i = 0; i < units.length; i++) {
+    final unit = units[i];
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      if (i + 1 < units.length &&
+          units[i + 1] >= 0xDC00 &&
+          units[i + 1] <= 0xDFFF) {
+        i++;
+        continue;
+      }
+      return true;
+    }
+    if (unit >= 0xDC00 && unit <= 0xDFFF) return true;
+  }
+  return false;
+}
+
+/// UTF-8 of [text], or a `malformed` refusal for a string that has a lone surrogate. Every part that is hashed or sealed goes through it.
+Uint8List _utf8(String text) {
+  if (_hasLoneSurrogate(text)) {
+    throw _fail(AcpSecretFailure.malformed, 'an unpaired surrogate');
+  }
+  return Uint8List.fromList(utf8.encode(text));
+}
+
+/// Reads JSON text strictly: an object that repeats a key, a string with a lone surrogate and nesting past 128 are refused, none of
+/// which `jsonDecode` refuses. Throws [FormatException] whose message is `twice` for a repeated key.
+final class _StrictJson {
+  _StrictJson(this.text);
+
+  final String text;
+  var _at = 0;
+  var _depth = 0;
+
+  static Object? read(String text) {
+    final reader = _StrictJson(text);
+    final value = reader._value();
+    reader._space();
+    if (reader._at != text.length) throw const FormatException('trailing');
+    return value;
+  }
+
+  String get _peek => _at < text.length ? text[_at] : '';
+
+  void _space() {
+    while (_at < text.length && ' \t\n\r'.contains(text[_at])) {
+      _at++;
+    }
+  }
+
+  Object? _value() {
+    if (++_depth > 128) throw const FormatException('deep');
+    _space();
+    final Object? value;
+    switch (_peek) {
+      case '{':
+        value = _object();
+      case '[':
+        value = _array();
+      case '"':
+        value = _string();
+      case '':
+        throw const FormatException('end');
+      default:
+        final start = _at;
+        while (_at < text.length && !',]} \t\n\r'.contains(text[_at])) {
+          _at++;
+        }
+        value = jsonDecode(text.substring(start, _at));
+    }
+    _depth--;
+    return value;
+  }
+
+  String _string() {
+    final start = _at++;
+    while (_at < text.length && text[_at] != '"') {
+      _at += text[_at] == r'\' ? 2 : 1;
+    }
+    if (_at >= text.length) throw const FormatException('end');
+    _at++;
+    final value = jsonDecode(text.substring(start, _at)) as String;
+    if (_hasLoneSurrogate(value)) throw const FormatException('surrogate');
+    return value;
+  }
+
+  Map<String, Object?> _object() {
+    _at++;
+    final map = <String, Object?>{};
+    _space();
+    if (_peek == '}') {
+      _at++;
+      return map;
+    }
+    while (true) {
+      _space();
+      if (_peek != '"') throw const FormatException('key');
+      final key = _string();
+      _space();
+      if (_peek != ':') throw const FormatException('colon');
+      _at++;
+      final value = _value();
+      if (map.containsKey(key)) throw const FormatException('twice');
+      map[key] = value;
+      _space();
+      if (_peek == ',') {
+        _at++;
+        continue;
+      }
+      if (_peek == '}') {
+        _at++;
+        return map;
+      }
+      throw const FormatException('object');
+    }
+  }
+
+  List<Object?> _array() {
+    _at++;
+    final list = <Object?>[];
+    _space();
+    if (_peek == ']') {
+      _at++;
+      return list;
+    }
+    while (true) {
+      list.add(_value());
+      _space();
+      if (_peek == ',') {
+        _at++;
+        continue;
+      }
+      if (_peek == ']') {
+        _at++;
+        return list;
+      }
+      throw const FormatException('array');
+    }
+  }
+}
+
+/// [_StrictJson.read], with the refusal [failure] and the reasons for text that is no JSON and for one that repeats a key.
+Object? _strictJson(
+  String text,
+  AcpSecretFailure failure,
+  String what,
+  String twice,
+) {
+  try {
+    return _StrictJson.read(text);
+  } on FormatException catch (error) {
+    throw _fail(failure, error.message == 'twice' ? twice : what);
+  }
+}
+
 /// How much of a form is taken; every value from 0 up is taken.
 final class AcpSecretLimits {
   const AcpSecretLimits({
@@ -178,22 +336,38 @@ bool _base64Canonical(String text, {required bool url}) {
   }
 }
 
-const _secretDenied = [
-  'default',
-  'const',
-  'enum',
-  'oneOf',
-  'examples',
-  'anyOf',
-  'allOf',
-  'pattern',
-  'if',
-  'then',
-  'else',
-  'not',
-  r'$ref',
-  'dependentSchemas',
-];
+/// The only keywords the schema's root may have: a flat object of questions.
+const _rootAllowed = {'type', 'properties', 'required', 'title', 'description'};
+
+/// The only keywords a secret field may have. Anything else could carry a value, a condition or a hint that makes a frontend draw or
+/// treat the field as something other than a secret.
+const _secretAllowed = {
+  'type',
+  'title',
+  'description',
+  'minLength',
+  'maxLength',
+  'minimum',
+  'maximum',
+  'writeOnly',
+  'x-sensitive',
+  'contentEncoding',
+  'contentMediaType',
+  'format',
+};
+
+/// The widgets of a layout for a question that is not secret (guatiao-intake's suggestions, minus the masking one).
+const _plainWidgets = {
+  'text',
+  'textarea',
+  'number',
+  'slider',
+  'checkbox',
+  'toggle',
+  'select',
+  'radio',
+  'dialog',
+};
 
 bool _flag(Map property, String key) {
   if (!property.containsKey(key)) return false;
@@ -222,18 +396,21 @@ final class AcpSecretForm {
     String schema, [
     AcpSecretLimits limits = const AcpSecretLimits(),
   ]) {
-    if (utf8.encode(schema).length > limits.schemaBytes) {
+    if (_hasLoneSurrogate(schema)) {
+      throw _fail(AcpSecretFailure.schema, 'the schema is not JSON');
+    }
+    if (_utf8(schema).length > limits.schemaBytes) {
       throw _fail(
         AcpSecretFailure.schema,
         'the schema is larger than the limit',
       );
     }
-    final Object? value;
-    try {
-      value = jsonDecode(schema);
-    } on FormatException {
-      throw _fail(AcpSecretFailure.schema, 'the schema is not JSON');
-    }
+    final value = _strictJson(
+      schema,
+      AcpSecretFailure.schema,
+      'the schema is not JSON',
+      'the schema repeats a key',
+    );
     return AcpSecretForm.parse(value, limits);
   }
 
@@ -244,8 +421,11 @@ final class AcpSecretForm {
   ]) {
     AcpSecretException bad(String why) => _fail(AcpSecretFailure.schema, why);
     if (schema is! Map) throw bad('the schema is not an object');
-    if (utf8.encode(jsonEncode(schema)).length > limits.schemaBytes) {
+    if (_utf8(jsonEncode(schema)).length > limits.schemaBytes) {
       throw bad('the schema is larger than the limit');
+    }
+    if (schema.keys.any((key) => !_rootAllowed.contains(key))) {
+      throw bad('the schema has a keyword a flat form does not');
     }
     if (schema.containsKey('type') && schema['type'] != 'object') {
       throw bad("the schema's type is not object");
@@ -274,7 +454,7 @@ final class AcpSecretForm {
     for (final MapEntry(:key, :value) in properties.entries) {
       final name = '$key';
       if (name.isEmpty ||
-          utf8.encode(name).length > limits.nameBytes ||
+          _utf8(name).length > limits.nameBytes ||
           name.runes.any(
             (rune) => rune < 0x20 || (rune >= 0x7f && rune < 0xa0),
           )) {
@@ -315,8 +495,11 @@ final class AcpSecretForm {
         if (field is! AcpTextField && field is! AcpNumberField) {
           throw bad('a secret field is not text or a number');
         }
-        if (_secretDenied.any(value.containsKey)) {
-          throw bad('a secret field carries a value or a choice in the schema');
+        if (value.keys.any((key) => !_secretAllowed.contains(key))) {
+          throw bad('a secret field has a keyword a secret field may not');
+        }
+        if (value.containsKey('format') && value['format'] != 'password') {
+          throw bad("a secret field's format is not password");
         }
       }
       fields.add(
@@ -334,6 +517,94 @@ final class AcpSecretForm {
       fields,
       limits,
     );
+  }
+
+  /// Checks the layout that came with the form, as the JSON text that was sent: guatiao-intake's form document over a flat form,
+  /// `{"sections": [{"id", "title"?, "description"?}], "fields": {<question>: {"widget"?, "placeholder"?, "unit"?, "visibleWhen"?}}}`.
+  /// A layout may place and label the questions; it may not change what a secret question is: a secret question has the `password`
+  /// widget or none, no other question has it, and a condition may not read a secret question's value. Throws `schema`.
+  void checkLayout(String text) {
+    AcpSecretException bad(String why) => _fail(AcpSecretFailure.schema, why);
+    if (_hasLoneSurrogate(text)) {
+      throw bad('the layout is not JSON');
+    }
+    if (_utf8(text).length > limits.schemaBytes) {
+      throw _fail(AcpSecretFailure.tooLarge, 'the layout');
+    }
+    final layout = _strictJson(
+      text,
+      AcpSecretFailure.schema,
+      'the layout is not JSON',
+      'the layout repeats a key',
+    );
+    if (layout is! Map) throw bad('the layout is not an object');
+    bool only(Map map, Set<String> keys) =>
+        map.keys.every((key) => keys.contains(key));
+    if (!only(layout, {'sections', 'fields'})) {
+      throw bad('the layout has a key the form document does not define');
+    }
+    const wrong = 'the layout is not a form document';
+    final sections = layout['sections'];
+    if (layout.containsKey('sections')) {
+      if (sections is! List) throw bad(wrong);
+      for (final section in sections) {
+        if (section is! Map ||
+            !only(section, {'id', 'title', 'description'}) ||
+            section['id'] is! String ||
+            (section.containsKey('title') && section['title'] is! String) ||
+            (section.containsKey('description') &&
+                section['description'] is! String)) {
+          throw bad(wrong);
+        }
+      }
+    }
+    if (layout.containsKey('fields')) {
+      final fields = layout['fields'];
+      if (fields is! Map) throw bad(wrong);
+      for (final MapEntry(:key, :value) in fields.entries) {
+        final question = field('$key');
+        if (question == null) {
+          throw bad('the layout names a question the form lacks');
+        }
+        if (value is! Map) throw bad(wrong);
+        if (!only(value, {'widget', 'placeholder', 'unit', 'visibleWhen'})) {
+          throw bad('the layout has a hint a flat form does not take');
+        }
+        for (final hint in const ['placeholder', 'unit']) {
+          if (value.containsKey(hint) && value[hint] is! String) {
+            throw bad(wrong);
+          }
+        }
+        if (value.containsKey('widget')) {
+          final widget = value['widget'];
+          if (widget is! String) throw bad(wrong);
+          final fits = question.secret
+              ? widget == 'password'
+              : _plainWidgets.contains(widget);
+          if (!fits) {
+            throw bad(
+              'a widget that hides, shows or relabels a question the schema says otherwise',
+            );
+          }
+        }
+        if (value.containsKey('visibleWhen')) {
+          final when = value['visibleWhen'];
+          final target = when is Map && when['field'] is String
+              ? field(when['field'] as String)
+              : null;
+          if (when is! Map ||
+              !only(when, {'field', 'equals', 'in'}) ||
+              when.containsKey('equals') == when.containsKey('in') ||
+              (when.containsKey('in') && when['in'] is! List) ||
+              target == null ||
+              target.secret) {
+            throw bad(
+              'a condition that is not on a plain question of the form',
+            );
+          }
+        }
+      }
+    }
   }
 
   /// The question named [name], or null.
@@ -568,14 +839,14 @@ final class AcpSecretContext {
     _concat([
       _lp(ascii.encode('dev.boriken.coqui.acp/secret/v1 context')),
       _lp(ascii.encode(method.text)),
-      _lp(utf8.encode(sessionId)),
-      _lp(utf8.encode(requestId)),
-      _lp(utf8.encode(message)),
-      _lp(utf8.encode(schema)),
+      _lp(_utf8(sessionId)),
+      _lp(_utf8(requestId)),
+      _lp(_utf8(message)),
+      _lp(_utf8(schema)),
       _lp([if (form != null) 1 else 0]),
-      _lp(utf8.encode(form ?? '')),
+      _lp(_utf8(form ?? '')),
       _lp([if (values != null) 1 else 0]),
-      _lp(utf8.encode(values ?? '')),
+      _lp(_utf8(values ?? '')),
     ]),
   );
 }
@@ -756,7 +1027,7 @@ Uint8List _statement(
     ),
   ),
   _lp(ascii.encode(method.text)),
-  _lp(utf8.encode(requestId)),
+  _lp(_utf8(requestId)),
   _lp(digest),
   _lp(key),
   _lp(payload),
@@ -766,15 +1037,12 @@ Uint8List _statement(
 
 /// The plain values of an answer or a show, from the JSON object text that was sent.
 Map<String, Object?> _plainValues(String text) {
-  final Object? value;
-  try {
-    value = jsonDecode(text);
-  } on FormatException {
-    throw _fail(
-      AcpSecretFailure.malformed,
-      'the plain values are not a JSON object',
-    );
-  }
+  final value = _strictJson(
+    text,
+    AcpSecretFailure.malformed,
+    'the plain values are not a JSON object',
+    'the plain values repeat a key',
+  );
   if (value is! Map) {
     throw _fail(
       AcpSecretFailure.malformed,
@@ -789,7 +1057,7 @@ Map<String, Object?> _plainValues(String text) {
 Uint8List _valuesDigest(String plain, Map<String, AcpSealed> sealed) {
   final names = sealed.keys.toList()
     ..sort((a, b) {
-      final x = utf8.encode(a), y = utf8.encode(b);
+      final x = _utf8(a), y = _utf8(b);
       for (var i = 0; i < x.length && i < y.length; i++) {
         if (x[i] != y[i]) return x[i] - y[i];
       }
@@ -800,15 +1068,11 @@ Uint8List _valuesDigest(String plain, Map<String, AcpSealed> sealed) {
     _concat([
       (ByteData(4)..setUint32(0, label.length)).buffer.asUint8List(),
       label,
-      (ByteData(
-        4,
-      )..setUint32(0, utf8.encode(plain).length)).buffer.asUint8List(),
-      utf8.encode(plain),
+      (ByteData(4)..setUint32(0, _utf8(plain).length)).buffer.asUint8List(),
+      _utf8(plain),
       for (final name in names) ...[
-        (ByteData(
-          4,
-        )..setUint32(0, utf8.encode(name).length)).buffer.asUint8List(),
-        utf8.encode(name),
+        (ByteData(4)..setUint32(0, _utf8(name).length)).buffer.asUint8List(),
+        _utf8(name),
         sealed[name]!.enc,
         (ByteData(
           4,
@@ -827,14 +1091,34 @@ Uint8List _fieldInfo(
 ) => _concat([
   _lp(ascii.encode('dev.boriken.coqui.acp/secret/v1 field')),
   _lp(ascii.encode(method.text)),
-  _lp(utf8.encode(requestId)),
+  _lp(_utf8(requestId)),
   _lp(digest),
-  _lp(utf8.encode(field)),
+  _lp(_utf8(field)),
 ]);
+
+/// What a context must be besides its id and its schema: a layout that changes nothing a secret question is, and plain values only in a
+/// show, which fit the form.
+void _checkContext(
+  AcpSecretMethod method,
+  AcpSecretContext context,
+  AcpSecretForm form,
+) {
+  if (context.form != null) form.checkLayout(context.form!);
+  switch ((method, context.values)) {
+    case (AcpSecretMethod.show, final String values):
+      form.checkPlain(_plainValues(values));
+    case (AcpSecretMethod.show, null):
+      throw _fail(AcpSecretFailure.malformed, 'a show has no values');
+    case (AcpSecretMethod.request, final String _):
+      throw _fail(AcpSecretFailure.malformed, 'a request carries no values');
+    case (AcpSecretMethod.request, null):
+      break;
+  }
+}
 
 void _checkRequestId(String requestId) {
   if (requestId.isEmpty ||
-      utf8.encode(requestId).length > 128 ||
+      _utf8(requestId).length > 128 ||
       requestId.runes.any(
         (rune) => rune < 0x20 || (rune >= 0x7f && rune < 0xa0),
       )) {
@@ -1160,11 +1444,13 @@ final class AcpSecretVerifier {
       now,
     );
     if (holder != expected) throw _fail(AcpSecretFailure.unknownIdentity);
+    final form = AcpSecretForm.parseText(context.schema, limits);
+    _checkContext(method, context, form);
     return AcpSecretCollector._(
       method,
       context.requestId,
       digest,
-      AcpSecretForm.parseText(context.schema, limits),
+      form,
       recipient.key,
       holder,
     );
@@ -1196,7 +1482,8 @@ final class AcpSecretCollector {
   /// Whether the field is one this collector would seal.
   bool isSecret(String name) => form.field(name)?.secret ?? false;
 
-  /// Seals the value of secret field [name]: UTF-8 text, or a number as decimal text.
+  /// Seals the value of secret field [name]: UTF-8 text, or a number as decimal text. The ciphertext is as long as the value plus 48
+  /// bytes (the encapsulated key and the tag), so its length tells a relay how long the secret is; nothing is padded.
   Future<AcpSealed> seal(String name, String value) {
     final source = Random.secure();
     final ikm = Uint8List.fromList([
@@ -1206,7 +1493,7 @@ final class AcpSecretCollector {
   }
 
   Future<AcpSealed> _seal(String name, String value, List<int> ikm) async {
-    final bytes = utf8.encode(value);
+    final bytes = _utf8(value);
     try {
       form.checkSecret(name, bytes);
       final made = await hpke.hpkeSeal(
@@ -1233,16 +1520,22 @@ final class AcpSecretCollector {
     Map<String, AcpSealed> sealed,
     int now, {
     Duration lifetime = acpSecretDefaultLifetime,
-  }) => prover._bind(
-    _Kind.answer,
-    method,
-    requestId,
-    _digest,
-    _key,
-    _valuesDigest(plain, sealed),
-    now + lifetime.inSeconds,
-    holder,
-  );
+  }) {
+    // A sender signs only an answer the form allows: a plain value for a secret question, or a required secret left out, is refused
+    // here, before anything is signed.
+    form.checkPlain(_plainValues(plain));
+    form.checkSealed(sealed.keys);
+    return prover._bind(
+      _Kind.answer,
+      method,
+      requestId,
+      _digest,
+      _key,
+      _valuesDigest(plain, sealed),
+      now + lifetime.inSeconds,
+      holder,
+    );
+  }
 }
 
 /// The receiving side of one request: it holds the per-request private key and gives the collector the public key with a binding.
@@ -1297,6 +1590,7 @@ final class AcpSecretReceiver {
   ) async {
     _checkRequestId(context.requestId);
     final form = AcpSecretForm.parseText(context.schema, limits);
+    _checkContext(method, context, form);
     final digest = context.digest(method);
     final secret = await hpke.deriveKey(ikm);
     final publicKey = await hpke.x25519Public(secret);
@@ -1381,6 +1675,10 @@ final class AcpSecretReceiver {
     _used = true;
     final secrets = <String, AcpSecretValue>{};
     try {
+      // The binding it made is over; a later answer is refused whatever its sender proves.
+      if (now > recipient.binding.expires + verifier.skew.inSeconds) {
+        throw _fail(AcpSecretFailure.expired);
+      }
       form.checkSealed(sealed.keys);
       final holder = await verifier._verify(
         _Kind.answer,
@@ -1821,4 +2119,25 @@ Future<AcpSecretRecipient> secretBindKey(
     now + 240,
     audience,
   ),
+);
+
+/// Binds an answer as an authenticated but hostile sender could: without the checks [AcpSecretCollector.authenticate] makes first.
+Future<AcpSecretBinding> secretBindAnswer(
+  AcpSecretProver prover,
+  AcpSecretMethod method,
+  AcpSecretContext context,
+  List<int> key,
+  String plain,
+  Map<String, AcpSealed> sealed,
+  int expires,
+  AcpIdentityId audience,
+) => prover._bind(
+  _Kind.answer,
+  method,
+  context.requestId,
+  context.digest(method),
+  key,
+  _valuesDigest(plain, sealed),
+  expires,
+  audience,
 );

@@ -91,7 +91,7 @@ Future<AcpSecretVerifier> verifierOf(
   );
 }
 
-Future<void> expectRefusal(Future<Object?> Function() run, String want) async {
+Future<void> expectRefusal(Future<void> Function() run, String want) async {
   try {
     await run();
   } on AcpSecretException catch (error) {
@@ -189,8 +189,12 @@ Future<void> openCase(
       (field as Map)['field'] as String: AcpSealed.fromJson(field['sealed']),
   };
   var auth = AcpSecretBinding.fromJson(base['auth']);
+  final plainUsed = (change['plain'] ?? base['plain']) as String;
   if (change.keys.any(
-    (key) => key.startsWith('reseal_') || key == 'seal_value',
+    (key) =>
+        key.startsWith('reseal_') ||
+        key == 'seal_value' ||
+        key == 'authenticated',
   )) {
     final requestId =
         (change['reseal_request_id'] ?? context.requestId) as String;
@@ -202,6 +206,7 @@ Future<void> openCase(
         : contextOf(base, {'message': change['reseal_message']}).digest(method);
     for (final field in base['fields'] as List) {
       final name = (field as Map)['field'] as String;
+      if (change['authenticated_drop'] == name) continue;
       final target = name == 'password'
           ? (change['reseal_as_field'] ?? name) as String
           : name;
@@ -217,23 +222,16 @@ Future<void> openCase(
       );
       sealed[name] = AcpSealed(made.enc, made.ct);
     }
-    final sender = await verifierOf(
-      kind,
-      base['sender_private'] as String,
-      trusts: proverR.id,
-    );
-    final collector = await sender.collector(
-      proverR.id,
+    sealed.remove(change['authenticated_drop']);
+    auth = await hooks.secretBindAnswer(
+      proverS,
       method,
       context,
-      recipient,
-      now,
-    );
-    auth = await collector.authenticate(
-      proverS,
-      base['plain'] as String,
+      recipient.key,
+      plainUsed,
       sealed,
-      now,
+      now + ((change['auth_lifetime'] ?? 240) as int),
+      proverR.id,
     );
   }
   if (change['flip_ct'] != null) {
@@ -256,9 +254,58 @@ Future<void> openCase(
     change['expected_sender'] == null
         ? idS
         : AcpIdentityId.parse(change['expected_sender'] as String),
-    (change['plain'] ?? base['plain']) as String,
+    plainUsed,
     sealed,
     auth,
+    (change['open_now'] ?? now) as int,
+  );
+}
+
+/// A receiver made for a context with one thing changed: the context itself is refused, before any binding.
+Future<void> receiverCase(
+  Map<String, dynamic> base,
+  Map<String, dynamic> change,
+) async {
+  final (proverR, proverS) = await proversOf(base);
+  await hooks.secretReceiverFromIkm(
+    methodOf(base['method'] as String),
+    contextOf(base, change),
+    proverR,
+    proverS.id,
+    now,
+    lifetime,
+    unhex(base['recipient_ikm'] as String),
+  );
+}
+
+/// A sender asked to sign an answer the form does not allow.
+Future<void> authenticateCase(
+  Map<String, dynamic> base,
+  Map<String, dynamic> change,
+) async {
+  final method = methodOf(base['method'] as String);
+  final (proverR, proverS) = await proversOf(base);
+  final sender = await verifierOf(
+    base['kind'] as String,
+    base['sender_private'] as String,
+    trusts: proverR.id,
+  );
+  final collector = await sender.collector(
+    proverR.id,
+    method,
+    contextOf(base, const {}),
+    AcpSecretRecipient.fromJson(base['recipient']),
+    now,
+  );
+  final sealed = <String, AcpSealed>{
+    for (final field in base['fields'] as List)
+      if (change['drop'] != (field as Map)['field'])
+        field['field'] as String: AcpSealed.fromJson(field['sealed']),
+  };
+  await collector.authenticate(
+    proverS,
+    (change['plain'] ?? base['plain']) as String,
+    sealed,
     now,
   );
 }
@@ -453,6 +500,91 @@ void main() {
     });
   });
 
+  test('layouts: accepted and refused', () {
+    final layouts = doc['layouts'] as Map<String, dynamic>;
+    for (final raw in layouts['accepted'] as List) {
+      final item = raw as Map<String, dynamic>;
+      AcpSecretForm.parseText(
+        item['schema'] as String,
+      ).checkLayout(item['layout'] as String);
+    }
+    for (final raw in layouts['refused'] as List) {
+      final item = raw as Map<String, dynamic>;
+      expect(
+        () => AcpSecretForm.parseText(
+          item['schema'] as String,
+        ).checkLayout(item['layout'] as String),
+        throwsA(
+          isA<AcpSecretException>().having(
+            (error) => error.failure.kind,
+            'kind',
+            item['kind'],
+          ),
+        ),
+        reason: item['name'] as String,
+      );
+    }
+  });
+
+  test(
+    'a lone surrogate in any hashed part is refused, not hashed as U+FFFD',
+    () async {
+      final base = (doc['bindings'] as List).first as Map<String, dynamic>;
+      final method = methodOf(base['method'] as String);
+      final (proverR, proverS) = await proversOf(base);
+      for (final raw in doc['surrogates'] as List) {
+        final item = raw as Map<String, dynamic>;
+        final part = item['part'] as String;
+        final lone = String.fromCharCodes([
+          for (var i = 0; i < (item['units'] as String).length; i += 4)
+            int.parse((item['units'] as String).substring(i, i + 4), radix: 16),
+        ]);
+        final bad = 'a$lone';
+        final context = contextOf(base, {
+          if (part != 'plain' && part != 'field_name') part: bad,
+        });
+        await expectLater(
+          expectRefusal(() async {
+            switch (part) {
+              case 'plain':
+                final sender = await verifierOf(
+                  base['kind'] as String,
+                  base['sender_private'] as String,
+                  trusts: proverR.id,
+                );
+                final collector = await sender.collector(
+                  proverR.id,
+                  method,
+                  context,
+                  AcpSecretRecipient.fromJson(base['recipient']),
+                  now,
+                );
+                await collector.authenticate(
+                  proverS,
+                  '{"user":"$bad"}',
+                  const {},
+                  now,
+                );
+              case 'field_name':
+                AcpSecretForm.parseText(
+                  '{"properties":{"$bad":{"type":"string"}}}',
+                );
+              default:
+                context.digest(method);
+            }
+          }, item['expect'] as String),
+          completes,
+          reason: part,
+        );
+      }
+      // The case the digest alone must not confuse: U+FFFD itself is a character, a lone surrogate is not.
+      expect(
+        contextOf(base, {'message': 'a\u{FFFD}'}).digest(method),
+        isNot(equals(contextOf(base, const {}).digest(method))),
+      );
+    },
+  );
+
   group('refusals', () {
     test('each changes one thing and is refused as the vector says', () async {
       for (final raw in doc['refusals'] as List) {
@@ -461,9 +593,12 @@ void main() {
         final change = item['change'] as Map<String, dynamic>;
         await expectLater(
           expectRefusal(
-            () => item['case'] == 'verify'
-                ? verifyCase(base, change)
-                : openCase(base, change),
+            () => switch (item['case']) {
+              'verify' => verifyCase(base, change),
+              'open' => openCase(base, change),
+              'receiver' => receiverCase(base, change),
+              _ => authenticateCase(base, change),
+            },
             item['expect'] as String,
           ),
           completes,

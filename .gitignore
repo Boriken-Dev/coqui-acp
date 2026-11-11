@@ -24,3 +24,6 @@ __pycache__/
 
 # Docs build
 /site/
+
+# The vectors copied beside the Dart tests for a browser run
+/bindings/dart/coqui_acp/test/secret_vectors.json
