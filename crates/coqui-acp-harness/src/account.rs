@@ -7,15 +7,25 @@
 //! event with one sequence, told to every keeper then live for the account.
 //!
 //! The rules for placing a file, per watched file:
-//! - the provider has no record of it and the file is absent: the grant's copy is written;
-//! - no record, and a file there: the same text is kept; one changed after the provider began is news (a renewal, or a
-//!   loss when it holds no login), told and kept; an older one is replaced by the grant's copy;
-//! - a record, and no hold on the file now: the host may have removed or replaced it since, so the grant's copy is
-//!   written unless the file is the one last recorded;
-//! - a record, and another hold on the file now: the file is kept (it may have been renewed since), unless the grant
-//!   carries a newer revision with other credentials, which replaces it.
+//! - absent, with no record of it or no hold on it now: the grant's copy is written;
+//! - planted (longer than [`MAX_FILE_BYTES`], a link, not a regular file): removed, and the grant's copy written;
+//! - there with no record: the same text is kept; a login changed since the provider began (by the spawner's clock) is
+//!   news (a renewal, told and kept); a blank or older one is replaced by the grant's copy;
+//! - there with a record and no other hold: the file last recorded is kept unless the grant is a newer revision with
+//!   other credentials; a login changed since the last look is news; a blank or older one is replaced by the grant's
+//!   copy (so a loss, once reported, is not reported again by the next hold);
+//! - there with a record and another hold on it: kept (it may have been renewed since), unless the grant is newer.
 //!
-//! A file whose login is missing or blank is reported lost once; it comes back as a renewal when a login appears in it.
+//! A change is read twice, a moment apart, and reported only when both reads agree: a file the harness is still
+//! writing is not a renewal, and one it has just truncated is not a loss. A login that is missing or blank is `lost`,
+//! once, and comes back as a renewal when a login appears again. A login that names another account than the
+//! grant's (when the text names one) is refused as lost, and logged.
+//!
+//! **Keepers.** A keeper is called with no lock of the registry held, on the thread that found the change (a
+//! connection's watcher, a call, a renewal). It may call back into the provider (`models`, `renew`, ending its own
+//! hold or closing the connection): ending a hold waits for the calls to its keeper that other threads have in
+//! flight, never for one on its own thread, and a watcher stopped from its own thread is not joined. A keeper that
+//! blocks holds the thread that called it.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -23,13 +33,15 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hash::Hasher;
+use core::ops::Deref;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::collections::hash_map::DefaultHasher;
-use std::sync::{Condvar, Mutex, PoisonError};
-use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::{JoinHandle, ThreadId};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{Secret, Status, Wipe};
 use coqui_acp_api::{
@@ -41,6 +53,59 @@ pub const MAX_FILE_BYTES: u64 = 1 << 20;
 
 /// The default of a provider's `renew_poll_ms`.
 pub const DEFAULT_POLL_MS: u64 = 30_000;
+
+/// How long a change waits before it is read again to see that the writer is done.
+const SETTLE: Duration = Duration::from_millis(100);
+
+/// How much older than the provider a file may be, in milliseconds, and still count as changed since it began: file
+/// times are coarse (two seconds on some file systems) and two clocks never agree to the millisecond.
+const CLOCK_SLACK_MS: i64 = 2000;
+
+/// The file a hold writes to ask the spawner what time it is.
+const CLOCK_FILE: &str = ".coqui-clock";
+
+/// Text that is a credential: wiped when dropped, and `Debug` shows only its length.
+pub struct SecretText(String);
+
+impl SecretText {
+    /// Keeps `text`.
+    #[must_use]
+    pub const fn new(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl Deref for SecretText {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "[redacted {} bytes]", self.0.len())
+    }
+}
+
+impl Drop for SecretText {
+    fn drop(&mut self) {
+        self.0.wipe();
+    }
+}
+
+/// What a file holds.
+#[derive(Debug)]
+pub enum FileState {
+    /// It is not there.
+    Missing,
+    /// Its text.
+    Text(SecretText),
+    /// Something is there that is not a file this provider may read: longer than [`MAX_FILE_BYTES`], a link, not a
+    /// regular file.
+    Planted,
+}
 
 /// The file methods of a host's spawner, shared with whoever else holds it.
 ///
@@ -84,17 +149,38 @@ impl Files {
         )
     }
 
-    /// The text of `path`; `None` when it is not there.
+    /// What `path` holds. A file the spawner will not read (too long, a link, not a file) is [`FileState::Planted`].
     ///
     /// # Errors
     ///
-    /// The spawner's refusal, other than the file not being there.
-    pub fn read(&self, path: &str) -> Result<Option<String>, ProviderError> {
+    /// The spawner's refusal, other than the file being missing or one it will not read.
+    pub fn state(&self, path: &str) -> Result<FileState, ProviderError> {
         match self.spawner.read_file(path, MAX_FILE_BYTES) {
-            Ok(bytes) => Ok(Some(bytes.expose().to_text())),
-            Err(error) if error.status == Status::GUATIAO_ERR_NOT_FOUND => Ok(None),
+            Ok(bytes) => Ok(FileState::Text(SecretText::new(bytes.expose().to_text()))),
+            Err(error)
+                if error.status == Status::GUATIAO_ERR_NOT_FOUND
+                    || error.status == Status::GUATIAO_ERR_BAD_VALUE =>
+            {
+                // The spawner says not found for a missing file and for one it refuses: the file's info tells which.
+                match self.spawner.file_info(path) {
+                    Ok(None) => Ok(FileState::Missing),
+                    _ => Ok(FileState::Planted),
+                }
+            }
             Err(error) => Err(error),
         }
+    }
+
+    /// The text of `path`; `None` when it is not there or is not a file this provider may read.
+    ///
+    /// # Errors
+    ///
+    /// The spawner's refusal, other than the file being missing or one it will not read.
+    pub fn read(&self, path: &str) -> Result<Option<SecretText>, ProviderError> {
+        Ok(match self.state(path)? {
+            FileState::Text(text) => Some(text),
+            FileState::Missing | FileState::Planted => None,
+        })
     }
 
     /// What is known of `path`; `None` when it is not there.
@@ -128,6 +214,8 @@ pub struct Watched {
     pub usable: fn(&str) -> bool,
     /// When the login in the text stops working, as an RFC 3339 time, when the text says.
     pub expires: fn(&str) -> Option<String>,
+    /// Whom the login in the text is for, when it says; a renewal naming someone else than the grant is refused.
+    pub identity: fn(&str) -> Option<String>,
 }
 
 impl core::fmt::Debug for Watched {
@@ -148,6 +236,7 @@ impl Watched {
             key: key.into(),
             usable: |text| !text.trim().is_empty(),
             expires: |_| None,
+            identity: |_| None,
         }
     }
 
@@ -164,16 +253,85 @@ impl Watched {
         self.expires = expires;
         self
     }
+
+    /// The same file, naming whom its login is for as `identity` reads from its text.
+    #[must_use]
+    pub fn identity(mut self, identity: fn(&str) -> Option<String>) -> Self {
+        self.identity = identity;
+        self
+    }
 }
 
 /// What the keepers of one hold are told through: destroyed when its hold ends.
-type Slot = Mutex<Option<Object<dyn AccountKeeper>>>;
+struct Slot {
+    state: Mutex<SlotState>,
+    idle: Condvar,
+}
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+struct SlotState {
+    keeper: Option<Arc<Object<dyn AccountKeeper>>>,
+    /// The threads that are inside a call to the keeper.
+    calling: Vec<ThreadId>,
+}
+
+impl Slot {
+    fn new(keeper: Option<Object<dyn AccountKeeper>>) -> Self {
+        Self {
+            state: Mutex::new(SlotState {
+                keeper: keeper.map(Arc::new),
+                calling: Vec::new(),
+            }),
+            idle: Condvar::new(),
+        }
+    }
+
+    /// Calls the keeper with no lock held.
+    fn call(&self, what: impl FnOnce(&Object<dyn AccountKeeper>) -> Result<(), ProviderError>) {
+        let keeper = {
+            let mut state = lock(&self.state);
+            let Some(keeper) = state.keeper.clone() else {
+                return;
+            };
+            state.calling.push(std::thread::current().id());
+            keeper
+        };
+        let result = what(&keeper);
+        drop(keeper);
+        let mut state = lock(&self.state);
+        let me = std::thread::current().id();
+        if let Some(at) = state.calling.iter().position(|id| *id == me) {
+            state.calling.swap_remove(at);
+        }
+        if result.is_err_and(|error| error.status == Status::GUATIAO_ERR_GONE) {
+            state.keeper = None;
+        }
+        drop(state);
+        self.idle.notify_all();
+    }
+
+    /// Takes the keeper away, waits for the calls other threads have in flight and destroys it.
+    fn close(&self) {
+        let mut state = lock(&self.state);
+        let taken = state.keeper.take();
+        let me = std::thread::current().id();
+        while state.calling.iter().any(|id| *id != me) {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(state);
+        drop(taken);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn fingerprint(text: &str) -> u64 {
+/// A short fingerprint of `text` for telling whether it changed: it is not a hash to keep a secret by.
+#[must_use]
+pub fn fingerprint(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(text.as_bytes());
     hasher.write_usize(text.len());
@@ -212,6 +370,18 @@ pub fn rfc3339_ms(ms: i64) -> String {
     )
 }
 
+/// When a JWT stops working (its `exp` claim), as an RFC 3339 time. The token is not verified, only read.
+#[must_use]
+pub fn jwt_expiry(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    exp.checked_mul(1000).map(rfc3339_ms)
+}
+
 /// What the provider knows of one watched file.
 struct Record {
     /// The fingerprint of the login last recorded; `None` when the login is lost.
@@ -228,6 +398,9 @@ struct Entry {
     keepers: Vec<(u64, Arc<Slot>)>,
     next_token: u64,
     files: BTreeMap<(String, String), Record>,
+    /// Held while the files of the account are read, compared and recorded, so an older reading never takes a later
+    /// sequence.
+    gate: Arc<Mutex<()>>,
 }
 
 /// What the provider knows of its accounts, for as long as it lives.
@@ -250,8 +423,15 @@ impl Default for Accounts {
 
 /// Something a look found.
 enum Event {
-    Renewed(Credentials, Option<String>),
+    Renewed(Secret<Credentials>, Option<String>),
     Lost(String),
+}
+
+/// An event with its sequence, to be told to the keepers once no lock is held.
+struct Pending {
+    sequence: u64,
+    slots: Vec<Arc<Slot>>,
+    event: Event,
 }
 
 /// What a [`Hold::look`] found and told.
@@ -259,7 +439,7 @@ enum Event {
 #[non_exhaustive]
 pub struct Looked {
     /// Each renewal found: the credentials now, whole, and when they expire.
-    pub renewed: Vec<(Credentials, Option<String>)>,
+    pub renewed: Vec<(Secret<Credentials>, Option<String>)>,
     /// Why each login found lost is.
     pub lost: Vec<String>,
 }
@@ -275,11 +455,9 @@ impl Accounts {
     }
 
     /// Holds the account `id` for a call or a connection: registers `keeper` (a call that has none, such as a renewal,
-    /// hears nothing and tells the others), places `credentials`' files (see the
-    /// module's rules) and answers the hold.
+    /// hears nothing and tells the others), places `credentials`' files (see the module's rules) and answers the hold.
     ///
-    /// `start` is a connection, as against a call that asks one thing. `dir` is the account's directory as the
-    /// host named it; every path of `watched` is relative to it.
+    /// `dir` is the account's directory as the host named it; every path of `watched` is relative to it.
     ///
     /// # Errors
     ///
@@ -308,7 +486,7 @@ impl Accounts {
             }
         }
         let listening = keeper.is_some();
-        let slot: Arc<Slot> = Arc::new(Mutex::new(keeper));
+        let slot = Arc::new(Slot::new(keeper));
         let token = {
             let mut entries = lock(&self.entries);
             let entry = entries.entry(id.to_string()).or_default();
@@ -324,7 +502,7 @@ impl Accounts {
             id: id.to_string(),
             dir: dir.to_string(),
             revision,
-            credentials: Mutex::new(credentials.clone()),
+            credentials: Mutex::new(Secret::new(credentials.clone())),
             watched,
             files: Mutex::new(Some(files)),
             slot,
@@ -337,35 +515,43 @@ impl Accounts {
         Ok(hold)
     }
 
-    fn tell(&self, id: &str, revision: u64, event: Event) {
-        let (sequence, slots) = {
-            let mut entries = lock(&self.entries);
-            let entry = entries.entry(id.to_string()).or_default();
-            entry.sequence += 1;
-            (
-                entry.sequence,
-                entry
-                    .keepers
-                    .iter()
-                    .map(|(_, slot)| Arc::clone(slot))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        // No lock of the registry is held while a keeper is called.
+    fn gate(&self, id: &str) -> Arc<Mutex<()>> {
+        Arc::clone(&lock(&self.entries).entry(id.to_string()).or_default().gate)
+    }
+
+    /// Gives `event` the account's next sequence, and the keepers it is to be told to.
+    fn assign(&self, id: &str, event: Event) -> Pending {
+        let mut entries = lock(&self.entries);
+        let entry = entries.entry(id.to_string()).or_default();
+        entry.sequence += 1;
+        Pending {
+            sequence: entry.sequence,
+            slots: entry
+                .keepers
+                .iter()
+                .map(|(_, slot)| Arc::clone(slot))
+                .collect(),
+            event,
+        }
+    }
+
+    /// Tells the keepers, with no lock of the registry held.
+    fn deliver(id: &str, revision: u64, pending: Pending) {
+        let Pending {
+            sequence,
+            slots,
+            event,
+        } = pending;
         for slot in slots {
-            let held = lock(&slot);
-            let Some(keeper) = held.as_ref() else {
-                continue;
-            };
-            let _ = match &event {
+            slot.call(|keeper| match &event {
                 Event::Renewed(credentials, expires) => {
                     let mut renewal =
-                        AccountRenewal::new(id, revision, sequence, credentials.clone());
+                        AccountRenewal::new(id, revision, sequence, credentials.expose().clone());
                     renewal.expires_at.clone_from(expires);
                     keeper.renewed(renewal)
                 }
                 Event::Lost(reason) => keeper.lost(AccountLoss::new(id, sequence, reason.clone())),
-            };
+            });
         }
     }
 }
@@ -375,7 +561,7 @@ struct Inner {
     id: String,
     dir: String,
     revision: u64,
-    credentials: Mutex<Credentials>,
+    credentials: Mutex<Secret<Credentials>>,
     watched: Vec<Watched>,
     files: Mutex<Option<Files>>,
     slot: Arc<Slot>,
@@ -402,7 +588,17 @@ impl core::fmt::Debug for Hold {
 /// What a file holds now.
 enum Now {
     Lost,
-    Has(String),
+    Foreign,
+    Has(SecretText),
+}
+
+/// What placing a file does.
+enum Act {
+    Keep,
+    Write,
+    /// The file is something else than a file: removed, then written.
+    Replace,
+    News(SecretText),
 }
 
 impl Inner {
@@ -416,111 +612,246 @@ impl Inner {
         (self.dir.clone(), file.path.clone())
     }
 
-    fn whole(&self, file: &Watched, text: &str) -> Credentials {
-        let mut credentials = lock(&self.credentials).clone();
+    /// The grant's credentials with `file`'s text in its place.
+    fn whole(&self, file: &Watched, text: &str) -> Secret<Credentials> {
+        let mut credentials = lock(&self.credentials).expose().clone();
         credentials.insert(file.key.clone(), text);
-        credentials
+        Secret::new(credentials)
     }
 
-    fn now(&self, files: &Files, file: &Watched) -> Result<Now, ProviderError> {
-        Ok(match files.read(&file.path)? {
-            Some(text) if (file.usable)(&text) => Now::Has(text),
+    /// The text of `file` in the grant.
+    fn granted(&self, file: &Watched) -> SecretText {
+        SecretText::new(
+            lock(&self.credentials)
+                .expose()
+                .get(&file.key)
+                .unwrap_or_default()
+                .to_string(),
+        )
+    }
+
+    /// Whether `text` names another account than the grant does.
+    fn foreign(&self, file: &Watched, text: &str) -> bool {
+        let granted = self.granted(file);
+        match ((file.identity)(&granted), (file.identity)(text)) {
+            (Some(own), Some(other)) => own != other,
+            _ => false,
+        }
+    }
+
+    fn classify(&self, file: &Watched, state: FileState) -> Now {
+        match state {
+            FileState::Text(text) if (file.usable)(&text) => {
+                if self.foreign(file, &text) {
+                    Now::Foreign
+                } else {
+                    Now::Has(text)
+                }
+            }
             _ => Now::Lost,
+        }
+    }
+
+    /// The fingerprint a `Now` would be recorded with.
+    fn print_of(now: &Now) -> Option<u64> {
+        match now {
+            Now::Has(text) => Some(fingerprint(text)),
+            Now::Lost | Now::Foreign => None,
+        }
+    }
+
+    /// What `file` holds, read until two reads a moment apart agree when it differs from what was recorded; `None`
+    /// when the writer was not done.
+    fn settled(
+        &self,
+        files: &Files,
+        file: &Watched,
+        recorded: Option<u64>,
+    ) -> Result<Option<Now>, ProviderError> {
+        let first = self.classify(file, files.state(&file.path)?);
+        if Self::print_of(&first) == recorded && !matches!(first, Now::Foreign) {
+            return Ok(Some(first));
+        }
+        std::thread::sleep(SETTLE);
+        let second = self.classify(file, files.state(&file.path)?);
+        let same = match (&first, &second) {
+            (Now::Has(a), Now::Has(b)) => **a == **b,
+            (Now::Lost, Now::Lost) | (Now::Foreign, Now::Foreign) => true,
+            _ => false,
+        };
+        Ok(same.then_some(second))
+    }
+
+    /// The time on the spawner's clock when this provider began, from a file the hold writes and reads back.
+    fn began_by_spawner(&self, files: &Files) -> i64 {
+        let own = now_ms();
+        let Ok(()) = files.write(CLOCK_FILE, "") else {
+            return self.accounts.began_ms;
+        };
+        let theirs = files.info(CLOCK_FILE).ok().flatten();
+        let _ = files.remove(CLOCK_FILE);
+        theirs.map_or(self.accounts.began_ms, |info| {
+            self.accounts.began_ms + (info.modified_ms - own)
         })
     }
 
     fn place(&self) -> Result<(), ProviderError> {
         let files = self.files()?;
-        let credentials = lock(&self.credentials).clone();
-        let mut events = Vec::new();
-        let mut placed = Vec::new();
+        let gate = self.accounts.gate(&self.id);
+        let serial = lock(&gate);
+        let mut began: Option<i64> = None;
+        let mut acts = Vec::new();
         for file in &self.watched {
-            let grant = credentials.get(&file.key).unwrap_or_default();
+            let grant = self.granted(file);
             let key = self.key(file);
             let record = lock(&self.accounts.entries)
                 .get(&self.id)
                 .and_then(|entry| entry.files.get(&key))
                 .map(|r| (r.fingerprint, r.revision, r.live));
-            let info = files.info(&file.path)?;
-            let (write, news) = match (info, record) {
-                (None, None) => (true, None),
-                (None, Some((_, _, live))) => (live == 0, None),
-                (Some(info), None) => {
-                    let text = files.read(&file.path)?.unwrap_or_default();
-                    if text == grant {
-                        (false, None)
-                    } else if info.modified_ms >= self.accounts.began_ms {
-                        (false, Some(text))
+            let state = files.state(&file.path)?;
+            let newer = |recorded: Option<u64>, revision: u64| {
+                self.revision > revision && recorded != Some(fingerprint(&grant))
+            };
+            let act = match (state, record) {
+                (FileState::Missing, None) => Act::Write,
+                (FileState::Missing, Some((_, _, live))) => {
+                    if live == 0 {
+                        Act::Write
                     } else {
-                        (true, None)
+                        Act::Keep
                     }
                 }
-                (Some(info), Some((recorded, revision, live))) => {
-                    let text = files.read(&file.path)?.unwrap_or_default();
-                    let newer = self.revision > revision && recorded != Some(fingerprint(grant));
-                    if recorded == Some(fingerprint(&text)) || live > 0 {
-                        // The file is the one last recorded, or another hold has it and it may have been renewed
-                        // since: kept, unless the host's grant is a newer copy.
-                        (newer, None)
-                    } else if newer {
-                        (true, None)
-                    } else if info.modified_ms >= self.accounts.began_ms {
-                        // Changed since the last look, by no one this provider knows: news.
-                        (false, Some(text))
+                (FileState::Planted, _) => {
+                    tracing::warn!(
+                        account = %self.id,
+                        path = %file.path,
+                        reason = "not a file this provider may read; the grant's copy replaces it",
+                        "a planted credential file"
+                    );
+                    Act::Replace
+                }
+                (FileState::Text(text), None) => {
+                    if *text == *grant {
+                        Act::Keep
+                    } else if !(file.usable)(&text) {
+                        Act::Write
                     } else {
-                        (true, None)
+                        let when = *began.get_or_insert_with(|| self.began_by_spawner(&files));
+                        let changed = files.info(&file.path)?.map_or(0, |info| info.modified_ms);
+                        if changed + CLOCK_SLACK_MS >= when {
+                            Act::News(text)
+                        } else {
+                            Act::Write
+                        }
+                    }
+                }
+                (FileState::Text(text), Some((recorded, revision, live))) => {
+                    if recorded == Some(fingerprint(&text)) || live > 0 {
+                        if newer(recorded, revision) {
+                            Act::Write
+                        } else {
+                            Act::Keep
+                        }
+                    } else if newer(recorded, revision) || !(file.usable)(&text) {
+                        Act::Write
+                    } else {
+                        let when = *began.get_or_insert_with(|| self.began_by_spawner(&files));
+                        let changed = files.info(&file.path)?.map_or(0, |info| info.modified_ms);
+                        if changed + CLOCK_SLACK_MS >= when {
+                            Act::News(text)
+                        } else {
+                            Act::Write
+                        }
                     }
                 }
             };
-            if write {
-                files.write(&file.path, grant)?;
-            }
-            placed.push((file, write, news, grant.to_string()));
-        }
-        let mut entries = lock(&self.accounts.entries);
-        let entry = entries.entry(self.id.clone()).or_default();
-        for (file, write, news, grant) in placed {
-            let key = self.key(file);
-            let fresh = !entry.files.contains_key(&key);
-            let record = entry.files.entry(key).or_insert(Record {
-                fingerprint: None,
-                revision: self.revision,
-                live: 0,
-            });
-            record.live += 1;
-            record.revision = record.revision.max(self.revision);
-            if write {
-                record.fingerprint = Some(fingerprint(&grant));
-            } else if let Some(text) = news {
-                if (file.usable)(&text) {
-                    record.fingerprint = Some(fingerprint(&text));
-                    events.push(Event::Renewed(
-                        self.whole(file, &text),
-                        (file.expires)(&text),
-                    ));
-                } else {
-                    record.fingerprint = None;
-                    events.push(Event::Lost(lost_reason(file)));
+            match &act {
+                Act::Replace => {
+                    let _ = files.remove(&file.path);
+                    files.write(&file.path, &grant)?;
                 }
-            } else if fresh {
-                // A file there that holds what the grant does.
-                record.fingerprint = Some(fingerprint(&grant));
+                Act::Write => files.write(&file.path, &grant)?,
+                Act::Keep | Act::News(_) => {}
+            }
+            acts.push((file, act, grant));
+        }
+        let mut pending = Vec::new();
+        {
+            let mut entries = lock(&self.accounts.entries);
+            let entry = entries.entry(self.id.clone()).or_default();
+            for (file, act, grant) in acts {
+                let key = self.key(file);
+                let fresh = !entry.files.contains_key(&key);
+                let record = entry.files.entry(key).or_insert(Record {
+                    fingerprint: None,
+                    revision: self.revision,
+                    live: 0,
+                });
+                record.live += 1;
+                record.revision = record.revision.max(self.revision);
+                match act {
+                    Act::Write | Act::Replace => record.fingerprint = Some(fingerprint(&grant)),
+                    Act::News(text) => {
+                        if self.foreign(file, &text) {
+                            tracing::warn!(
+                                account = %self.id,
+                                path = %file.path,
+                                reason = "the login is for another account than the grant's",
+                                "a login is refused"
+                            );
+                            if record.fingerprint.take().is_some() {
+                                pending.push((
+                                    file,
+                                    Event::Lost(format!(
+                                        "the login in {} is for another account",
+                                        file.path
+                                    )),
+                                ));
+                            }
+                        } else {
+                            record.fingerprint = Some(fingerprint(&text));
+                            pending.push((
+                                file,
+                                Event::Renewed(self.whole(file, &text), (file.expires)(&text)),
+                            ));
+                        }
+                    }
+                    Act::Keep => {
+                        if fresh {
+                            // A file there that holds what the grant does.
+                            record.fingerprint = Some(fingerprint(&grant));
+                        }
+                    }
+                }
             }
         }
-        drop(entries);
+        let pending: Vec<Pending> = pending
+            .into_iter()
+            .map(|(_, event)| self.accounts.assign(&self.id, event))
+            .collect();
         self.placed.store(true, Ordering::SeqCst);
-        for event in events {
-            self.accounts.tell(&self.id, self.revision, event);
+        drop(serial);
+        for one in pending {
+            Accounts::deliver(&self.id, self.revision, one);
         }
         Ok(())
     }
 
     fn look(&self) -> Result<Looked, ProviderError> {
         let files = self.files()?;
+        let gate = self.accounts.gate(&self.id);
+        let serial = lock(&gate);
         let mut found = Looked::default();
+        let mut pending = Vec::new();
         for file in &self.watched {
-            let now = self.now(&files, file)?;
             let key = self.key(file);
+            let recorded = lock(&self.accounts.entries)
+                .get(&self.id)
+                .and_then(|entry| entry.files.get(&key))
+                .map(|r| r.fingerprint);
+            let Some(now) = self.settled(&files, file, recorded.flatten())? else {
+                continue;
+            };
             let event = {
                 let mut entries = lock(&self.accounts.entries);
                 let entry = entries.entry(self.id.clone()).or_default();
@@ -536,16 +867,30 @@ impl Inner {
                             None
                         } else {
                             record.fingerprint = Some(print);
+                            found
+                                .renewed
+                                .push((self.whole(file, &text), (file.expires)(&text)));
                             Some(Event::Renewed(
                                 self.whole(file, &text),
                                 (file.expires)(&text),
                             ))
                         }
                     }
-                    Now::Lost => {
-                        if record.fingerprint.is_some() {
-                            record.fingerprint = None;
-                            Some(Event::Lost(lost_reason(file)))
+                    Now::Lost | Now::Foreign => {
+                        if record.fingerprint.take().is_some() {
+                            let reason = if matches!(now, Now::Foreign) {
+                                tracing::warn!(
+                                    account = %self.id,
+                                    path = %file.path,
+                                    reason = "the login is for another account than the grant's",
+                                    "a login is refused"
+                                );
+                                format!("the login in {} is for another account", file.path)
+                            } else {
+                                lost_reason(file)
+                            };
+                            found.lost.push(reason.clone());
+                            Some(Event::Lost(reason))
                         } else {
                             None
                         }
@@ -553,14 +898,12 @@ impl Inner {
                 }
             };
             if let Some(event) = event {
-                match &event {
-                    Event::Renewed(credentials, expires) => {
-                        found.renewed.push((credentials.clone(), expires.clone()));
-                    }
-                    Event::Lost(reason) => found.lost.push(reason.clone()),
-                }
-                self.accounts.tell(&self.id, self.revision, event);
+                pending.push(self.accounts.assign(&self.id, event));
             }
+        }
+        drop(serial);
+        for one in pending {
+            Accounts::deliver(&self.id, self.revision, one);
         }
         Ok(found)
     }
@@ -586,10 +929,10 @@ impl Inner {
                 entry.keepers.retain(|(token, _)| *token != self.token);
             }
         }
-        // Waits for a call to this keeper in flight, then destroys it.
-        drop(lock(&self.slot).take());
+        // Waits for a call to this keeper in flight on another thread, then destroys it.
+        self.slot.close();
         drop(lock(&self.files).take());
-        lock(&self.credentials).wipe();
+        *lock(&self.credentials) = Secret::default();
     }
 }
 
@@ -631,15 +974,17 @@ impl Hold {
     /// # Errors
     ///
     /// The spawner's refusal to read a file, or the hold has ended.
-    pub fn credentials(&self) -> Result<Credentials, ProviderError> {
+    pub fn credentials(&self) -> Result<Secret<Credentials>, ProviderError> {
         let files = self.0.files()?;
-        let mut credentials = lock(&self.0.credentials).clone();
+        let mut credentials = lock(&self.0.credentials).expose().clone();
         for file in &self.0.watched {
-            if let Now::Has(text) = self.0.now(&files, file)? {
-                credentials.insert(file.key.clone(), text);
+            if let FileState::Text(text) = files.state(&file.path)?
+                && (file.usable)(&text)
+            {
+                credentials.insert(file.key.clone(), &*text);
             }
         }
-        Ok(credentials)
+        Ok(Secret::new(credentials))
     }
 
     /// The expiry the files now say, the earliest of them.
@@ -649,8 +994,8 @@ impl Hold {
         self.0
             .watched
             .iter()
-            .filter_map(|file| match self.0.now(&files, file) {
-                Ok(Now::Has(text)) => (file.expires)(&text),
+            .filter_map(|file| match files.state(&file.path) {
+                Ok(FileState::Text(text)) if (file.usable)(&text) => (file.expires)(&text),
                 _ => None,
             })
             .min()
@@ -673,10 +1018,17 @@ impl Hold {
                 let (flag, changed) = &*stopping;
                 let mut stopped = lock(flag);
                 loop {
-                    let (next, _) = changed
-                        .wait_timeout(stopped, poll)
-                        .unwrap_or_else(PoisonError::into_inner);
-                    stopped = next;
+                    let deadline = Instant::now() + poll;
+                    while !*stopped {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        stopped = changed
+                            .wait_timeout(stopped, left)
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .0;
+                    }
                     if *stopped {
                         return;
                     }
@@ -713,7 +1065,7 @@ impl core::fmt::Debug for Watcher {
 }
 
 impl Watcher {
-    /// Stops the thread and waits for it.
+    /// Stops the thread and waits for it (unless called from the thread itself, from a keeper it was telling).
     pub fn stop(mut self) {
         self.end();
     }
@@ -721,7 +1073,9 @@ impl Watcher {
     fn end(&mut self) {
         *lock(&self.stop.0) = true;
         self.stop.1.notify_all();
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = self.thread.take()
+            && thread.thread().id() != std::thread::current().id()
+        {
             let _ = thread.join();
         }
     }
@@ -730,5 +1084,15 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         self.end();
+    }
+}
+
+/// Whether two environment variable names are the same variable: exact on Unix, ignoring case on Windows.
+#[must_use]
+pub fn same_name(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
     }
 }

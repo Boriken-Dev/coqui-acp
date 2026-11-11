@@ -502,6 +502,7 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+ "tracing",
  "ureq",
  "uuid",
  "win32job",

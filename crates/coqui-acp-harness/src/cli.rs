@@ -4,15 +4,21 @@
 //! [`Cli`] hands over what a program writes as it arrives, so a sign-in can see the page it prints and answer the
 //! question it asks; [`run`] runs one that is not conversed with, bounded in time and in output.
 
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::net::IpAddr;
 use core::time::Duration;
 use std::io::{self, Read, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crate::process::{Exit, Launch, Process, Spawn};
+
+/// How many pieces of output wait to be read before the program that writes them waits to write.
+const PIECES: usize = 256;
 
 /// What a program wrote, in the order it arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +46,7 @@ pub struct Cli {
     stdin: Mutex<Option<Box<dyn Write + Send>>>,
     pieces: Mutex<Receiver<Piece>>,
     process: Box<dyn Process>,
+    threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl core::fmt::Debug for Cli {
@@ -48,8 +55,12 @@ impl core::fmt::Debug for Cli {
     }
 }
 
-fn pump(mut from: Box<dyn Read + Send>, error: bool, to: mpsc::Sender<Piece>) {
-    let _ = std::thread::Builder::new()
+fn pump(
+    mut from: Box<dyn Read + Send>,
+    error: bool,
+    to: SyncSender<Piece>,
+) -> io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
         .name("coqui-acp-cli-output".into())
         .spawn(move || {
             let mut chunk = [0u8; 4096];
@@ -61,13 +72,15 @@ fn pump(mut from: Box<dyn Read + Send>, error: bool, to: mpsc::Sender<Piece>) {
                             error,
                             bytes: chunk[..n].to_vec(),
                         };
+                        // A reader that is busy (a sign-in waiting on the person) holds the program back once
+                        // `PIECES` are waiting, rather than the provider holding all it writes.
                         if to.send(piece).is_err() {
                             return;
                         }
                     }
                 }
             }
-        });
+        })
 }
 
 impl Cli {
@@ -78,16 +91,17 @@ impl Cli {
     /// It could not be started.
     pub fn start(spawn: &dyn Spawn, launch: &Launch) -> io::Result<Arc<Self>> {
         let spawned = spawn.spawn(launch)?;
-        let (sender, receiver) = mpsc::channel();
-        pump(spawned.stdout, false, sender.clone());
+        let (sender, receiver) = mpsc::sync_channel(PIECES);
+        let mut threads = vec![pump(spawned.stdout, false, sender.clone())?];
         if let Some(stderr) = spawned.stderr {
-            pump(stderr, true, sender.clone());
+            threads.push(pump(stderr, true, sender.clone())?);
         }
         drop(sender);
         Ok(Arc::new(Self {
             stdin: Mutex::new(Some(spawned.stdin)),
             pieces: Mutex::new(receiver),
             process: spawned.process,
+            threads: Mutex::new(threads),
         }))
     }
 
@@ -149,11 +163,70 @@ impl Cli {
         self.close_input();
         let _ = self.process.kill();
     }
+
+    /// Runs it to its end: `input` on its standard input (then closed) for at most `limit`, keeping at most
+    /// `max_bytes` of each output stream. A program still running at `limit` is ended.
+    pub fn collect(&self, input: Option<&[u8]>, limit: Duration, max_bytes: usize) -> Done {
+        if let Some(input) = input {
+            let _ = self.write(input);
+        }
+        self.close_input();
+        let deadline = Instant::now() + limit;
+        let mut done = Done {
+            exit: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            timed_out: false,
+        };
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                self.kill();
+                done.timed_out = true;
+                return done;
+            }
+            match self.next(left.min(Duration::from_millis(200))) {
+                Next::Piece(piece) => {
+                    let kept = if piece.error {
+                        &mut done.stderr
+                    } else {
+                        &mut done.stdout
+                    };
+                    let room = max_bytes.saturating_sub(kept.len());
+                    kept.extend_from_slice(&piece.bytes[..piece.bytes.len().min(room)]);
+                }
+                Next::Idle => {}
+                Next::Ended => break,
+            }
+        }
+        done.exit = self.wait(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(50)),
+        );
+        if done.exit.is_none() {
+            self.kill();
+            done.timed_out = true;
+        }
+        done
+    }
 }
 
 impl Drop for Cli {
     fn drop(&mut self) {
         self.kill();
+        // The output threads end with the program; one still reading a pipe some escaped process holds open ends when
+        // that process does, so dropping never waits for it.
+        let threads =
+            core::mem::take(&mut *self.threads.lock().unwrap_or_else(PoisonError::into_inner));
+        for thread in threads {
+            if thread.is_finished() {
+                let _ = thread.join();
+            } else {
+                #[cfg(feature = "kind")]
+                crate::provider::track(thread);
+            }
+        }
     }
 }
 
@@ -182,6 +255,8 @@ impl Done {
 /// Runs `launch` with `input` on its standard input (then closed) for at most `limit`, keeping at most `max_bytes` of each
 /// output stream. A program still running at `limit` is ended.
 ///
+/// Inside a sign-in, start the program with [`Job::run`](crate::login::Job::run) instead, so cancelling ends it.
+///
 /// # Errors
 ///
 /// It could not be started.
@@ -192,56 +267,14 @@ pub fn run(
     limit: Duration,
     max_bytes: usize,
 ) -> io::Result<Done> {
-    let cli = Cli::start(spawn, launch)?;
-    if let Some(input) = input {
-        let _ = cli.write(input);
-    }
-    cli.close_input();
-    let deadline = Instant::now() + limit;
-    let mut done = Done {
-        exit: None,
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-        timed_out: false,
-    };
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            cli.kill();
-            done.timed_out = true;
-            return Ok(done);
-        }
-        match cli.next(left.min(Duration::from_millis(200))) {
-            Next::Piece(piece) => {
-                let kept = if piece.error {
-                    &mut done.stderr
-                } else {
-                    &mut done.stdout
-                };
-                let room = max_bytes.saturating_sub(kept.len());
-                kept.extend_from_slice(&piece.bytes[..piece.bytes.len().min(room)]);
-            }
-            Next::Idle => {}
-            Next::Ended => break,
-        }
-    }
-    done.exit = cli.wait(
-        deadline
-            .saturating_duration_since(Instant::now())
-            .max(Duration::from_millis(50)),
-    );
-    if done.exit.is_none() {
-        cli.kill();
-        done.timed_out = true;
-    }
-    Ok(done)
+    Ok(Cli::start(spawn, launch)?.collect(input, limit, max_bytes))
 }
 
 /// `text` without the escape sequences a terminal reads: colour codes and operating system commands such as the
 /// hyperlinks of OSC 8, which leave only their visible text.
 #[must_use]
-pub fn plain(text: &str) -> alloc::string::String {
-    let mut out = alloc::string::String::with_capacity(text.len());
+pub fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\u{1b}' {
@@ -277,22 +310,69 @@ pub fn plain(text: &str) -> alloc::string::String {
     out
 }
 
-/// The first `https://` (or `http://`) address in `text`, from an OSC 8 hyperlink when it has one, else from its
-/// visible text; `None` while the address may still be arriving (nothing ends it yet).
+/// The host of an `http(s)` address, lower case, without user, port or brackets.
+pub fn host_of(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    let host = if let Some(inner) = authority.strip_prefix('[') {
+        inner.split(']').next()?
+    } else {
+        authority.split(':').next()?
+    };
+    (!host.is_empty()).then(|| host.trim_end_matches('.').to_ascii_lowercase())
+}
+
+/// Whether `host` is this machine: `localhost`, a loopback or unspecified address.
 #[must_use]
-pub fn address_in(text: &str) -> Option<alloc::string::String> {
+pub fn is_loopback(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
+}
+
+/// Whether `url` is a page the person can open: not this machine's, and when `hosts` names any, on one of them or
+/// under one of them.
+fn openable(url: &str, hosts: &[&str]) -> bool {
+    let Some(host) = host_of(url) else {
+        return false;
+    };
+    if is_loopback(&host) {
+        return false;
+    }
+    hosts.is_empty()
+        || hosts.iter().any(|allowed| {
+            let allowed = allowed.to_ascii_lowercase();
+            host == allowed || host.ends_with(&format!(".{allowed}"))
+        })
+}
+
+/// The first `https://` (or `http://`) address in `text` that is a page to open, from an OSC 8 hyperlink when it has
+/// one, else from its visible text; `None` while the address may still be arriving (nothing ends it yet).
+///
+/// An address on this machine (a login server a command starts on `localhost`) is never one. When `hosts` is not
+/// empty only an address on one of them, or under one, is: a command's output cannot send the person elsewhere.
+#[must_use]
+pub fn address_in(text: &str, hosts: &[&str]) -> Option<String> {
     const OSC8: &str = "\u{1b}]8;;";
-    if let Some(at) = text.find(OSC8) {
-        let rest = &text[at + OSC8.len()..];
-        let end = rest.find(['\u{1b}', '\u{7}'])?;
+    let mut from = 0;
+    while let Some(found) = text[from..].find(OSC8) {
+        let rest = &text[from + found + OSC8.len()..];
+        let Some(end) = rest.find(['\u{1b}', '\u{7}']) else {
+            break;
+        };
         let url = &rest[..end];
-        if url.starts_with("http://") || url.starts_with("https://") {
-            return Some(url.to_owned());
+        if openable(url, hosts) {
+            return Some(url.to_string());
         }
+        from += found + OSC8.len() + end;
     }
     let shown = plain(text);
-    // The first address the person can open: a loopback address in a line such as "Starting local login server on
-    // http://localhost:1455." is the program's own, not a page.
     let mut from = 0;
     while let Some(found) = shown[from..].find("http") {
         let at = from + found;
@@ -302,13 +382,9 @@ pub fn address_in(text: &str) -> Option<alloc::string::String> {
             continue;
         }
         let end = rest.find(char::is_whitespace)?;
-        let url = &rest[..end];
-        let host = url.split("://").nth(1).unwrap_or_default();
-        let loopback = ["localhost", "127.0.0.1", "[::1]"]
-            .iter()
-            .any(|name| host.starts_with(name));
-        if !loopback {
-            return Some(url.to_owned());
+        let url = rest[..end].trim_end_matches(['.', ',', ')']);
+        if openable(url, hosts) {
+            return Some(url.to_string());
         }
         from = at + end;
     }

@@ -2,12 +2,11 @@
 //!
 //! A sign-in's work runs on a thread of its own and [`supervise`] watches it, so the answer comes when the person
 //! cancels or the time is up even while the work waits on the person or on the command it started. The work starts its
-//! commands through [`Job::start`], so the supervisor can end their whole trees.
+//! commands through [`Job::start`] or [`Job::run`], so the supervisor can end their whole trees.
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, PoisonError};
@@ -17,15 +16,23 @@ use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{LoginOutcome, LoginPrompter, ProcessSpawner};
 
-use crate::cli::{Cli, plain};
+use crate::cli::{Cli, Done, plain};
 use crate::process::{Launch, Spawn};
 use crate::provider::track;
 
+/// How long the supervisor waits, after ending the commands, for the work to let go of what it was handed.
+const LET_GO: Duration = Duration::from_millis(1000);
+
+#[derive(Debug, Default)]
+struct JobState {
+    abandoned: bool,
+    started: Vec<Arc<Cli>>,
+}
+
 /// What the work of a sign-in can reach to learn it has ended, and where it registers what it starts.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Job {
-    abandoned: AtomicBool,
-    started: Mutex<Vec<Arc<Cli>>>,
+    state: Mutex<JobState>,
 }
 
 impl Job {
@@ -45,11 +52,33 @@ impl Job {
             };
             ProviderError::new(Status::GUATIAO_ERR_INTERNAL, why)
         })?;
-        self.started
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::clone(&cli));
+        // The check and the registration are one step: a program started as the supervisor answers is ended here.
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.abandoned {
+            drop(state);
+            cli.kill();
+            return Err(gone("the sign-in has ended"));
+        }
+        state.started.push(Arc::clone(&cli));
         Ok(cli)
+    }
+
+    /// Runs `launch` to its end as [`cli::run`](crate::cli::run) does, registered with the sign-in so cancelling or
+    /// running out of time ends it.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    pub fn run(
+        &self,
+        spawn: &dyn Spawn,
+        launch: &Launch,
+        input: Option<&[u8]>,
+        limit: Duration,
+        max_bytes: usize,
+    ) -> Result<Done, ProviderError> {
+        let cli = self.start(spawn, launch)?;
+        Ok(cli.collect(input, limit, max_bytes))
     }
 
     /// Whether the sign-in is over: the work asks and starts nothing more once it is.
@@ -58,7 +87,12 @@ impl Job {
     ///
     /// `GONE` when the supervisor has answered.
     pub fn check(&self) -> Result<(), ProviderError> {
-        if self.abandoned.load(Ordering::SeqCst) {
+        if self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .abandoned
+        {
             Err(gone("the sign-in has ended"))
         } else {
             Ok(())
@@ -66,13 +100,12 @@ impl Job {
     }
 
     fn end(&self) {
-        self.abandoned.store(true, Ordering::SeqCst);
-        for cli in self
-            .started
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-        {
+        let started = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.abandoned = true;
+            state.started.clone()
+        };
+        for cli in started {
             cli.kill();
         }
     }
@@ -111,8 +144,9 @@ pub type Work = Box<
 
 /// Runs `work` on a thread of its own and answers its outcome, or `GONE` `login cancelled` when the person cancels
 /// and `GONE` `login timed out` when `timeout_ms` passes (each within a moment of it, whatever the work is waiting on),
-/// after ending every command the work started. `spawner` and `prompter` are let go once the work has, and before an
-/// answer the work made.
+/// after ending every command the work started. `spawner` and `prompter` are let go by the work before its own
+/// answer; when the supervisor answers first, it gives the work a moment (one second) to let go of them, so a caller
+/// told of the end usually finds them gone, and a work blocked in the host's prompter lets go when that call returns.
 ///
 /// # Errors
 ///
@@ -124,10 +158,7 @@ pub fn supervise(
     work: Work,
 ) -> Result<LoginOutcome, ProviderError> {
     let prompter = Arc::new(prompter);
-    let job = Arc::new(Job {
-        abandoned: AtomicBool::new(false),
-        started: Mutex::new(Vec::new()),
-    });
+    let job = Arc::new(Job::default());
     let (sender, receiver) = mpsc::channel();
     let thread = {
         let prompter = Arc::clone(&prompter);
@@ -171,15 +202,46 @@ pub fn supervise(
         };
         if let Some(why) = ended {
             job.end();
+            // The commands are ended, so the work is on its way out: give it a moment to let go of the spawner and
+            // the prompter before answering. Its answer, if it makes one, is not ours.
+            let _ = receiver.recv_timeout(LET_GO);
+            drop(prompter);
             return Err(gone(why));
         }
     }
 }
 
-/// The reason a command refused, from what it printed: its last line, with addresses removed and nothing the person
-/// typed (`typed` is a secret; a line that holds it is replaced).
+/// Whether `word` looks like an address: it has a scheme, or a host-and-path (`example.com/...`) or starts `www.`.
+fn address_like(word: &str) -> bool {
+    word.contains("://")
+        || word.to_ascii_lowercase().starts_with("www.")
+        || word
+            .split_once('/')
+            .is_some_and(|(host, _)| host.contains('.') && !host.starts_with('.'))
+}
+
+/// Whether `line` echoes `secret`, in whole or in part: all of it, or its first or last four characters or more.
+fn echoes(line: &str, secret: &str) -> bool {
+    if secret.is_empty() {
+        return false;
+    }
+    if line.contains(secret) {
+        return true;
+    }
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.len() < 8 {
+        return false;
+    }
+    let first: String = chars[..4].iter().collect();
+    let last: String = chars[chars.len() - 4..].iter().collect();
+    line.contains(&first) || line.contains(&last)
+}
+
+/// The reason a command refused, from what it printed: its last line, with addresses removed (with or without a
+/// scheme) and nothing the person typed. `typed` is every value the person gave (a key, a code, an address); a line
+/// that echoes any of them in whole or in part (their first or last four characters) is replaced.
 #[must_use]
-pub fn reason(output: &str, typed: &str) -> String {
+pub fn reason(output: &str, typed: &[&str]) -> String {
     let shown = plain(output);
     let line = shown
         .lines()
@@ -188,10 +250,10 @@ pub fn reason(output: &str, typed: &str) -> String {
         .unwrap_or_default();
     let words: Vec<&str> = line
         .split_whitespace()
-        .filter(|word| !word.contains("://"))
+        .filter(|word| !address_like(word))
         .collect();
     let mut text = words.join(" ");
-    if text.is_empty() || (!typed.is_empty() && text.contains(typed)) {
+    if text.is_empty() || typed.iter().any(|secret| echoes(&text, secret)) {
         text = "it was not accepted".to_string();
     }
     if text.len() > 200 {
