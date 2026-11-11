@@ -21,6 +21,7 @@ __pycache__/
 # Dart
 .dart_tool/
 /bindings/dart/coqui_acp/pubspec.lock
+/bindings/dart/coqui_acp_chat/pubspec.lock
 
 # Docs build
 /site/
