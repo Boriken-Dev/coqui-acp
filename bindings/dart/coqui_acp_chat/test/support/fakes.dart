@@ -115,7 +115,7 @@ final class FakeConnection extends ChatConnection {
 }
 
 /// Lets what an agent sent reach the chat.
-Future<void> settle() => Future<void>.delayed(const Duration(milliseconds: 10));
+Future<void> settle() => Future<void>.delayed(const Duration(milliseconds: 40));
 
 /// A session in a store, attached to a fresh connection, as a host would make it.
 ({ChatStore store, ChatSession session, FakeConnection agent}) started({

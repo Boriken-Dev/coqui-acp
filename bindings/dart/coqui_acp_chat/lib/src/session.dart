@@ -378,6 +378,12 @@ class ChatSession extends ChatNotifier {
   StreamSubscription<AcpEvent>? _eventsSub;
   StreamSubscription<UsageNotice>? _usageSub;
   bool _steering = false;
+
+  /// The message and the note of attachments shown for the v1 prompt now under way, and how many updates there had been, so a
+  /// prompt the agent refuses before it says anything can take them back.
+  ChatMessage? _v1Local;
+  ChatMessage? _v1Note;
+  int _v1Before = 0;
   bool _replaying = false;
 
   /// Whether a message is being handed to the agent.
@@ -403,11 +409,11 @@ class ChatSession extends ChatNotifier {
   Map<String, TerminalView> get terminals => UnmodifiableMapView(_terminals);
 
   /// The agent's plan, as it last said.
-  List<PlanEntry> get plan => _plan;
+  List<PlanEntry> get plan => UnmodifiableListView(_plan);
 
   /// What the agent lets a person choose, its commands and what it has used, each as it last said.
-  List<ConfigOption> get options => _options;
-  List<AgentCommandInfo> get commands => _commands;
+  List<ConfigOption> get options => UnmodifiableListView(_options);
+  List<AgentCommandInfo> get commands => UnmodifiableListView(_commands);
   SessionUsage get usage => _usage;
 
   /// What the agent last said of the account's allowances; null while it has not.
@@ -651,6 +657,7 @@ class ChatSession extends ChatNotifier {
         _turnEnded(TurnOutcome.cancelled);
       case AcpFailed(:final message):
         _status = ChatStatus.connected;
+        _dropV1Prompt();
         _add(_entry(MessageRole.notice, message));
         _needs(AttentionKind.finished);
         _turnEnded(TurnOutcome.failed);
@@ -727,6 +734,11 @@ class ChatSession extends ChatNotifier {
     String? keptMode,
     bool keptBypass = false,
   }) async {
+    // What the agent sends is history, and a turn running now is over with the process that held it.
+    _replaying = true;
+    if (currentTurn != null) _closeTurn(TurnOutcome.failed);
+    if (_status == ChatStatus.working) _status = ChatStatus.connected;
+    _deferredEnd = null;
     final held = (
       messages: List.of(_messages),
       tools: Map.of(_toolEntries),
@@ -769,6 +781,7 @@ class ChatSession extends ChatNotifier {
     _opening = true;
     _bypass = keptBypass;
     _chosenMode = keptMode;
+    var opened0 = false;
     try {
       final AcpOpenedSession opened;
       try {
@@ -791,11 +804,21 @@ class ChatSession extends ChatNotifier {
         _pending[id] = PendingChoice(id, OptionRole.mode, keptMode);
       }
       await _applyPending();
+      opened0 = true;
       return opened;
     } finally {
       _replaying = false;
       _opening = false;
       _keepMode();
+      // Messages written while it opened go now, after the kept mode is back; if it did not open they wait for the person.
+      if (_queue.isNotEmpty) {
+        if (opened0) {
+          _queueHeld = null;
+          _scheduleQueue();
+        } else {
+          _queueHeld = 'the conversation could not be opened';
+        }
+      }
       notifyListeners();
     }
   }
@@ -853,8 +876,8 @@ class ChatSession extends ChatNotifier {
   }
 
   void _applyTool(Map<String, dynamic> raw) {
-    final id = raw['toolCallId'];
-    if (id is! String || id.isEmpty) return;
+    final id = idText(raw['toolCallId'], limits);
+    if (id == null) return;
     var entry = _toolEntries[id];
     if (entry == null) {
       entry = _entry(MessageRole.tool, '', tool: ToolCall(id));
@@ -865,8 +888,8 @@ class ChatSession extends ChatNotifier {
   }
 
   void _applyTerminal(Map<String, dynamic> raw) {
-    final id = raw['terminalId'];
-    if (id is! String || id.isEmpty) return;
+    final id = idText(raw['terminalId'], limits);
+    if (id == null) return;
     if (!_terminals.containsKey(id) && _terminals.length >= limits.terminals) {
       // The oldest that has ended goes; one still running never does, and a new one with no room is not kept.
       final gone = _terminals.entries
@@ -881,8 +904,8 @@ class ChatSession extends ChatNotifier {
 
   /// A compaction's entry stays where its first update put it, and later ones change it there.
   void _applyCompaction(Map<String, dynamic> raw) {
-    final id = raw['compactionId'];
-    if (id is! String || id.isEmpty) return;
+    final id = idText(raw['compactionId'], limits);
+    if (id == null) return;
     var entry = _compactions[id];
     if (entry == null) {
       entry = _entry(
@@ -929,6 +952,7 @@ class ChatSession extends ChatNotifier {
   /// Ends the running turn, if one runs, whoever's it is; any steering with it is over too.
   void _closeTurn(TurnOutcome outcome) {
     _steering = false;
+    _v1Local = _v1Note = null;
     final turn = currentTurn;
     if (turn == null) return;
     turn
@@ -1035,12 +1059,13 @@ class ChatSession extends ChatNotifier {
       if (ended && outcome != TurnOutcome.cancelled) {
         _needs(AttentionKind.finished);
       }
-      if (ended) _turnEnded(outcome);
+      // What is said of how it ended is part of the turn that ended, so it is written before the turn is closed.
       if (update.reason == 'cancelled') {
         _note('Stopped.');
       } else if (update.reason == 'error') {
         _note('Agent reported an operation failure.');
       }
+      if (ended) _turnEnded(outcome);
     }
   }
 
@@ -1146,15 +1171,15 @@ class ChatSession extends ChatNotifier {
     final question = PermissionQuestion._(
       _nextRequest++,
       title,
-      request.kind,
+      shortText(request.kind, limits),
       detail: [
         ?shortText(request.description, limits),
         ?describeToolInput(request.rawInput, limits),
       ].join('\n').trim(),
-      options: request.options,
+      options: List.unmodifiable(request.options),
       bypassPassed: _bypass,
       forPerson: forPerson,
-      toolCallId: request.toolCall?['toolCallId'] as String?,
+      toolCallId: idText(request.toolCall?['toolCallId'], limits),
       askedAt: _now(),
     );
     _pendingPermissions.add(question);
@@ -1353,7 +1378,7 @@ class ChatSession extends ChatNotifier {
   /// request with no allow, a question or a plan is still the person's.
   void setBypass(bool on, {String? by}) {
     _requireClient(by);
-    if (_bypass == on) return;
+    if (_bypass == on || _opening) return;
     _bypass = on;
     if (on) {
       _note(
@@ -1402,7 +1427,8 @@ class ChatSession extends ChatNotifier {
 
   /// Puts the conversation in [entry]'s mode. The chat's own Bypass answers every request that offers an allow, those already
   /// waiting included, and sits on the agent's mode, which stays.
-  Future<void> chooseMode(ModeEntry entry) => _inMode(() => _chooseMode(entry));
+  Future<void> chooseMode(ModeEntry entry) =>
+      canChangeMode ? _inMode(() => _chooseMode(entry)) : Future.value();
 
   Future<void> _chooseMode(ModeEntry entry) async {
     if (!entry.selectable) return;
@@ -1452,26 +1478,31 @@ class ChatSession extends ChatNotifier {
 
   /// Takes the conversation out of Bypass. The chat's own sat on the agent's mode, which holds again; an agent's own goes to Manual,
   /// or the first mode it has that asks.
-  Future<void> leaveBypass() => _inMode(() async {
-    if (_bypass) {
-      _bypass = false;
-      _note('Bypass is off. Requests are asked again.');
-      _keepMode();
-      notifyListeners();
-      return;
-    }
-    final entries = [
-      for (final entry in modeEntries(modeOptionIn(_options)))
-        if (!entry.bypass && entry.selectable) entry,
-    ];
-    if (entries.isEmpty) return;
-    final preferred =
-        entries
-            .where((entry) => const {'manual', 'default'}.contains(entry.value))
-            .firstOrNull ??
-        entries.first;
-    await _chooseMode(preferred);
-  });
+  Future<void> leaveBypass() => !canChangeMode
+      ? Future.value()
+      : _inMode(() async {
+          if (_bypass) {
+            _bypass = false;
+            _note('Bypass is off. Requests are asked again.');
+            _keepMode();
+            notifyListeners();
+            return;
+          }
+          final entries = [
+            for (final entry in modeEntries(modeOptionIn(_options)))
+              if (!entry.bypass && entry.selectable) entry,
+          ];
+          if (entries.isEmpty) return;
+          final preferred =
+              entries
+                  .where(
+                    (entry) =>
+                        const {'manual', 'default'}.contains(entry.value),
+                  )
+                  .firstOrNull ??
+              entries.first;
+          await _chooseMode(preferred);
+        });
 
   /// Tells [onModeKept] the mode that was set and whether Bypass is on, to put both back when the conversation is opened again.
   /// The agent's starting default was set by nobody and is not kept.
@@ -1610,11 +1641,17 @@ class ChatSession extends ChatNotifier {
   }) async {
     if (text.trim().isEmpty && attachments.isEmpty) return;
     _requireClient(from);
-    if (_status == ChatStatus.working || _delivering || _queue.isNotEmpty) {
+    if (_status == ChatStatus.working ||
+        _delivering ||
+        _opening ||
+        _queue.isNotEmpty) {
       _enqueue(QueuedMessage._(text, attachments, from: from), last: true);
       notifyListeners();
       // A queue waiting on nothing, after a turn that ended as it should, goes on at once.
-      if (_status != ChatStatus.working && !_delivering && _queueHeld == null) {
+      if (_status != ChatStatus.working &&
+          !_delivering &&
+          !_opening &&
+          _queueHeld == null) {
         await sendQueued();
       }
       return;
@@ -1646,6 +1683,12 @@ class ChatSession extends ChatNotifier {
     if (text.trim().isEmpty && attachments.isEmpty) return;
     _requireClient(from);
     if (_status != ChatStatus.working) {
+      if (_delivering || _opening) {
+        // No turn runs yet, so there is nothing to end: it goes next, ahead of the rest of the queue.
+        _enqueue(QueuedMessage._(text, attachments, from: from), last: false);
+        notifyListeners();
+        return;
+      }
       await send(text, attachments: attachments, from: from);
       return;
     }
@@ -1703,21 +1746,28 @@ class ChatSession extends ChatNotifier {
           };
     _queueHeld = held;
     // After the update that ended the turn has been dispatched: an answer to the next prompt could otherwise arrive inside it.
-    if (held == null) {
-      scheduleMicrotask(
-        () => unawaited(
-          sendQueued().catchError((Object error) {
-            _note('A queued message was not sent: ${reasonOf(error)}');
-            notifyListeners();
-          }),
-        ),
-      );
-    }
+    if (held == null) _scheduleQueue();
+  }
+
+  void _scheduleQueue() {
+    scheduleMicrotask(
+      () => unawaited(
+        sendQueued().catchError((Object error) {
+          _note('A queued message was not sent: ${reasonOf(error)}');
+          notifyListeners();
+        }),
+      ),
+    );
   }
 
   /// Sends [message], else the first queued message, now, and lets the queue go on after it.
   Future<void> sendQueued([QueuedMessage? message]) async {
-    if (_queue.isEmpty || _status == ChatStatus.working || _delivering) return;
+    if (_queue.isEmpty ||
+        _status == ChatStatus.working ||
+        _delivering ||
+        _opening) {
+      return;
+    }
     if (message != null && !_queue.contains(message)) return;
     _queueHeld = null;
     final next = message ?? _queue.first;
@@ -1776,6 +1826,17 @@ class ChatSession extends ChatNotifier {
     }
   }
 
+  /// Takes back the message and the note of attachments shown for the v1 prompt under way, when nothing has come of it: the agent
+  /// said nothing since, or [force]. Past that the agent may have recorded it, and it stays.
+  void _dropV1Prompt({bool force = false}) {
+    final local = _v1Local, note = _v1Note;
+    final fresh = force || _applied == _v1Before;
+    _v1Local = _v1Note = null;
+    if (!fresh) return;
+    if (local != null) _messages.remove(local);
+    if (note != null) _messages.remove(note);
+  }
+
   Future<void> _handOver(
     ChatConnection connection,
     String remote,
@@ -1786,10 +1847,12 @@ class ChatSession extends ChatNotifier {
     await _applyPending();
     final names = [for (final item in attachments) item.name];
     final v1 = connection.protocolVersion == 1;
+    ChatTurn? mine;
     if (v1) {
       // A v1 answer arrives when the whole turn ends, so the turn starts now.
       _status = ChatStatus.working;
       _beginTurn();
+      mine = currentTurn;
     }
     // The person's message goes in before the agent can answer it, however fast the answer comes.
     final local = text.trim().isEmpty
@@ -1799,33 +1862,39 @@ class ChatSession extends ChatNotifier {
       _add(local);
       if (!v1) _unacked.add(local);
     }
-    final noted = v1 && names.isNotEmpty;
-    if (noted) _note('Sent with this: ${names.join(', ')}');
+    ChatMessage? note;
+    if (v1 && names.isNotEmpty) {
+      _note('Sent with this: ${names.join(', ')}');
+      note = _messages.last;
+    }
     _trim();
-    final before = _applied;
+    if (v1) {
+      _v1Local = local;
+      _v1Note = note;
+      _v1Before = _applied;
+    }
     void rollback() {
-      // Nothing came of the prompt, so what was shown for it goes, or a retry would show it twice.
-      if (local != null) {
-        _messages.remove(local);
-        _unacked.remove(local);
-      }
-      if (noted) {
-        final note = _messages.lastWhere(
-          (m) => m.role == MessageRole.notice,
-          orElse: () => local ?? _messages.last,
-        );
-        if (note.role == MessageRole.notice) _messages.remove(note);
-      }
+      // Nothing came of the prompt, so what was shown for it goes, or a retry would show it twice. A v2 message the agent echoed
+      // before refusing is one it recorded, and stays.
       if (v1) {
+        _dropV1Prompt(force: true);
         _status = ChatStatus.connected;
         _closeTurn(TurnOutcome.failed);
+      } else if (local != null && _unacked.remove(local)) {
+        _messages.remove(local);
       }
       notifyListeners();
     }
 
     notifyListeners();
     if (v1) {
-      final turn = connection.prompt(remote, text, attachments: attachments);
+      final Future<String?> turn;
+      try {
+        turn = connection.prompt(remote, text, attachments: attachments);
+      } catch (_) {
+        rollback();
+        rethrow;
+      }
       Object? early;
       var settled = false;
       unawaited(
@@ -1844,7 +1913,7 @@ class ChatSession extends ChatNotifier {
         throw early!;
       }
       if (!settled || identical(_connection, connection)) {
-        unawaited(_watchTurn(turn, connection, local, noted, before));
+        unawaited(_watchTurn(turn, connection, mine));
       }
       return;
     }
@@ -1884,9 +1953,7 @@ class ChatSession extends ChatNotifier {
   Future<void> _watchTurn(
     Future<String?> turn,
     ChatConnection connection,
-    ChatMessage? local,
-    bool noted,
-    int before,
+    ChatTurn? mine,
   ) async {
     Object? failure;
     try {
@@ -1896,14 +1963,16 @@ class ChatSession extends ChatNotifier {
     }
     // The event that ends a turn is delivered a moment after the answer is given.
     await Future<void>.delayed(Duration.zero);
+    // Only the turn this prompt started: a later one is not ended by an answer that comes after it began.
     if (!identical(_connection, connection) ||
         _status != ChatStatus.working ||
+        !identical(currentTurn, mine) ||
         _events.isClosed) {
       return;
     }
     _status = ChatStatus.connected;
     if (failure != null) {
-      if (_applied == before && local != null) _messages.remove(local);
+      _dropV1Prompt();
       _note('The prompt failed: ${reasonOf(failure)}');
       _turnEnded(TurnOutcome.failed);
     } else {

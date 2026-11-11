@@ -12,15 +12,15 @@ final class Choice {
 
 /// Something the agent lets a person choose, such as its model or its mode.
 final class ConfigOption {
-  const ConfigOption({
+  ConfigOption({
     required this.id,
     required this.label,
     required this.current,
-    required this.choices,
+    required List<Choice> choices,
     this.isMode = false,
     this.category,
     this.defaultLabel,
-  });
+  }) : choices = List.unmodifiable(choices);
   final String id;
   final String label;
   final String current;
@@ -77,9 +77,11 @@ List<ConfigOption>? parseConfigOptions(Object? raw, ChatLimits limits) {
   final parsed = <ConfigOption>[];
   for (final entry in raw.take(limits.configOptions)) {
     // ACP v2 calls it `configId`, and v1 `id`.
-    final id = entry is Map ? entry['configId'] ?? entry['id'] : null;
+    final id = entry is Map
+        ? idText(entry['configId'] ?? entry['id'], limits)
+        : null;
     if (entry is! Map ||
-        id is! String ||
+        id == null ||
         entry['currentValue'] is! String ||
         entry['options'] is! List) {
       continue;
@@ -87,7 +89,7 @@ List<ConfigOption>? parseConfigOptions(Object? raw, ChatLimits limits) {
     final choices = _flatChoices(entry['options'] as List)
         .take(limits.choices)
         .whereType<Map>()
-        .where((choice) => choice['value'] is String)
+        .where((choice) => idText(choice['value'], limits) != null)
         .map(
           (choice) => Choice(
             choice['value'] as String,
@@ -120,7 +122,7 @@ ConfigOption? parseModes(Object? raw, ChatLimits limits) {
   final choices = (raw['availableModes'] as List)
       .take(limits.choices)
       .whereType<Map>()
-      .where((mode) => mode['id'] is String)
+      .where((mode) => idText(mode['id'], limits) != null)
       .map(
         (mode) => Choice(
           mode['id'] as String,

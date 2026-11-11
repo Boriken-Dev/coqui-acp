@@ -52,8 +52,8 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
   it starts. `TurnEvent(turn)` goes out on `events` for every end, cancelled included; history opened again ends none.
 - **Prompts**: `send(text, {attachments, from}) -> Future<void>` completes when the agent has been handed the message (v2: its
   acknowledgement; v1: the prompt is under way and was not refused at once). The message is in the conversation before the agent can
-  answer, takes its id from the acknowledgement or its echo, and a prompt that is refused leaves nothing behind. Queued while a turn
-  runs or another message is being handed over; throws `StateError` past `queued`. `steer(text)` goes first, even past `queued`, and
+  answer, takes its id from the acknowledgement or its echo, and a prompt that is refused leaves nothing behind (a v1 prompt the agent fails before it said anything too; one it echoed in v2 stays). Queued while a turn
+  runs, another message is being handed over, or the conversation is being opened (sent after the kept mode is back; held if it did not open); throws `StateError` past `queued`. `steer(text)` goes first, even past `queued`, and with a turn running
   cancels the turn. `steerQueued`, `sendQueued([m])`, `editQueued`, `removeQueued([m])`, `cancel({from})`.
 - **Requests**: `PermissionQuestion` (`title`, `kind`, `detail`, `options` in the agent's order, `forPerson`, `toolCallId`,
   `outcome`), `AgentQuestion`. `answerPermission(allow:, by:)`, `choosePermission(option, by:)`, `cancelPermission`,
@@ -64,7 +64,7 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
 - **Modes and options**: `choose(option, value) -> Future<bool refused>` (held while a turn runs or the conversation opens),
   `holdChoice`, `setBypass(on)`, `chooseMode(ModeEntry)`, `cycleMode()`, `leaveBypass()`, `canChangeMode`. Mode changes run one at a
   time in the order asked; presses go on from `targetMode`; a mode the agent refused is in `refusedModes` and cycling skips it; nothing
-  changes while `opening`. `modeEntries(option)`, `nextMode`, `modeOrder`, `isBypassMode`, `bypassAnswer`, `ownBypass`.
+  changes while `opening`: `chooseMode`, `cycleMode`, `leaveBypass` and `setBypass` do nothing then, so the kept mode holds. `modeEntries(option)`, `nextMode`, `modeOrder`, `isBypassMode`, `bypassAnswer`, `ownBypass`.
 - **Reopening**: `reopen(open, {keptMode, keptBypass}) -> Future<AcpOpenedSession>`: when the agent sends the conversation it
   replaces what is held (nothing twice); when it only resumes, what is held stays; history is not news; open tool lines become
   `stopped`; the kept mode and Bypass are put back before anything is sent.
@@ -86,7 +86,7 @@ optionId:)` (`by` must be attached). Requests still waiting are not carried: rea
 `Compaction`; `AgentCommandInfo`; `ConfigOption`/`Choice`/`OptionRole`/`roleOf`/`optionIn`/`modeOptionIn`/`PendingChoice`;
 `SessionUsage`; `UsageReport.parse(json, [limits])` (the `dev.boriken.coqui.acp/usage` extension: buckets, spend, `fractionPermille`,
 `resetsIn`; strings sanitised, lists cut at `usageBuckets`), `UsageSupport.parse`; `reasonOf(error)`, `titleFrom(text, [limits])`,
-`toolRuns(entries)` (consecutive tool calls grouped, for a transcript that folds them), `BoundedText`.
+`toolRuns(entries)` (consecutive tool calls grouped, for a transcript that folds them), `BoundedText` (appendable bounded text). Identifiers an agent chooses (tool, terminal, compaction, option and choice ids) are used as they came or not at all: empty, longer than `shortText` or holding a control character, they are dropped.
 
 ## Recording
 

@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 
 import 'limits.dart';
@@ -103,7 +104,7 @@ ToolBlock? _toolBlock(Object? raw, ChatLimits limits) {
       newText: boundedHead(raw['newText'] as String, limits.toolText),
     );
   }
-  if (type == 'terminal' && raw['terminalId'] is String) {
+  if (type == 'terminal' && idText(raw['terminalId'], limits) != null) {
     return ToolTerminal(raw['terminalId'] as String);
   }
   final patch = raw['patch'];
@@ -127,10 +128,10 @@ final class ToolCall {
   String get title => _title;
   String? get kind => _kind;
   ToolStatus get status => _status;
-  List<ToolBlock> get blocks => _blocks;
+  List<ToolBlock> get blocks => UnmodifiableListView(_blocks);
 
   /// Where it works, as `path` or `path:line`.
-  List<String> get locations => _locations;
+  List<String> get locations => UnmodifiableListView(_locations);
 
   /// Marks a call that was waiting or running as stopped: nothing can finish it now. A call that has finished stays as it was.
   void stop() {
@@ -459,12 +460,13 @@ final class SessionUsage {
 
   SessionUsage applied(Map<String, dynamic> raw, ChatLimits limits) {
     final said = raw['cost'];
-    final amount = said is Map && said['amount'] is num
+    final amount =
+        said is Map && said['amount'] is num && (said['amount'] as num).isFinite
         ? (said['amount'] as num).toDouble()
         : null;
     return SessionUsage(
-      used: raw['used'] is int ? raw['used'] as int : used,
-      size: raw['size'] is int ? raw['size'] as int : size,
+      used: _whole(raw['used']) ?? used,
+      size: _whole(raw['size']) ?? size,
       cost: amount ?? cost,
       currency: said is Map
           ? shortText(said['currency'], limits) ?? currency
@@ -527,3 +529,11 @@ String? describeToolInput(Object? raw, ChatLimits limits) {
       ? null
       : boundedHead(lines.join('\n'), limits.describedInput);
 }
+
+int? _whole(Object? value) =>
+    value is num &&
+        value.isFinite &&
+        value.abs() < 9007199254740992 &&
+        value == value.truncate()
+    ? value.toInt()
+    : null;

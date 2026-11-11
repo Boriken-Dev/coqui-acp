@@ -174,11 +174,15 @@ void main() {
         reason: 'a press while it opens does nothing',
       );
       expect(session.canChangeMode, isTrue);
-      expect(kept.last, (
+      expect(
+        session.bypass,
+        isFalse,
+        reason: 'setting Bypass while it opens does nothing',
+      );
+      expect(kept.single, (
         null,
-        true,
-      ), reason: 'a change made while it opened is kept now');
-      expect(kept, hasLength(1));
+        false,
+      ), reason: 'what is kept is told once it is open');
       store.dispose();
     },
   );

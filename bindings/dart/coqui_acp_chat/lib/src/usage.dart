@@ -390,15 +390,19 @@ List<Object?> _duration(Duration length) => [
 Duration? _length(Object? json) {
   if (json is! List || json.length != 2) return null;
   final seconds = _count(json[0]), nanos = _count(json[1]);
-  if (seconds == null || nanos == null) return null;
+  if (seconds == null || nanos == null || seconds > 1099511627776) return null;
   return Duration(seconds: seconds, microseconds: nanos ~/ 1000);
 }
 
-int? _count(Object? value) => value is int
-    ? value
-    : (value is double && value == value.truncateToDouble()
-          ? value.toInt()
-          : null);
+// A figure an agent sends is a whole number every platform holds exactly: not NaN, not infinite (which a browser counts as an int),
+// and below 2^53.
+int? _count(Object? value) {
+  if (value is! num || !value.isFinite || value.abs() >= 9007199254740992) {
+    return null;
+  }
+  if (value is int) return value;
+  return value == value.truncateToDouble() ? value.toInt() : null;
+}
 
 // Every string an agent sends is shown to a person, so it is one clean line cut at ChatLimits.shortText, and every list is cut at
 // ChatLimits.usageBuckets.

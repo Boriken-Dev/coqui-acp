@@ -23,6 +23,18 @@ String _tail(String text, int n) {
   return text.substring(_isLow(text.codeUnitAt(start)) ? start + 1 : start);
 }
 
+/// [value] as an identifier the agent chose, to be sent back to it as it came: a string that is not empty, no longer than
+/// [ChatLimits.shortText], and with no control or direction-changing character in it. Null for anything else, which is then not used.
+String? idText(Object? value, ChatLimits limits) {
+  if (value is! String ||
+      value.isEmpty ||
+      value.length > limits.shortText ||
+      _unprintable.hasMatch(value)) {
+    return null;
+  }
+  return value;
+}
+
 /// [value] as one short line of text a person may be shown: control and direction-changing characters become spaces, since they can
 /// reorder or hide what surrounds them, and it is cut at [ChatLimits.shortText] without splitting a character. Null when it is not a
 /// string or is blank.

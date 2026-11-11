@@ -13,5 +13,5 @@ export 'src/options.dart';
 export 'src/rendering.dart';
 export 'src/session.dart' hide ChatSessionHub, chatClientMetaKey;
 export 'src/store.dart';
-export 'src/text.dart' show shortText;
+export 'src/text.dart' show BoundedText, shortText;
 export 'src/usage.dart';
