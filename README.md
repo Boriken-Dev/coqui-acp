@@ -17,6 +17,7 @@ command that puts a stdio agent on the network under a proven identity. It build
 | `crates/coqui-acp-provider` | [agents as Guatiao providers](docs/provider.md), in any language, and a facade serving one over ACP |
 | `examples/provider-python` | an echo agent written in Python, through that facade |
 | `bindings/dart/coqui_acp` | the Dart client, for browsers and Flutter |
+| `bindings/dart/coqui_acp_chat` | the state of an agent chat built from the client's updates, in pure Dart: messages, tool calls, permissions, the prompt queue and several attached clients |
 | `bindings/js` | the page side of [ACP in the browser](docs/browser.md), its scope and its conformance checks |
 | `vectors/conversations.json`, `vectors/describe.json`, `vectors/elicitation.json` | scripted conversations, descriptions of agents, and an agent's questions as forms, which both clients must pass |
 | `docs/` | the wire profiles |
@@ -28,6 +29,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 (cd bindings/dart/coqui_acp && dart analyze && dart test)
+(cd bindings/dart/coqui_acp_chat && dart analyze && dart test)
 (cd bindings/js && npm test)
 ```
 
