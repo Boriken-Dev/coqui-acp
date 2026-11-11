@@ -1,7 +1,7 @@
 //! A provider of the `acp_harness` kind for coding agents that speak ACP on their own standard input and output: Grok
 //! (`grok agent stdio`), Antigravity (`agy acp`) and Pi (`pi-acp`).
 //!
-//! The host's messages go to the program a line each and its lines come back as messages (see [`relay`]); what the
+//! The host's messages go to the program a line each and its lines come back as messages; what the
 //! provider adds is the account: it removes every credential variable of the harness from what it starts, sets the chosen
 //! kind's, places the login file in the account's directory, watches it and tells the host's keeper when the harness
 //! renews or loses the login, renews it with no model turn where the harness can, and runs the harness's own sign-in.
