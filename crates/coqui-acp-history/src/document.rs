@@ -157,6 +157,14 @@ impl Document {
     pub fn seed(&self) -> Seed<'_> {
         Seed::of(&self.lines)
     }
+
+    /// The first body line as a seed point, whatever boundaries follow it; `None` for no body.
+    #[must_use]
+    pub fn first_point(&self) -> Option<crate::SeedPoint> {
+        self.lines
+            .first()
+            .map(|line| crate::seed::point_of(2, line))
+    }
 }
 
 impl FromStr for Document {

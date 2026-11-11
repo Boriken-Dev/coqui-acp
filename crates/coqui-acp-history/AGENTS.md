@@ -6,7 +6,7 @@ Cargo feature `cli` (off by default) builds the `coqui-acp-history` command and 
 
 Imports: everything is at the crate root except the tool table, `coqui_acp_history::tools`. `StopReason` is ACP's (`agent_client_protocol::schema::v1`), re-exported.
 
-No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state. Text only: the crate reads and writes UTF-8 JSON Lines; it parses no harness's own files (the Claude and Codex codecs live in their crates).
+No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state. Text only: the crate reads and writes UTF-8 JSON Lines; it parses no harness's own files (the Claude and Codex codecs live in `coqui-acp-claude` and `coqui-acp-codex`, behind their `history` feature, and are built on `conversation` below).
 
 Dialect: strict UTF-8 and strict JSON; one leading byte-order mark ignored on line 1 and none elsewhere; a repeated object key, a carriage return, an empty line, a missing final line feed, `NaN`/`Infinity`, a lone surrogate escape and a number no double holds (`1e400`) are refused; an integer outside `i64`/`u64` is read as the nearest `f64`; nesting stops at `PARSER_DEPTH` (127) levels whatever `max_depth` is. Written numbers follow the format document's canonical rule (`100.0`, `1e16`, `-0.0`), not `serde_json`'s.
 
@@ -93,6 +93,41 @@ pub fn Seed::turns(&self) -> u64;  pub fn Seed::fit(&self, max_bytes: u64) -> Fi
 
 The seed starts at the latest `history/compaction` that has a summary (else at the first body line); `point.digest` is the SHA-256 of that line in canonical spelling. `fit` keeps the summary and the latest whole turns within `max_bytes` (each line as `Line::to_json` writes it, plus a line feed); divide a token window by your own bytes-per-token figure.
 
+## Conversation and recorder (`coqui_acp_history::conversation`)
+
+What a codec on either side of a harness's files needs, with no knowledge of any harness.
+
+```rust
+pub struct Conversation { pub summary: Option<Boundary>, pub seeded_from: Option<SeedPoint>, pub summary_missing: bool,
+    pub items: Vec<Item>, pub calls: BTreeMap<String, Call>, pub closed_calls: u64, pub closed_turn: bool }   // #[non_exhaustive]
+pub fn Conversation::of(doc: &Document, use_summary: bool) -> Conversation;
+pub fn Conversation::call(&self, id: &str) -> Option<&Call>;
+pub enum Item { Prompt { blocks, stamp }, Note { block, stamp }, Message { text, stamp }, Thought { text, stamp }, Call { id },
+    Result { id }, Plan { entries, stamp }, Cancel { stamp }, TurnEnd { stop, error, closed_here, stamp } }          // #[non_exhaustive]
+pub struct Call { pub id, name, title, kind, status: Option<String>, raw_input, raw_output: Option<Value>, content, locations: Vec<Value>,
+    call_meta, result_meta: Option<Value>, call_at, result_at: Option<String>, announced: bool }                    // Call::new, is_done, is_failed, output_text, announce, finish
+pub struct Stamp { pub at: Option<String>, pub meta: Option<Value> }    // Stamp::at, new, native(harness, fields), native_of(harness)
+pub struct Boundary { pub summary: String, pub trigger: Option<Trigger>, pub pre_tokens: Option<u64>, pub stamp: Stamp }
+pub struct Recorder;   // new, is_open, prompt, update, message, thought, note, cancel, end_turn, compaction, finish() -> Vec<Line>
+pub fn native_meta(harness: &str, fields: Map) -> Option<Value>;  pub fn native_of(meta: Option<&Value>, harness: &str) -> Option<&Map>;
+pub fn derived_uuid(session, what, n) -> String;  is_uuid(&str) -> bool;  clean_id(id, taken) -> String;  shell_text(&[&str]) -> String;
+pub fn call_note(&Call) -> String;  valid_time(&str) -> bool;
+```
+
+`Conversation::of` seeds as `Document::seed` does (the latest compaction that has a summary, then what follows) when `use_summary`, and from the first line, with no boundary's text anywhere, when not. A tool call's `tool_call` and `tool_call_update`s are merged into one `Call`, which appears as an `Item::Call` where it was announced and an `Item::Result` where it ended (or where this ended it). It closes what the history left open, as the format's rule (a): a call with no result ends `cancelled` (`closed_calls`, an `Item::Result` before the turn's end) and a turn left open ends `Cancelled` (`closed_turn`, an `Item::TurnEnd` with `closed_here`). A permission request and its answer, and a compaction boundary other than the seed's, are not items (rule (b); a boundary with no summary is `summary_missing`). A result for a call the seed does not hold is a `Call` with `announced` false, for a writer to drop. Chunks of one message or thought are joined; ACP updates that are no conversation (usage, modes, commands) are ignored.
+
+`Recorder` builds lines that keep the order rules: `prompt` ends an open turn first as `end_turn` (a codec that knows better ends it itself), `cancel` and `end_turn` do nothing with no turn open, and `finish` leaves a turn open as a recording cut short. A codec puts what only its own harness reads into a line's `_meta` with `Stamp::native(harness, fields)` and reads it back with `native_of`, which answers only when the object names that harness.
+
+## Paging (`coqui_acp_history::paging`)
+
+```rust
+pub fn page(text: &str, after: Option<&str>, max_bytes: u64) -> Result<Page, PageError>;
+pub struct Page { pub text: String, pub next: Option<String> }
+pub enum PageError { Position, LineTooLarge(u64) }
+```
+
+Cuts a history's text into pages of whole lines for a provider's `export_session`. The position is `<byte offset>:<sha256 of the whole text>`, so a position of another text, one in the middle of a line or one that is not this function's is `Position`, and a next line that does not fit is `LineTooLarge(bytes with its line feed)`.
+
 ## Redaction
 
 ```rust
@@ -155,4 +190,4 @@ Constants: `DEFAULT_MAX_LINE_BYTES`, `DEFAULT_MAX_LINES`, `DEFAULT_MAX_TOTAL_BYT
 
 ## Command (`--features cli`)
 
-`coqui-acp-history list [DIR]`, `show FILE`, `convert IN -o OUT [--redact-pattern RE]... [--redact-values-file FILE] [--replacement TEXT] [--seal]`, `export --harness H SESSION` and `import --harness H FILE` (exit status 2: they need a harness's codec), and `--max-line-bytes`, `--max-lines`, `--max-total-bytes`, `--max-depth`, `--max-values` on the first three. `show` and a `convert` that redacts or seals hold the history in memory, so they start from the 16 MiB total of `ReaderSettings::for_document()`; `list` and a verbatim `convert` stream. `convert` copies the checked lines verbatim, after the whole history has been checked, unless a redaction removes something or `--seal` asks for a rewrite in canonical spelling with a digest; the output is written whole or not at all, to a new uniquely named file beside it (created exclusively, so no existing file or link is written through) and renamed. A secret to remove is read from a file, never an argument. A bound looser than its default is reported on standard error. Everything a history says is printed with control, line-separator and bidirectional characters escaped as `\u{..}`. Exit status 1 for a refused history, 2 for a usage error.
+`coqui-acp-history list [DIR]`, `show FILE`, `convert IN -o OUT [--redact-pattern RE]... [--redact-values-file FILE] [--replacement TEXT] [--seal]`, `export --harness H SESSION` and `import --harness H FILE` (exit status 2: they need a harness's codec, and the codecs depend on this crate, so the command cannot call them; `coqui-acp-claude` and `coqui-acp-codex` ship the `history_claude` and `history_codex` examples, which export to standard output and import from standard input, so a session moves between harnesses as `history_claude export ... | history_codex import ...`), and `--max-line-bytes`, `--max-lines`, `--max-total-bytes`, `--max-depth`, `--max-values` on the first three. `show` and a `convert` that redacts or seals hold the history in memory, so they start from the 16 MiB total of `ReaderSettings::for_document()`; `list` and a verbatim `convert` stream. `convert` copies the checked lines verbatim, after the whole history has been checked, unless a redaction removes something or `--seal` asks for a rewrite in canonical spelling with a digest; the output is written whole or not at all, to a new uniquely named file beside it (created exclusively, so no existing file or link is written through) and renamed. A secret to remove is read from a file, never an argument. A bound looser than its default is reported on standard error. Everything a history says is printed with control, line-separator and bidirectional characters escaped as `\u{..}`. Exit status 1 for a refused history, 2 for a usage error.

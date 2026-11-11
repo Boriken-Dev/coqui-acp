@@ -31,12 +31,15 @@
 extern crate alloc;
 
 mod canon;
+pub mod conversation;
 mod document;
 mod error;
 mod header;
 mod line;
 mod loss;
 mod order;
+pub mod paging;
+pub mod patch;
 mod reader;
 mod redact;
 mod seed;

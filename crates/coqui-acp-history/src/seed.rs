@@ -155,7 +155,7 @@ fn size(line: &Line) -> u64 {
     line.to_json().map_or(0, |text| text.len() as u64 + 1)
 }
 
-fn point_of(number: u64, line: &Line) -> SeedPoint {
+pub(crate) fn point_of(number: u64, line: &Line) -> SeedPoint {
     let text = line.to_json().unwrap_or_default();
     SeedPoint {
         line: number,

@@ -155,14 +155,14 @@ fn a_limit_looser_than_the_default_is_reported() {
 }
 
 #[test]
-fn export_and_import_say_they_need_a_codec() {
+fn export_and_import_say_which_command_does_it() {
     for args in [
         ["export", "--harness", "claude", "session"],
         ["import", "--harness", "codex", "file"],
     ] {
         let out = command(&args);
         assert_eq!(out.status.code(), Some(2));
-        assert!(String::from_utf8_lossy(&out.stderr).contains("no codec"));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("history export"));
     }
 }
 

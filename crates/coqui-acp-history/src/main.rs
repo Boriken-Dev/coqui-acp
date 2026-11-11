@@ -92,7 +92,7 @@ enum Command {
         #[command(flatten)]
         limits: Limits,
     },
-    /// Export a harness's session to a history (needs that harness's codec).
+    /// Export a harness's session to a history (`coqui-acp-claude history export` and `coqui-acp-codex history export` do it).
     Export {
         /// The harness: claude, codex, agy.
         #[arg(long)]
@@ -158,8 +158,11 @@ fn run(cli: Cli) -> Result<ExitCode, HistoryError> {
         Command::Show { file, limits } => show(&file, &limits.settings(true)),
         Command::Export { harness, .. } | Command::Import { harness, .. } => {
             eprintln!(
-                "no codec for {harness} is built in: a harness's export and import live in its \
-                 crate, behind that crate's `history` feature"
+                "this command cannot read a harness's own files: run `coqui-acp-{}` `history export` or                  `history import` (the program built with its `history` feature)",
+                harness
+                    .chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .collect::<String>()
             );
             Ok(ExitCode::from(2))
         }
