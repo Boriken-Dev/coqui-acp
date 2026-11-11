@@ -122,9 +122,7 @@ fn the_suite_inside() {
     let outcome = Contract::new("codex")
         .program_agent(true)
         .imports(false)
-        .logins(false)
         .holds(Vec::new())
-        .account("harness-login")
         .run(&harness);
     drop(harness);
     drop(registry);
@@ -186,9 +184,14 @@ fn it_lists_the_account_kinds_it_measured_and_refuses_what_it_does_not_apply() {
             "codex-access-token"
         ]
     );
-    assert!(catalog.logins.is_empty());
+    let methods: Vec<&str> = catalog.logins.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        methods,
+        ["chatgpt", "chatgpt-device", "api-key", "access-token"]
+    );
     let chatgpt = catalog.kind("codex-chatgpt").expect("listed");
-    assert!(chatgpt.rotates && chatgpt.state_dir && !chatgpt.history_portable);
+    assert!(chatgpt.rotates && chatgpt.state_dir && !chatgpt.history_portable && chatgpt.renews);
+    // A sign-in with no directory to run in is refused.
     let error = provider()
         .login(
             coqui_acp_api::LoginRequest::new("chatgpt", ""),
@@ -196,7 +199,7 @@ fn it_lists_the_account_kinds_it_measured_and_refuses_what_it_does_not_apply() {
             Prompter.into_object(),
         )
         .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
 }
 
 struct Sink(std::sync::mpsc::Sender<Vec<u8>>);
@@ -211,7 +214,8 @@ impl ChannelSink for Sink {
 }
 
 #[test]
-fn a_usage_read_for_an_account_it_does_not_apply_is_refused_like_a_models_call() {
+fn a_usage_read_for_an_account_checks_the_grant_like_a_start_does() {
+    // A login with no credential or directory is not a grant the kind takes.
     let error = provider()
         .usage(
             UsageQuery::new().account(coqui_acp_api::AccountGrant::new("a", "codex-chatgpt")),
@@ -219,8 +223,7 @@ fn a_usage_read_for_an_account_it_does_not_apply_is_refused_like_a_models_call()
             Keeper.into_object(),
         )
         .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    assert!(error.message().contains("codex-chatgpt"));
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
 }
 
 struct Prompter;

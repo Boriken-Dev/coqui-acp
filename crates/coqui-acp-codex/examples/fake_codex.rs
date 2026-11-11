@@ -147,14 +147,28 @@ fn main() {
         println!("codex-cli {VERSION}");
         return;
     }
+    let mut logs: Vec<PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("COQUI_ACP_FAKE_CODEX_LOG") {
+        logs.push(path.into());
+    }
+    // Beside the home too, so a call that sets no variable of its own can still be read back.
+    if let Some(dir) = std::env::var_os("CODEX_HOME")
+        && std::fs::create_dir_all(&dir).is_ok()
+    {
+        logs.push(PathBuf::from(dir).join("fake-codex.log"));
+    }
+    if !logs.is_empty() {
         let names: Vec<String> = std::env::vars().map(|(name, _)| name).collect();
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{}", json!({"args": args, "env_names": names}));
+        let line =
+            json!({"args": args, "env_names": names, "home": std::env::var("CODEX_HOME").ok()});
+        for path in logs {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(file, "{line}");
+            }
         }
     }
     // Never in a real home: in the directory it is told, or in the home the contract suite gave it.
@@ -171,6 +185,9 @@ fn main() {
         std::process::exit(2);
     };
     let _ = std::fs::create_dir_all(&home);
+    if args.first().is_some_and(|first| first == "login") {
+        std::process::exit(login(&args, std::path::Path::new(&home)));
+    }
     let mut fake = Fake {
         home: PathBuf::from(home),
         next_request: 0,
@@ -217,6 +234,7 @@ fn plain(fake: &Fake, message: &Value) -> bool {
         Some("config/read") => answer(id, &json!({"config": {}})),
         Some("skills/extraRoots/set") => answer(id, &json!({})),
         Some("account/rateLimits/read") => answer(id, &fake.rate_limits()),
+        Some("account/read") => answer(id, &account_read(fake, &message["params"])),
         Some("turn/interrupt") => answer(id, &json!({})),
         _ => return false,
     }
@@ -413,4 +431,203 @@ fn turn(fake: &mut Fake, message: &Value, lines: &mut impl Iterator<Item = Strin
     }
     fake.save(&thread_id, &thread);
     ending("completed", &[item], Value::Null);
+}
+
+/// The `auth.json` of a ChatGPT login, as Codex keeps one (names and types of the recording in
+/// `references/account_kinds/codex/stored_file_shape.txt`).
+fn chatgpt_file(number: u64) -> Value {
+    json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "last_refresh": "2026-11-11T00:00:00Z",
+        "tokens": {
+            "id_token": "stand-in-id",
+            "access_token": format!("stand-in-access-{number}"),
+            "refresh_token": format!("stand-in-refresh-{number}"),
+            "account_id": "stand-in-account",
+            "login_owner_id": "stand-in-owner",
+            "oauth_provenance": {"issuer": "https://auth.openai.com", "client_id": "stand-in"},
+        },
+    })
+}
+
+/// The refresh number in a stand-in login file, 0 for any other text.
+fn number_of(text: &str) -> u64 {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|file| {
+            file["tokens"]["refresh_token"]
+                .as_str()
+                .and_then(|t| t.rsplit('-').next())
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// `codex login ...`, as recorded in `references/account_kinds/codex`. A key or token is read from standard input and
+/// never echoed or logged; `fake-login` in the home holding `refuse` refuses what it is given, and a token that starts
+/// with `bad` is refused as Codex refuses one that is not a JWT.
+fn login(args: &[String], home: &std::path::Path) -> i32 {
+    let auth = home.join("auth.json");
+    let read_line = || {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        line.trim().to_string()
+    };
+    let refused =
+        std::fs::read_to_string(home.join("fake-login")).is_ok_and(|s| s.trim() == "refuse");
+    match args.get(1).map(String::as_str) {
+        Some("--with-api-key") => {
+            eprintln!("Reading API key from stdin...");
+            let key = read_line();
+            let mode = std::fs::read_to_string(home.join("fake-login")).unwrap_or_default();
+            if mode.trim() == "echo" {
+                // A refusal that quotes the start and end of what it was given.
+                eprintln!(
+                    "Error: invalid key {}...{}",
+                    key.chars().take(6).collect::<String>(),
+                    key.chars()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<String>()
+                );
+                return 1;
+            }
+            if mode.trim() == "sleep" {
+                // Slow to finish, and writes the key late: to see whether it was ended.
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+                let _ = std::fs::write(
+                    &auth,
+                    json!({"auth_mode": "apikey", "OPENAI_API_KEY": key}).to_string(),
+                );
+                return 0;
+            }
+            if key.is_empty() || refused {
+                eprintln!("Error logging in with an API key: the key is empty");
+                return 1;
+            }
+            let _ = std::fs::write(
+                &auth,
+                json!({"auth_mode": "apikey", "OPENAI_API_KEY": key}).to_string(),
+            );
+            eprintln!("API key saved. Authentication is checked when you send a request.");
+            0
+        }
+        Some("--with-access-token") => {
+            eprintln!("Reading access token from stdin...");
+            let token = read_line();
+            if token.is_empty() || token.starts_with("bad") || refused {
+                eprintln!("Error logging in with access token: invalid agent identity JWT format");
+                return 1;
+            }
+            let _ = std::fs::write(
+                &auth,
+                json!({"auth_mode": "agentIdentity", "OPENAI_API_KEY": null, "tokens": {"access_token": token}}).to_string(),
+            );
+            eprintln!("Logged in.");
+            0
+        }
+        Some("status") => match std::fs::read_to_string(&auth) {
+            Ok(text) if !text.trim().is_empty() => {
+                eprintln!("Logged in");
+                0
+            }
+            _ => {
+                eprintln!("Not logged in");
+                1
+            }
+        },
+        Some("--device-auth") => {
+            println!("\nWelcome to Codex [v{VERSION}]\nOpenAI's command-line coding agent\n");
+            println!(
+                "Follow these steps to sign in with ChatGPT using device code authorization:\n"
+            );
+            println!(
+                "1. Open this link in your browser and sign in to your account\n   https://auth.openai.com/codex/device\n"
+            );
+            println!("2. Enter this one-time code (expires in 15 minutes)\n   ABCD-12345\n");
+            println!(
+                "Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.\n"
+            );
+            let _ = std::io::stdout().flush();
+            finish_web(&auth, refused)
+        }
+        None => {
+            eprintln!("Starting local login server on http://localhost:1455.");
+            eprintln!("If your browser did not open, navigate to this URL to authenticate:\n");
+            eprintln!(
+                "https://auth.openai.com/oauth/authorize?response_type=code&client_id=stand-in&state=stand-in\n"
+            );
+            eprintln!("On a remote or headless machine? Use `codex login --device-auth` instead.");
+            finish_web(&auth, refused)
+        }
+        _ => 2,
+    }
+}
+
+/// The browser comes back after a moment, and the login is written.
+fn finish_web(auth: &std::path::Path, refused: bool) -> i32 {
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    if refused {
+        eprintln!("Login failed");
+        return 1;
+    }
+    let _ = std::fs::write(auth, chatgpt_file(1).to_string());
+    eprintln!("Successfully logged in");
+    0
+}
+
+/// `account/read`: the signed-in account, refreshing a ChatGPT login when asked to. A file named `fake-refresh` in the
+/// home scripts what a refresh does, as in the Claude Code stand-in: `refuse-blank` blanks the tokens and
+/// `refuse-delete` deletes the file.
+fn account_read(fake: &Fake, params: &Value) -> Value {
+    let auth = fake.home.join("auth.json");
+    let signed_out = || json!({"account": null, "requiresOpenaiAuth": true});
+    let Ok(text) = std::fs::read_to_string(&auth) else {
+        return signed_out();
+    };
+    if text.trim().is_empty() {
+        return signed_out();
+    }
+    let Ok(file) = serde_json::from_str::<Value>(&text) else {
+        // A login the stand-in did not make: signed in.
+        return json!({"account": {"type": "chatgpt", "email": "stand-in@example.invalid", "planType": "plus"}, "requiresOpenaiAuth": true});
+    };
+    if file["tokens"]["refresh_token"]
+        .as_str()
+        .is_none_or(str::is_empty)
+        && file["tokens"]["access_token"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        && file["OPENAI_API_KEY"].as_str().is_none_or(str::is_empty)
+    {
+        return signed_out();
+    }
+    if params["refreshToken"] == true && file["tokens"]["refresh_token"].is_string() {
+        match std::fs::read_to_string(fake.home.join("fake-refresh"))
+            .unwrap_or_default()
+            .trim()
+        {
+            "refuse-blank" => {
+                let mut blank = file.clone();
+                blank["tokens"]["access_token"] = json!("");
+                blank["tokens"]["refresh_token"] = json!("");
+                let _ = std::fs::write(&auth, blank.to_string());
+                return signed_out();
+            }
+            "refuse-delete" => {
+                let _ = std::fs::remove_file(&auth);
+                return signed_out();
+            }
+            _ => {
+                // The refresh token is single use: the new login replaces it.
+                let renewed = chatgpt_file(number_of(&text) + 1);
+                let _ = std::fs::write(&auth, renewed.to_string());
+            }
+        }
+    }
+    json!({"account": {"type": "chatgpt", "email": "stand-in@example.invalid", "planType": "plus"}, "requiresOpenaiAuth": true})
 }
