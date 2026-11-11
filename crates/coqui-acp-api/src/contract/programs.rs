@@ -41,7 +41,7 @@ const HOME_VARIABLES: [&str; 7] = [
 ];
 
 /// The variables a command line reads its configuration directory from, which are not passed on.
-const CONFIG_VARIABLES: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+const CONFIG_VARIABLES: [&str; 3] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR"];
 
 /// What one output stream of the program holds that has not been read.
 #[derive(Default)]
