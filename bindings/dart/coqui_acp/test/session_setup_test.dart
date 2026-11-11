@@ -242,7 +242,7 @@ void main() {
       systemPrompt: 'Say the marker.',
     );
     await client.reopenSession('s', cwd: '/w', setup: setup);
-    final load = agent.last('session/load')['params'] as Map;
+    final load = agent.last('session/resume')['params'] as Map;
     expect((load['mcpServers'] as List).single, containsPair('name', 'marker'));
     expect(load['systemPrompt'], isNotNull);
     await client.resumeSession('s', cwd: '/w', setup: setup);

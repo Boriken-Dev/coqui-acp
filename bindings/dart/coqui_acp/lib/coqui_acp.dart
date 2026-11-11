@@ -1226,17 +1226,18 @@ final class AcpClient {
       }, limited: false);
       return AcpOpenedSession(id, reply, replayed: true);
     }
+    // Resume continues the session; load replays a conversation the caller may keep its own record of.
+    if (_says(const ['sessionCapabilities', 'resume'])) {
+      return AcpOpenedSession(
+        id,
+        await _request('session/resume', params, limited: false),
+      );
+    }
     if (_says(const ['loadSession'])) {
       return AcpOpenedSession(
         id,
         await _request('session/load', params, limited: false),
         replayed: true,
-      );
-    }
-    if (_says(const ['sessionCapabilities', 'resume'])) {
-      return AcpOpenedSession(
-        id,
-        await _request('session/resume', params, limited: false),
       );
     }
     throw const AcpFailure('This agent cannot open an earlier session');
@@ -1406,7 +1407,9 @@ final class AcpClient {
     });
   }
 
-  Future<void> resumeSession(
+  /// Resumes a session this agent still holds, with its history replayed as updates when [replayHistory] is set. The answer is the
+  /// agent's own: its config options, modes and models.
+  Future<AcpOpenedSession> resumeSession(
     String id, {
     required String cwd,
     bool replayHistory = false,
@@ -1417,12 +1420,16 @@ final class AcpClient {
     final fields = _setupParams(setup);
     return _using(
       id,
-      () => _request('session/resume', {
-        'sessionId': id,
-        'cwd': cwd,
-        ...fields,
-        if (replayHistory) 'replayFrom': {'type': 'start'},
-      }),
+      () async => AcpOpenedSession(
+        id,
+        await _request('session/resume', {
+          'sessionId': id,
+          'cwd': cwd,
+          ...fields,
+          if (replayHistory) 'replayFrom': {'type': 'start'},
+        }),
+        replayed: replayHistory,
+      ),
     );
   }
 

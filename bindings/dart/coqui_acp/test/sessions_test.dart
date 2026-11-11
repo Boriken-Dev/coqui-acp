@@ -256,9 +256,27 @@ void main() {
   );
 
   test(
-    'v1 reopens by load, which replays, and by resume where it cannot',
+    'v1 reopens by resume where it is offered, even beside load, and by load, which replays, where it is not',
     () async {
-      final agent = Agent(v1);
+      final both = Agent(v1);
+      both.answers['session/resume'] = (_) => {'configOptions': <Object>[]};
+      final resumed = await (await both.connected()).reopenSession(
+        's',
+        cwd: '/w',
+      );
+      expect(resumed.replayed, isFalse);
+      expect(resumed.raw, {'configOptions': <Object>[]});
+      expect(both.last('session/resume')['params'], {
+        'sessionId': 's',
+        'cwd': '/w',
+        'mcpServers': <Object>[],
+      });
+      expect(both.received.any((m) => m['method'] == 'session/load'), isFalse);
+
+      final agent = Agent({
+        'protocolVersion': 1,
+        'agentCapabilities': {'loadSession': true},
+      });
       agent.answers['session/load'] = (_) => <String, Object?>{};
       final opened = await (await agent.connected()).reopenSession(
         's',
@@ -312,6 +330,30 @@ void main() {
       );
     },
   );
+
+  test('resuming returns what the agent answered, in v1 and v2', () async {
+    for (final (initialize, replays) in [(v1, false), (v2, true)]) {
+      final agent = Agent(initialize);
+      agent.answers['session/resume'] = (_) => {
+        'configOptions': [
+          {'id': 'mode'},
+        ],
+      };
+      final client = await agent.connected(
+        maxVersion: initialize['protocolVersion'] as int,
+      );
+      final opened = await client.resumeSession(
+        's',
+        cwd: '/w',
+        replayHistory: replays,
+      );
+      expect(opened.id, 's');
+      expect(opened.replayed, replays);
+      expect(opened.raw['configOptions'], [
+        {'id': 'mode'},
+      ]);
+    }
+  });
 
   test('attachments go with a prompt in the shapes ACP gives them', () async {
     final agent = Agent(v2);
