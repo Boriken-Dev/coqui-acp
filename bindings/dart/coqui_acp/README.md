@@ -62,7 +62,7 @@ value's type, `id`, as v2 requires; v1 has no type.
 
 ## Sessions
 
-`openSession`, `prompt`, `cancel`, `closeSession`; `listSessions` and `reopenSession` for earlier sessions; `events` for one
+`openSession`, `prompt`, `cancel`, `closeSession`; `listSessions` and `reopenSession` for earlier sessions (by `session/resume` where the agent offers it, else `session/load`; `resumeSession` returns the agent's answer); `events` for one
 normalized stream of `AcpEvent`s and `updates` for every `session/update` as it arrives. Agent text in `events` gathers until
 something follows it, or until `textFlush` UTF-8 bytes have gathered (default 64 KiB, as in the Rust client; any value from 0 up).
 `listSessions` keeps at most `maxListedSessions` sessions of a page (default 500; any value from 0 up), and a page cut short by it

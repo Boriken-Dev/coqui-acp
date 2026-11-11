@@ -75,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Dart `coqui_acp`: `reopenSession` opens a v1 session by `session/resume` when the agent offers it, and by `session/load` (which replays) only when it does not; v2 resumes with a replay as before. `resumeSession` returns an `AcpOpenedSession` carrying the agent's answer (config options, modes, models) instead of nothing, with `replayed` set as `replayHistory` was.
+
 - **Breaking** for a provider of `acp_harness`: the kind gained the `usage` slot, `HarnessInfo` the key `usage` and `StartRequest` the key `account`, so the kind's hash moves (`1326996142`) and every built provider rebuilds. No older shape is read.
 - **Breaking** for a provider of `agent_provider`: `AgentEvent::quota`, `usage` and `limit: UsageLimit` are replaced by `report: Option<UsageReport>` and `limit: Option<LimitHit>`; `QuotaReport`, `UsageLimit` and `TokenUsage` are removed.
 - **Breaking** for a translator: `coqui_acp_harness::event::{Limit, Quota}` and `Event::Quota` are replaced by `coqui_acp_api::usage::LimitHit` and `Event::Buckets`; a limited turn's `_meta["dev.boriken.coqui.acp/limit"]` is the `LimitHit` (`bucket`, `resets_at`, `retry_after`, `source`, `text`, `observed_at`), no longer `{resetsAt, window, text}`. `coqui-acp-harness` depends on `coqui-acp-api` always; its feature `kind` keeps only the spawners. `coqui-acp-claude` and `coqui-acp-codex` report their windows as buckets, and a Claude usage-limit text names the bucket `seven_day`, no longer `weekly`.
