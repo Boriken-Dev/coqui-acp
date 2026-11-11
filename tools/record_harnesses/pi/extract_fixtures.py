@@ -15,7 +15,7 @@ SCENARIOS = [
     "tool_read_image", "tool_write", "tool_edit", "tool_bash", "tool_two", "abort_turn", "abort_tool", "errors",
     "retry_abort", "permission_gate", "compaction", "session", "rpc_bash", "ui_methods", "no_credentials", "queue",
 ]
-GATE = re.compile(r'^Allow (\w+) \{')
+GATE = re.compile(r'^Allow (\w+) (\{.*\})\?$')
 
 
 def keep(message):
@@ -37,8 +37,9 @@ def clean(value):
         found = GATE.match(title)
         if found and value.get("options") == ["Allow once", "Reject"]:
             tool = found.group(1)
-            value["title"] = "coqui-acp-pi-gate " + json.dumps({"id": "call_1", "tool": tool}, separators=(",", ":"))
-            value["options"] = ["allow", "deny", "plan"]
+            call = {"id": "call_1", "tool": tool, "input": json.loads(found.group(2))}
+            value["title"] = "coqui-acp-pi-gate " + json.dumps(call, separators=(",", ":"))
+            value["options"] = ["allow", "deny", "plan", "protected"]
     return value
 
 

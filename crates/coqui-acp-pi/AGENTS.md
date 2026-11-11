@@ -26,7 +26,8 @@ pub struct PiLaunch {
     pub mode: Option<Mode>,                    // the start mode and the loosest a client may choose; Manual when None
     pub allow_bypass: bool,                    // false: the Bypass mode is not offered
     pub modes: Option<Vec<Mode>>,              // those named widen the start mode and stricter ones (Bypass still needs allow_bypass; Auto is never offered)
-    pub ask_for_reads: bool,                   // Manual asks before read, grep, find and ls too
+    pub ask_for_reads: bool,                   // Manual and Plan ask before read, grep, find and ls too
+    pub isolated: bool,                        // Pi loads only the gate: --no-extensions --no-mcp
     pub gate_dir: Option<PathBuf>,             // where the gate's private directory is made; the system's temporary directory
     pub extra_args: Vec<OsString>,             // the caller's own, last, unchecked
     pub env: BTreeMap<OsString, OsString>,
@@ -35,24 +36,29 @@ pub struct PiLaunch {
 }
 pub fn PiLaunch::new(cwd: impl Into<PathBuf>) -> PiLaunch
 pub fn start_mode(&self) -> Mode                // mode, else Manual
-pub fn program(&self) -> OsString               // executable; on Windows a bare name resolved to pi.exe, else pi.cmd, in the launch's PATH or the process's
-pub fn launch(&self, extension: Option<&Path>, prompt: Option<&Path>) -> Launch   // pi --mode rpc [-e ext] [--session id] [--model m] [--thinking l] [--append-system-prompt file] extra
+pub fn command(&self) -> Result<(OsString, Vec<OsString>), Error>   // the program and its leading arguments; Windows: see below
+pub fn base(&self) -> Result<Launch, Error>     // that command with the environment, before Pi's own arguments
+pub fn roots(&self) -> Vec<PathBuf>;  pub fn agent_dirs(&self) -> Vec<PathBuf>   // where calls are free; Pi's agent directory (PI_CODING_AGENT_DIR of the launch, else the process's, else ~/.pi/agent)
+pub fn launch(&self, extension: Option<&Path>, prompt: Option<&Path>) -> Result<Launch, Error>   // pi --mode rpc --no-approve [--no-extensions --no-mcp when isolated] [-e ext] [--session id] [--model m] [--thinking l] [--append-system-prompt file] extra
 #[non_exhaustive] pub enum SessionStart { New, Resume(String), Load(String) }
 pub fn valid_session_id(id: &str) -> bool       // letters, digits and dashes, 1 to 128
 ```
 
-None of the person's text is an argument: the system prompt is a file, a prompt goes through `prompt`. A model or thinking level that starts with `-` or holds a control character is `Error::Refused`.
+None of the person's text is an argument: the system prompt is a file, a prompt goes through `prompt`. `--no-approve` is always passed, so the project's own `.pi` extensions, settings and MCP servers never load (measured: Pi 1.5.2 in RPC mode loads none without `--approve` either). The person's own extensions and MCP servers load unless `isolated`: another extension can change a call's `input` after the gate asked (measured, either load order), which the gate cannot see; `isolated` is the setting for a host that does not trust them. A launch whose `mode` is Bypass needs `allow_bypass`, else `Error::Refused`.
+
+**Windows.** Nothing is started through `cmd.exe` and nothing is found by a search that includes the project. `command()` looks for a bare `pi` in `PATH`, absolute entries only, none inside the session's directories or on the network, as `pi.exe` then `pi.cmd`. npm's `pi.cmd` is not run (it runs a bare `node`, which `cmd.exe` looks for in the working directory first: a project's `node.bat` would run before any gate): its `cli.js` is read from it and started with an absolute `node.exe`, the one beside the shim or the first on `PATH` outside the session's directories; none is `Error::Refused`. `NoDefaultCurrentDirectoryInExePath=1` is set in Pi's environment, whatever the person's. A model or thinking level that starts with `-` or holds a control character is `Error::Refused`.
 
 ## Gate (`Gate`, `GATE_SOURCE`)
 
 ```rust
 pub const GATE_SOURCE: &str                      // the extension, TypeScript, which Pi loads itself
-pub fn Gate::write(parent: Option<&Path>, system_prompt: Option<&str>) -> io::Result<Gate>   // a new directory coqui-acp-pi-<uuid> under parent; owner-only on Unix
+pub fn Gate::write(parent: Option<&Path>, system_prompt: Option<&str>) -> io::Result<Gate>   // a new directory coqui-acp-pi-<uuid> under parent, made exclusively and closed to every other user (mode 0700; on Windows an owner-only ACL by icacls); a nonce in the extension
 pub fn extension(&self) -> &Path;  pub fn prompt(&self) -> Option<&Path>;  pub fn dir(&self) -> &Path
+pub fn command(&self) -> String                  // coqui-acp-pi-gate-<nonce>, the command the extension registers
 // Drop removes the directory.
 ```
 
-Pi asks nobody before it runs a tool. The gate is an extension on `tool_call` that puts every call to the program that started Pi as a `select` dialog, titled `coqui-acp-pi-gate {"id":<toolCallId>,"tool":<name>}`, with the options `allow`, `deny` and `plan`. The answer decides: `allow` runs the call; `plan` refuses it with the reason `Plan mode: nothing may be changed or run. Say what you would do instead.`; `deny`, a cancelled dialog, any other answer, or a dialog that fails refuses it with `Blocked by user`. Pi shows the model that reason as the tool's result and goes on. The gate is written to a private directory for one launch and removed with the session; nothing is written to the person's Pi configuration. The file is on the machine of the translator, so a spawner that runs Pi elsewhere is refused by the provider (`describe().local`).
+Pi asks nobody before it runs a tool. The gate is an extension on `tool_call` that puts every call (extension and MCP tools too: measured) to the program that started Pi as a `select` dialog, titled `coqui-acp-pi-gate {"id":<toolCallId>,"tool":<name>,"input":<the input at that moment>}`, with the options `allow`, `deny`, `plan` and `protected`. The input is what is decided on and shown (long strings cut to 4096 characters and values over 16 KiB left out, each named in `_cut`; a cut path is asked about). The answer decides: `allow` runs the call; `plan` refuses it with the reason `Plan mode: nothing may be changed or run. Say what you would do instead.`; `protected` refuses it because the path holds credentials; `deny`, a cancelled dialog, any other answer, or a dialog that fails refuses it with `Blocked by user`. Pi shows the model that reason as the tool's result and goes on. The gate also registers a command, `coqui-acp-pi-gate-<nonce>`, with a nonce of the launch in its file: the session is refused (`Error::Harness`, "Pi did not load the permission gate") unless `get_commands` lists it, and the command is left out of the commands told to the client. Measured: a `-e` that fails to load makes Pi exit at startup; a handler that throws blocks the call; one returning `{block: false}` does not override the gate. The gate is written to a private directory for one launch and removed with the session; nothing is written to the person's Pi configuration. The file is on the machine of the translator, so a spawner that runs Pi elsewhere is refused by the provider (`describe().local`).
 
 ## Session (`PiSession`)
 
@@ -141,14 +147,16 @@ Config options: `model` (category `model`): the models Pi has credentials for, b
 
 The mode option (`mode`, category `mode`; ids from `coqui_acp_harness::mode`; `coqui_acp_pi::mode` holds the table). The mode decides what the gate does with each call; Pi has no sandbox, so every mode runs what it lets through with the person's rights.
 
-| Mode | `read`, `grep`, `find`, `ls` | `edit`, `write` | `bash` and any other tool (an extension's, an MCP server's) |
+| Mode | `read`, `grep`, `find`, `ls` | `edit`, `write` | commands (`bash`, `powershell`) and any other tool (an extension's, an MCP server's) |
 | --- | --- | --- | --- |
-| `manual` | runs (asked with `ask_for_reads`) | asked | asked |
-| `accept_edits` | runs | runs | asked |
-| `plan` | runs | refused as a plan | refused as a plan |
-| `bypass` | runs | runs | runs |
+| `manual` | run inside the session's directories (asked with `ask_for_reads`) | asked | asked |
+| `accept_edits` | run inside the directories | run inside the directories and away from what Pi loads, else asked | asked |
+| `plan` | as Manual (asked with `ask_for_reads`) | refused as a plan | refused as a plan |
+| `bypass` | run | run | run |
 
-`auto` is never offered: Pi has no automatic reviewer to back it. What a client may choose is the start mode (`PiLaunch::mode`, Manual by default) and every stricter one in the order Plan, Manual, Accept edits, Bypass, and what `PiLaunch::modes` names besides; Bypass only with `allow_bypass`. A question offers `allow` (once), `allow_tool` ("Always allow <tool> in this session": every mode but Plan allows that tool from then on, for the rest of the session) and `reject`; a cancelled answer ends the run. Plan refuses without asking and tells the model why.
+A read outside the session's directories (`cwd`, the more directories, or `working_roots`) is asked about in every mode but Bypass, and a network path is never resolved to find out. A read of a credential file is refused (`protected`), asked about never, in every mode but Bypass: Pi's `auth.json`, `models.json` (its `apiKey` can be a command) and `mcp-auth.json` in the agent directory, and under the person's home `.ssh`, `.aws`, `.gnupg`, `.kube`, `.config/gcloud`, `.docker/config.json`, `.netrc` and `.npmrc`. An edit is never run unasked on a path that Pi loads code or configuration from: any path under the agent directory or `~/.pi`, any `.pi` or `.git` directory (hooks), credentials; Accept edits asks about those and about every path outside the directories (links followed), and about an edit whose path is missing or cut. `coqui_acp_pi::Scope` is that reasoning.
+
+`auto` is never offered: Pi has no automatic reviewer to back it. What a client may choose is the start mode (`PiLaunch::mode`, Manual by default) and every stricter one in the order Plan, Manual, Accept edits, Bypass, and what `PiLaunch::modes` names besides; Bypass only with `allow_bypass`. A question offers `allow` (once), `reject`, and where it can be said exactly `allow_tool`, which is remembered for the rest of the session in every mode but Plan: a plain command by its program ("Always allow `git …` in this session"; a command with a separator, substitution, redirection, variable or an assignment before its first word offers nothing to remember), `edit` or `write` inside the directories ("Always allow `write` inside the working directories in this session"), any other tool by its name ("Always allow the tool `name` in this session"); never a tool that only reads. A cancelled answer ends the run; a question that comes after the person stopped the run is answered cancelled and not asked. Plan refuses without asking and tells the model why.
 
 ## Provider (`PiProvider`, id `pi`)
 
@@ -162,6 +170,7 @@ pub struct ProviderSettings {                                        // ToValue,
     pub allow_bypass: bool,              // false
     pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `plan`, `bypass`
     pub ask_for_reads: bool,             // false
+    pub isolated: bool,                  // false: Pi loads only the gate (--no-extensions --no-mcp)
     pub max_acp_version: u64,            // 2 (1 or 2)
     pub max_sessions: u64,               // 8
     pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused
@@ -202,6 +211,7 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 - A write's old content is read from disk when Pi starts the call, before the gate answers, so it is the file as it was; the translator reads it only inside the session's directories, and a spawner on another machine shows an add.
 - A tool whose result holds an image shows its text only: the protocol's tool content has no image.
 - An empty message with an image is taken by Pi 1.5.2.
-- Project-local Pi settings are not read in RPC mode unless Pi is given `--approve`; pass it in `PiLaunch::extra_args` if wanted.
-- On Windows a `.cmd` is started through `cmd.exe`: std escapes its arguments and refuses one it cannot escape safely (Rust 1.77.2 and later). No text of the person is an argument, so none is refused.
+- Project-local Pi extensions, settings and MCP servers are never loaded (`--no-approve`); `--approve` in `PiLaunch::extra_args` would undo that and is not advised.
+- The key variable of a `pi-api-key` account is in the environment of Pi, so an approved `bash` command can read it, and so can a command remembered with "Always allow".
+- On Windows nothing goes through `cmd.exe`: see `PiLaunch::command`. A `pi.cmd` the crate cannot read a script from, or no `node.exe` outside the session's directories, is `Error::Refused`.
 - Everything Pi writes is the model's or Pi's: untrusted.

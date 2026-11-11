@@ -90,7 +90,8 @@ coqui-acp-pi --mode accept_edits --effort low
 | `--model`, `--effort` | Pi's | What every session starts with (`provider/id`, a thinking level) |
 | `--mode` | `manual` | The mode sessions start in and the loosest a client may choose: `manual`, `accept_edits` or `plan` |
 | `--allow-bypass` | off | Offers the Bypass mode: never ask |
-| `--ask-for-reads` | off | Asks before a tool that only reads, too, in Manual mode |
+| `--ask-for-reads` | off | Asks before a tool that only reads, too, in Manual and Plan modes |
+| `--isolated` | off | Pi loads only the permission gate: none of the person's own extensions, no MCP servers |
 | `--max-acp-version` | 2 | The highest ACP version answered |
 | `--max-sessions` | 8 | Sessions at once |
 | `--working-root` | any | A directory a session's `cwd` and more directories must lie in, repeated for more |
