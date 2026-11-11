@@ -773,6 +773,7 @@ impl Parser {
             } else {
                 ToolStatus::Completed
             });
+            call.output = block.get("content").cloned();
             return vec![Event::Tool(call)];
         };
         let name = tool.name.clone();
@@ -794,6 +795,8 @@ impl Parser {
         } else {
             ToolStatus::Completed
         });
+        // What the model was given back, as it was given.
+        call.output = block.get("content").cloned();
         if tools::TERMINAL_TOOLS.contains(&name.as_str()) {
             let mut terminal = Terminal::new(id);
             let output = match result.filter(|result| result.is_object()) {
