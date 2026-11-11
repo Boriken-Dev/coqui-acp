@@ -318,6 +318,12 @@ impl PiSession {
                 "the Bypass mode needs the launch to allow it".into(),
             ));
         }
+        if !ephemeral && let Some(root) = launch.credential_root() {
+            return Err(Error::Refused(format!(
+                "the working directory {} holds the places credentials are kept in; a search from there would read them                  (allow_credential_roots lets a launch do it)",
+                root.display()
+            )));
+        }
         for (what, value) in [("model", &launch.model), ("thinking level", &launch.effort)] {
             if let Some(value) = value
                 && (value.starts_with('-') || value.chars().any(char::is_control))
@@ -339,9 +345,10 @@ impl PiSession {
                     .map_err(Error::Spawn)?,
             )
         };
-        let mut command = launch.launch(
+        let mut command = launch.launch_guarded(
             gate.as_ref().map(Gate::extension),
             gate.as_ref().and_then(Gate::prompt),
+            gate.as_ref().map(Gate::guard),
         )?;
         if ephemeral {
             command = command.arg("--no-session");

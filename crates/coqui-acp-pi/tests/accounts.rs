@@ -175,6 +175,9 @@ fn start_and_close(provider: &PiProvider, request: StartRequest, dir: &Path) {
             Keeper.into_object(),
         )
         .expect("it starts");
+    // The session works beside the directory holding Pi's credentials, not over it.
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
     let ask = |id: u64, method: &str, params: serde_json::Value| {
         let message =
             serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
@@ -192,7 +195,7 @@ fn start_and_close(provider: &PiProvider, request: StartRequest, dir: &Path) {
     let opened = ask(
         2,
         "session/new",
-        serde_json::json!({"cwd": dir.to_string_lossy(), "mcpServers": []}),
+        serde_json::json!({"cwd": work.to_string_lossy(), "mcpServers": []}),
     );
     assert!(opened["error"].is_null(), "{opened}");
     channel.close(0, "");

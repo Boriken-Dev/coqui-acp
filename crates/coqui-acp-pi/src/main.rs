@@ -47,6 +47,9 @@ struct Cli {
     /// Load only the permission gate: none of the person's own extensions and no MCP servers.
     #[arg(long)]
     isolated: bool,
+    /// Let a session work in a directory that holds the places credentials are kept in (a home directory).
+    #[arg(long)]
+    allow_credential_roots: bool,
     /// The highest ACP version answered.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=2))]
     max_acp_version: u8,
@@ -86,6 +89,7 @@ fn main() -> ExitCode {
     defaults.allow_bypass = cli.allow_bypass;
     defaults.ask_for_reads = cli.ask_for_reads;
     defaults.isolated = cli.isolated;
+    defaults.allow_credential_roots = cli.allow_credential_roots;
     let agent = PiAgent::new().defaults(defaults);
     match serve(
         Arc::new(agent),

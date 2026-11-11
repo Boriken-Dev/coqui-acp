@@ -15,6 +15,9 @@ use serde_json::Value;
 /// The extension's source: TypeScript, which Pi loads itself. `__NONCE__` stands where a launch's nonce goes.
 pub const GATE_SOURCE: &str = include_str!("gate.ts");
 
+/// The Node preload that keeps the project out of every program search Pi makes.
+pub const GUARD_SOURCE: &str = include_str!("guard.cjs");
+
 /// What a dialog's title starts with when it is the gate's.
 pub(crate) const PREFIX: &str = "coqui-acp-pi-gate ";
 
@@ -26,6 +29,7 @@ const COMMAND_PREFIX: &str = "coqui-acp-pi-gate-";
 pub struct Gate {
     dir: PathBuf,
     extension: PathBuf,
+    guard: PathBuf,
     prompt: Option<PathBuf>,
     nonce: String,
 }
@@ -80,6 +84,7 @@ impl Gate {
         builder.create(&dir)?;
         let gate = Self {
             extension: dir.join("gate.ts"),
+            guard: dir.join("guard.cjs"),
             prompt: system_prompt.map(|_| dir.join("system-prompt.md")),
             dir,
             nonce,
@@ -89,6 +94,7 @@ impl Gate {
             &gate.extension,
             GATE_SOURCE.replace("__NONCE__", &gate.nonce),
         )?;
+        std::fs::write(&gate.guard, GUARD_SOURCE)?;
         if let (Some(path), Some(text)) = (&gate.prompt, system_prompt) {
             std::fs::write(path, text)?;
         }
@@ -99,6 +105,12 @@ impl Gate {
     #[must_use]
     pub fn extension(&self) -> &Path {
         &self.extension
+    }
+
+    /// The Node preload (`guard.cjs`), for `--require`.
+    #[must_use]
+    pub fn guard(&self) -> &Path {
+        &self.guard
     }
 
     /// The file holding the system prompt to append, for `--append-system-prompt`.
@@ -122,7 +134,14 @@ impl Gate {
 
 impl Drop for Gate {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        // Windows refuses to remove a directory while the process that used it is still ending.
+        for _ in 0..40 {
+            match std::fs::remove_dir_all(&self.dir) {
+                Ok(()) => return,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+                Err(_) => std::thread::sleep(core::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 

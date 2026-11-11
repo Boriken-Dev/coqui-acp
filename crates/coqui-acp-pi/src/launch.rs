@@ -63,6 +63,9 @@ pub struct PiLaunch {
     pub modes: Option<Vec<Mode>>,
     /// Whether Manual and Plan ask even before a tool that only reads.
     pub ask_for_reads: bool,
+    /// Whether a working directory may hold the places credentials are kept (the person's home, say, with its `.ssh`), which a
+    /// session is otherwise refused. A search from there (`grep` passes `--hidden`) reads them.
+    pub allow_credential_roots: bool,
     /// Whether Pi loads only the gate: no extension of the person's and no built-in one, MCP included, which another
     /// extension could use to change a call after the gate approved it.
     pub isolated: bool,
@@ -154,6 +157,7 @@ impl PiLaunch {
             allow_bypass: false,
             modes: None,
             ask_for_reads: false,
+            allow_credential_roots: false,
             isolated: false,
             gate_dir: None,
             extra_args: Vec::new(),
@@ -201,12 +205,39 @@ impl PiLaunch {
     #[must_use]
     pub fn agent_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
-        if let Some(dir) = self.named("PI_CODING_AGENT_DIR") {
-            dirs.push(dir);
+        if let Some(dir) = self
+            .named("PI_CODING_AGENT_DIR")
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
+            // Pi expands `~` in it, and reads a relative one against the directory it works in.
+            let home = self.home();
+            let found = paths::setting(
+                &dir.to_string_lossy(),
+                &self.cwd,
+                home.as_deref(),
+                cfg!(windows),
+            );
+            dirs.push(found.path);
         } else if let Some(home) = self.home() {
             dirs.push(home.join(".pi").join("agent"));
         }
         dirs
+    }
+
+    /// The first working directory that holds a place credentials are kept in (Pi's `auth.json` and `models.json`, the
+    /// person's `.ssh` and the like), when the launch does not allow it.
+    #[must_use]
+    pub fn credential_root(&self) -> Option<PathBuf> {
+        if self.allow_credential_roots {
+            return None;
+        }
+        let scope = crate::mode::Scope::new(&self.cwd, self.roots())
+            .with_agent_dirs(self.agent_dirs())
+            .with_home(self.home());
+        self.roots()
+            .into_iter()
+            .chain(core::iter::once(self.cwd.clone()))
+            .find(|root| scope.reaches_secret(Some(&root.to_string_lossy())))
     }
 
     fn path_value(&self) -> Option<OsString> {
@@ -269,6 +300,39 @@ impl PiLaunch {
         Ok((node.into_os_string(), vec![script.into_os_string()]))
     }
 
+    /// Loads `guard` into a Pi that runs on Node, ahead of whatever `NODE_OPTIONS` the launch already has.
+    fn preload(&self, launch: &mut Launch, guard: &Path) {
+        // Forward slashes: NODE_OPTIONS reads a backslash as an escape inside quotes.
+        let written = guard.to_string_lossy().replace('\\', "/");
+        let require = if written.contains([' ', '"']) {
+            format!("--require \"{}\"", written.replace('"', "\\\""))
+        } else {
+            format!("--require {written}")
+        };
+        let before = (!self.clear_env || self.env.keys().any(|k| k == "NODE_OPTIONS"))
+            .then(|| self.named("NODE_OPTIONS"))
+            .flatten();
+        let options = match before {
+            Some(before) if !before.as_os_str().is_empty() => {
+                format!("{require} {}", before.to_string_lossy())
+            }
+            _ => require,
+        };
+        launch.env.insert("NODE_OPTIONS".into(), options.into());
+        launch.remove_env.retain(|name| name != "NODE_OPTIONS");
+        let keep_out: Vec<String> = {
+            let mut dirs = self.roots();
+            dirs.push(self.cwd.clone());
+            dirs.iter()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .collect()
+        };
+        launch.env.insert(
+            "COQUI_ACP_PI_KEEP_OUT".into(),
+            serde_json::to_string(&keep_out).unwrap_or_default().into(),
+        );
+    }
+
     /// The command of Pi with no arguments of its own yet: the program, its leading arguments, the environment.
     ///
     /// # Errors
@@ -312,6 +376,22 @@ impl PiLaunch {
     ///
     /// As [`PiLaunch::command`].
     pub fn launch(&self, extension: Option<&Path>, prompt: Option<&Path>) -> Result<Launch, Error> {
+        self.launch_guarded(extension, prompt, None)
+    }
+
+    /// As [`PiLaunch::launch`], and with `guard` (the Node preload `guard.cjs`) loaded into Pi: `NODE_OPTIONS` gets
+    /// `--require` of it, and `COQUI_ACP_PI_KEEP_OUT` names the session's directories, which no program search of Pi's may
+    /// look in. The preload only acts in a Pi that runs on Node.
+    ///
+    /// # Errors
+    ///
+    /// As [`PiLaunch::command`].
+    pub fn launch_guarded(
+        &self,
+        extension: Option<&Path>,
+        prompt: Option<&Path>,
+        guard: Option<&Path>,
+    ) -> Result<Launch, Error> {
         let mut launch = self
             .base()?
             .args(["--mode", "rpc", "--no-approve"])
@@ -336,6 +416,9 @@ impl PiLaunch {
         }
         if let Some(prompt) = prompt {
             launch = launch.arg("--append-system-prompt").arg(prompt);
+        }
+        if let Some(guard) = guard {
+            self.preload(&mut launch, guard);
         }
         Ok(launch.args(self.extra_args.iter()))
     }

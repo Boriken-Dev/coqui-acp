@@ -197,3 +197,135 @@ mod windows {
         assert!(launch.launch(None, None).is_err());
     }
 }
+
+#[test]
+fn the_guard_is_loaded_through_node_options_and_the_session_directories_are_kept_out_of_every_search()
+ {
+    let scratch = Scratch::new("guard-env");
+    let (cwd, home, more) = (
+        scratch.dir("work"),
+        scratch.dir("home"),
+        scratch.dir("more"),
+    );
+    let mut launch = launching(&cwd, &home);
+    launch.additional_directories.push(more.clone());
+    launch
+        .env
+        .insert("NODE_OPTIONS".into(), "--max-old-space-size=64".into());
+    let guard = scratch.dir("gates").join("guard.cjs");
+    let made = launch
+        .launch_guarded(None, None, Some(&guard))
+        .expect("a command");
+    let options = made
+        .env
+        .get(std::ffi::OsStr::new("NODE_OPTIONS"))
+        .expect("NODE_OPTIONS")
+        .to_string_lossy()
+        .into_owned();
+    let written = guard.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        options,
+        format!("--require {written} --max-old-space-size=64"),
+        "the guard comes first and the person's options stay"
+    );
+    let keep: Vec<String> = serde_json::from_str(
+        &made
+            .env
+            .get(std::ffi::OsStr::new("COQUI_ACP_PI_KEEP_OUT"))
+            .expect("the directories")
+            .to_string_lossy(),
+    )
+    .unwrap();
+    for dir in [&cwd, &more] {
+        assert!(
+            keep.iter().any(|kept| kept == &dir.to_string_lossy()),
+            "{dir:?} is not kept out: {keep:?}"
+        );
+    }
+    // A path with a space is quoted for NODE_OPTIONS.
+    let spaced = scratch.dir("a gate").join("guard.cjs");
+    let made = launch
+        .launch_guarded(None, None, Some(&spaced))
+        .expect("a command");
+    let options = made
+        .env
+        .get(std::ffi::OsStr::new("NODE_OPTIONS"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        options.starts_with(&format!(
+            "--require \"{}\"",
+            spaced.to_string_lossy().replace('\\', "/")
+        )),
+        "{options}"
+    );
+}
+
+#[test]
+fn a_session_starts_pi_with_the_guard_in_the_gate_directory_and_removes_the_directory_with_it() {
+    let scratch = Scratch::new("guard-session");
+    let (cwd, home, gates) = (
+        scratch.dir("work"),
+        scratch.dir("home"),
+        scratch.dir("gates"),
+    );
+    let mut launch = launching(&cwd, &home);
+    launch.gate_dir = Some(gates.clone());
+    let (session, _events) = start(&launch).expect("it starts");
+    let names = logged(&home)[0]["env_names"].clone();
+    for wanted in ["NODE_OPTIONS", "COQUI_ACP_PI_KEEP_OUT"] {
+        assert!(
+            names.as_array().unwrap().iter().any(|n| n == wanted),
+            "{wanted} is not in Pi's environment: {names}"
+        );
+    }
+    let held: Vec<_> = std::fs::read_dir(&gates).unwrap().flatten().collect();
+    assert_eq!(held.len(), 1, "one directory for one session");
+    assert!(held[0].path().join("guard.cjs").is_file());
+    drop(session);
+    assert_eq!(
+        std::fs::read_dir(&gates).unwrap().count(),
+        0,
+        "the gate's directory outlived the session"
+    );
+}
+
+#[test]
+fn a_launch_whose_working_directory_holds_the_places_credentials_are_kept_is_refused_unless_allowed()
+ {
+    let scratch = Scratch::new("credential-root");
+    let (cwd, home) = (scratch.dir("work"), scratch.dir("home"));
+    // The scratch directory holds the agent directory (`home`) with its `auth.json`, as a person's home holds `.ssh`.
+    let mut launch = launching(&scratch.0, &home);
+    let Err(error) = start(&launch) else {
+        panic!("a session was opened over the credentials");
+    };
+    assert!(matches!(error, Error::Refused(_)), "{error}");
+    assert!(error.to_string().contains("credentials"), "{error}");
+    launch.allow_credential_roots = true;
+    assert!(start(&launch).is_ok());
+    // A project beside it is fine, and so is one with more directories beside it.
+    let launch = launching(&cwd, &home);
+    assert!(start(&launch).is_ok());
+}
+
+#[test]
+fn a_tilde_in_the_agent_directory_is_the_home_pi_expands_it_to() {
+    let scratch = Scratch::new("tilde-agent");
+    let (cwd, home) = (scratch.dir("work"), scratch.dir("home"));
+    let mut launch = PiLaunch::new(&cwd);
+    for name in ["HOME", "USERPROFILE"] {
+        launch.env.insert(name.into(), home.clone().into());
+    }
+    launch
+        .env
+        .insert("PI_CODING_AGENT_DIR".into(), "~/elsewhere".into());
+    assert_eq!(launch.agent_dirs(), [home.join("elsewhere")]);
+    launch.env.insert("PI_CODING_AGENT_DIR".into(), "~".into());
+    assert_eq!(launch.agent_dirs(), std::slice::from_ref(&home));
+    launch
+        .env
+        .insert("PI_CODING_AGENT_DIR".into(), "plain/dir".into());
+    assert_eq!(launch.agent_dirs(), [cwd.join("plain").join("dir")]);
+}

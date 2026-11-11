@@ -59,6 +59,10 @@ pub struct ProviderSettings {
     /// call runs after the gate approved it.
     #[map(default = false)]
     pub isolated: bool,
+    /// Whether a session's working directory may hold the places credentials are kept in (a home directory with its `.ssh`):
+    /// a search from there reads them, so a session is refused otherwise.
+    #[map(default = false)]
+    pub allow_credential_roots: bool,
     /// The highest ACP version `initialize` answers: 1 or 2.
     #[map(default = 2)]
     pub max_acp_version: u64,
@@ -89,6 +93,7 @@ impl Default for ProviderSettings {
             modes: None,
             ask_for_reads: false,
             isolated: false,
+            allow_credential_roots: false,
             max_acp_version: 2,
             max_sessions: 8,
             max_requests: 32,
@@ -172,6 +177,7 @@ impl PiProvider {
         launch.modes.clone_from(&self.settings.modes);
         launch.ask_for_reads = self.settings.ask_for_reads;
         launch.isolated = self.settings.isolated;
+        launch.allow_credential_roots = self.settings.allow_credential_roots;
         for (name, value) in environment.iter() {
             launch.env.insert(name.into(), value.into());
         }

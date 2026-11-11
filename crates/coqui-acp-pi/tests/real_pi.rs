@@ -311,3 +311,47 @@ console.log("OK", text.length, JSON.stringify(call.input._cut));
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Pi starts npm and git for the packages its settings name, by bare name; on Windows its spawner looks in the working
+/// directory first, and runs a file with a script's first line under any executable extension.
+#[cfg(windows)]
+#[test]
+fn a_real_pi_never_runs_a_program_the_project_plants_under_the_name_of_npm_or_git() {
+    for isolated in [false, true] {
+        let Some(world) = world("real-planted") else {
+            eprintln!("skipped: no real Pi named");
+            return;
+        };
+        let marker = world.scratch.0.join("RAN");
+        let body = format!(
+            "#!/usr/bin/env node\nrequire('fs').appendFileSync({:?}, process.argv[1] + '\\n');\n",
+            marker.to_string_lossy()
+        );
+        for name in ["npm.cmd", "npm.EXE", "git.bat", "git.exe"] {
+            std::fs::write(world.project.join(name), &body).unwrap();
+        }
+        std::fs::write(
+            world.home.join(".pi").join("agent").join("settings.json"),
+            r#"{"defaultProvider": "stub", "defaultModel": "stub-fast",
+                "packages": ["npm:coqui-no-such-package-xyz", "git:github.com/coqui-no-such/repo"]}"#,
+        )
+        .unwrap();
+        let mut launch = world.launch(Mode::Manual);
+        launch.env.remove(std::ffi::OsStr::new("PI_OFFLINE"));
+        launch.isolated = isolated;
+        let (sink, events) = Events::new();
+        let session = PiSession::start(&launch, &PlainSpawn, PiSettings::new(), sink)
+            .expect("the real Pi starts with the gate");
+        // The packages are installed as Pi starts; give a program that was found time to write its mark.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !marker.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let ran = std::fs::read_to_string(&marker).unwrap_or_default();
+        drop((session, events));
+        assert!(
+            ran.is_empty(),
+            "isolated {isolated}: a program of the project ran at startup: {ran}"
+        );
+    }
+}
