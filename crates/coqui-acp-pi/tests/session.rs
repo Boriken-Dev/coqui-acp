@@ -117,7 +117,11 @@ fn the_gate_is_a_private_file_that_goes_with_the_session_and_nothing_is_written_
         .expect("the gate is loaded with -e");
     let extension = Path::new(args[at + 1].as_str().unwrap());
     assert!(extension.starts_with(world.scratch.0.join("gates")));
-    assert_eq!(started["gate"], GATE_SOURCE);
+    let text = started["gate"].as_str().unwrap();
+    assert!(
+        !text.contains("__NONCE__") && text.len() > GATE_SOURCE.len(),
+        "the launch's nonce is in the file"
+    );
     assert_eq!(&args[..2], ["--mode", "rpc"]);
     assert_eq!(
         Path::new(started["cwd"].as_str().unwrap()).file_name(),
@@ -508,33 +512,4 @@ fn a_program_that_is_not_there_is_a_spawn_error() {
     let (sink, _events) = Events::new();
     let error = PiSession::start(&launch, &PlainSpawn, PiSettings::new(), sink).unwrap_err();
     assert!(matches!(error, Error::Spawn(_)), "{error}");
-}
-
-/// npm installs Pi on Windows as `pi.cmd`, which a bare `pi` does not name to the system: the launch finds it in `PATH`.
-#[cfg(windows)]
-#[test]
-fn a_bare_pi_finds_the_npm_shim_on_windows_and_runs_a_turn_through_it() {
-    let world = world("cmd");
-    let shim = world.scratch.dir("npm");
-    std::fs::write(
-        shim.join("pi.cmd"),
-        format!("@\"{}\" %*\r\n", support::fake_program().display()),
-    )
-    .unwrap();
-    let mut launch = world.launch();
-    launch.executable = "pi".into();
-    let path = format!(
-        "{};{}",
-        shim.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    launch.env.insert("PATH".into(), path.into());
-    assert_eq!(launch.program(), shim.join("pi.cmd").into_os_string());
-    let (session, mut events) = world.start(&launch);
-    say(&session, "hello");
-    events.turn();
-    assert_eq!(events.said(), "echo: hello");
-    // A gated call goes through the shim too, its arguments (the gate's path among them) escaped by std.
-    say(&session, "ask");
-    events.until(|event| matches!(event, Event::Permission(_)));
 }

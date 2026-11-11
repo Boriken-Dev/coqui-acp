@@ -55,6 +55,10 @@ pub struct ProviderSettings {
     /// Whether Manual mode asks even before a tool that only reads.
     #[map(default = false)]
     pub ask_for_reads: bool,
+    /// Whether Pi loads only the permission gate: none of the person's own extensions and no MCP, which could change what a
+    /// call runs after the gate approved it.
+    #[map(default = false)]
+    pub isolated: bool,
     /// The highest ACP version `initialize` answers: 1 or 2.
     #[map(default = 2)]
     pub max_acp_version: u64,
@@ -84,6 +88,7 @@ impl Default for ProviderSettings {
             allow_bypass: false,
             modes: None,
             ask_for_reads: false,
+            isolated: false,
             max_acp_version: 2,
             max_sessions: 8,
             max_requests: 32,
@@ -121,8 +126,9 @@ fn unsupported(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, why)
 }
 
-/// The reason for the first requirement Pi cannot be held to; none is held. Pi has no sandbox, no read-only mode and no
-/// switch for its extensions, skills and MCP servers, which the person's own configuration loads.
+/// The reason for the first requirement Pi cannot be held to; none is held. Pi has no sandbox and no read-only mode, a
+/// session's mode is the gate's and not a requirement's, and the person's own extensions, skills and MCP servers load unless
+/// the provider is `isolated`; the project's own resources never load (`--no-approve`).
 fn narrow(requirements: &[Requirement]) -> Result<Option<String>, ProviderError> {
     let narrowings = match Narrowing::read_all(requirements) {
         Ok(narrowings) => narrowings,
@@ -165,6 +171,7 @@ impl PiProvider {
         launch.allow_bypass = self.settings.allow_bypass;
         launch.modes.clone_from(&self.settings.modes);
         launch.ask_for_reads = self.settings.ask_for_reads;
+        launch.isolated = self.settings.isolated;
         for (name, value) in environment.iter() {
             launch.env.insert(name.into(), value.into());
         }

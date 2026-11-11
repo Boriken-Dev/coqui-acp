@@ -22,6 +22,7 @@ pub use agent::{DEFAULT, PiAgent};
 pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned};
 pub use gate::{GATE_SOURCE, Gate};
 pub use launch::{PiLaunch, SessionStart, valid_session_id};
+pub use mode::Scope;
 pub use parse::{Parser, ParserLimits};
 pub use provider::{PiProvider, ProviderSettings};
 pub use session::{Model, PiSession, PiSettings, models_of, user_input};

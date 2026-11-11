@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use coqui_acp_api::usage::{DEFAULT_LIMIT_PHRASES, infer_limit};
-use coqui_acp_harness::acp::within_roots;
 use coqui_acp_harness::event::{
     Content, Diff, Event, FileChange, Location, OptionKind, Outcome, PermissionOption,
     PermissionRequest, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolKind,
@@ -26,7 +25,7 @@ use coqui_acp_harness::lines::{cut, one_line};
 use serde_json::{Map, Value, json};
 
 use crate::gate;
-use crate::mode::{Decision, Policy};
+use crate::mode::{Decision, Policy, Scope};
 
 /// Writes one line to Pi.
 pub type Writer = Arc<dyn Fn(&Value) -> io::Result<()> + Send + Sync>;
@@ -139,6 +138,8 @@ pub struct Parser {
     max_tools: usize,
     cwd: PathBuf,
     roots: Vec<PathBuf>,
+    /// Pi's agent directories, where it keeps its credentials and the code it loads.
+    protected: Vec<PathBuf>,
     tools: BTreeMap<String, Tool>,
     order: VecDeque<String>,
     /// The ids given out to tool calls, so that a model that repeats one gets another.
@@ -187,6 +188,7 @@ impl Parser {
             max_tools,
             cwd: PathBuf::new(),
             roots: Vec::new(),
+            protected: Vec::new(),
             tools: BTreeMap::new(),
             order: VecDeque::new(),
             used: BTreeSet::new(),
@@ -206,6 +208,17 @@ impl Parser {
     pub fn with_policy(mut self, policy: Arc<Mutex<Policy>>) -> Self {
         self.policy = policy;
         self
+    }
+    /// Pi's agent directories: files of theirs that hold credentials are refused, and files in them are never written
+    /// without a question, since Pi loads code and configuration from there.
+    #[must_use]
+    pub fn with_protected(mut self, agent_dirs: Vec<PathBuf>) -> Self {
+        self.protected = agent_dirs;
+        self
+    }
+
+    fn scope(&self) -> Scope {
+        Scope::new(&self.cwd, self.roots.clone()).with_agent_dirs(self.protected.clone())
     }
 
     /// The directory relative paths are against, and the directories a file may be read from for a write's old content.
@@ -792,15 +805,14 @@ impl Parser {
     /// The file a `write` is about to replace, read before Pi writes it: Pi's result has no old content. Only inside the
     /// directories the session works in, and only a plain file of a bounded size.
     fn old_content(&self, args: &Value) -> Option<String> {
-        let path = PathBuf::from(self.path_of(args)?);
-        let roots: Vec<PathBuf> = if self.roots.is_empty() {
-            vec![self.cwd.clone()]
-        } else {
-            self.roots.clone()
-        };
-        if !within_roots(&path, &roots) {
+        let text = args.get("path")?.as_str()?;
+        let scope = self.scope();
+        // A credential file is not read for a diff, and a file outside the session's directories is not either; a network
+        // path is passed over by how it is written, before anything opens it.
+        if scope.secret(text) || !scope.inside(text) {
             return None;
         }
+        let path = self.cwd.join(text);
         let meta = std::fs::metadata(&path).ok()?;
         if !meta.is_file() || meta.len() > self.limits.max_old_bytes {
             return None;
@@ -983,84 +995,127 @@ impl Parser {
         }
     }
 
-    /// The gate asks about a call: the mode answers, or the person is asked.
+    /// The gate asks about a call: the mode answers, or the person is asked. What is decided on, and shown, is the input
+    /// the gate saw when it asked, not what the stream announced: another extension may change the input in between.
     fn gate(&mut self, dialog: &str, title: &str) -> Vec<Event> {
-        let Some((id, name)) = gate::call_of(title) else {
+        let Some(mut asked) = gate::call_of(title) else {
             self.respond(dialog, &json!({"cancelled": true}));
             return Vec::new();
         };
-        let decision = locked(&self.policy).decide(&name);
-        match decision {
-            Decision::Allow => {
-                self.respond(dialog, &json!({"value": "allow"}));
-                return Vec::new();
+        // A gate that sent no input (an older one) is decided on what the stream announced.
+        if asked.input.is_null() {
+            let announced = asked
+                .id
+                .as_ref()
+                .and_then(|id| self.tools.get(id))
+                .or_else(|| {
+                    self.order
+                        .iter()
+                        .filter_map(|key| self.tools.get(key))
+                        .find(|tool| tool.name == asked.tool && !tool.asked && !tool.finished)
+                });
+            if let Some(tool) = announced {
+                asked.input = tool.args.clone();
             }
-            Decision::Plan => {
-                self.respond(dialog, &json!({"value": "plan"}));
-                return Vec::new();
-            }
-            Decision::Ask => {}
         }
-        // The call, by the id Pi gave the gate, else the oldest of that tool not asked about yet.
-        let key = id.filter(|id| self.tools.contains_key(id)).or_else(|| {
-            self.order
+        // A question that comes after the person stopped the run is not put to them.
+        if self.run.state.load(Ordering::SeqCst) != 0 {
+            self.respond(dialog, &json!({"cancelled": true}));
+            return Vec::new();
+        }
+        let name = asked.tool.clone();
+        let decision = locked(&self.policy).decide(&name, &asked.input, &self.scope());
+        let answer = match decision {
+            Decision::Allow => Some("allow"),
+            Decision::Plan => Some("plan"),
+            Decision::Protected => Some("protected"),
+            Decision::Ask => None,
+        };
+        if let Some(answer) = answer {
+            self.respond(dialog, &json!({"value": answer}));
+            return Vec::new();
+        }
+        // The call the stream announced under the id Pi gave the gate, when that one has not been asked about yet; else the
+        // oldest of that tool not asked about. A reused id is a call of its own.
+        let free = |tool: &Tool| tool.name == name && !tool.asked && !tool.finished;
+        let key = match &asked.id {
+            Some(id) if self.tools.get(id).is_some_and(free) => Some(id.clone()),
+            // An id already asked about, or finished, is reused by the model: a call of its own.
+            Some(id) if self.tools.contains_key(id) => None,
+            _ => self
+                .order
                 .iter()
-                .find(|key| {
-                    self.tools
-                        .get(*key)
-                        .is_some_and(|tool| tool.name == name && !tool.asked && !tool.finished)
-                })
-                .cloned()
-        });
-        let whole = key
+                .find(|key| self.tools.get(*key).is_some_and(free))
+                .cloned(),
+        };
+        let (kind, shown, locations) = self.view(&name, &asked.input);
+        let id = match key.as_ref().and_then(|key| self.tools.get_mut(key)) {
+            Some(tool) => {
+                tool.asked = true;
+                tool.id.clone()
+            }
+            None => format!("gate-{dialog}"),
+        };
+        // What the stream said, to tell the person when it is not what the gate saw.
+        let announced = key
             .as_ref()
             .and_then(|key| self.tools.get(key))
-            .and_then(|tool| tool.args.get("command").and_then(Value::as_str))
-            .map(|command| self.told(command));
-        let (mut call, question, description) =
-            match key.as_ref().and_then(|key| self.tools.get_mut(key)) {
-                Some(tool) => {
-                    tool.asked = true;
-                    let mut call = ToolCall::new(tool.id.clone());
-                    call.name = Some(tool.name.clone());
-                    call.title = Some(tool.title.clone());
-                    call.kind = Some(tool.kind);
-                    call.input = Some(tool.args.clone());
-                    call.locations = Some(tool.locations.clone());
-                    let question = match name.as_str() {
-                        "bash" => format!("Run {}", tool.title),
-                        _ => tool.title.clone(),
-                    };
-                    let long = tool
-                        .args
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|command| command.len() > tool.title.len());
-                    let description = if tool.kind == ToolKind::Execute && long {
-                        whole
-                    } else {
-                        None
-                    };
-                    (call, question, description)
-                }
-                None => (
-                    ToolCall::new(format!("gate-{dialog}")),
-                    format!("Use {name}"),
-                    None,
-                ),
-            };
+            .map(|tool| tool.args.clone());
+        let differs = announced.as_ref().is_some_and(|before| {
+            ["command", "path"]
+                .iter()
+                .any(|field| before.get(field) != asked.input.get(field))
+        });
+        let command = asked.input.get("command").and_then(Value::as_str);
+        let mut told: Vec<String> = Vec::new();
+        if differs {
+            told.push(
+                "The call's input changed after Pi announced it; this is what it will run.".into(),
+            );
+        }
+        if kind == ToolKind::Execute
+            && let Some(command) = command
+            && (differs || command.len() > shown.len())
+        {
+            told.push(self.told(command));
+        }
+        if asked
+            .input
+            .get("_cut")
+            .and_then(Value::as_array)
+            .is_some_and(|cut| !cut.is_empty())
+        {
+            told.push("Some of its input is longer than the gate sends and is cut here.".into());
+        }
+        let description = (!told.is_empty()).then(|| told.join("\n\n"));
+        let question = if kind == ToolKind::Execute {
+            format!("Run {shown}")
+        } else {
+            shown.clone()
+        };
+        let mut call = ToolCall::new(id);
+        call.name = Some(name.clone());
+        call.title = Some(shown);
+        call.kind = Some(kind);
+        call.input = Some(asked.input.clone());
+        call.locations = Some(locations);
         call.status = Some(ToolStatus::Pending);
         locked(&self.open).insert(dialog.to_string());
-        let responder = self.responder(dialog, &name);
-        let options = vec![
-            PermissionOption::new(ALLOW, "Allow", OptionKind::AllowOnce),
-            PermissionOption::new(
+        let remember = Policy::remember(&name, &asked.input);
+        let responder = self.responder(dialog, remember.as_ref().map(|r| r.key.clone()));
+        let mut options = vec![PermissionOption::new(ALLOW, "Allow", OptionKind::AllowOnce)];
+        if let Some(remember) = remember {
+            options.push(PermissionOption::new(
                 ALLOW_TOOL,
-                format!("Always allow {name} in this session"),
+                remember.label,
                 OptionKind::AllowAlways,
-            ),
-            PermissionOption::new(REJECT, "Reject", OptionKind::RejectOnce),
-        ];
+            ));
+        }
+        options.push(PermissionOption::new(
+            REJECT,
+            "Reject",
+            OptionKind::RejectOnce,
+        ));
         let mut details = Map::new();
         details.insert("tool".into(), json!(name));
         vec![Event::Permission(
@@ -1069,14 +1124,14 @@ impl Parser {
         )]
     }
 
-    fn responder(&self, dialog: &str, tool: &str) -> Responder {
+    fn responder(&self, dialog: &str, key: Option<String>) -> Responder {
         let (writer, open, policy) = (
             Arc::clone(&self.writer),
             Arc::clone(&self.open),
             Arc::clone(&self.policy),
         );
         let state = Arc::clone(&self.run.state);
-        let (dialog, tool) = (dialog.to_string(), tool.to_string());
+        let dialog = dialog.to_string();
         Responder::new(move |outcome| {
             // An abort that cancelled the dialog has answered it already.
             if !locked(&open).remove(&dialog) {
@@ -1086,7 +1141,9 @@ impl Parser {
             let fields = match outcome {
                 Outcome::Selected(chosen) if chosen == ALLOW => json!({"value": "allow"}),
                 Outcome::Selected(chosen) if chosen == ALLOW_TOOL => {
-                    locked(&policy).allow_tool(&tool);
+                    if let Some(key) = &key {
+                        locked(&policy).allow_key(key);
+                    }
                     json!({"value": "allow"})
                 }
                 Outcome::Cancelled => json!({"cancelled": true}),

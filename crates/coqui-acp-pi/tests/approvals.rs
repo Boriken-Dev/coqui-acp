@@ -41,8 +41,8 @@ fn call(tool: &str, args: &Value, dialog: &str) -> Vec<Value> {
     vec![
         json!({"type": "tool_execution_start", "toolCallId": dialog, "toolName": tool, "args": args}),
         json!({"type": "extension_ui_request", "id": dialog, "method": "select",
-               "title": format!("coqui-acp-pi-gate {}", json!({"id": dialog, "tool": tool})),
-               "options": ["allow", "deny", "plan"]}),
+               "title": format!("coqui-acp-pi-gate {}", json!({"id": dialog, "tool": tool, "input": args})),
+               "options": ["allow", "deny", "plan", "protected"]}),
     ]
 }
 
@@ -144,7 +144,7 @@ fn always_allowing_a_tool_answers_it_without_asking_again_but_not_another_tool()
     parser.prompting();
     let mut requests = asked(feed(
         &mut parser,
-        &call("bash", &json!({"command": "a"}), "d1"),
+        &call("bash", &json!({"command": "git a"}), "d1"),
     ));
     requests
         .remove(0)
@@ -155,7 +155,7 @@ fn always_allowing_a_tool_answers_it_without_asking_again_but_not_another_tool()
     assert!(
         asked(feed(
             &mut parser,
-            &call("bash", &json!({"command": "b"}), "d2")
+            &call("bash", &json!({"command": "git b"}), "d2")
         ))
         .is_empty()
     );
@@ -207,6 +207,8 @@ fn the_mode_set_between_calls_decides_the_next_one() {
     let write = json!({"path": "a", "content": "b"});
     drop(asked(feed(&mut parser, &call("write", &write, "d1"))));
     policy.lock().unwrap().set_mode(Mode::Plan);
+    // The first question was dropped, which ends the run: the next call is in a new one.
+    parser.prompting();
     written.lock().unwrap().clear();
     assert!(asked(feed(&mut parser, &call("write", &write, "d2"))).is_empty());
     assert_eq!(answers(&written)[0]["value"], "plan");
@@ -265,7 +267,10 @@ fn the_recorded_gate_questions_are_the_ones_this_parser_answers() {
                 .unwrap()
                 .starts_with("coqui-acp-pi-gate ")
         );
-        assert_eq!(question["options"], json!(["allow", "deny", "plan"]));
+        assert_eq!(
+            question["options"],
+            json!(["allow", "deny", "plan", "protected"])
+        );
     }
     let (mut parser, written, _) = parser_in(Mode::Manual);
     parser.prompting();

@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 
 use coqui_acp_api::{Bucket, UsageSupport};
 use coqui_acp_harness::{
-    AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, Launch, McpTransport,
-    Open, OpenRequest, OptionValue, PlainSpawn, Spawn, Takes,
+    AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, McpTransport, Open,
+    OpenRequest, OptionValue, PlainSpawn, Spawn, Takes,
 };
 
 use crate::launch::{PiLaunch, SessionStart, valid_session_id};
@@ -90,11 +90,7 @@ impl PiAgent {
                 if self.settings.version_wait.is_zero() {
                     return None;
                 }
-                let mut launch = Launch::new(self.defaults.program())
-                    .arg("--version")
-                    .clear_env(self.defaults.clear_env);
-                launch.env.clone_from(&self.defaults.env);
-                launch.remove_env.clone_from(&self.defaults.remove_env);
+                let launch = self.defaults.base().ok()?.arg("--version");
                 let spawned = self.spawn.spawn(&launch).ok()?;
                 let (sender, received) = std::sync::mpsc::channel();
                 let mut stdout = spawned.stdout;

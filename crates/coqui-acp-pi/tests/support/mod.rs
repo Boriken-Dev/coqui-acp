@@ -306,3 +306,33 @@ impl Peer {
             .collect()
     }
 }
+
+/// An npm-shaped install of Pi on Windows: the shim `pi.cmd` with its script, and in a `bin` directory a `node.exe` (the
+/// stand-in, which reads Pi's arguments and ignores the script's). The directories of the shim and of `bin`.
+#[cfg(windows)]
+pub fn npm_install(scratch: &Scratch) -> (PathBuf, PathBuf) {
+    let npm = scratch.dir("npm");
+    let package = npm.join("node_modules").join("pkg").join("dist");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("cli.js"), "// the script\n").unwrap();
+    std::fs::write(
+        npm.join("pi.cmd"),
+        "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\n\
+         IF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n)\r\n\r\n\
+         endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\pkg\\dist\\cli.js\" %*\r\n",
+    )
+    .unwrap();
+    let bin = scratch.dir("bin");
+    std::fs::copy(fake_program(), bin.join("node.exe")).unwrap();
+    (npm, bin)
+}
+
+/// A `PATH` of these directories, then the system's.
+#[cfg(windows)]
+pub fn path_with(dirs: &[&Path]) -> std::ffi::OsString {
+    let mut all: Vec<PathBuf> = dirs.iter().map(|d| d.to_path_buf()).collect();
+    all.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(all).unwrap()
+}

@@ -107,6 +107,8 @@ struct Fake {
     model: String,
     level: String,
     gated: bool,
+    /// The command the gate registers, found in the gate's file.
+    gate_command: Option<String>,
     messages: Vec<Value>,
     /// The id of an `abort`, answered once the run it stopped has settled.
     abort_id: Option<Value>,
@@ -156,14 +158,16 @@ impl Fake {
             "get_available_thinking_levels" => {
                 respond(id, command, Some(json!({"levels": levels(&self.model)})));
             }
-            "get_commands" => respond(
-                id,
-                command,
-                Some(
-                    json!({"commands": [{"name": "fake", "description": "A command of an extension",
-                                          "source": "extension"}]}),
-                ),
-            ),
+            "get_commands" => {
+                let mut commands = vec![
+                    json!({"name": "fake", "description": "A command of an extension",
+                                              "source": "extension"}),
+                ];
+                if let Some(gate) = &self.gate_command {
+                    commands.push(json!({"name": gate, "description": "the gate is loaded", "source": "extension"}));
+                }
+                respond(id, command, Some(json!({"commands": commands})));
+            }
             "get_messages" => respond(id, command, Some(json!({"messages": self.messages}))),
             "set_model" => {
                 let wanted = line["modelId"].as_str().unwrap_or("");
@@ -360,8 +364,8 @@ impl Fake {
             let dialog = uuid();
             emit(
                 &json!({"type": "extension_ui_request", "id": dialog, "method": "select",
-                         "title": format!("coqui-acp-pi-gate {}", json!({"id": "call_1", "tool": tool})),
-                         "options": ["allow", "deny", "plan"]}),
+                         "title": format!("coqui-acp-pi-gate {}", json!({"id": "call_1", "tool": tool, "input": args})),
+                         "options": ["allow", "deny", "plan", "protected"]}),
             );
             loop {
                 let Ok(line) = self.lines.recv() else {
@@ -373,6 +377,11 @@ impl Fake {
                         Some("plan") => {
                             allowed = false;
                             "Plan mode: nothing may be changed or run. Say what you would do instead."
+                                .clone_into(&mut blocked);
+                        }
+                        Some("protected") => {
+                            allowed = false;
+                            "That path holds credentials or configuration Pi loads; it is not available to you."
                                 .clone_into(&mut blocked);
                         }
                         _ => allowed = false,
@@ -598,6 +607,16 @@ fn main() {
     {
         level = wanted;
     }
+    // `COQUI_ACP_FAKE_PI_NO_GATE` makes it a Pi that did not load the extension it was given.
+    let gated = gate.is_some() && std::env::var_os("COQUI_ACP_FAKE_PI_NO_GATE").is_none();
+    let gate_command = gate
+        .as_ref()
+        .filter(|_| gated)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| {
+            let (_, rest) = text.split_once("const NONCE = \"")?;
+            Some(format!("coqui-acp-pi-gate-{}", rest.split_once('"')?.0))
+        });
     let (sender, lines) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -614,7 +633,8 @@ fn main() {
         id: uuid(),
         model,
         level,
-        gated: gate.is_some(),
+        gated,
+        gate_command,
         messages: Vec::new(),
         abort_id: None,
         lines,

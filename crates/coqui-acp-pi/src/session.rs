@@ -211,6 +211,7 @@ pub struct PiSession {
     titled: AtomicBool,
     sink: Arc<dyn Fn(Event) -> bool + Send + Sync>,
     /// Removes the gate's directory once Pi has ended: declared last, so it is dropped after the close.
+    gate_command: Option<String>,
     _gate: Option<Gate>,
 }
 
@@ -312,6 +313,11 @@ impl PiSession {
         sink: impl Fn(Event) -> bool + Send + Sync + 'static,
         ephemeral: bool,
     ) -> Result<Self, Error> {
+        if launch.start_mode() == Mode::Bypass && !launch.allow_bypass {
+            return Err(Error::Refused(
+                "the Bypass mode needs the launch to allow it".into(),
+            ));
+        }
         for (what, value) in [("model", &launch.model), ("thinking level", &launch.effort)] {
             if let Some(value) = value
                 && (value.starts_with('-') || value.chars().any(char::is_control))
@@ -336,7 +342,7 @@ impl PiSession {
         let mut command = launch.launch(
             gate.as_ref().map(Gate::extension),
             gate.as_ref().and_then(Gate::prompt),
-        );
+        )?;
         if ephemeral {
             command = command.arg("--no-session");
         }
@@ -357,15 +363,11 @@ impl PiSession {
             launch.start_mode(),
             launch.ask_for_reads,
         )));
-        let mut roots = launch.working_roots.clone();
-        if roots.is_empty() {
-            roots.push(launch.cwd.clone());
-            roots.extend(launch.additional_directories.iter().cloned());
-        }
         let parser = Arc::new(Mutex::new(
             Parser::with_limits(Arc::clone(&writer), settings.max_tools, settings.parser)
                 .with_policy(Arc::clone(&policy))
-                .with_roots(&launch.cwd, roots),
+                .with_roots(&launch.cwd, launch.roots())
+                .with_protected(launch.agent_dirs()),
         ));
         let tail = Arc::new(Mutex::new(Tail::new(
             settings.tail_lines,
@@ -430,6 +432,7 @@ impl PiSession {
             choice,
             titled: AtomicBool::new(false),
             sink,
+            gate_command: gate.as_ref().map(Gate::command),
             _gate: gate,
         })
     }
@@ -460,7 +463,7 @@ impl PiSession {
         if self.settings.list_models {
             self.list_models();
         }
-        self.read_commands();
+        self.read_commands()?;
         if matches!(launch.session, SessionStart::Load(_)) {
             self.replay()?;
         }
@@ -518,10 +521,29 @@ impl PiSession {
     }
 
     /// The commands of Pi's extensions, prompt templates and skills, which a prompt of `/name` runs.
-    fn read_commands(&self) {
-        let Ok(data) = self.request("get_commands", json!({}), self.settings.request_timeout)
-        else {
-            return;
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Harness`] when the session has a gate and Pi does not list the command the gate registers: Pi did not load
+    /// it (or could not be asked), and nothing it would run is gated.
+    fn read_commands(&self) -> Result<(), Error> {
+        let listed = self.request("get_commands", json!({}), self.settings.request_timeout);
+        if let Some(gate) = &self.gate_command {
+            let loaded = listed.as_ref().is_ok_and(|data| {
+                data.get("commands")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|command| command.get("name").and_then(Value::as_str) == Some(gate))
+            });
+            if !loaded {
+                return Err(Error::Harness(
+                    "Pi did not load the permission gate, so it is not started".into(),
+                ));
+            }
+        }
+        let Ok(data) = listed else {
+            return Ok(());
         };
         let commands: Vec<Command> = data
             .get("commands")
@@ -530,6 +552,9 @@ impl PiSession {
             .flatten()
             .filter_map(|command| {
                 let name = command.get("name")?.as_str()?;
+                if self.gate_command.as_deref() == Some(name) {
+                    return None;
+                }
                 let description = command
                     .get("description")
                     .and_then(Value::as_str)
@@ -540,6 +565,7 @@ impl PiSession {
         if !commands.is_empty() {
             (self.sink)(Event::Commands(commands));
         }
+        Ok(())
     }
 
     /// The session's earlier messages, as history.

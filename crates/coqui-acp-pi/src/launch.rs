@@ -1,13 +1,17 @@
 //! What a Pi session is started with.
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use coqui_acp_harness::acp::within_roots;
 use coqui_acp_harness::{Launch, Mode};
+
+use crate::Error;
 
 /// How a session begins.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,7 +38,7 @@ pub fn valid_session_id(id: &str) -> bool {
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct PiLaunch {
-    /// The program: `pi`, or the path of one. On Windows npm's shim is `pi.cmd`.
+    /// The program: `pi`, or the path of one. On Windows a bare `pi` is looked for in `PATH` (see [`PiLaunch::command`]).
     pub executable: OsString,
     /// The directory Pi works in: the process's own, since Pi has no other way to be given one.
     pub cwd: PathBuf,
@@ -46,19 +50,22 @@ pub struct PiLaunch {
     pub effort: Option<String>,
     /// Text appended to Pi's system prompt (`--append-system-prompt`, from a file made for the launch).
     pub system_prompt: Option<String>,
-    /// More directories the session works in. Pi has no such setting: they are where a diff may read a file's old content.
+    /// More directories the session works in. Pi has no such setting: calls may use files there freely, as in `cwd`.
     pub additional_directories: Vec<PathBuf>,
-    /// The directories a file's old content may be read from for a diff; empty takes `cwd` and the more directories.
+    /// The directories calls may use freely; empty takes `cwd` and the more directories.
     pub working_roots: Vec<PathBuf>,
     /// The mode a session starts in, and the loosest a client may choose; Manual when absent.
     pub mode: Option<Mode>,
-    /// Whether the Bypass mode is offered.
+    /// Whether the Bypass mode is offered. A launch whose `mode` is Bypass needs it.
     pub allow_bypass: bool,
     /// The modes a client may choose, besides the mode and every stricter one. Bypass needs `allow_bypass`; Auto is never
     /// offered.
     pub modes: Option<Vec<Mode>>,
-    /// Whether Manual mode asks even before a tool that only reads.
+    /// Whether Manual and Plan ask even before a tool that only reads.
     pub ask_for_reads: bool,
+    /// Whether Pi loads only the gate: no extension of the person's and no built-in one, MCP included, which another
+    /// extension could use to change a call after the gate approved it.
+    pub isolated: bool,
     /// The directory the private one holding the permission gate is made in; the system's temporary directory when absent.
     pub gate_dir: Option<PathBuf>,
     /// Arguments of the caller's own, after the others, unchecked.
@@ -87,6 +94,46 @@ impl fmt::Debug for PiLaunch {
     }
 }
 
+/// Whether a `PATH` entry is one a program may be taken from: a directory written in full, not on the network.
+fn plain_entry(entry: &Path) -> bool {
+    let text = entry.to_string_lossy();
+    entry.is_absolute() && !text.starts_with("\\\\") && !text.starts_with("//")
+}
+
+/// Where a program called `name` is, looking in the directories of `path` for each of `extensions` in turn. A relative
+/// entry, a network one, and one in `keep_out` (the session's own directories) are not looked in. `None` when `name` has a
+/// directory or an extension already, or nothing is found.
+fn find_in(
+    name: &OsStr,
+    path: &OsStr,
+    extensions: &[&str],
+    keep_out: &[PathBuf],
+) -> Option<PathBuf> {
+    let text = name.to_str()?;
+    if text.contains(['/', '\\']) || Path::new(text).extension().is_some() {
+        return None;
+    }
+    std::env::split_paths(path)
+        .filter(|dir| plain_entry(dir) && !within_roots(dir, keep_out))
+        .find_map(|dir| {
+            extensions
+                .iter()
+                .map(|extension| dir.join(format!("{text}.{extension}")))
+                .find(|candidate| candidate.is_file())
+        })
+}
+
+/// The script an npm shim (`pi.cmd`) runs, from its text: the `.js` path written under the shim's own directory
+/// (`%dp0%`).
+fn shim_script(shim: &Path, text: &str) -> Option<PathBuf> {
+    let dir = shim.parent()?;
+    text.split('"')
+        .filter_map(|quoted| quoted.strip_prefix("%dp0%\\"))
+        .find(|relative| relative.to_ascii_lowercase().ends_with(".js") && !relative.contains('%'))
+        .map(|relative| dir.join(relative.replace('\\', "/")))
+        .filter(|script| script.is_file())
+}
+
 impl PiLaunch {
     /// A launch of `pi` in `cwd`, with everything else left to Pi and the defaults.
     #[must_use]
@@ -104,6 +151,7 @@ impl PiLaunch {
             allow_bypass: false,
             modes: None,
             ask_for_reads: false,
+            isolated: false,
             gate_dir: None,
             extra_args: Vec::new(),
             env: BTreeMap::new(),
@@ -118,14 +166,137 @@ impl PiLaunch {
         self.mode.unwrap_or(Mode::Manual)
     }
 
-    /// The command: `pi --mode rpc`, with the gate when there is one (`-e`), the session to open, the model and the thinking
-    /// level, the system prompt's file, and the caller's own arguments.
+    /// The directories calls may use freely.
     #[must_use]
-    pub fn launch(&self, extension: Option<&Path>, prompt: Option<&Path>) -> Launch {
-        let mut launch = Launch::new(self.program())
-            .args(["--mode", "rpc"])
-            .cwd(&self.cwd)
-            .clear_env(self.clear_env);
+    pub fn roots(&self) -> Vec<PathBuf> {
+        if self.working_roots.is_empty() {
+            let mut roots = vec![self.cwd.clone()];
+            roots.extend(self.additional_directories.iter().cloned());
+            roots
+        } else {
+            self.working_roots.clone()
+        }
+    }
+
+    /// Pi's agent directories: the launch's `PI_CODING_AGENT_DIR`, else the process's, else `~/.pi/agent`. Where Pi keeps
+    /// its credentials and the code it loads.
+    #[must_use]
+    pub fn agent_dirs(&self) -> Vec<PathBuf> {
+        let named = |name: &str| {
+            self.env
+                .iter()
+                .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+                .map(|(_, value)| PathBuf::from(value))
+                .or_else(|| std::env::var_os(name).map(PathBuf::from))
+        };
+        let mut dirs = Vec::new();
+        if let Some(dir) = named("PI_CODING_AGENT_DIR") {
+            dirs.push(dir);
+        } else if let Some(home) = named(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+            dirs.push(home.join(".pi").join("agent"));
+        }
+        dirs
+    }
+
+    fn path_value(&self) -> Option<OsString> {
+        self.env
+            .iter()
+            .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var_os("PATH"))
+    }
+
+    /// The program to start, and the arguments that come before Pi's own.
+    ///
+    /// On any system but Windows this is `executable`. On Windows nothing is started through `cmd.exe` and nothing is found
+    /// by a search that includes the project: a bare `pi` is looked for in `PATH` (absolute entries outside the session's
+    /// directories) as `pi.exe`, then `pi.cmd`. npm's `pi.cmd` is not run: its script (`cli.js`) is read from it and
+    /// started with an absolute `node.exe`, the one beside the shim or the first on `PATH` outside the session's
+    /// directories.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Refused`] when, on Windows, `pi` or `node` is not to be found that way.
+    pub fn command(&self) -> Result<(OsString, Vec<OsString>), Error> {
+        if !cfg!(windows) {
+            return Ok((self.executable.clone(), Vec::new()));
+        }
+        let keep_out = self.roots();
+        let path = self.path_value().unwrap_or_default();
+        let found = find_in(&self.executable, &path, &["exe", "cmd"], &keep_out)
+            .or_else(|| {
+                // A path or a name with an extension is the host's own choice: used as written.
+                let written = self.executable.to_string_lossy();
+                (written.contains(['/', '\\']) || Path::new(&self.executable).extension().is_some())
+                    .then(|| PathBuf::from(&self.executable))
+            })
+            .ok_or_else(|| Error::Refused("Pi was not found on PATH".into()))?;
+        let is_shim = found.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+        if !is_shim {
+            return Ok((found.into_os_string(), Vec::new()));
+        }
+        let script = std::fs::read_to_string(&found)
+            .ok()
+            .and_then(|text| shim_script(&found, &text))
+            .ok_or_else(|| {
+                Error::Refused(
+                    "that Pi shim names no script this crate can start without cmd.exe".into(),
+                )
+            })?;
+        let beside = found.with_file_name("node.exe");
+        let node = if beside.is_file() {
+            beside
+        } else {
+            find_in(OsStr::new("node"), &path, &["exe"], &keep_out).ok_or_else(|| {
+                Error::Refused(
+                    "node.exe was not found on PATH outside the session's directories".into(),
+                )
+            })?
+        };
+        Ok((node.into_os_string(), vec![script.into_os_string()]))
+    }
+
+    /// The command of Pi with no arguments of its own yet: the program, its leading arguments, the environment.
+    ///
+    /// # Errors
+    ///
+    /// As [`PiLaunch::command`].
+    pub fn base(&self) -> Result<Launch, Error> {
+        let (program, leading) = self.command()?;
+        let mut launch = Launch::new(program).args(leading).clear_env(self.clear_env);
+        launch.env.clone_from(&self.env);
+        launch.remove_env.clone_from(&self.remove_env);
+        if cfg!(windows) {
+            // Programs Pi starts (a shell, say) must not be found in the project either.
+            launch.remove_env.retain(|name| {
+                !name
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("NoDefaultCurrentDirectoryInExePath")
+            });
+            launch
+                .env
+                .insert("NoDefaultCurrentDirectoryInExePath".into(), "1".into());
+        }
+        Ok(launch)
+    }
+
+    /// The command: `pi --mode rpc`, with the gate when there is one (`-e`), the session to open, the model and the thinking
+    /// level, the system prompt's file, the arguments that keep the project's own resources out (`--no-approve`; with
+    /// `isolated`, `--no-extensions` and `--no-mcp` too), and the caller's own arguments.
+    ///
+    /// # Errors
+    ///
+    /// As [`PiLaunch::command`].
+    pub fn launch(&self, extension: Option<&Path>, prompt: Option<&Path>) -> Result<Launch, Error> {
+        let mut launch = self
+            .base()?
+            .args(["--mode", "rpc", "--no-approve"])
+            .cwd(&self.cwd);
+        if self.isolated {
+            launch = launch.args(["--no-extensions", "--no-mcp"]);
+        }
         if let Some(extension) = extension {
             launch = launch.arg("-e").arg(extension);
         }
@@ -144,10 +315,7 @@ impl PiLaunch {
         if let Some(prompt) = prompt {
             launch = launch.arg("--append-system-prompt").arg(prompt);
         }
-        launch = launch.args(self.extra_args.iter());
-        launch.env.clone_from(&self.env);
-        launch.remove_env.clone_from(&self.remove_env);
-        launch
+        Ok(launch.args(self.extra_args.iter()))
     }
 }
 
@@ -166,20 +334,24 @@ mod tests {
     #[test]
     fn the_command_line_holds_no_text_of_the_person() {
         let mut launch = PiLaunch::new("/w");
+        launch.executable = std::env::current_exe().unwrap().into();
         launch.session = SessionStart::Resume("abc-1".into());
         launch.model = Some("anthropic/claude".into());
         launch.effort = Some("high".into());
-        let command = launch.launch(Some(Path::new("/g/gate.ts")), Some(Path::new("/g/p.md")));
+        let command = launch
+            .launch(Some(Path::new("/g/gate.ts")), Some(Path::new("/g/p.md")))
+            .unwrap();
         let args: Vec<_> = command
             .args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            args,
+            args[..],
             [
                 "--mode",
                 "rpc",
+                "--no-approve",
                 "-e",
                 "/g/gate.ts",
                 "--session",
@@ -190,69 +362,46 @@ mod tests {
                 "high",
                 "--append-system-prompt",
                 "/g/p.md"
-            ]
+            ][..]
+        );
+        launch.isolated = true;
+        let args = launch.launch(None, None).unwrap().args;
+        assert!(
+            args.iter().any(|a| a == "--no-extensions") && args.iter().any(|a| a == "--no-mcp")
         );
     }
-}
-
-/// Where a program called `name` is, looking in the directories of `path` for each of `extensions` in turn; `None` when
-/// `name` already has a directory or an extension, or nothing is found.
-fn find_in(name: &OsStr, path: &OsStr, extensions: &[&str]) -> Option<PathBuf> {
-    let text = name.to_str()?;
-    if text.contains(['/', '\\']) || Path::new(text).extension().is_some() {
-        return None;
-    }
-    std::env::split_paths(path).find_map(|dir| {
-        extensions
-            .iter()
-            .map(|extension| dir.join(format!("{text}.{extension}")))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-impl PiLaunch {
-    /// The program to start. On Windows a bare `pi` is looked for in `PATH` as `pi.exe` and then `pi.cmd`, the shim npm
-    /// installs, which the system would not find by the bare name; the launch's own `PATH` is used when it sets one. Anything
-    /// else, and any other system, is `executable` as it is.
-    #[must_use]
-    pub fn program(&self) -> OsString {
-        if !cfg!(windows) {
-            return self.executable.clone();
-        }
-        let own = self.env.iter().find_map(|(name, value)| {
-            name.to_string_lossy()
-                .eq_ignore_ascii_case("PATH")
-                .then_some(value.clone())
-        });
-        let Some(path) = own.or_else(|| std::env::var_os("PATH")) else {
-            return self.executable.clone();
-        };
-        find_in(&self.executable, &path, &["exe", "cmd"])
-            .map_or_else(|| self.executable.clone(), PathBuf::into_os_string)
-    }
-}
-
-#[cfg(test)]
-mod find_tests {
-    use super::*;
 
     #[test]
-    fn exe_comes_before_cmd_and_a_name_with_an_extension_or_directory_is_left_alone() {
-        let dir = std::env::temp_dir().join(format!("coqui-acp-pi-find-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("pi.cmd"), "").unwrap();
-        let path = std::env::join_paths([&dir]).unwrap();
-        assert_eq!(
-            find_in(OsStr::new("pi"), &path, &["exe", "cmd"]),
-            Some(dir.join("pi.cmd"))
-        );
-        std::fs::write(dir.join("pi.exe"), "").unwrap();
-        assert_eq!(
-            find_in(OsStr::new("pi"), &path, &["exe", "cmd"]),
-            Some(dir.join("pi.exe"))
-        );
-        assert_eq!(find_in(OsStr::new("pi.cmd"), &path, &["exe", "cmd"]), None);
-        assert_eq!(find_in(OsStr::new("./pi"), &path, &["exe", "cmd"]), None);
-        let _ = std::fs::remove_dir_all(&dir);
+    fn exe_comes_before_cmd_and_entries_that_are_not_to_be_trusted_are_skipped() {
+        let base = std::env::temp_dir().join(format!("coqui-acp-pi-find-{}", std::process::id()));
+        let (bin, project) = (base.join("bin"), base.join("project"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(bin.join("pi.cmd"), "").unwrap();
+        std::fs::write(project.join("pi.exe"), "").unwrap();
+        let keep_out = vec![project.clone()];
+        let path = std::env::join_paths([&project, Path::new("."), Path::new(""), &bin]).unwrap();
+        let find = |name: &str| find_in(OsStr::new(name), &path, &["exe", "cmd"], &keep_out);
+        // The project's `pi.exe`, a relative entry and an empty one are passed over.
+        assert_eq!(find("pi"), Some(bin.join("pi.cmd")));
+        std::fs::write(bin.join("pi.exe"), "").unwrap();
+        assert_eq!(find("pi"), Some(bin.join("pi.exe")));
+        assert_eq!(find("pi.cmd"), None);
+        assert_eq!(find("./pi"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_shim_names_its_script_under_its_own_directory() {
+        let base = std::env::temp_dir().join(format!("coqui-acp-pi-shim-{}", std::process::id()));
+        let script = base.join("node_modules").join("pkg").join("cli.js");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "").unwrap();
+        let shim = base.join("pi.cmd");
+        let text = "IF EXIST \"%dp0%\\node.exe\" (\r\n) ELSE (\r\n)\r\n\"%_prog%\"  \"%dp0%\\node_modules\\pkg\\cli.js\" %*\r\n";
+        assert_eq!(shim_script(&shim, text), Some(script));
+        assert_eq!(shim_script(&shim, "\"%dp0%\\missing.js\""), None);
+        assert_eq!(shim_script(&shim, "\"%dp0%\\%EVIL%\\cli.js\""), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -41,9 +41,12 @@ struct Cli {
     /// Offer the Bypass mode: never ask.
     #[arg(long)]
     allow_bypass: bool,
-    /// Ask before a tool that only reads, too, in Manual mode.
+    /// Ask before a tool that only reads, too, in Manual and Plan modes.
     #[arg(long)]
     ask_for_reads: bool,
+    /// Load only the permission gate: none of the person's own extensions and no MCP servers.
+    #[arg(long)]
+    isolated: bool,
     /// The highest ACP version answered.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=2))]
     max_acp_version: u8,
@@ -82,6 +85,7 @@ fn main() -> ExitCode {
     defaults.mode = cli.mode;
     defaults.allow_bypass = cli.allow_bypass;
     defaults.ask_for_reads = cli.ask_for_reads;
+    defaults.isolated = cli.isolated;
     let agent = PiAgent::new().defaults(defaults);
     match serve(
         Arc::new(agent),
