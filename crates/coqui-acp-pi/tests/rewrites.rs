@@ -257,3 +257,201 @@ fn a_command_cut_for_its_size_is_never_remembered_nor_answered_from_a_remembered
     );
     drop(asked.remove(0));
 }
+
+/// The path of the credential in each spelling Pi opens to it.
+#[cfg(windows)]
+fn spellings_of_a_credential() -> Vec<String> {
+    let ssh = home().join(".ssh").join("id_rsa");
+    let back = ssh.to_string_lossy().into_owned();
+    let fwd = back.replace('\\', "/");
+    let drive = back[..1].to_string();
+    let tail = fwd[2..].to_string(); // `/Users/...`
+    let rooted_back = back[2..].to_string(); // `\Users\...`
+    let mut list = vec![
+        format!("/mnt/{}{tail}", drive.to_lowercase()),
+        format!("/MNT/{}{tail}", drive.to_uppercase()),
+        format!("/Mnt/{}{tail}", drive.to_lowercase()),
+        format!("/CYGDRIVE/{}{tail}", drive.to_lowercase()),
+        format!("/cygdrive/{}{tail}", drive.to_uppercase()),
+        format!("/Cygdrive/{}{tail}", drive.to_lowercase()),
+        format!("file:///{drive}|{tail}"),
+        format!("file:///{}|{tail}", drive.to_lowercase()),
+        format!("file://{drive}:{tail}"),
+        format!("file://{drive}|{tail}"),
+        format!("file:///{fwd}"),
+        format!("file:///{back}"),
+        format!("file://\\{back}"),
+        format!("file:///{fwd}?x"),
+        format!("file:///{fwd}#f"),
+        format!("file://\t/{fwd}"),
+        format!("file:///{}", fwd.replace(".ssh", ".s\tsh")),
+        format!("file:///{}", fwd.replace("id_rsa", "id_\nrsa")),
+        format!("file:///{fwd}\r"),
+        format!("\\\\?\\{back}"),
+        format!("\\\\.\\{back}"),
+        format!("//?/{fwd}"),
+        format!("//./{fwd}"),
+        format!("\\\\?\\{}", back.to_lowercase()),
+        format!("///{}", &tail[1..]),
+        format!("\\\\\\{}", &rooted_back[1..]),
+    ];
+    list.extend(list.clone().into_iter().map(|text| format!("@{text}")));
+    list
+}
+
+/// What Pi opens as the credential itself, whatever the spelling: refused, never asked.
+#[cfg(windows)]
+#[test]
+fn a_credential_is_refused_in_every_spelling_pi_opens_to_it() {
+    for mode in [Mode::Manual, Mode::AcceptEdits, Mode::Plan] {
+        for text in spellings_of_a_credential() {
+            for tool in ["read", "write"] {
+                let (mut parser, written) = parser_in(mode);
+                parser.prompting();
+                let asked = run(
+                    &mut parser,
+                    &call(tool, &json!({"path": text, "content": "x"}), "c"),
+                );
+                assert!(
+                    asked.is_empty(),
+                    "{mode:?} {tool} {text:?} was asked, not refused"
+                );
+                assert_eq!(
+                    answer(&written).as_deref(),
+                    Some("protected"),
+                    "{mode:?} {tool} {text:?}"
+                );
+            }
+        }
+    }
+}
+
+/// `/\host\share` and `\/host/share` are network paths to Windows as `\\host\share` is.
+#[cfg(windows)]
+#[test]
+fn a_network_path_written_with_mixed_separators_or_as_a_device_is_asked_about() {
+    for text in [
+        "/\\10.255.255.1\\share\\f",
+        "\\/10.255.255.1/share/f",
+        "@/\\10.255.255.1/share/f",
+        "\\\\?\\UNC\\10.255.255.1\\share\\f",
+        "//?/UNC/10.255.255.1/share/f",
+        "\\\\.\\pipe\\x",
+    ] {
+        for tool in ["read", "write"] {
+            let (mut parser, _) = parser_in(Mode::AcceptEdits);
+            parser.prompting();
+            let started = std::time::Instant::now();
+            let asked = run(
+                &mut parser,
+                &call(tool, &json!({"path": text, "content": "x"}), "n"),
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "{text:?} was resolved"
+            );
+            assert_eq!(asked.len(), 1, "{tool} {text:?} was not asked about");
+            drop(asked);
+        }
+    }
+}
+
+/// On NTFS `.git::$INDEX_ALLOCATION` is the directory `.git`: a name with a colon is not where its text says.
+#[cfg(windows)]
+#[test]
+fn a_name_with_a_colon_is_refused_in_every_mode_but_bypass() {
+    for text in [
+        ".git::$INDEX_ALLOCATION/config",
+        "sub/.git::$INDEX_ALLOCATION/HEAD",
+        ".pi::$INDEX_ALLOCATION/settings.json",
+        "notes.txt:hidden",
+        "notes.txt::$DATA",
+        "@.git::$INDEX_ALLOCATION/config",
+    ] {
+        for mode in [Mode::Manual, Mode::AcceptEdits, Mode::Plan] {
+            for tool in ["read", "write", "edit"] {
+                let (mut parser, written) = parser_in(mode);
+                parser.prompting();
+                let asked = run(
+                    &mut parser,
+                    &call(tool, &json!({"path": text, "content": "x"}), "s"),
+                );
+                assert!(asked.is_empty(), "{mode:?} {tool} {text:?} was asked");
+                assert_eq!(
+                    answer(&written).as_deref(),
+                    Some("protected"),
+                    "{mode:?} {tool} {text:?}"
+                );
+            }
+        }
+    }
+    let (mut parser, written) = parser_in(Mode::Bypass);
+    parser.prompting();
+    let _ = run(
+        &mut parser,
+        &call("write", &json!({"path": "x:y", "content": "x"}), "b"),
+    );
+    assert_eq!(answer(&written).as_deref(), Some("allow"));
+}
+
+fn parser_over(root: &std::path::Path, mode: Mode) -> (Parser, Written) {
+    let written: Written = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&written);
+    let parser = Parser::new(
+        Arc::new(move |value: &Value| {
+            sink.lock().unwrap().push(value.clone());
+            Ok(())
+        }),
+        4096,
+    )
+    .with_policy(Arc::new(Mutex::new(Policy::new(mode, false))))
+    .with_roots(root, Vec::new())
+    .with_protected(vec![home().join(".pi").join("agent")])
+    .with_home(Some(home()));
+    (parser, written)
+}
+
+/// `grep` passes `--hidden`: from a directory above the credentials it reads them, though no path it names is one.
+#[test]
+fn a_search_from_a_directory_above_a_credential_is_asked_about_not_answered_by_rule() {
+    // The directory holding the fixture home is a working root, as a home directory is for a session that works there.
+    let above = home().parent().unwrap().to_path_buf();
+    let inputs = [
+        ("grep", json!({"pattern": "CANARY"})),
+        ("grep", json!({"pattern": ".", "path": "."})),
+        (
+            "grep",
+            json!({"pattern": ".", "path": home().to_string_lossy()}),
+        ),
+        ("find", json!({"pattern": "*"})),
+        ("ls", json!({})),
+        ("ls", json!({"path": "."})),
+    ];
+    for (tool, input) in &inputs {
+        for mode in [Mode::Manual, Mode::AcceptEdits] {
+            let (mut parser, written) = parser_over(&above, mode);
+            parser.prompting();
+            let asked = run(&mut parser, &call(tool, input, "g"));
+            assert_eq!(asked.len(), 1, "{mode:?} {tool} {input} was answered");
+            assert!(answer(&written).is_none(), "{mode:?} {tool} {input}");
+            drop(asked);
+        }
+        let (mut parser, written) = parser_over(&above, Mode::Plan);
+        parser.prompting();
+        let asked = run(&mut parser, &call(tool, input, "g"));
+        assert!(asked.is_empty(), "Plan {tool} {input} was asked");
+        assert_eq!(answer(&written).as_deref(), Some("protected"), "{tool}");
+    }
+    // A search inside a project that holds none is answered by the rule, and `read` names one file.
+    let (mut parser, written) = parser_over(&work(), Mode::Manual);
+    parser.prompting();
+    assert!(run(&mut parser, &call("grep", &json!({"pattern": "x"}), "ok")).is_empty());
+    assert_eq!(answer(&written).as_deref(), Some("allow"));
+    let (mut parser, written) = parser_over(&above, Mode::Manual);
+    parser.prompting();
+    let _ = run(
+        &mut parser,
+        &call("read", &json!({"path": "somefile.txt"}), "rd"),
+    );
+    assert_eq!(answer(&written).as_deref(), Some("allow"));
+}

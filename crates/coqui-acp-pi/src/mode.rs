@@ -81,6 +81,20 @@ fn same(a: &std::ffi::OsStr, b: &str) -> bool {
     }
 }
 
+/// Whether `path` is `base` or lies inside it; on Windows names are compared whatever their case.
+fn under(path: &Path, base: &Path, windows: bool) -> bool {
+    if !windows {
+        return path.starts_with(base);
+    }
+    let fold = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let (path, base) = (fold(path), fold(base));
+    path.len() >= base.len() && path[..base.len()] == base[..]
+}
+
 fn has_component(path: &Path, names: &[&str]) -> bool {
     path.components().any(|part| match part {
         Component::Normal(name) => names.iter().any(|wanted| same(name, wanted)),
@@ -200,6 +214,48 @@ impl Scope {
         SECRET_HOME.iter().any(|name| {
             path.starts_with(home.join(name)) || resolved(&found.path).starts_with(home.join(name))
         })
+    }
+
+    /// Whether a name in the path holds a `:` on Windows, which the file system reads as a stream of the file before it
+    /// (`.git::$INDEX_ALLOCATION` is the directory `.git`): the path is not where its text says, and is refused.
+    #[must_use]
+    pub fn stream(&self, text: &str) -> bool {
+        self.pi(text).stream
+    }
+
+    /// Where credentials are kept: the files Pi keeps its own in, and what a person keeps secrets in under their home.
+    fn secret_places(&self) -> Vec<PathBuf> {
+        let mut places = Vec::new();
+        for dir in &self.agent_dirs {
+            for name in ["auth.json", "models.json", "mcp-auth.json"] {
+                places.push(resolved(&dir.join(name)));
+            }
+        }
+        if let Some(home) = &self.home {
+            let home = resolved(home);
+            places.extend(SECRET_HOME.iter().map(|name| home.join(name)));
+        }
+        places
+    }
+
+    /// Whether a search that starts at `root` (the working directory when absent) would reach a credential: the root holds
+    /// one of the places credentials are kept, a directory above it. `grep` passes `--hidden`, so a search from the
+    /// person's home would read `.ssh` unasked although no path it names is a credential.
+    #[must_use]
+    pub fn reaches_secret(&self, root: Option<&str>) -> bool {
+        let start = match root {
+            None => resolved(&self.cwd),
+            Some(text) => {
+                let found = self.pi(text);
+                if found.network || found.unknown {
+                    return false;
+                }
+                resolved(&found.path)
+            }
+        };
+        self.secret_places()
+            .iter()
+            .any(|place| under(place, &start, self.windows))
     }
 
     /// Whether Pi loads code or configuration from the path, so that a file written there runs later with no question: its
@@ -356,8 +412,27 @@ impl Policy {
         if self.mode == Mode::Bypass {
             return Decision::Allow;
         }
+        // A path that hides a stream of a file is where it says it is not, for every tool that takes a path.
+        if (READ_ONLY.contains(&tool) || EDITS.contains(&tool))
+            && text(input, "path").is_some_and(|path| !cut(input, "path") && scope.stream(path))
+        {
+            return Decision::Protected;
+        }
         if READ_ONLY.contains(&tool) {
             let path = text(input, "path");
+            // A search from a directory above a credential finds it whatever its own path says; `read` names one file.
+            if tool != "read"
+                && !path.is_some_and(|path| {
+                    cut(input, "path") || scope.network(path) || scope.secret(path)
+                })
+                && scope.reaches_secret(path)
+            {
+                return if self.mode == Mode::Plan {
+                    Decision::Protected
+                } else {
+                    Decision::Ask
+                };
+            }
             if let Some(path) = path {
                 if cut(input, "path") {
                     return Decision::Ask;

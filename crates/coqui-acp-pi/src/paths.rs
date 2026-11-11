@@ -32,6 +32,9 @@ pub struct Resolved {
     /// Whether this could not say where it is (a home directory unknown, a `file:` URL Pi would refuse or one this does not
     /// read): the text is to be treated as unknown.
     pub unknown: bool,
+    /// Whether, on Windows, a name in it holds a `:` (an alternate data stream: `.git::$INDEX_ALLOCATION` is the directory
+    /// `.git`), so that it is not the place its text seems to be.
+    pub stream: bool,
 }
 
 /// `%XX` escapes decoded, `None` for a bad escape or one that hides a separator (which Pi refuses).
@@ -61,9 +64,14 @@ fn windows_shell_path(text: &str) -> Option<String> {
     if !text.starts_with('/') || text.starts_with("//") || text.contains('\\') {
         return None;
     }
-    let rest = text
-        .strip_prefix("/mnt/")
-        .or_else(|| text.strip_prefix("/cygdrive/"))
+    // Pi matches the two prefixes whatever their case.
+    let after_prefix = |prefix: &str| {
+        text.get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| &text[prefix.len()..])
+    };
+    let rest = after_prefix("/mnt/")
+        .or_else(|| after_prefix("/cygdrive/"))
         .unwrap_or(&text[1..]);
     let mut chars = rest.chars();
     let drive = chars.next().filter(char::is_ascii_alphabetic)?;
@@ -76,11 +84,39 @@ fn windows_shell_path(text: &str) -> Option<String> {
 }
 
 /// A `file://` URL as the path Pi reads from it; `None` where Pi would refuse it. A host that is not the machine's makes a
-/// network path on Windows.
+/// network path on Windows. The text is read as URL parsing reads it: ASCII tab and newline are removed wherever they are,
+/// control characters and spaces at either end are cut, a backslash is a slash, the query and the fragment are not part of
+/// the path, and (Windows) a drive is `C:` or `C|`, in the host's place as well as in the path's.
 fn file_url(text: &str, windows: bool) -> Option<String> {
-    let rest = text.strip_prefix("file://")?;
-    let (host, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
-    let path = percent_decode(path)?;
+    let cleaned: String = text
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let rest = cleaned.strip_prefix("file://")?;
+    let rest = rest[..rest.find(['?', '#']).unwrap_or(rest.len())].replace('\\', "/");
+    let (host, path) = rest
+        .find('/')
+        .map_or((rest.as_str(), ""), |at| rest.split_at(at));
+    let drive_host = host.len() == 2
+        && host.as_bytes()[0].is_ascii_alphabetic()
+        && matches!(host.as_bytes()[1], b':' | b'|');
+    let (host, mut path) = if windows && drive_host {
+        ("", alloc::format!("/{}:{path}", &host[..1]))
+    } else {
+        (host, path.to_string())
+    };
+    let bytes = path.as_bytes();
+    if windows
+        && bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b'|'
+        && (bytes.len() == 3 || bytes[3] == b'/')
+    {
+        path.replace_range(2..3, ":");
+    }
+    let path = percent_decode(&path)?;
     if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
         if windows {
             let drive = path.strip_prefix('/')?;
@@ -140,12 +176,29 @@ fn drive_relative(text: &str) -> bool {
 /// Pi 1.5.2's `resolveToCwd(text, cwd)`, with `home` for `~` and `windows` for the Windows-only rewrite and URL reading.
 #[must_use]
 pub fn resolve(text: &str, cwd: &Path, home: Option<&Path>, windows: bool) -> Resolved {
-    let mut unknown = false;
     let spaced: String = text
         .chars()
         .map(|c| if unicode_space(c) { ' ' } else { c })
         .collect();
-    let mut s = spaced.strip_prefix('@').unwrap_or(&spaced).to_string();
+    rewrite(
+        spaced.strip_prefix('@').unwrap_or(&spaced),
+        cwd,
+        home,
+        windows,
+    )
+}
+
+/// What Pi 1.5.2 makes of a directory a setting or an environment variable names (`PI_CODING_AGENT_DIR`): the same rewrite
+/// as a tool's path (`~`, a Windows shell path, a `file:` URL) but for the Unicode spaces and the leading `@`, which only
+/// a tool's path loses.
+#[must_use]
+pub fn setting(text: &str, cwd: &Path, home: Option<&Path>, windows: bool) -> Resolved {
+    rewrite(text, cwd, home, windows)
+}
+
+fn rewrite(text: &str, cwd: &Path, home: Option<&Path>, windows: bool) -> Resolved {
+    let mut unknown = false;
+    let mut s = text.to_string();
     if windows && let Some(drive) = windows_shell_path(&s) {
         s = drive;
     }
@@ -171,17 +224,75 @@ pub fn resolve(text: &str, cwd: &Path, home: Option<&Path>, windows: bool) -> Re
     if windows && drive_relative(&s) {
         unknown = true;
     }
-    let network = s.starts_with("\\\\") || s.starts_with("//");
+    if windows {
+        s = windows_form(&s);
+    }
+    let network = if windows {
+        s.starts_with("\\\\")
+    } else {
+        s.starts_with("\\\\") || s.starts_with("//")
+    };
     let path = if network {
         PathBuf::from(&s)
     } else {
         lexical(&cwd.join(&s))
     };
+    let stream = windows && hides_a_stream(&path.to_string_lossy());
     Resolved {
         path,
         network,
         unknown,
+        stream,
     }
+}
+
+fn separator(c: char) -> bool {
+    matches!(c, '/' | '\\')
+}
+
+/// A path on Windows, written the way the system reads it. A network path starts with exactly two separators of either kind
+/// and is written `\\host\share`; three or more are one, the root of the current drive; `\\?\C:\x`, `\\.\C:\x` and `//?/C:/x`
+/// name the file `C:\x` and are written so; `\\?\UNC\host\share` and every other device path are network paths.
+fn windows_form(text: &str) -> String {
+    let mut chars = text.chars();
+    let (first, second, third) = (chars.next(), chars.next(), chars.next());
+    if !(first.is_some_and(separator) && second.is_some_and(separator)) {
+        return text.to_string();
+    }
+    if third.is_some_and(separator) {
+        return alloc::format!("\\{}", text.trim_start_matches(separator));
+    }
+    let rest = &text[2..];
+    if let Some(device) = rest
+        .strip_prefix(['?', '.'])
+        .and_then(|after| after.strip_prefix(separator))
+    {
+        let mut letters = device.chars();
+        let drive = letters.next().filter(char::is_ascii_alphabetic);
+        if drive.is_some() && letters.next() == Some(':') {
+            match letters.next() {
+                None => return alloc::format!("{}\\", &device[..2]),
+                Some(c) if separator(c) => return device.to_string(),
+                Some(_) => {}
+            }
+        }
+    }
+    alloc::format!("\\\\{}", rest.replace('/', "\\"))
+}
+
+/// Whether a Windows path has a `:` in a name, which the file system reads as an alternate data stream
+/// (`.git::$INDEX_ALLOCATION` is the directory `.git`): any colon but the one after the drive letter.
+fn hides_a_stream(path: &str) -> bool {
+    if path.starts_with("\\\\") {
+        return false;
+    }
+    let bytes = path.as_bytes();
+    let rest = if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        &path[2..]
+    } else {
+        path
+    };
+    rest.contains(':')
 }
 
 /// Whether the text looks as if Pi rewrites it: it starts with `~` or `@`, holds a `file:` URL, or (on Windows) names a
@@ -322,6 +433,81 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_path_prefix_is_matched_whatever_its_case() {
+        for text in [
+            "/MNT/c/x",
+            "/Mnt/C/x",
+            "/CYGDRIVE/c/x",
+            "/Cygdrive/c/x",
+            "/cygdrive/C/x",
+        ] {
+            assert_eq!(windows_shell_path(text).as_deref(), Some("C:\\x"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_file_url_is_cleaned_as_url_parsing_cleans_it() {
+        for (text, wanted) in [
+            ("file:///C|/Data/x", "C:\\Data\\x"),
+            ("file://C:/Data/x", "C:\\Data\\x"),
+            ("file://C|/Data/x", "C:\\Data\\x"),
+            ("file://\t/C:/Data/x", "C:\\Data\\x"),
+            ("file:///C:/Da\tta/x", "C:\\Data\\x"),
+            ("file:///C:/Data/x\r", "C:\\Data\\x"),
+            ("file:///C:/Data/x?q#f", "C:\\Data\\x"),
+            ("file:///C:\\Data\\x", "C:\\Data\\x"),
+            ("file://\\C:\\Data\\x", "C:\\Data\\x"),
+            ("file://localhost\\C:\\x", "C:\\x"),
+        ] {
+            assert_eq!(file_url(text, true).as_deref(), Some(wanted), "{text:?}");
+        }
+        // Pi refuses these.
+        for text in [
+            "file:///C%7c/Data/x",
+            "file:///C||/x",
+            "file:///\\host\\share\\f",
+        ] {
+            assert_eq!(file_url(text, true), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_windows_path_is_written_the_way_the_system_reads_it() {
+        for (text, wanted) in [
+            ("\\\\?\\C:\\Data\\x", "C:\\Data\\x"),
+            ("\\\\.\\C:\\x", "C:\\x"),
+            ("//?/C:/Data/x", "C:/Data/x"),
+            ("\\\\?\\C:", "C:\\"),
+            ("/\\host\\share", "\\\\host\\share"),
+            ("\\/host/share", "\\\\host\\share"),
+            ("//host/share", "\\\\host\\share"),
+            ("\\\\?\\UNC\\h\\s", "\\\\?\\UNC\\h\\s"),
+            ("//?/UNC/h/s", "\\\\?\\UNC\\h\\s"),
+            ("\\\\.\\pipe\\x", "\\\\.\\pipe\\x"),
+            ("///a/b", "\\a/b"),
+            ("\\\\\\a\\b", "\\a\\b"),
+            ("C:\\x", "C:\\x"),
+            ("/x", "/x"),
+        ] {
+            assert_eq!(windows_form(text), wanted, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_colon_after_the_drive_is_not_a_stream() {
+        for text in [
+            "C:\\proj\\.git::$INDEX_ALLOCATION\\config",
+            "C:\\a:b",
+            "sub\\a:b",
+        ] {
+            assert!(hides_a_stream(text), "{text}");
+        }
+        for text in ["C:\\proj\\a.txt", "\\\\host\\share\\a:b", "C:\\", "a.txt"] {
+            assert!(!hides_a_stream(text), "{text}");
+        }
+    }
+
+    #[test]
     fn what_looks_rewritten_is_indirect() {
         for text in [
             "~",
@@ -398,8 +584,100 @@ mod pi_table {
         ("@file:///C:/x", "C:\\x"),
         ("C:\\x\\..\\y", "C:\\y"),
         ("\\x", "C:\\x"),
-        ("C:\\Users\\..\\Windows", "C:\\Windows"),
+        ("C:\\Data\\..\\Windows", "C:\\Windows"),
+        // The prefixes of a shell path are matched whatever their case.
+        ("/MNT/C/Data/x", "C:\\Data\\x"),
+        ("/Mnt/c/Data/x", "C:\\Data\\x"),
+        ("/mnt/C/Data/x", "C:\\Data\\x"),
+        ("/CYGDRIVE/c/Data/x", "C:\\Data\\x"),
+        ("/cygdrive/C/Data/x", "C:\\Data\\x"),
+        ("/Cygdrive/c/x", "C:\\x"),
+        // A URL is read as URL parsing reads it.
+        ("file:///C|/Data/x", "C:\\Data\\x"),
+        ("file:///c|/Data/x", "c:\\Data\\x"),
+        ("file://C:/Data/x", "C:\\Data\\x"),
+        ("file://C|/Data/x", "C:\\Data\\x"),
+        ("file://c:/Data/x", "c:\\Data\\x"),
+        ("file:///C:\\Data\\x", "C:\\Data\\x"),
+        ("file://\\C:\\Data\\x", "C:\\Data\\x"),
+        ("file://localhost\\C:\\x", "C:\\x"),
+        ("file:///C:/Da\tta/x", "C:\\Data\\x"),
+        ("file:///C:/Da\nta/x", "C:\\Data\\x"),
+        ("file://\t/C:/Data/x", "C:\\Data\\x"),
+        ("file:///\tC:/Data/x", "C:\\Data\\x"),
+        ("file:///C:/Data/x\r", "C:\\Data\\x"),
+        ("file:///C:/Data/x ", "C:\\Data\\x"),
+        ("file:///C:/Data/x?q", "C:\\Data\\x"),
+        ("file:///C:/Data/x#f", "C:\\Data\\x"),
+        ("file:///C:/Data/x?a#b", "C:\\Data\\x"),
+        ("file:///C:/Data/%2e%2e/x", "C:\\x"),
+        ("file:///C:/Data/x%3f", "C:\\Data\\x?"),
+        ("fi\tle:///C:/Data/x", "C:\\proj\\fi\tle:\\C:\\Data\\x"),
+        ("file:\t///C:/Data/x", "C:\\proj\\file:\t\\C:\\Data\\x"),
+        ("file://host.example/share/f", "\\\\host.example\\share\\f"),
+        // Mixed separators make a network path; three or more are the root of the drive.
+        ("/\\host\\share\\f", "\\\\host\\share\\f"),
+        ("\\/host/share/f", "\\\\host\\share\\f"),
+        ("/\\host/share", "\\\\host\\share"),
+        ("///host/share/f", "C:\\host\\share\\f"),
+        ("\\\\\\host\\share\\f", "C:\\host\\share\\f"),
+        ("\\//host/share", "C:\\host\\share"),
+        ("////host/share", "C:\\host\\share"),
+        // Names that are colons are streams of a file, not different names.
+        (
+            ".git::$INDEX_ALLOCATION/config",
+            "C:\\proj\\.git::$INDEX_ALLOCATION\\config",
+        ),
+        ("C:\\a\\b:c", "C:\\a\\b:c"),
     ];
+
+    /// Pi writes a verbatim or device path as it was given (`\\?\C:\x`); it names the file `C:\x`, which this port decides on.
+    const VERBATIM: &[(&str, &str)] = &[
+        ("\\\\?\\C:\\Data\\x", "C:\\Data\\x"),
+        ("\\\\.\\C:\\Data\\x", "C:\\Data\\x"),
+        ("//?/C:/Data/x", "C:\\Data\\x"),
+        ("//./C:/Data/x", "C:\\Data\\x"),
+        ("\\\\?\\c:\\users\\x", "c:\\users\\x"),
+        ("\\\\?\\C:\\a\\..\\b", "C:\\b"),
+        ("\\\\?\\C:", "C:\\"),
+        ("\\\\.\\C:", "C:\\"),
+        ("\\\\?\\UNC\\host\\share\\f", "\\\\?\\UNC\\host\\share\\f"),
+        ("//?/UNC/host/share/f", "\\\\?\\UNC\\host\\share\\f"),
+        ("\\\\.\\pipe\\x", "\\\\.\\pipe\\x"),
+        ("\\\\?\\Volume{abc}\\x", "\\\\?\\Volume{abc}\\x"),
+    ];
+
+    #[test]
+    fn a_verbatim_or_device_path_to_a_drive_is_that_drive_and_any_other_is_a_network_path() {
+        let (cwd, home) = (PathBuf::from("C:\\proj"), PathBuf::from("C:\\fakehome"));
+        for (input, wanted) in VERBATIM {
+            let found = resolve(input, &cwd, Some(&home), true);
+            assert_eq!(
+                found.path.to_string_lossy().replace('/', "\\"),
+                *wanted,
+                "{input:?}"
+            );
+            assert_eq!(found.network, wanted.starts_with("\\\\"), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_with_a_colon_is_a_stream() {
+        let (cwd, home) = (PathBuf::from("C:\\proj"), PathBuf::from("C:\\fakehome"));
+        for text in [
+            ".git::$INDEX_ALLOCATION/config",
+            "sub/.git::$INDEX_ALLOCATION/HEAD",
+            ".pi::$INDEX_ALLOCATION/settings.json",
+            "notes.txt:hidden",
+            "C:\\proj\\a:b",
+            "@.git::$INDEX_ALLOCATION/config",
+        ] {
+            assert!(resolve(text, &cwd, Some(&home), true).stream, "{text}");
+        }
+        for text in ["notes.txt", "C:\\proj\\a.txt", "//host/share/a:b", "C:/x/y"] {
+            assert!(!resolve(text, &cwd, Some(&home), true).stream, "{text}");
+        }
+    }
 
     #[test]
     fn the_port_makes_of_each_input_what_pi_made() {
