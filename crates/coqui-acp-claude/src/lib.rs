@@ -6,10 +6,15 @@ extern crate alloc;
 
 pub mod accounts;
 mod agent;
+#[cfg(feature = "history")]
+#[cfg_attr(docsrs, doc(cfg(feature = "history")))]
+pub mod history;
 mod launch;
 mod limits;
 pub mod parse;
 mod provider;
+#[cfg(feature = "history")]
+mod provider_history;
 mod replay;
 mod session;
 mod signin;

@@ -108,7 +108,10 @@ fn every_recorded_tool_call_has_its_kind_input_and_output() {
             results += 1;
         }
     }
-    assert!(calls >= 6 && results >= 6, "{calls} calls, {results} results");
+    assert!(
+        calls >= 6 && results >= 6,
+        "{calls} calls, {results} results"
+    );
 }
 
 #[test]
@@ -119,10 +122,7 @@ fn a_replayed_transcript_keeps_its_tool_calls_whole() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     let mut parser = coqui_acp_claude::Parser::new(std::sync::Arc::new(|_: &Value| Ok(())), 4096);
-    let events: Vec<Event> = lines
-        .iter()
-        .flat_map(|line| parser.history(line))
-        .collect();
+    let events: Vec<Event> = lines.iter().flat_map(|line| parser.history(line)).collect();
     let told = tools_of(&events);
     let (uses, outcomes) = blocks(&lines);
     let mut checked = 0;
@@ -141,7 +141,11 @@ fn a_replayed_transcript_keeps_its_tool_calls_whole() {
     for block in outcomes {
         let id = block["tool_use_id"].as_str().unwrap();
         if let Some(call) = told.iter().find(|call| {
-            call.id == id && matches!(call.status, Some(ToolStatus::Completed | ToolStatus::Failed))
+            call.id == id
+                && matches!(
+                    call.status,
+                    Some(ToolStatus::Completed | ToolStatus::Failed)
+                )
         }) {
             assert_eq!(call.output.as_ref(), block.get("content"), "{id}");
             checked += 1;

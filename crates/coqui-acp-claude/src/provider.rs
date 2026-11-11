@@ -433,29 +433,45 @@ impl AcpHarness for ClaudeProvider {
     fn import_session(
         &self,
         session: SessionImport,
-        _spawner: Object<dyn ProcessSpawner>,
+        spawner: Object<dyn ProcessSpawner>,
         _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
         if let Some(account) = &session.account {
             accounts::plan(account)?;
         }
-        Err(unsupported(
-            "this provider does not import a session into Claude Code yet",
-        ))
+        #[cfg(feature = "history")]
+        {
+            crate::provider_history::import(&session, &spawner)
+        }
+        #[cfg(not(feature = "history"))]
+        {
+            drop(spawner);
+            Err(unsupported(
+                "this provider does not import a session into Claude Code yet",
+            ))
+        }
     }
 
     fn export_session(
         &self,
         export: SessionExport,
-        _spawner: Object<dyn ProcessSpawner>,
+        spawner: Object<dyn ProcessSpawner>,
         _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
         if let Some(account) = &export.account {
             accounts::plan(account)?;
         }
-        Err(unsupported(
-            "this provider does not export a Claude Code session yet",
-        ))
+        #[cfg(feature = "history")]
+        {
+            crate::provider_history::export(&export, &spawner)
+        }
+        #[cfg(not(feature = "history"))]
+        {
+            drop(spawner);
+            Err(unsupported(
+                "this provider does not export a Claude Code session yet",
+            ))
+        }
     }
 
     fn models(

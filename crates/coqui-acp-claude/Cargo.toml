@@ -18,6 +18,11 @@ publish = false
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = []
+# Export and import of the harness's own session files in the standard history format.
+history = ["dep:coqui-acp-history"]
+
 [[bin]]
 name = "coqui-acp-claude"
 path = "src/main.rs"
@@ -27,6 +32,7 @@ clap.workspace = true
 coqui-acp-api = { path = "../coqui-acp-api" }
 coqui-acp-harness = { path = "../coqui-acp-harness", features = ["kind"] }
 serde_json.workspace = true
+coqui-acp-history = { path = "../coqui-acp-history", optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
