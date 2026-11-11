@@ -87,7 +87,10 @@ fn every_recorded_tool_item_is_a_call_with_its_kind_input_and_output() {
                     .unwrap_or_else(|| panic!("{name}: {kind} {id} ended with no output"));
                 if kind == "commandExecution" {
                     let output: &Value = end.output.as_ref().unwrap();
-                    assert_eq!(output["aggregatedOutput"], item["aggregatedOutput"], "{name}");
+                    assert_eq!(
+                        output["aggregatedOutput"], item["aggregatedOutput"],
+                        "{name}"
+                    );
                     assert_eq!(output["exitCode"], item["exitCode"], "{name}");
                 }
                 done += 1;

@@ -727,7 +727,8 @@ impl Parser {
                         None => "Search the web".to_string(),
                     },
                 );
-                call.input = Some(json!({"query": item.get("query"), "action": item.get("action")}));
+                call.input =
+                    Some(json!({"query": item.get("query"), "action": item.get("action")}));
                 call.status = Some(if done {
                     ToolStatus::Completed
                 } else {
