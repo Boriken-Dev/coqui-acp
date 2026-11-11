@@ -11,7 +11,7 @@ use coqui_acp_harness::stdio::StdioProvider;
 
 // The library's say in being unloaded: busy while a thread of its connections still runs.
 extern "C" fn unload() -> Status {
-    coqui_acp_harness::stdio::threads_done()
+    coqui_acp_harness::provider::threads_done()
 }
 
 guatiao::providers!(

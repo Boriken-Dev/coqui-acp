@@ -309,7 +309,9 @@ fn a_pi_key_names_only_a_provider_variable() {
         Sink(sender).into_object(),
         Keeper.into_object(),
     );
-    let error = refused.err().expect("refused");
+    let Err(error) = refused else {
+        panic!("a variable that is no provider's was taken");
+    };
     assert_eq!(u32::from(error.status), 7, "{}", error.message());
     let _ = std::fs::remove_dir_all(&dir);
 }

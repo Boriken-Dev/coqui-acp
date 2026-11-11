@@ -255,14 +255,8 @@ impl core::fmt::Debug for Applied {
     }
 }
 
-/// A Guatiao value as JSON; `null` when it holds something JSON cannot.
-#[must_use]
-pub fn json_of(value: &coqui_acp_api::guatiao::Value) -> Value {
-    serde_json::to_value(guatiao_serde::Serializable::from(value)).unwrap_or(Value::Null)
-}
-
 fn settings_of(grant: &AccountGrant) -> Result<Map<String, Value>, ProviderError> {
-    match json_of(&grant.settings) {
+    match crate::provider::to_json(&grant.settings) {
         Value::Object(map) => Ok(map),
         Value::Null => Ok(Map::new()),
         _ => Err(bad("the settings are not an object")),

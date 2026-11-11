@@ -22,8 +22,8 @@ use coqui_acp_api::{
 };
 use serde_json::{Value, json};
 
-use super::threads;
 use crate::account::{Hold, Watcher};
+use crate::provider::track;
 
 /// How many messages wait for the sink before a sender is held back.
 const QUEUE: usize = 4;
@@ -298,7 +298,7 @@ fn spawn_thread(name: &str, work: impl FnOnce() + Send + 'static) -> Result<(), 
         .name(name.into())
         .spawn(work)
         .map_err(|_| ProviderError::new(Status::GUATIAO_ERR_INTERNAL, "no thread to serve on"))?;
-    threads::track(thread);
+    track(thread);
     Ok(())
 }
 

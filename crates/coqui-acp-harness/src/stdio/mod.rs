@@ -18,21 +18,22 @@ use core::time::Duration;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeper, AccountLoss, AccountRef, AccountRenewal,
-    AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport,
-    LoginOutcome, LoginPrompter, LoginRequest, ModelListing, ModelsRequest, Narrowing,
-    ProcessSpawner, RenewReport, RenewRequest, Requirement, SessionExport, SessionImport,
-    SpawnSpec, StartRequest, UsageQuery, UsageReport, WorkingRoots,
+    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
+    Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter, LoginRequest,
+    ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport, RenewRequest, Requirement,
+    SessionExport, SessionImport, SpawnSpec, StartRequest, UsageQuery, UsageReport, WorkingRoots,
 };
 
+use std::ffi::OsString;
+
+use crate::ThroughSpawner;
 use crate::account::{Accounts, DEFAULT_POLL_MS, Files, Hold, Watched};
+use crate::cli;
+use crate::process::Launch;
 
 pub mod accounts;
 mod login;
 mod relay;
-mod threads;
-
-pub use threads::threads_done;
 
 use accounts::{Applied, HarnessDef};
 
@@ -124,19 +125,6 @@ impl From<StdioSettings> for StdioProvider {
     }
 }
 
-/// A keeper that keeps nothing, for a call that asks no host to be told.
-struct Mute;
-
-impl AccountKeeper for Mute {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
-    }
-}
-
 fn unsupported(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, why)
 }
@@ -203,7 +191,7 @@ impl StdioProvider {
         grant: &AccountGrant,
         applied: &Applied,
         spawner: &Arc<Object<dyn ProcessSpawner>>,
-        keeper: Object<dyn AccountKeeper>,
+        keeper: Option<Object<dyn AccountKeeper>>,
     ) -> Result<Option<Hold>, ProviderError> {
         let files = Files::new(Arc::clone(spawner));
         if applied.needs_files && !files.available() {
@@ -243,7 +231,7 @@ impl StdioProvider {
             return Ok(());
         };
         let spawner = Arc::new(spawner);
-        if let Some(hold) = self.hold(grant, &applied, &spawner, keeper)? {
+        if let Some(hold) = self.hold(grant, &applied, &spawner, Some(keeper))? {
             let _ = hold.look();
             hold.finish();
         }
@@ -316,7 +304,7 @@ impl AcpHarness for StdioProvider {
         let spawner = Arc::new(spawner);
         let hold = match (&request.account, &applied) {
             (Some(grant), Some(applied)) => self
-                .hold(grant, applied, &spawner, keeper)?
+                .hold(grant, applied, &spawner, Some(keeper))?
                 .map(|hold| (hold, self.poll())),
             _ => None,
         };
@@ -447,7 +435,7 @@ impl AcpHarness for StdioProvider {
             _ => return Err(unsupported(kind.renew_unsupported)),
         };
         let spawner = Arc::new(spawner);
-        let Some(hold) = self.hold(&grant, &applied, &spawner, Mute.into_object())? else {
+        let Some(hold) = self.hold(&grant, &applied, &spawner, None)? else {
             return Err(unsupported(kind.renew_unsupported));
         };
         let renewed = self.renew_with(&hold, &spawner, &applied, args);
@@ -472,12 +460,32 @@ impl StdioProvider {
         if let Some(why) = lost(hold) {
             return Err(gone(why));
         }
-        let spec = self.spec(&Environment::new(), Some(applied), args);
-        let exit = login::run_to_end(spawner, spec, RENEW_LIMIT)?;
-        if exit.code != Some(0) {
+        let mut launch = Launch::new(self.program_name()).args(args.iter().copied());
+        for (name, value) in &applied.environment {
+            launch = launch.env(name.as_str(), value.as_str());
+        }
+        launch.remove_env = self.def().variables.iter().map(OsString::from).collect();
+        let done = cli::run(
+            &ThroughSpawner::shared(Arc::clone(spawner)),
+            &launch,
+            None,
+            RENEW_LIMIT,
+            4096,
+        )
+        .map_err(|_| {
+            ProviderError::new(
+                Status::GUATIAO_ERR_INTERNAL,
+                "the renewal's program could not be started",
+            )
+        })?;
+        if !done.succeeded() {
             return Err(ProviderError::new(
                 Status::GUATIAO_ERR_INTERNAL,
-                "the renewal's program did not succeed",
+                if done.timed_out {
+                    "the renewal's program did not finish in time"
+                } else {
+                    "the renewal's program did not succeed"
+                },
             ));
         }
         let found = hold.look()?;

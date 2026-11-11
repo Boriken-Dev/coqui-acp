@@ -8,16 +8,18 @@
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
+use std::ffi::OsString;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
     ASK, AUTH, Credentials, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
-    MODEL_API, OPEN_URL, OpenUrl, PROXY, ProcessSpawner, SpawnSpec, USER_CODE,
+    MODEL_API, OPEN_URL, OpenUrl, PROXY, ProcessSpawner, USER_CODE,
 };
 use serde_json::json;
 
 use super::{Credential, Endpoint, HarnessDef, KindDef, Setting};
+use crate::process::{Exit, Launch};
 use crate::provider::schema;
 use crate::stdio::login::{self, Ctx};
 
@@ -221,15 +223,15 @@ pub fn logins() -> Vec<LoginMethodInfo> {
     vec![device, browser, key]
 }
 
-fn spec(program: &str, args: &[&str], dir: &str) -> SpawnSpec {
-    let mut environment = coqui_acp_api::Environment::new();
-    environment.insert("GROK_HOME", dir);
-    let mut spec = SpawnSpec::new(program).environment(environment);
-    for arg in args {
-        spec = spec.arg(*arg);
+fn launch(program: &str, args: &[&str], dir: &str, extra: &[(&str, &str)]) -> Launch {
+    let mut launch = Launch::new(program)
+        .args(args.iter().copied())
+        .env("GROK_HOME", dir);
+    for (name, value) in extra {
+        launch = launch.env(*name, *value);
     }
-    spec.remove_environment = VARIABLES.iter().map(|v| (*v).to_string()).collect();
-    spec
+    launch.remove_env = VARIABLES.iter().map(OsString::from).collect();
+    launch
 }
 
 #[derive(Default)]
@@ -274,7 +276,7 @@ fn internal(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_INTERNAL, why)
 }
 
-fn code_text(exit: &coqui_acp_api::ProcessExit) -> alloc::string::String {
+fn code_text(exit: &Exit) -> alloc::string::String {
     exit.code.map_or_else(
         || "was ended".to_string(),
         |code| alloc::format!("ended with code {code}"),
@@ -283,7 +285,7 @@ fn code_text(exit: &coqui_acp_api::ProcessExit) -> alloc::string::String {
 
 /// `grok models` on the sign-in's directory, which asks nothing of a model and renews a login near its end.
 fn check(ctx: &Ctx, program: &str, dir: &str) -> Result<bool, ProviderError> {
-    let mut child = ctx.spawn(spec(program, &["models"], dir))?;
+    let mut child = ctx.spawn(&launch(program, &["models"], dir, &[]))?;
     let exit = child.run(ctx, |_| Ok(()))?;
     Ok(exit.code == Some(0))
 }
@@ -299,7 +301,7 @@ fn browser_or_device(
     } else {
         &["login", "--oauth"]
     };
-    let mut child = ctx.spawn(spec(program, args, dir))?;
+    let mut child = ctx.spawn(&launch(program, args, dir, &[]))?;
     let mut seen = Seen::default();
     let exit = child.run(ctx, |line| seen.line(ctx, line, device))?;
     if exit.code != Some(0) {
@@ -348,12 +350,12 @@ fn api_key(ctx: &Ctx, program: &str, dir: &str) -> Result<LoginOutcome, Provider
             "login refused: no usable key was given",
         ));
     }
-    let mut spec = spec(program, &["models"], dir);
-    let mut environment = coqui_acp_api::Environment::new();
-    environment.insert("GROK_HOME", dir);
-    environment.insert("XAI_API_KEY", key.as_str());
-    spec = spec.environment(environment);
-    let mut child = ctx.spawn(spec)?;
+    let mut child = ctx.spawn(&launch(
+        program,
+        &["models"],
+        dir,
+        &[("XAI_API_KEY", key.as_str())],
+    ))?;
     let exit = child.run(ctx, |_| Ok(()))?;
     if exit.code != Some(0) {
         return Err(ProviderError::new(

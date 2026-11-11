@@ -7,7 +7,9 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
+use std::io;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
@@ -15,18 +17,21 @@ use std::time::Instant;
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    Credentials, ErrorOutput, LoginAnswer, LoginForm, LoginOutcome, LoginPrompter, OpenUrl,
-    ProcessExit, ProcessSpawner, READ_LINK_DOWN, READ_TIMED_OUT, SpawnSpec, SpawnedProcess,
+    Credentials, LoginAnswer, LoginForm, LoginOutcome, LoginPrompter, OpenUrl, ProcessSpawner,
 };
 
-use super::threads;
+use crate::ThroughSpawner;
+use crate::account::Files;
+use crate::cli::{Cli, Next, plain};
+use crate::process::{Exit, Launch};
+use crate::provider::track;
 
 /// How often the caller looks at the prompter while the sign-in runs.
 const LOOK: Duration = Duration::from_millis(25);
 /// How long a cancelled sign-in is given to let go of what it was handed before the caller answers anyway.
 const LET_GO: Duration = Duration::from_millis(1500);
-/// The largest file a sign-in is read back from.
-pub const MAX_FILE: u64 = 1 << 20;
+/// How long a program that closed its output is given to exit.
+const EXIT_WAIT: Duration = Duration::from_secs(5);
 
 fn gone(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_GONE, why)
@@ -35,27 +40,28 @@ fn gone(why: &str) -> ProviderError {
 /// The programs a sign-in started, so that the caller can end them from another thread.
 #[derive(Default)]
 struct Running {
-    ended: core::sync::atomic::AtomicBool,
-    processes: Mutex<Vec<Arc<Object<dyn SpawnedProcess>>>>,
+    ended: AtomicBool,
+    programs: Mutex<Vec<Arc<Cli>>>,
 }
 
 impl Running {
     fn kill_all(&self) {
-        self.ended.store(true, core::sync::atomic::Ordering::SeqCst);
-        let processes: Vec<_> = self
-            .processes
+        self.ended.store(true, Ordering::SeqCst);
+        let programs: Vec<_> = self
+            .programs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        for process in processes {
-            let _ = process.kill();
+        for program in programs {
+            program.kill();
         }
     }
 }
 
 /// What a sign-in works with: the spawner, the prompter and the deadline.
 pub struct Ctx {
-    spawner: Arc<Object<dyn ProcessSpawner>>,
+    spawn: ThroughSpawner,
+    files: Files,
     prompter: Arc<Object<dyn LoginPrompter>>,
     deadline: Instant,
     running: Arc<Running>,
@@ -71,12 +77,7 @@ impl Ctx {
         if Instant::now() >= self.deadline {
             return Err(gone("login timed out"));
         }
-        if self
-            .running
-            .ended
-            .load(core::sync::atomic::Ordering::SeqCst)
-            || self.prompter.cancelled().unwrap_or(false)
-        {
+        if self.running.ended.load(Ordering::SeqCst) || self.prompter.cancelled().unwrap_or(false) {
             return Err(gone("login cancelled"));
         }
         Ok(())
@@ -103,7 +104,7 @@ impl Ctx {
     ///
     /// # Errors
     ///
-    /// As [`open_url`](Self::open_url).
+    /// The person cancelled, or the sign-in ran out of time.
     pub fn open_url(&self, open: OpenUrl) -> Result<(), ProviderError> {
         self.mapped(self.prompter.open_url(open))
     }
@@ -117,31 +118,31 @@ impl Ctx {
         self.mapped(self.prompter.ask(form))
     }
 
-    /// Starts `spec` on the spawner, with its standard error kept apart. The program is ended with the sign-in.
+    /// Starts `launch` on the spawner. The program is ended with the sign-in.
     ///
     /// # Errors
     ///
-    /// The sign-in has ended, or the spawner refused.
-    pub fn spawn(&self, spec: SpawnSpec) -> Result<Child, ProviderError> {
+    /// The sign-in has ended, or the program could not be started.
+    pub fn spawn(&self, launch: &Launch) -> Result<Child, ProviderError> {
         self.check()?;
-        let process = Arc::new(
-            self.spawner
-                .spawn(spec.error_output(ErrorOutput::Separate))?,
-        );
+        let cli = Cli::start(&self.spawn, launch).map_err(|error| {
+            let status = if error.kind() == io::ErrorKind::NotFound {
+                Status::GUATIAO_ERR_NOT_FOUND
+            } else {
+                Status::GUATIAO_ERR_INTERNAL
+            };
+            ProviderError::new(status, "the sign-in's program could not be started")
+        })?;
         self.running
-            .processes
+            .programs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::clone(&process));
-        if self
-            .running
-            .ended
-            .load(core::sync::atomic::Ordering::SeqCst)
-        {
-            let _ = process.kill();
+            .push(Arc::clone(&cli));
+        if self.running.ended.load(Ordering::SeqCst) {
+            cli.kill();
         }
         Ok(Child {
-            process,
+            cli,
             out: Vec::new(),
             err: Vec::new(),
         })
@@ -153,155 +154,71 @@ impl Ctx {
     ///
     /// The spawner's refusal; `GUATIAO_ERR_NOT_FOUND` for a file that is not there.
     pub fn read_file(&self, path: &str) -> Result<String, ProviderError> {
-        Ok(self.spawner.read_file(path, MAX_FILE)?.expose().to_text())
+        self.files
+            .read(path)?
+            .ok_or_else(|| ProviderError::new(Status::GUATIAO_ERR_NOT_FOUND, "no such file"))
     }
 }
 
-/// A program a sign-in started.
+/// A program a sign-in started, whose output is read a line at a time.
 pub struct Child {
-    process: Arc<Object<dyn SpawnedProcess>>,
+    cli: Arc<Cli>,
     out: Vec<u8>,
     err: Vec<u8>,
 }
 
-/// Removes terminal colour and hyperlink sequences from a line.
-#[must_use]
-pub fn clean(line: &str) -> String {
-    let mut clean = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            if c != '\r' {
-                clean.push(c);
-            }
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                let mut last = ' ';
-                for c in chars.by_ref() {
-                    if c == '\u{7}' || (last == '\u{1b}' && c == '\\') {
-                        break;
-                    }
-                    last = c;
-                }
-            }
-            _ => {}
-        }
-    }
-    clean
-}
-
 impl Child {
-    fn drain(&mut self, error: bool, wait_ms: u64, lines: &mut Vec<String>) {
-        let mut chunk = [0u8; 4096];
-        loop {
-            let read = if error {
-                self.process.read_error(&mut chunk, wait_ms)
-            } else {
-                self.process.read(&mut chunk, wait_ms)
-            };
-            let n = match read {
-                Ok(n) if n > 0 => usize::try_from(n).unwrap_or(0),
-                Ok(READ_TIMED_OUT | READ_LINK_DOWN) | Ok(_) | Err(_) => return,
-            };
-            let buffer = if error { &mut self.err } else { &mut self.out };
-            buffer.extend_from_slice(&chunk[..n]);
-            while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
-                lines.push(clean(&String::from_utf8_lossy(&line)));
-            }
-            if buffer.len() > (1 << 16) {
-                buffer.clear();
-            }
+    fn lines(buffer: &mut Vec<u8>, bytes: &[u8], lines: &mut Vec<String>) {
+        buffer.extend_from_slice(bytes);
+        while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=end).collect();
+            lines.push(plain(
+                String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']),
+            ));
+        }
+        if buffer.len() > (1 << 16) {
+            buffer.clear();
         }
     }
 
-    /// Runs it to its end, handing each line it prints (standard error's too) to `on_line` as it comes, and answers how
-    /// it ended.
+    /// Runs it to its end, handing each line it prints (standard error's too, without terminal colour) to `on_line` as
+    /// it comes, and answers how it ended.
     ///
     /// # Errors
     ///
-    /// The sign-in was cancelled or ran out of time (the program is then ended), or `on_line` refused.
+    /// The sign-in was cancelled or ran out of time, or `on_line` refused; the program is ended then.
     pub fn run(
         &mut self,
         ctx: &Ctx,
-        on_line: impl FnMut(&str) -> Result<(), ProviderError>,
-    ) -> Result<ProcessExit, ProviderError> {
-        self.run_while(|| ctx.check(), on_line)
-    }
-
-    /// As [`run`](Self::run), until `proceed` refuses.
-    ///
-    /// # Errors
-    ///
-    /// What `proceed` or `on_line` refused.
-    pub fn run_while(
-        &mut self,
-        mut proceed: impl FnMut() -> Result<(), ProviderError>,
         mut on_line: impl FnMut(&str) -> Result<(), ProviderError>,
-    ) -> Result<ProcessExit, ProviderError> {
+    ) -> Result<Exit, ProviderError> {
         loop {
-            proceed()?;
+            ctx.check()?;
             let mut lines = Vec::new();
-            self.drain(false, 20, &mut lines);
-            self.drain(true, 20, &mut lines);
+            let ended = match self.cli.next(Duration::from_millis(40)) {
+                Next::Piece(piece) => {
+                    let buffer = if piece.error {
+                        &mut self.err
+                    } else {
+                        &mut self.out
+                    };
+                    Self::lines(buffer, &piece.bytes, &mut lines);
+                    false
+                }
+                Next::Idle => false,
+                Next::Ended => true,
+            };
             for line in lines {
                 on_line(&line)?;
             }
-            let exit = self.process.wait(0)?;
-            if !exit.running {
-                let mut lines = Vec::new();
-                self.drain(false, 0, &mut lines);
-                self.drain(true, 0, &mut lines);
-                for line in lines {
-                    on_line(&line)?;
-                }
-                return Ok(exit);
+            if ended {
+                break;
             }
         }
+        self.cli.wait(EXIT_WAIT).ok_or_else(|| {
+            ProviderError::new(Status::GUATIAO_ERR_INTERNAL, "the program did not exit")
+        })
     }
-}
-
-/// Runs `spec` on `spawner` to its end, reading its output away, and ends it when it has not finished in `limit`.
-///
-/// # Errors
-///
-/// The spawner's refusal; `GUATIAO_ERR_INTERNAL` when the program did not finish in time.
-pub fn run_to_end(
-    spawner: &Object<dyn ProcessSpawner>,
-    spec: SpawnSpec,
-    limit: Duration,
-) -> Result<ProcessExit, ProviderError> {
-    let process = Arc::new(spawner.spawn(spec.error_output(ErrorOutput::Separate))?);
-    let mut child = Child {
-        process: Arc::clone(&process),
-        out: Vec::new(),
-        err: Vec::new(),
-    };
-    let deadline = Instant::now() + limit;
-    let outcome = child.run_while(
-        || {
-            if Instant::now() >= deadline {
-                Err(ProviderError::new(
-                    Status::GUATIAO_ERR_INTERNAL,
-                    "the program did not finish in time",
-                ))
-            } else {
-                Ok(())
-            }
-        },
-        |_| Ok(()),
-    );
-    let _ = process.kill();
-    outcome
 }
 
 /// Runs `work` as a sign-in on a thread of its own and answers its outcome, or a cancel or a timeout the moment they
@@ -320,8 +237,10 @@ pub fn run(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let running = Arc::new(Running::default());
     let prompter = Arc::new(prompter);
+    let spawner = Arc::new(spawner);
     let ctx = Ctx {
-        spawner: Arc::new(spawner),
+        files: Files::new(Arc::clone(&spawner)),
+        spawn: ThroughSpawner::shared(spawner),
         prompter: Arc::clone(&prompter),
         deadline,
         running: Arc::clone(&running),
@@ -337,7 +256,7 @@ pub fn run(
             let _ = tx.send(outcome);
         })
         .map_err(|_| ProviderError::new(Status::GUATIAO_ERR_INTERNAL, "no thread to sign in on"))?;
-    threads::track(thread);
+    track(thread);
     loop {
         match rx.recv_timeout(LOOK) {
             Ok(outcome) => return outcome,

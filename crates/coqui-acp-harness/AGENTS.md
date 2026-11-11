@@ -130,7 +130,6 @@ pub struct StdioSettings { pub harness: StdioHarness, pub executable: Option<Str
     pub renew_poll_ms: u64 /* 30000 */, pub max_requests: u64 /* 32 */, pub max_message_bytes: u64 /* 67108864 */ }   // ToValue, FromValue, Schema
 pub const fn StdioSettings::new(harness: StdioHarness) -> StdioSettings
 #[non_exhaustive] pub enum StdioHarness { Grok, Antigravity, Pi }                      // written grok, antigravity, pi
-pub fn threads_done() -> Status                                                        // a library's `unload` hook
 pub mod accounts { pub struct HarnessDef; pub struct KindDef; pub fn catalog(..); pub fn apply(..); pub fn known(..);
     pub fn json_of(..); pub mod grok; pub mod antigravity; pub mod pi }               // the tables
 ```
