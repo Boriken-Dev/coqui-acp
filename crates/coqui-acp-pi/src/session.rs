@@ -711,16 +711,7 @@ impl PiSession {
         if !images.is_empty() {
             fields["images"] = Value::Array(images);
         }
-        locked(&self.parser).prompting();
-        let taken = self
-            .request("prompt", fields, self.settings.prompt_timeout)
-            .inspect_err(|_| locked(&self.parser).abandon())?;
-        if taken.get("disposition").and_then(Value::as_str) == Some("handled") {
-            let events = locked(&self.parser).handled();
-            for event in events {
-                (self.sink)(event);
-            }
-        }
+        // Told before the prompt is sent: a run that ends at once must not outrun it.
         if !self.titled.swap(true, Ordering::SeqCst)
             && let Some(title) = content.iter().find_map(|block| match block {
                 Content::Text(text) => text.lines().find(|line| !line.trim().is_empty()),
@@ -730,6 +721,16 @@ impl PiSession {
             (self.sink)(Event::Title(
                 lines::cut(title.trim(), self.settings.title_bytes).to_string(),
             ));
+        }
+        locked(&self.parser).prompting();
+        let taken = self
+            .request("prompt", fields, self.settings.prompt_timeout)
+            .inspect_err(|_| locked(&self.parser).abandon())?;
+        if taken.get("disposition").and_then(Value::as_str) == Some("handled") {
+            let events = locked(&self.parser).handled();
+            for event in events {
+                (self.sink)(event);
+            }
         }
         Ok(())
     }
