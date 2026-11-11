@@ -1,0 +1,108 @@
+{
+ "rollout": true,
+ "files": {
+  "w/notes.txt": "one\ntwo\n"
+ },
+ "script": [
+  {
+   "reasoning": "Look first.",
+   "call": {
+    "type": "function_call",
+    "name": "shell_command",
+    "arguments": "{\"command\": \"echo checked\", \"workdir\": \"{ROOT}/w\"}",
+    "id": "fc_1"
+   }
+  },
+  {
+   "call": {
+    "type": "custom_tool_call",
+    "name": "apply_patch",
+    "id": "ctc_p",
+    "input": "*** Begin Patch\n*** Update File: notes.txt\n@@\n one\n-two\n+three\n*** End Patch\n"
+   }
+  },
+  {
+   "text": "Done."
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "coqui-acp-codex",
+      "version": "0.0.0"
+     },
+     "capabilities": {}
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 1
+   }
+  },
+  {
+   "send": {
+    "method": "initialized",
+    "params": {}
+   }
+  },
+  {
+   "send": {
+    "id": 2,
+    "method": "model/list",
+    "params": {}
+   }
+  },
+  {
+   "until": {
+    "id": 2
+   }
+  },
+  {
+   "send": {
+    "id": 3,
+    "method": "thread/start",
+    "params": {
+     "cwd": "{ROOT}/w",
+     "approvalPolicy": "never",
+     "sandbox": "danger-full-access",
+     "developerInstructions": "Answer briefly.",
+     "model": "standin-classic"
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 3
+   }
+  },
+  {
+   "send": {
+    "id": 4,
+    "method": "turn/start",
+    "params": {
+     "threadId": "{THREAD}",
+     "input": [
+      {
+       "type": "text",
+       "text": "Change two to three in notes.txt."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 120
+  },
+  {
+   "close": true
+  }
+ ]
+}

@@ -1,4 +1,5 @@
 {
+ "rollout": true,
  "files": {
   "w/notes.txt": "one\ntwo\n"
  },

@@ -1,0 +1,132 @@
+{
+ "rollout": true,
+ "script": [
+  {
+   "text": "First answer."
+  },
+  {
+   "text": "Summary of the work so far."
+  },
+  {
+   "text": "After the compaction."
+  }
+ ],
+ "steps": [
+  {
+   "send": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "coqui-acp-codex",
+      "version": "0.0.0"
+     },
+     "capabilities": {}
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 1
+   }
+  },
+  {
+   "send": {
+    "method": "initialized",
+    "params": {}
+   }
+  },
+  {
+   "send": {
+    "id": 2,
+    "method": "model/list",
+    "params": {}
+   }
+  },
+  {
+   "until": {
+    "id": 2
+   }
+  },
+  {
+   "send": {
+    "id": 3,
+    "method": "thread/start",
+    "params": {
+     "cwd": "{ROOT}/w",
+     "approvalPolicy": "never",
+     "sandbox": "danger-full-access",
+     "developerInstructions": "Answer briefly."
+    }
+   }
+  },
+  {
+   "until": {
+    "id": 3
+   }
+  },
+  {
+   "send": {
+    "id": 4,
+    "method": "turn/start",
+    "params": {
+     "threadId": "{THREAD}",
+     "input": [
+      {
+       "type": "text",
+       "text": "Say something."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 120
+  },
+  {
+   "send": {
+    "id": 5,
+    "method": "thread/compact/start",
+    "params": {
+     "threadId": "{THREAD}"
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 120
+  },
+  {
+   "sleep": 2
+  },
+  {
+   "send": {
+    "id": 6,
+    "method": "turn/start",
+    "params": {
+     "threadId": "{THREAD}",
+     "input": [
+      {
+       "type": "text",
+       "text": "And after?"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "until": {
+    "method": "turn/completed"
+   },
+   "timeout": 120
+  },
+  {
+   "close": true
+  }
+ ]
+}

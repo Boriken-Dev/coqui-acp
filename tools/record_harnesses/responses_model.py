@@ -143,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
         step = SCRIPT[at] if at < len(SCRIPT) else {"text": "done"}
         log({"method": "POST", "path": self.path, "seq": seq, "model": body.get("model"),
              "instructions": (body.get("instructions") or "")[:200],
-             "tools": [tool.get("name") for tool in body.get("tools", []) if isinstance(tool, dict)]})
+             "tools": [tool.get("name") for tool in body.get("tools", []) if isinstance(tool, dict)], "input": body.get("input")})
         time.sleep(step.get("hold", 0))
         if "status" in step:
             refusal = {"error": {"message": step.get("message", "stand-in refusal"), "type": step.get("kind", "server_error")}}

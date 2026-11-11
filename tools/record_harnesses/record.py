@@ -15,7 +15,8 @@ After a new version of a tool: record into a new directory, run the crate's test
 A case is JSON: "argv"; "script", the stand-in's steps (see anthropic_model.py, responses_model.py); "steps", each of
 {"send": line}, {"until": {key: value}, "timeout": seconds}, {"sleep": seconds} or {"close": true}; "policy", the answers
 to permission requests, in order; "files", text by path under the root; "env" and "env_remove"; "seed", a case or a case's name run first
-in the same root, unrecorded; "transcript", whether to copy the session's messages to `<case>.transcript.jsonl`;
+in the same root, unrecorded; "transcript", whether to copy the session's messages to `<case>.transcript.jsonl`; "rollout" (Codex), whether to copy its
+rollout file to `<case>.rollout.jsonl`;
 "provider_extra", more of Codex's stand-in provider; "mcp", whether to write the root's mcp.json naming mcp_echo.py.
 """
 
@@ -194,6 +195,32 @@ def run_steps(tool, case, values, seen):
     return True
 
 
+LEFT_OUT = "[left out of the recording]"
+
+
+def shortened(value):
+    """`value` with every long text replaced: Codex's own instructions and tool descriptions, which no test reads."""
+    if isinstance(value, str):
+        return LEFT_OUT if len(value) > 1500 else value
+    if isinstance(value, list):
+        return [shortened(item) for item in value]
+    if isinstance(value, dict):
+        return {key: shortened(item) for key, item in value.items()}
+    return value
+
+
+def scrubbed_rollout(data):
+    """A rollout as the recording keeps it: the machine's time zone and name removed, long texts left out, LF line ends."""
+    lines = [json.dumps(shortened(json.loads(scrubbed(line))), ensure_ascii=False, separators=(",", ":"))
+             for line in data.splitlines()]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def kept_line(entry):
+    """A transcript line that is part of the conversation: its messages and where it was compacted."""
+    return entry.get("type") in ("user", "assistant") or (entry.get("type") == "system" and entry.get("subtype") == "compact_boundary")
+
+
 def claude_answer(policy):
     def answer(tool, message):
         request = message.get("request", {})
@@ -259,7 +286,7 @@ def record_claude(program, case, name, root, out, recording=True):
         write(out / f"{name}.argv.json", json.dumps(case["argv"], indent=1) + "\n")
         if case.get("transcript"):
             found = next(iter((root / "c" / "projects").rglob(f"{case['transcript']}.jsonl")))
-            kept = [line for line in found.read_bytes().splitlines(keepends=True) if json.loads(line).get("type") in ("user", "assistant")]
+            kept = [line for line in found.read_bytes().splitlines(keepends=True) if kept_line(json.loads(line))]
             (out / f"{name}.transcript.jsonl").write_bytes(b"".join(kept))
     return tool.count
 
@@ -322,6 +349,10 @@ def record_codex(program, case, name, root, out, recording=True):
         write(out / f"{name}.steps.json", json.dumps(tool.written, indent=1) + "\n")
         kept = [argument.replace(port, "{PORT}") for argument in argv]
         write(out / f"{name}.argv.json", json.dumps(kept, indent=1) + "\n")
+        if case.get("rollout"):
+            found = sorted((root / "home" / "sessions").rglob("rollout-*.jsonl"))
+            assert len(found) == 1, f"{len(found)} rollout files"
+            (out / f"{name}.rollout.jsonl").write_bytes(scrubbed_rollout(found[0].read_bytes()))
     return tool.count
 
 

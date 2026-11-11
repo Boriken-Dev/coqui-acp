@@ -112,7 +112,7 @@ class Handler(BaseHTTPRequestHandler):
         main = bool(body.get("tools")) and "count_tokens" not in self.path
         log({"method": "POST", "path": self.path, "seq": seq, "main": main, "system": body.get("system"),
              "tools": [tool.get("name") for tool in body.get("tools", [])], "model": body.get("model"),
-             "messages": len(body.get("messages", []))})
+             "messages": len(body.get("messages", [])), "input": body.get("messages")})
         if "count_tokens" in self.path:
             return self.reply(200, json.dumps({"input_tokens": 1}))
         if not self.path.startswith("/v1/messages"):
