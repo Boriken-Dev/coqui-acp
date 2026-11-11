@@ -1,4 +1,4 @@
-//! The stdio provider, held to the `acp_harness` kind against a stand-in for Grok, Antigravity and Pi: every kind and
+//! The stdio provider, held to the `acp_harness` kind against a stand-in for Grok and Antigravity: every kind and
 //! login method of each, and what the stand-in saw of the arguments and the environment.
 #![allow(
     clippy::std_instead_of_core,
@@ -109,13 +109,6 @@ fn grok_keeps_every_rule_of_the_kind_for_each_kind_and_login() {
 #[test]
 fn antigravity_keeps_every_rule_of_the_kind() {
     run_suite("antigravity", "harness-login", false);
-}
-
-#[test]
-fn pi_keeps_every_rule_of_the_kind_for_each_kind() {
-    for kind in ["harness-login", "pi-api-key", "pi-oauth"] {
-        run_suite("pi", kind, false);
-    }
 }
 
 #[test]
@@ -261,63 +254,6 @@ fn a_key_account_clears_the_other_credentials_and_sets_its_own() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A Pi key goes in the variable its setting names, and in no other.
-#[test]
-fn a_pi_key_goes_in_the_variable_named_by_its_setting() {
-    let dir = scratch("pi");
-    let log = dir.join("fake.log");
-    let environment: Environment = [
-        ("OPENAI_API_KEY", "the-hosts-own-key"),
-        ("COQUI_ACP_FAKE_STDIO_LOG", log.to_str().expect("text")),
-    ]
-    .into_iter()
-    .collect();
-    let mut settings = Map::new();
-    settings.set("variable", Value::from("GROQ_API_KEY"));
-    let grant = AccountGrant::new("a-pi-key", "pi-api-key")
-        .settings(Value::from(settings))
-        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
-        .state_dir(dir.to_str().expect("text"));
-    let request = StartRequest::builder()
-        .environment(environment)
-        .account(grant)
-        .build();
-    start_and_close(&provider(StdioHarness::Pi), request, &dir);
-    let entries = logged(&log);
-    let names = names_of(entries.last().expect("a start"));
-    assert!(names.contains(&"GROQ_API_KEY".to_owned()), "{names:?}");
-    assert!(!names.contains(&"OPENAI_API_KEY".to_owned()), "{names:?}");
-    assert_eq!(
-        entries.last().expect("a start")["args"],
-        serde_json::json!([])
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A variable the Pi key setting does not list is refused, so a setting cannot name `PATH`.
-#[test]
-fn a_pi_key_names_only_a_provider_variable() {
-    let dir = scratch("pi-path");
-    let mut settings = Map::new();
-    settings.set("variable", Value::from("PATH"));
-    let grant = AccountGrant::new("a-pi-key", "pi-api-key")
-        .settings(Value::from(settings))
-        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
-        .state_dir(dir.to_str().expect("text"));
-    let (sender, _received) = mpsc::channel();
-    let refused = provider(StdioHarness::Pi).start(
-        StartRequest::builder().account(grant).build(),
-        LocalSpawner::new().files(&dir).into_object(),
-        Sink(sender).into_object(),
-        Keeper.into_object(),
-    );
-    let Err(error) = refused else {
-        panic!("a variable that is no provider's was taken");
-    };
-    assert_eq!(u32::from(error.status), 7, "{}", error.message());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 fn names_without(entry: &serde_json::Value, name: &str) -> bool {
     !names_of(entry).iter().any(|n| {
         if cfg!(windows) {
@@ -389,7 +325,6 @@ fn an_account_removes_the_endpoint_variables_the_host_process_has() {
             "--test-threads=1",
         ])
         .env("GROK_MODELS_BASE_URL", "https://evil.example/models")
-        .env("ANTHROPIC_BASE_URL", "https://evil.example/anthropic")
         .env("COQUI_ACP_FAKE_STDIO_LOG", dir.join("fake.log"))
         .env("STDIO_INHERITED_DIR", &dir)
         .output()
@@ -416,28 +351,12 @@ fn inherited_inside() {
         StartRequest::builder().account(grok).build(),
         &dir,
     );
-    let mut settings = Map::new();
-    settings.set("variable", Value::from("GROQ_API_KEY"));
-    let pi = AccountGrant::new("a-pi-key", "pi-api-key")
-        .settings(Value::from(settings))
-        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
-        .state_dir(dir.to_str().expect("text"));
-    start_and_close(
-        &provider(StdioHarness::Pi),
-        StartRequest::builder().account(pi).build(),
-        &dir,
-    );
     let entries = logged(&log);
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 1);
     assert!(
         names_without(&entries[0], "GROK_MODELS_BASE_URL"),
         "{}",
         entries[0]
-    );
-    assert!(
-        names_without(&entries[1], "ANTHROPIC_BASE_URL"),
-        "{}",
-        entries[1]
     );
 }
 

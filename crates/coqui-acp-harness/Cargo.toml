@@ -56,7 +56,7 @@ time = { workspace = true, features = ["formatting"] }
 name = "spawner_host"
 required-features = ["kind"]
 
-# The program the stdio provider's tests start in place of Grok, Antigravity and Pi.
+# The program the stdio provider's tests start in place of Grok and Antigravity.
 [[example]]
 name = "fake_stdio_cli"
 required-features = ["kind"]

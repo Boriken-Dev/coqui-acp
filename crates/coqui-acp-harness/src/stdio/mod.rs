@@ -1,5 +1,5 @@
 //! A provider of the `acp_harness` kind for coding agents that speak ACP on their own standard input and output: Grok
-//! (`grok agent stdio`), Antigravity (`agy acp`) and Pi (`pi-acp`).
+//! (`grok agent stdio`) and Antigravity (`agy acp`).
 //!
 //! The host's messages go to the program a line each and its lines come back as messages; what the
 //! provider adds is the account: it removes every credential variable of the harness from what it starts, sets the chosen
@@ -37,7 +37,7 @@ mod relay;
 
 use accounts::{Applied, HarnessDef};
 
-/// The harness a provider fronts. Written as `grok`, `antigravity` and `pi`.
+/// The harness a provider fronts. Written as `grok` and `antigravity`.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[map(crate = ::coqui_acp_api::guatiao, rename_all = "snake_case")]
 #[non_exhaustive]
@@ -46,8 +46,6 @@ pub enum StdioHarness {
     Grok,
     /// Antigravity, started as `agy acp`.
     Antigravity,
-    /// Pi, started as `pi-acp`.
-    Pi,
 }
 
 impl StdioHarness {
@@ -55,7 +53,6 @@ impl StdioHarness {
         match self {
             Self::Grok => &accounts::grok::DEF,
             Self::Antigravity => &accounts::antigravity::DEF,
-            Self::Pi => &accounts::pi::DEF,
         }
     }
 }
@@ -64,10 +61,10 @@ impl StdioHarness {
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
 #[map(crate = ::coqui_acp_api::guatiao)]
 pub struct StdioSettings {
-    /// The harness: `grok`, `antigravity` or `pi`.
+    /// The harness: `grok` or `antigravity`.
     pub harness: StdioHarness,
-    /// The program: a path, or a name looked up on the `PATH` where the spawner runs it. The harness's own (`grok`, `agy`,
-    /// `pi-acp`) when absent.
+    /// The program: a path, or a name looked up on the `PATH` where the spawner runs it. The harness's own (`grok`, `agy`)
+    /// when absent.
     pub executable: Option<String>,
     /// The highest ACP version the harness is said to answer: 1 or 2.
     #[map(default = 1)]
@@ -104,7 +101,7 @@ impl StdioSettings {
     }
 }
 
-/// Grok, Antigravity or Pi, as a provider of `acp_harness` under the id `stdio`.
+/// Grok or Antigravity, as a provider of `acp_harness` under the id `stdio`.
 ///
 /// Register it beside a host's own providers with `Registry::register_local`, or build it into a library with
 /// `guatiao::providers!`.
@@ -284,7 +281,7 @@ impl AcpHarness for StdioProvider {
     fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
         let logins = match self.settings.harness {
             StdioHarness::Grok => accounts::grok::logins(),
-            StdioHarness::Antigravity | StdioHarness::Pi => Vec::new(),
+            StdioHarness::Antigravity => Vec::new(),
         };
         Ok(accounts::catalog(self.def(), logins))
     }
@@ -408,9 +405,7 @@ impl AcpHarness for StdioProvider {
             StdioHarness::Grok => {
                 accounts::grok::sign_in(self.program_name(), request, spawner, prompter)
             }
-            StdioHarness::Antigravity | StdioHarness::Pi => {
-                Err(unsupported(self.def().login_unsupported))
-            }
+            StdioHarness::Antigravity => Err(unsupported(self.def().login_unsupported)),
         }
     }
 

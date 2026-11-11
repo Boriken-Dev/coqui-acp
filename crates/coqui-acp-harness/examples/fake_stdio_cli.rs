@@ -1,8 +1,8 @@
-//! A stand-in for `grok`, `agy` and `pi-acp` that behaves as the `acp_harness` contract agent does, for
+//! A stand-in for `grok` and `agy` that behaves as the `acp_harness` contract agent does, for
 //! `acp-harness-check --program-agent` and the stdio provider's tests. It never calls a model.
 //!
 //! Which program it plays is told by its arguments, as the provider starts them: `agent stdio` is Grok, `acp` is
-//! Antigravity, none is Pi; `login [--oauth]` and `models` are Grok's. As an ACP agent it answers `initialize`,
+//! Antigravity; `login [--oauth]` and `models` are Grok's. As an ACP agent it answers `initialize`,
 //! `session/new` and `session/prompt`, whose text decides the turn: `wait` ends only on `session/cancel`; `ask` asks for
 //! a permission and says `echo: allowed` or `echo: refused`, or ends cancelled when the answer was a cancel; any other
 //! text is answered `echo: TEXT`.
@@ -316,7 +316,7 @@ fn main() {
     match words.as_slice() {
         ["login", rest @ ..] => login(rest),
         ["models"] => models(),
-        ["agent", "stdio"] | ["acp"] | [] => agent(),
+        ["agent", "stdio"] | ["acp"] => agent(),
         _ => {
             eprintln!("unknown arguments");
             exit(2);
