@@ -495,6 +495,7 @@ dependencies = [
  "base64 0.22.1",
  "coqui-acp",
  "coqui-acp-api",
+ "guatiao",
  "guatiao-serde",
  "rcgen",
  "rustix",

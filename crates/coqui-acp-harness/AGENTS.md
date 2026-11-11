@@ -121,6 +121,37 @@ pub fn login::asked(result) -> result  // a prompter's GONE is `login cancelled`
 
 The one process-wide state of the crate is the list of threads `provider` started; `threads_done` is `GUATIAO_ERR_BUSY` while one runs.
 
+## Stdio provider (`coqui_acp_harness::stdio`, feature `kind`)
+
+```rust
+pub struct StdioProvider;                     // Debug; a provider of `acp_harness` under the id `stdio`
+pub fn StdioProvider::new(settings: StdioSettings) -> StdioProvider
+pub struct StdioSettings { pub harness: StdioHarness, pub executable: Option<String>, pub max_acp_version: u64 /* 1 */,
+    pub renew_poll_ms: u64 /* 30000 */, pub max_requests: u64 /* 32 */, pub max_message_bytes: u64 /* 67108864 */ }   // ToValue, FromValue, Schema
+pub const fn StdioSettings::new(harness: StdioHarness) -> StdioSettings
+#[non_exhaustive] pub enum StdioHarness { Grok, Antigravity, Pi }                      // written grok, antigravity, pi
+pub fn threads_done() -> Status                                                        // a library's `unload` hook
+pub mod accounts { pub struct HarnessDef; pub struct KindDef; pub fn catalog(..); pub fn apply(..); pub fn known(..);
+    pub fn json_of(..); pub mod grok; pub mod antigravity; pub mod pi }               // the tables
+```
+
+A provider for agents that speak ACP on their own standard input and output: `grok agent stdio`, `agy acp` and `pi-acp` (`executable` replaces the program; the arguments are the harness's). The host's messages go to the program a line each and its lines come back as messages. The provider answers for itself only a message that is no request (`-32700`, `-32600`), the shape of `session/new`, `session/load`, `session/resume`, `session/fork` and `session/prompt` (`-32602`), and the working roots (`-32602` for a `cwd` or an additional directory outside them). A session id the program reports must be a UUID, as the kind says: nothing is translated. `send` waits while four answers wait for the sink, and a request waits while `max_requests` have no answer taken by the sink yet; `close` cancels the prompts still out, waits up to three seconds for them to end (answering `cancelled` for one that does not), ends the program, takes a last look at the account's login file, lets go of the spawner and the keeper, and only then calls `closed`. A program that exits ends the connection (`GUATIAO_ERR_INTERNAL` with its exit code). It claims nothing of what the program takes beyond ACP version 1 (or 1 and 2 with `max_acp_version`), holds no requirement (every one is refused, one it cannot read `GUATIAO_ERR_BAD_VALUE`), reports no usage, refuses `import_session` and `export_session` `GUATIAO_ERR_UNSUPPORTED`, and answers `models` as unknown.
+
+Accounts (each harness's `DEF` is data; the catalog, the schemas and the checks on a grant come from it). A start on any kind but `harness-login` removes every name in the harness's `credential_variables` from what it starts (the host's environment included), then sets the kind's; a kind with a `state_dir` is placed and watched through `crate::account` (`auth.json`), and `renew_poll_ms` is how often the file is looked at. A kind that needs files on a spawner that has none is `GUATIAO_ERR_UNSUPPORTED`; a bad setting, an unknown or missing credential, no directory for a kind that needs one, `GUATIAO_ERR_BAD_VALUE`.
+
+| harness | kind | credential | variables and files | state_dir | rotates | renews |
+| --- | --- | --- | --- | --- | --- | --- |
+| grok | `grok-login` | `auth_json` | `GROK_HOME` = state_dir, `auth.json`; settings `proxy_base_url`, `xai_api_base_url` | yes | yes | `grok models` |
+| grok | `xai-api-key` | `api_key` | `XAI_API_KEY`; `GROK_HOME` when a directory is given | no | no | no |
+| grok | `grok-oidc` | `auth_json` (optional) | `GROK_OIDC_ISSUER`, `GROK_OIDC_CLIENT_ID`, `GROK_HOME`, `auth.json`; settings `issuer`, `client_id`, `proxy_base_url` | yes | yes | `grok models` |
+| pi | `pi-api-key` | `api_key` | the variable the setting `variable` names (one of Pi's provider variables only); `PI_CODING_AGENT_DIR` when a directory is given | no | no | no |
+| pi | `pi-oauth` | `auth_json` | `PI_CODING_AGENT_DIR` = state_dir, `auth.json` | yes | yes | no: Pi refreshes itself |
+| antigravity | none beyond `harness-login` | | | | | |
+
+Login methods (Grok only): `device` (`grok login`, steps `open_url` with the code, remote), `browser` (`grok login --oauth`, loopback so not remote), `api-key` (asks for the key, checks it with `grok models`, `checked`). A sign-in runs the CLI in the login's directory on a thread of its own, so a cancel or the timeout answers `GUATIAO_ERR_GONE` (`login cancelled`, `login timed out`) within two seconds with the program killed; a key the CLI did not accept is `GUATIAO_ERR_BAD_VALUE` `login refused: ...` with no word of the CLI's output; the key is never in an argument. Every other `login` is `GUATIAO_ERR_UNSUPPORTED`: Antigravity's `agy acp --login`, whose prompts, token location and Credential Manager use were not measured; Pi's `/login`, which exists only inside its terminal interface; Grok's identity-provider sign-in, which needs a provider to answer. `grok-external` (`GROK_AUTH_PROVIDER_COMMAND`, a program named in settings) is not a kind until the owner decides.
+
+`renew` runs the harness's renewal program on the account's directory, then looks at the file: a changed file is the new credentials, an unchanged one `not_renewed_because`, a missing or blank one `GUATIAO_ERR_GONE`. `usage` and `models` look at the file too, so a renewal made since is told to every live keeper.
+
 ## Stream (`coqui_acp_harness::stream`)
 
 ```rust

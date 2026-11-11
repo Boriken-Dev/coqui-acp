@@ -45,6 +45,8 @@ win32job.workspace = true
 coqui-acp = { path = "../coqui-acp" }
 # The suite that holds a spawner's file methods to their rules.
 coqui-acp-api = { path = "../coqui-acp-api", features = ["contract"] }
+guatiao = { workspace = true, features = ["provider", "load"] }
+guatiao-serde = { workspace = true, features = ["json"] }
 # A self-signed certificate made at test time, for the stand-in that answers over TLS.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -54,12 +56,27 @@ time = { workspace = true, features = ["formatting"] }
 name = "spawner_host"
 required-features = ["kind"]
 
+# The program the stdio provider's tests start in place of Grok, Antigravity and Pi.
+[[example]]
+name = "fake_stdio_cli"
+required-features = ["kind"]
+
+# A real library the tests load: `cargo test` builds it into target/<profile>/examples.
+[[example]]
+name = "stdio_provider"
+crate-type = ["cdylib"]
+required-features = ["kind"]
+
 [[test]]
 name = "spawner"
 required-features = ["kind"]
 
 [[test]]
 name = "account"
+required-features = ["kind"]
+
+[[test]]
+name = "stdio"
 required-features = ["kind"]
 
 [[test]]
