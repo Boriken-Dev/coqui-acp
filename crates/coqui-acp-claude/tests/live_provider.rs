@@ -115,8 +115,10 @@ fn a_seeded_empty_session_is_resumed_prompted_and_exported_under_its_uuid() {
             "C:/Program Files/Git/bin/bash.exe",
         );
     }
-    let mut settings = ProviderSettings::default();
-    settings.setting_sources = Some(Vec::new());
+    let settings = ProviderSettings {
+        setting_sources: Some(Vec::new()),
+        ..ProviderSettings::default()
+    };
     let provider = ClaudeProvider::new(settings);
 
     // Seeded with nothing, at the host's UUID.
