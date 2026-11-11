@@ -1244,9 +1244,12 @@ fn exchange_calls_itself_what_it_is_told_and_coqui_acp_otherwise() {
 
 #[test]
 fn an_exchange_with_no_answer_in_time_says_so_for_that_call() {
-    let (transport, _) = agent_with(|method, _, _| match method {
+    // The agent answers only once the exchange has given up, however long a busy machine takes to get there.
+    let (release, held) = mpsc::channel::<()>();
+    let held = std::sync::Mutex::new(held);
+    let (transport, _) = agent_with(move |method, _, _| match method {
         "_slow" => {
-            thread::sleep(Duration::from_millis(500));
+            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(300));
             Some(json!({}))
         }
         other => plain(other),
@@ -1256,6 +1259,7 @@ fn an_exchange_with_no_answer_in_time_says_so_for_that_call() {
         .run(transport, vec![("_slow".to_owned(), json!({}))])
         .unwrap();
     assert_eq!(results[0].as_ref().unwrap_err().code, -1);
+    let _ = release.send(());
 }
 
 /// An outcome as `vectors/describe.json` writes it.
