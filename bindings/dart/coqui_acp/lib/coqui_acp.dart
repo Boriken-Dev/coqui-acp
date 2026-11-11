@@ -1,8 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:pointycastle/export.dart' as pc;
+
+import 'src/hpke.dart' as hpke;
 
 part 'src/elicit.dart';
+part 'src/secret.dart';
 
 /// What `coqui-acp-bridge serve --linger` sends when it dropped output while nobody was connected.
 const acpOutputLost = '_dev.boriken.coqui.acp/output_lost';
