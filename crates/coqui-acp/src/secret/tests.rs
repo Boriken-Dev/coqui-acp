@@ -81,8 +81,12 @@ fn context(method: &str, request_id: &str) -> Context {
         .into(),
         schema: schema_text(),
         form: Some(r#"{"sections":[]}"#.into()),
+        values: (method == "show").then(|| PLAIN.into()),
     }
 }
+
+/// The plain values of an answer (and of a show) as the JSON object text that is sent.
+const PLAIN: &str = r#"{"user":"ana"}"#;
 
 fn method_of(text: &str) -> Method {
     if text == "show" {
@@ -214,7 +218,7 @@ fn base_cases() -> Vec<Value> {
             fields.push(json!({"field": field, "value": value, "ephemeral_ikm": HEXLOWER.encode(&ikm(32)), "sealed": made.to_value()}));
             sealed.insert(field.to_string(), made);
         }
-        let payload = values_digest(&sealed);
+        let payload = values_digest(PLAIN, &sealed);
         let values_statement = Statement {
             kind: Kind::Values,
             method: method_of(method),
@@ -240,12 +244,12 @@ fn base_cases() -> Vec<Value> {
             .unwrap();
         out.push(json!({
             "name": name, "kind": kind, "receiver_private": receiver, "sender_private": sender,
-            "method": method, "context": {"session_id": ctx.session_id, "request_id": ctx.request_id, "message": ctx.message, "schema": ctx.schema, "form": ctx.form},
+            "method": method, "context": {"session_id": ctx.session_id, "request_id": ctx.request_id, "message": ctx.message, "schema": ctx.schema, "form": ctx.form, "values": ctx.values},
             "context_digest": HEXLOWER.encode(&digest),
             "recipient_ikm": HEXLOWER.encode(&ikm(0)), "now": NOW, "lifetime": LIFETIME,
             "receiver_id": id_r.to_string(), "sender_id": id_s.to_string(),
             "key_statement": HEXLOWER.encode(&key_statement), "recipient": recipient.to_value(),
-            "plain": {"user": "ana"}, "fields": fields,
+            "plain": PLAIN, "fields": fields,
             "values_digest": HEXLOWER.encode(&payload), "values_statement": HEXLOWER.encode(&values_statement), "auth": auth.to_value(),
         }));
     }
@@ -367,6 +371,11 @@ fn refusals() -> Value {
         {"case": "verify", "name": "a noise proof for another collector", "base": b, "change": {"own_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, "expect": "wrong_audience"},
         {"case": "verify", "name": "a collector with no key agreement of its own", "base": b, "change": {"no_agreement": true}, "expect": "unsupported"},
         {"case": "open", "name": "values untouched are opened", "base": a, "change": {}, "expect": "ok"},
+        {"case": "open", "name": "a plain value changed after the answer was authenticated", "base": a, "change": {"plain": "{\"user\":\"mallory\"}"}, "expect": "bad_proof"},
+        {"case": "open", "name": "a plain value added after the answer was authenticated", "base": a, "change": {"plain": "{\"user\":\"ana\",\"x\":1}"}, "expect": "bad_proof"},
+        {"case": "open", "name": "the plain text written another way", "base": a, "change": {"plain": "{ \"user\": \"ana\" }"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "a shown plain value changed on the way", "base": b, "change": {"values": "{\"user\":\"mallory\"}"}, "expect": "bad_proof"},
+        {"case": "verify", "name": "shown plain values taken off", "base": b, "change": {"values": null}, "expect": "bad_proof"},
         {"case": "open", "name": "a ciphertext changed after it was authenticated", "base": a, "change": {"flip_ct": "password"}, "expect": "bad_proof"},
         {"case": "open", "name": "an encapsulated key changed after it was authenticated", "base": a, "change": {"flip_enc": "password"}, "expect": "bad_proof"},
         {"case": "open", "name": "two ciphertexts swapped after they were authenticated", "base": a, "change": {"swap": ["password", "token"]}, "expect": "bad_proof"},
@@ -412,6 +421,7 @@ fn context_of(case: &Value, change: &Value) -> Context {
         message: pick("message").as_str().unwrap().into(),
         schema: pick("schema").as_str().unwrap().into(),
         form: pick("form").as_str().map(String::from),
+        values: pick("values").as_str().map(String::from),
     }
 }
 
@@ -568,7 +578,7 @@ fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
             );
             sealed.insert(name.to_string(), made);
         }
-        let payload = values_digest(&sealed);
+        let payload = values_digest(case["plain"].as_str().unwrap(), &sealed);
         auth = prover_s
             .bind(
                 &Statement {
@@ -602,9 +612,11 @@ fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
         sealed.remove(name);
     }
     let expected = change["expected_sender"].as_str().map_or(id_s, id_of);
-    let plain = case["plain"].as_object().unwrap().clone();
+    let plain = change["plain"]
+        .as_str()
+        .unwrap_or_else(|| case["plain"].as_str().unwrap());
     receiver
-        .open_values(&verifier_r, &expected, &plain, &sealed, &auth, NOW)
+        .open_values(&verifier_r, &expected, plain, &sealed, &auth, NOW)
         .map(|_| ())
 }
 
@@ -722,11 +734,17 @@ fn check(doc: &Value) {
             sealed.insert(field_name.to_string(), stored);
         }
         assert_eq!(
-            HEXLOWER.encode(&values_digest(&sealed)),
+            HEXLOWER.encode(&values_digest(case["plain"].as_str().unwrap(), &sealed)),
             case["values_digest"].as_str().unwrap()
         );
         let auth = collector
-            .authenticate(&prover_s, &sealed, NOW, DEFAULT_LIFETIME)
+            .authenticate(
+                &prover_s,
+                case["plain"].as_str().unwrap(),
+                &sealed,
+                NOW,
+                DEFAULT_LIFETIME,
+            )
             .unwrap();
         assert_eq!(auth.to_value(), case["auth"], "{name}");
         // The values open for the receiver.

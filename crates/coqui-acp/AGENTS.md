@@ -178,8 +178,8 @@ pub const BINDING_ECDSA: &str = "ecdsa-p256-sha256"; pub const BINDING_DH: &str 
 pub struct Capability { pub request: bool, pub show: bool, pub bindings: Vec<String> }       // #[non_exhaustive]
 impl Capability { pub fn all() -> Self; pub fn to_value(&self) -> Value; pub fn from_meta(meta: &Map<String, Value>) -> Option<Self> }
 
-pub struct Context { pub session_id: String, pub request_id: String, pub message: String, pub schema: String, pub form: Option<String> }
-impl Context { pub fn digest(&self, method: Method) -> [u8; 32] }   // schema and form are the JSON text as sent; these bytes are hashed
+pub struct Context { pub session_id: String, pub request_id: String, pub message: String, pub schema: String, pub form: Option<String>, pub values: Option<String> }
+impl Context { pub fn digest(&self, method: Method) -> [u8; 32] }   // schema, form and values (a show's plain values) are the JSON text as sent; these bytes are hashed
 
 pub struct Limits { pub fields: usize, pub options: usize, pub schema_bytes: usize, pub name_bytes: usize, pub value_bytes: usize }   // 64, 256, 64 KiB, 128, 64 KiB; setters
 pub struct Form { pub title: Option<String>, pub description: Option<String>, pub fields: Vec<FormField> }
@@ -215,30 +215,30 @@ pub struct Receiver;
 impl Receiver {
     pub fn new(method: Method, context: &Context, limits: &Limits, prover: &Prover, audience: &IdentityId, now: u64, lifetime: Duration) -> Result<Receiver, Error>;
     pub const fn recipient(&self) -> &Recipient;  pub fn request_id(&self) -> &str;
-    pub fn open_values(self, verifier: &Verifier, sender: &IdentityId, plain: &Map<String, Value>, sealed: &BTreeMap<String, Sealed>, auth: &Binding, now: u64) -> Result<Opened, Error>;   // once
+    pub fn open_values(self, verifier: &Verifier, sender: &IdentityId, plain: &str, sealed: &BTreeMap<String, Sealed>, auth: &Binding, now: u64) -> Result<Opened, Error>;   // once; plain is the JSON object text as sent
 }
 pub struct Collector;
 impl Collector {
     pub const fn holder(&self) -> IdentityId;  pub const fn form(&self) -> &Form;  pub fn is_secret(&self, name: &str) -> bool;
     pub fn seal(&self, name: &str, value: &str) -> Result<Sealed, Error>;
-    pub fn authenticate(&self, prover: &Prover, sealed: &BTreeMap<String, Sealed>, now: u64, lifetime: Duration) -> Result<Binding, Error>;
+    pub fn authenticate(&self, prover: &Prover, plain: &str, sealed: &BTreeMap<String, Sealed>, now: u64, lifetime: Duration) -> Result<Binding, Error>;   // covers the whole answer
 }
 pub struct Recipient { pub key: [u8; 32], pub binding: Binding }    // to_value / from_value
 pub struct Binding { pub method: String, pub key: Vec<u8>, pub expires: u64, pub audience: IdentityId, pub proof: Vec<u8> }   // to_value / from_value
 pub struct Sealed { pub enc: [u8; 32], pub ct: Vec<u8> }           // to_value / from_value
 pub struct Opened { pub plain: Map<String, Value>, pub secrets: BTreeMap<String, SecretValue> }
 pub struct SecretValue;  // expose() -> &[u8], expose_str() -> &str; zeroed on drop; Debug is "SecretValue(..)"
-// Messages, each with to_value / from_value: RequestParams { context, recipient }, RequestReply (Accept { plain, sealed, auth } | Decline | Cancel),
-// ShowOpen { context, values }, ShowOpened (Ready(Recipient) | Decline | Cancel), ShowDeliver { session_id, request_id, sealed, auth }, ShowDone (Shown | Cancel)
+// Messages, each with to_value / from_value: RequestParams { context, recipient }, RequestReply (Accept { plain: String, sealed, auth } | Decline | Cancel),
+// ShowOpen { context } (its plain values are context.values), ShowOpened (Ready(Recipient) | Decline | Cancel), ShowDeliver { session_id, request_id, sealed, auth }, ShowDone (Shown | Cancel)
 pub enum Error { Schema, Malformed, Unsupported, Key, UnknownIdentity, BadProof, Expired, WrongAudience, Field, Seal, Open, TooLarge }   // #[non_exhaustive], static reasons, never a value
 ```
 
-- **Roles.** The receiver of the secret values makes a key pair for the request (`Receiver::new`) and sends `recipient()`: the host for a `request`, the frontend (in answer to `secret_show_open`) for a `show`. The collector (`Verifier::collector`) is told which identity the request must come from and refuses the key unless its binding verifies for that identity, for this verifier's own id, and for the digest of the `Context` it received; it then seals each secret field and authenticates the set (`Collector::authenticate`). The receiver opens the answer once (`open_values` consumes it) and only after it verified the sender. `now` is an argument (Unix seconds): the module reads no clock. The owner of receivers remembers request ids for the verifier's `max_lifetime` plus `skew`.
+- **Roles.** The receiver of the secret values makes a key pair for the request (`Receiver::new`) and sends `recipient()`: the host for a `request`, the frontend (in answer to `secret_show_open`) for a `show`. The collector (`Verifier::collector`) is told which identity the request must come from and refuses the key unless its binding verifies for that identity, for this verifier's own id, and for the digest of the `Context` it received; it then seals each secret field and authenticates the whole answer (`Collector::authenticate`). The receiver opens the answer once (`open_values` consumes it) and only after it verified the sender over the whole answer, plain values included. `now` is an argument (Unix seconds): the module reads no clock. The owner of receivers remembers request ids for the verifier's `max_lifetime` plus `skew`.
 - **Sealing.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM, one message per field, no aad; the `info` is the extension's label, the method, the request id, the context digest and the field name, each length-prefixed, so a ciphertext opens only for the field and request it was sealed for. A secret value is its text (UTF-8, or JSON number grammar for a number) and is never parsed as JSON.
 - **Forms.** A secret field is `writeOnly` or `x-sensitive` (a non-boolean is refused), must be text or a number, and may carry none of `default`, `const`, `enum`, `oneOf`, `examples`, `anyOf`, `allOf`, `pattern`, `if`, `then`, `else`, `not`, `$ref`, `dependentSchemas`; `format: "password"` needs the mark; whole-number bounds stay within 2^53 - 1. A frontend masks from `FormField::secret` alone. `check_plain` refuses a name the form lacks, a secret field holding a plain value, a missing required one, and a value that does not fit. `open_values` checks both halves before it opens anything.
 - **Bindings.** `ecdsa-p256-sha256` for an identity that signs (the `webcrypto` peer method; `s` low, a high `s` is refused and a signer's is normalized); `x25519-hmac-sha256` for one that cannot (the `noise` method), which needs `VerifierBuilder::agreement` and a `Prover::agreeing` made for that one collector. Every binding names its audience; a verifier refuses one made for another id. Proof bytes are not identifiers. The Diffie-Hellman proof is not transferable and whoever holds the checker's static key can forge it to the checker. A binding ends at the maker's `lifetime` (`DEFAULT_LIFETIME` 240 s); a verifier takes it that long plus `skew` (30 s) after it ended and refuses one beyond `max_lifetime` (5 min) plus `skew` from now.
 - **Secrets in memory.** Plaintexts, the per-request private key and the MAC key and HMAC state are zeroed on drop (`zeroize`); no `Debug` prints a value, key or proof. The identity key is the caller's: this module only calls the signer or key agreement it was given. Copies a move leaves on the stack and `serde_json` strings of plain values are not zeroed.
-- **Not here.** The handle store, the use and show tools, approvals, output scrubbing, routing to the owner's frontend, the frontend's pending-open table, request-id memory, certificate chains for `tls` identities, and the integrity of plain values in an answer (they are not secret; the sealed ones are covered).
+- **Not here.** The handle store, the use and show tools, approvals, output scrubbing, routing to the owner's frontend, the frontend's pending-open table, request-id memory, certificate chains for `tls` identities, (the plain values of an answer are covered by `auth`).
 
 ## Errors
 

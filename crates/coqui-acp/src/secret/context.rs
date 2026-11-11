@@ -1,5 +1,7 @@
 use super::binding::Method;
+use super::error::Error;
 use alloc::string::String;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 const LABEL: &[u8] = b"dev.boriken.coqui.acp/secret/v1 context";
@@ -19,10 +21,20 @@ pub struct Context {
     pub schema: String,
     /// A guatiao-intake form document laying the questions out, as the JSON text that was sent, when there is one.
     pub form: Option<String>,
+    /// For a show: the values that are not secret, as the JSON object text that was sent, covered like the rest.
+    pub values: Option<String>,
+}
+
+/// Reads the plain values of an answer or a show from the JSON object text that was sent.
+pub(crate) fn plain_values(text: &str) -> Result<Map<String, Value>, Error> {
+    match serde_json::from_str(text) {
+        Ok(Value::Object(map)) => Ok(map),
+        _ => Err(Error::Malformed("the plain values are not a JSON object")),
+    }
 }
 
 impl Context {
-    /// SHA-256 of the method and every part, each with a 4-byte length, and a byte that says whether a layout was sent.
+    /// SHA-256 of the method and every part, each with a 4-byte length, and a byte that says whether a layout and a byte that says whether plain values were sent.
     #[must_use]
     pub fn digest(&self, method: Method) -> [u8; 32] {
         let mut hash = Sha256::new();
@@ -38,6 +50,8 @@ impl Context {
         part(self.schema.as_bytes());
         part(&[u8::from(self.form.is_some())]);
         part(self.form.as_deref().unwrap_or("").as_bytes());
+        part(&[u8::from(self.values.is_some())]);
+        part(self.values.as_deref().unwrap_or("").as_bytes());
         hash.finalize().into()
     }
 }

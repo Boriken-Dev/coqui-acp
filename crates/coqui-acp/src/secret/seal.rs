@@ -4,7 +4,7 @@
 //! then bound, as a set, to the identity that sent them.
 
 use super::binding::{Binding, IdentityId, Kind, Method, Prover, Statement, Verifier};
-use super::context::Context;
+use super::context::{Context, plain_values};
 use super::error::Error;
 use super::form::{Form, Limits};
 use super::{b64u, b64u_decode};
@@ -180,11 +180,14 @@ pub(crate) fn info(method: Method, request_id: &str, digest: &[u8; 32], field: &
     out
 }
 
-/// The digest of a set of sealed values, in the order of their names: what the sender's binding covers.
-pub(crate) fn values_digest(sealed: &BTreeMap<String, Sealed>) -> [u8; 32] {
+/// The digest of a whole answer: the plain values as the JSON object text that was sent, then the sealed values in the order of their
+/// names. It is what the sender's binding covers.
+pub(crate) fn values_digest(plain: &str, sealed: &BTreeMap<String, Sealed>) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update((VALUES_DIGEST_LABEL.len() as u32).to_be_bytes());
     hash.update(VALUES_DIGEST_LABEL);
+    hash.update((plain.len() as u32).to_be_bytes());
+    hash.update(plain.as_bytes());
     for (name, value) in sealed {
         hash.update((name.len() as u32).to_be_bytes());
         hash.update(name.as_bytes());
@@ -366,9 +369,10 @@ impl Receiver {
         Ok(SecretValue(plain))
     }
 
-    /// Opens an answer, once: checks that `sender`, an identity `verifier` knows, sent these sealed values (`auth` binds them, as a
-    /// set, to this request and key), checks the plain values against the form, and opens every sealed one. Nothing is opened before
-    /// the sender is verified.
+    /// Opens an answer, once: checks that `sender`, an identity `verifier` knows, sent this answer (`auth` binds the plain values, as
+    /// the JSON object text that was sent, and the sealed ones, to this request and key), checks the plain values against the form, and
+    /// opens every sealed one. Nothing is read or opened before the sender is verified. For a show, `plain` is the text of the open
+    /// step's values.
     ///
     /// # Errors
     /// The refusals of the binding ([`Error::UnknownIdentity`] for a sender other than `sender`, [`Error::BadProof`] for sealed
@@ -379,14 +383,13 @@ impl Receiver {
         self,
         verifier: &Verifier,
         sender: &IdentityId,
-        plain: &Map<String, Value>,
+        plain: &str,
         sealed: &BTreeMap<String, Sealed>,
         auth: &Binding,
         now: u64,
     ) -> Result<Opened, Error> {
-        self.form.check_plain(plain)?;
         self.form.check_sealed(sealed.keys().map(String::as_str))?;
-        let payload = values_digest(sealed);
+        let payload = values_digest(plain, sealed);
         let statement = Statement {
             kind: Kind::Values,
             method: self.method,
@@ -398,14 +401,13 @@ impl Receiver {
         if verifier.verify(&statement, auth, now)? != *sender {
             return Err(Error::UnknownIdentity);
         }
+        let plain = plain_values(plain)?;
+        self.form.check_plain(&plain)?;
         let secrets = sealed
             .iter()
             .map(|(name, value)| Ok((name.clone(), self.open_field(name, value)?)))
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
-        Ok(Opened {
-            plain: plain.clone(),
-            secrets,
-        })
+        Ok(Opened { plain, secrets })
     }
 }
 
@@ -490,19 +492,21 @@ impl Collector {
         )
     }
 
-    /// Binds the sealed values, as a set, to `prover`'s identity for this request and key until `now` plus `lifetime`: what the
-    /// receiver verifies before it opens anything. `sealed` is every sealed value of the answer.
+    /// Binds the whole answer to `prover`'s identity for this request and key until `now` plus `lifetime`: what the receiver verifies
+    /// before it reads or opens anything. `plain` is the JSON object text of the plain values, exactly as it will be sent (for a show,
+    /// the open step's values), and `sealed` is every sealed value of the answer.
     ///
     /// # Errors
     /// [`Error::WrongAudience`] for a Diffie-Hellman identity not paired with the receiver's; [`Error::Seal`].
     pub fn authenticate(
         &self,
         prover: &Prover,
+        plain: &str,
         sealed: &BTreeMap<String, Sealed>,
         now: u64,
         lifetime: Duration,
     ) -> Result<Binding, Error> {
-        let payload = values_digest(sealed);
+        let payload = values_digest(plain, sealed);
         let statement = Statement {
             kind: Kind::Values,
             method: self.method,

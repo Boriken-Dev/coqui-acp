@@ -119,6 +119,11 @@ fn context_of(map: &Map<String, Value>) -> Result<Context, Error> {
         message: text(map, "message", "the message has no message")?,
         schema: text(map, "schema", "the schema is not JSON text")?,
         form: optional_form(map)?,
+        values: match map.get("values") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(values)) => Some(values.clone()),
+            Some(_) => return Err(Error::Malformed("the values are not JSON text")),
+        },
     })
 }
 
@@ -133,6 +138,9 @@ fn put_context(map: &mut Map<String, Value>, context: &Context) {
     );
     map.insert("message".into(), Value::String(context.message.clone()));
     map.insert("schema".into(), Value::String(context.schema.clone()));
+    if let Some(values) = &context.values {
+        map.insert("values".into(), Value::String(values.clone()));
+    }
     if let Some(form) = &context.form {
         map.insert("form".into(), Value::String(form.clone()));
     }
@@ -181,11 +189,11 @@ impl RequestParams {
 pub enum RequestReply {
     /// They filled in the form.
     Accept {
-        /// The plain answers.
-        plain: Map<String, Value>,
+        /// The plain answers as the JSON object text that is sent: these exact bytes are what `auth` covers.
+        plain: String,
         /// The secret answers, sealed to the request's key.
         sealed: BTreeMap<String, Sealed>,
-        /// The sender's binding of `sealed`, as [`Collector::authenticate`](super::Collector::authenticate) makes it.
+        /// The sender's binding of the whole answer, as [`Collector::authenticate`](super::Collector::authenticate) makes it.
         auth: Binding,
     },
     /// They refused to answer.
@@ -195,8 +203,8 @@ pub enum RequestReply {
 }
 
 impl RequestReply {
-    /// `{"action": "accept", "values": {..}, "auth": {..}}`, `{"action": "decline"}` or `{"action": "cancel"}`. A sealed value is
-    /// `{"enc", "ct"}`; which fields are sealed is the form's, not the value's.
+    /// `{"action": "accept", "plain": "<JSON text>", "values": {..}, "auth": {..}}`, `{"action": "decline"}` or `{"action": "cancel"}`.
+    /// `values` holds only the sealed values, each `{"enc", "ct"}`.
     #[must_use]
     pub fn to_value(&self) -> Value {
         let mut map = Map::new();
@@ -207,10 +215,11 @@ impl RequestReply {
                 auth,
             } => {
                 map.insert("action".into(), "accept".into());
-                let mut values = plain.clone();
-                for (name, value) in sealed {
-                    values.insert(name.clone(), value.to_value());
-                }
+                map.insert("plain".into(), Value::String(plain.clone()));
+                let values: Map<String, Value> = sealed
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.to_value()))
+                    .collect();
                 map.insert("values".into(), Value::Object(values));
                 map.insert("auth".into(), auth.to_value());
             }
@@ -224,7 +233,7 @@ impl RequestReply {
         Value::Object(map)
     }
 
-    /// Reads an answer. `is_secret` says which fields are secret (the form's): those must be sealed values, and no other may be one.
+    /// Reads an answer. `is_secret` says which fields are secret (the form's): `values` must hold only those, sealed.
     ///
     /// # Errors
     /// [`Error::Malformed`].
@@ -239,16 +248,15 @@ impl RequestReply {
                         .ok_or(Error::Malformed("the answer has no values"))?,
                     "the values are not an object",
                 )?;
-                let (mut plain, mut sealed) = (Map::new(), BTreeMap::new());
+                let mut sealed = BTreeMap::new();
                 for (name, value) in values {
-                    if is_secret(name) {
-                        sealed.insert(name.clone(), Sealed::from_value(value)?);
-                    } else {
-                        plain.insert(name.clone(), value.clone());
+                    if !is_secret(name) {
+                        return Err(Error::Malformed("a plain value outside the plain text"));
                     }
+                    sealed.insert(name.clone(), Sealed::from_value(value)?);
                 }
                 Ok(Self::Accept {
-                    plain,
+                    plain: text(map, "plain", "the answer has no plain values")?,
                     sealed,
                     auth: Binding::from_value(
                         map.get("auth")
@@ -264,22 +272,19 @@ impl RequestReply {
 }
 
 /// [`SHOW_OPEN_METHOD`]'s parameters: the host tells the frontend what it will show, without the secret values, and asks for the key to
-/// seal them to.
+/// seal them to. The values that are not secret are `context.values`, the JSON object text as sent, covered by the receiver's binding.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShowOpen {
     /// What the person is shown.
     pub context: Context,
-    /// The values that are not secret.
-    pub values: Map<String, Value>,
 }
 
 impl ShowOpen {
-    /// The parameters as JSON, as [`RequestParams`] with `values` and no recipient.
+    /// The parameters as JSON, as [`RequestParams`] with `values` (JSON text) and no recipient.
     #[must_use]
     pub fn to_value(&self) -> Value {
         let mut map = Map::new();
         put_context(&mut map, &self.context);
-        map.insert("values".into(), Value::Object(self.values.clone()));
         Value::Object(map)
     }
 
@@ -289,15 +294,11 @@ impl ShowOpen {
     /// [`Error::Malformed`].
     pub fn from_value(value: &Value) -> Result<Self, Error> {
         let map = object(value, "the show is not an object")?;
-        Ok(Self {
-            context: context_of(map)?,
-            values: object(
-                map.get("values")
-                    .ok_or(Error::Malformed("the show has no values"))?,
-                "the values are not an object",
-            )?
-            .clone(),
-        })
+        let context = context_of(map)?;
+        if context.values.is_none() {
+            return Err(Error::Malformed("the show has no values"));
+        }
+        Ok(Self { context })
     }
 }
 

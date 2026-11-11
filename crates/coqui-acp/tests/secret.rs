@@ -15,7 +15,7 @@ use coqui_acp::secret::{
 };
 use p256::ecdsa::signature::Signer as _;
 use proptest::prelude::*;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -42,6 +42,7 @@ fn context(request_id: &str) -> Context {
         message: "The deploy needs a login".into(),
         schema: schema_text(),
         form: None,
+        values: None,
     }
 }
 
@@ -71,12 +72,7 @@ fn form() -> Form {
 }
 
 /// The frontend answers a request: it verifies the host's key, seals the secrets, authenticates them and writes the reply.
-fn answer(
-    pair: &Pair,
-    params: &RequestParams,
-    values: &[(&str, &str)],
-    plain: Map<String, Value>,
-) -> Value {
+fn answer(pair: &Pair, params: &RequestParams, values: &[(&str, &str)], plain: &str) -> Value {
     let frontend_side = verifier_for(&pair.frontend, &pair.host);
     let collector = frontend_side
         .collector(
@@ -92,10 +88,10 @@ fn answer(
         .map(|(name, value)| ((*name).to_string(), collector.seal(name, value).unwrap()))
         .collect();
     let auth = collector
-        .authenticate(&pair.frontend, &sealed, NOW, DEFAULT_LIFETIME)
+        .authenticate(&pair.frontend, plain, &sealed, NOW, DEFAULT_LIFETIME)
         .unwrap();
     RequestReply::Accept {
-        plain,
+        plain: plain.to_string(),
         sealed,
         auth,
     }
@@ -124,11 +120,8 @@ fn request(pair: &Pair, id: &str) -> (Receiver, RequestParams) {
     (receiver, params)
 }
 
-fn plain_user() -> Map<String, Value> {
-    let mut plain = Map::new();
-    plain.insert("user".into(), json!("ana"));
-    plain.insert("port".into(), json!(5432));
-    plain
+fn plain_user() -> String {
+    json!({"user": "ana", "port": 5432}).to_string()
 }
 
 #[test]
@@ -140,7 +133,7 @@ fn a_request_reaches_the_host_sealed_and_nothing_else_holds_the_value() {
         &pair,
         &params,
         &[("password", "correct horse battery"), ("note", "for ana")],
-        plain_user(),
+        &plain_user(),
     );
     let wire = reply.to_string();
     assert!(
@@ -206,8 +199,6 @@ fn a_show_asks_the_frontend_for_a_key_then_delivers_authenticated_values() {
         .build();
 
     let schema = json!({"type": "object", "properties": {"label": {"type": "string"}, "key": {"type": "string", "writeOnly": true}}}).to_string();
-    let mut values = Map::new();
-    values.insert("label".into(), json!("ci"));
     let open = ShowOpen {
         context: Context {
             session_id: "s1".into(),
@@ -215,9 +206,10 @@ fn a_show_asks_the_frontend_for_a_key_then_delivers_authenticated_values() {
             message: "Your new key".into(),
             schema,
             form: None,
+            values: Some(json!({"label": "ci"}).to_string()),
         },
-        values,
     };
+    let shown_values = open.context.values.clone().unwrap();
     let open = ShowOpen::from_value(&open.to_value()).unwrap();
 
     // The frontend makes the key pair for this show and answers the open step.
@@ -248,7 +240,7 @@ fn a_show_asks_the_frontend_for_a_key_then_delivers_authenticated_values() {
         collector.seal("key", "sk_live_123").unwrap(),
     );
     let auth = collector
-        .authenticate(&host, &sealed, NOW, DEFAULT_LIFETIME)
+        .authenticate(&host, &shown_values, &sealed, NOW, DEFAULT_LIFETIME)
         .unwrap();
     let deliver = ShowDeliver {
         session_id: "s1".into(),
@@ -263,7 +255,7 @@ fn a_show_asks_the_frontend_for_a_key_then_delivers_authenticated_values() {
         .open_values(
             &frontend_verifier,
             &host_id,
-            &open.values,
+            &shown_values,
             &deliver.sealed,
             &deliver.auth,
             NOW,
@@ -342,7 +334,7 @@ fn flow(
     pair: &Pair,
 ) -> (
     Receiver,
-    Map<String, Value>,
+    String,
     BTreeMap<String, coqui_acp::secret::Sealed>,
     coqui_acp::secret::Binding,
 ) {
@@ -351,7 +343,7 @@ fn flow(
         pair,
         &params,
         &[("password", "correct horse battery")],
-        plain_user(),
+        &plain_user(),
     );
     let form = form();
     let RequestReply::Accept {
@@ -382,6 +374,22 @@ fn values_are_opened_only_from_the_sender_that_authenticated_them() {
         Error::BadProof
     );
     // A sender other than the one expected.
+    // A plain value changed by a relay, though every sealed value is untouched.
+    let (receiver, _, sealed, auth) = flow(&pair);
+    let relayed = json!({"user": "mallory", "port": 5432}).to_string();
+    assert_eq!(
+        receiver
+            .open_values(
+                &host_side,
+                &pair.frontend.id(),
+                &relayed,
+                &sealed,
+                &auth,
+                NOW
+            )
+            .unwrap_err(),
+        Error::BadProof
+    );
     let (receiver, plain, sealed, auth) = flow(&pair);
     assert_eq!(
         receiver
@@ -571,12 +579,11 @@ fn a_required_secret_left_out_or_a_plain_value_for_a_secret_is_refused() {
     let host_side = verifier_for(&pair.host, &pair.frontend);
     for (values, plain) in [
         (vec![], plain_user()),
-        (vec![("password", "correct horse")], {
-            let mut plain = plain_user();
-            plain.insert("password".into(), json!("x"));
-            plain
-        }),
-        (vec![("password", "correct horse")], Map::new()),
+        (
+            vec![("password", "correct horse")],
+            json!({"user": "ana", "password": "x"}).to_string(),
+        ),
+        (vec![("password", "correct horse")], "{}".to_string()),
     ] {
         let (receiver, params) = request(&pair, "r1");
         let frontend_side = verifier_for(&pair.frontend, &pair.host);
@@ -594,7 +601,7 @@ fn a_required_secret_left_out_or_a_plain_value_for_a_secret_is_refused() {
             .map(|(name, value)| ((*name).to_string(), collector.seal(name, value).unwrap()))
             .collect();
         let auth = collector
-            .authenticate(&pair.frontend, &sealed, NOW, DEFAULT_LIFETIME)
+            .authenticate(&pair.frontend, &plain, &sealed, NOW, DEFAULT_LIFETIME)
             .unwrap();
         assert!(matches!(
             receiver.open_values(&host_side, &pair.frontend.id(), &plain, &sealed, &auth, NOW),
@@ -633,7 +640,7 @@ fn answers_decline_and_cancel_read_back() {
     assert!(RequestReply::from_value(&json!({"action": "maybe"}), |_| false).is_err());
     assert!(
         RequestReply::from_value(
-            &json!({"action": "accept", "values": {"pw": "plain text"}}),
+            &json!({"action": "accept", "plain": "{}", "values": {"pw": "plain text"}}),
             |name| name == "pw"
         )
         .is_err()
