@@ -334,7 +334,7 @@ fn browser_or_device(
     let checked = check(ctx, program, dir)?;
     // `grok models` may have renewed the login: the newer copy is the one to keep.
     let text = ctx.read_settled(AUTH_FILE).unwrap_or(text);
-    let mut outcome = LoginOutcome::new(LOGIN, login::one("auth_json", text.expose()));
+    let mut outcome = LoginOutcome::new(LOGIN, login::one("auth_json", &text));
     outcome.checked = checked;
     Ok(outcome)
 }
@@ -377,7 +377,7 @@ fn api_key(ctx: &Ctx<'_>, program: &str, dir: &str) -> Result<LoginOutcome, Prov
     if exit.code != Some(0) {
         return Err(ProviderError::new(
             Status::GUATIAO_ERR_BAD_VALUE,
-            &alloc::format!("login refused: {}", reason(&last, &key)),
+            &alloc::format!("login refused: {}", reason(&last, &[key.as_str()])),
         ));
     }
     let mut credentials = Credentials::new();

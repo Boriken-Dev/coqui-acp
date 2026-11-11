@@ -498,7 +498,8 @@ impl StdioProvider {
         }
         match found.renewed.into_iter().next_back() {
             Some((credentials, expires)) => {
-                let mut report = RenewReport::renewed(credentials);
+                let mut report = RenewReport::default();
+                report.credentials = Some(credentials);
                 report.expires_at = expires;
                 Ok(report)
             }
@@ -531,8 +532,7 @@ impl StdioProvider {
         let Ok(Some(now)) = files.read(watched.path) else {
             return Ok(());
         };
-        let now = Secret::new(now);
-        if accounts::identity_of(now.expose()).is_some_and(|theirs| theirs != mine) {
+        if accounts::identity_of(&now).is_some_and(|theirs| theirs != mine) {
             if let Some(old) = grant.credentials.expose().get(watched.key) {
                 let _ = files.write(watched.path, old);
             }

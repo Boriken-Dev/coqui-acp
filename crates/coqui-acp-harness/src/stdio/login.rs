@@ -6,15 +6,15 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
-use coqui_acp_api::guatiao::{Secret, Status};
 use coqui_acp_api::{
     Credentials, LoginAnswer, LoginForm, LoginOutcome, LoginPrompter, OpenUrl, ProcessSpawner,
 };
 
 use super::accounts::login_usable;
 use crate::ThroughSpawner;
-use crate::account::Files;
+use crate::account::{Files, SecretText};
 use crate::cli::{Cli, Next, plain};
 use crate::login::{Job, asked, supervise};
 use crate::process::{Exit, Launch};
@@ -77,12 +77,8 @@ impl Ctx<'_> {
     /// # Errors
     ///
     /// The spawner's refusal; `GUATIAO_ERR_NOT_FOUND` for a file that is not there or never settled.
-    pub fn read_settled(&self, path: &str) -> Result<Secret<String>, ProviderError> {
-        let text = settle(
-            || self.files.read(path).map(|text| text.map(Secret::new)),
-            Duration::from_millis(50),
-            20,
-        )?;
+    pub fn read_settled(&self, path: &str) -> Result<SecretText, ProviderError> {
+        let text = settle(|| self.files.read(path), Duration::from_millis(50), 20)?;
         text.ok_or_else(|| {
             ProviderError::new(Status::GUATIAO_ERR_NOT_FOUND, "no settled login file")
         })
@@ -96,13 +92,13 @@ impl Ctx<'_> {
 ///
 /// What `read` refuses.
 pub fn settle(
-    mut read: impl FnMut() -> Result<Option<Secret<String>>, ProviderError>,
+    mut read: impl FnMut() -> Result<Option<SecretText>, ProviderError>,
     pause: Duration,
     tries: usize,
-) -> Result<Option<Secret<String>>, ProviderError> {
+) -> Result<Option<SecretText>, ProviderError> {
     for attempt in 0..tries {
         if let Some(text) = read()?
-            && login_usable(text.expose())
+            && login_usable(&text)
         {
             return Ok(Some(text));
         }
@@ -217,19 +213,19 @@ mod tests {
     fn a_half_written_login_is_read_again_until_whole() {
         let mut reads = vec!["", "{\"tok", "{\"tok\": 1}"].into_iter();
         let got = settle(
-            || Ok(reads.next().map(|t| Secret::new(t.to_string()))),
+            || Ok(reads.next().map(|t| SecretText::new(t.to_string()))),
             Duration::from_millis(1),
             5,
         )
         .expect("it reads")
         .expect("it settles");
-        assert_eq!(got.expose(), "{\"tok\": 1}");
+        assert_eq!(&*got, "{\"tok\": 1}");
     }
 
     #[test]
     fn a_login_that_never_settles_is_none() {
         let got = settle(
-            || Ok(Some(Secret::new("{\"tok".to_string()))),
+            || Ok(Some(SecretText::new("{\"tok".to_string()))),
             Duration::from_millis(1),
             3,
         )
