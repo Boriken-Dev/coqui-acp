@@ -160,8 +160,10 @@ fn it_says_what_pi_takes_and_that_it_reports_no_usage() {
         "Pi reads its MCP servers from its own configuration"
     );
     assert!(info.resumes_wider);
-    let mut one = ProviderSettings::default();
-    one.max_acp_version = 1;
+    let one = ProviderSettings {
+        max_acp_version: 1,
+        ..ProviderSettings::default()
+    };
     assert_eq!(PiProvider::new(one).describe().unwrap().versions, vec![1]);
 }
 
