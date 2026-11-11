@@ -99,6 +99,9 @@ enum Action {
         /// Seed from the first line of the history, not from its latest compaction summary.
         #[arg(long)]
         no_summary: bool,
+        /// The model provider the thread names, which Codex resumes only under the same one (default `openai`).
+        #[arg(long)]
+        model_provider: Option<String>,
     },
 }
 
@@ -130,6 +133,7 @@ fn history_main(action: Action) -> Result<(), String> {
             cwd,
             id,
             no_summary,
+            model_provider,
         } => {
             let config = place(config)?;
             let mut text = Vec::new();
@@ -139,6 +143,10 @@ fn history_main(action: Action) -> Result<(), String> {
             let doc = coqui_acp_history::Document::from_slice(&text)
                 .map_err(|error| error.to_string())?;
             let options = ImportOptions::default().use_summary(!no_summary);
+            let options = match model_provider {
+                Some(provider) => options.model_provider(provider),
+                None => options,
+            };
             let imported = import_file(&config, &cwd, &id, &doc, &options)
                 .map_err(|error| error.to_string())?;
             let lost: Vec<String> = imported

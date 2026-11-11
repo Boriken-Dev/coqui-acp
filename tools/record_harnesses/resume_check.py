@@ -20,7 +20,8 @@ import sys
 import tempfile
 import time
 
-import record
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import record  # noqa: E402
 
 SESSION = "6f2c1b0e-0000-4000-8000-0000000c0a9c"
 
@@ -73,7 +74,7 @@ def check_codex(args, root):
     for name in ("w", "home", "h", "t", "l"):
         (root / name).mkdir(exist_ok=True)
     logs = root / "l"
-    notes = import_into(args.codec, ["--config", str(root / "home"), str(root / "w"), args.id], args.history)
+    notes = import_into(args.codec, ["--config", str(root / "home"), "--model-provider", "standin", str(root / "w"), args.id], args.history)
     model, port = record.start_model("responses", [{"text": "resumed answer"}], logs)
     provider = {"base_url": f"http://127.0.0.1:{port}/v1", "env_key": "STANDIN_API_KEY", "name": "standin",
                 "wire_api": "responses"}
