@@ -11,6 +11,8 @@ mod elicit;
 mod error;
 mod event;
 pub mod lines;
+#[cfg(feature = "secret")]
+pub mod secret;
 mod state;
 
 pub use agent_client_protocol as sdk;

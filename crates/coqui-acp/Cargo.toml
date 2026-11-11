@@ -18,11 +18,28 @@ publish = false
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+# The secret-prompt extension (`coqui_acp::secret`): a value the person types or is shown travels sealed to a key only its receiver holds.
+secret = [
+    "dep:base64", "dep:data-encoding", "dep:hkdf", "dep:hmac", "dep:hpke", "dep:p256", "dep:sha2", "dep:subtle",
+    "dep:x25519-dalek", "dep:zeroize",
+]
+
 [dependencies]
 agent-client-protocol.workspace = true
 futures.workspace = true
 # A form's questions keep the agent's order.
 serde_json = { workspace = true, features = ["preserve_order"] }
+base64 = { workspace = true, optional = true }
+data-encoding = { workspace = true, optional = true }
+hkdf = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+hpke = { workspace = true, optional = true }
+p256 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
+x25519-dalek = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-There are no Cargo features. MSRV Rust 1.89. A default build depends on `agent-client-protocol`, `futures` and `serde_json`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
+One Cargo feature, off by default: `secret` (the `secret` module below), which adds `hpke`, `p256`, `x25519-dalek`, `hkdf`, `hmac`, `sha2`, `subtle`, `zeroize`, `base64` and `data-encoding`. MSRV Rust 1.89. A default build depends on `agent-client-protocol`, `futures` and `serde_json`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: the crate root holds everything but `lines`. `coqui_acp::sdk` is the protocol's own crate, for its transports.
 
@@ -163,6 +163,68 @@ pub fn over_io(reader: impl Read + Send + 'static, writer: impl Write + Send + '
 ```
 
 A transport over blocking I/O, such as a process's pipes, one JSON-RPC message per line. A line that does not start a JSON value is kept in `Diagnostics`, the last `diagnostic_lines` of them, for the message shown when the peer dies. A line over `max_line` ends the transport.
+
+## Secret prompts (`coqui_acp::secret`, feature `secret`)
+
+An agent asks the person for a secret, or shows them one, without the model, a transcript or a log holding the value: the host sends the frontend of the session's owner `_coqui/secret/request` or `_coqui/secret/show`, and each secret value travels sealed to a key only its receiver holds. The wire, the capability and the binding rules are `docs/secrets.md`; `vectors/secret.json` holds this module and the Dart client (`AcpSecret*`) to the same bytes. This module does the messages and the cryptography; the handle store, the tools and the person's approvals are the host's.
+
+```rust
+pub const CAPABILITY: &str = "dev.boriken.coqui.acp/secrets";   // clientCapabilities._meta key
+pub const REQUEST_METHOD: &str = "_coqui/secret/request"; pub const SHOW_METHOD: &str = "_coqui/secret/show"; pub const VERSION: u64 = 1;
+pub const BINDING_ECDSA: &str = "ecdsa-p256-sha256"; pub const BINDING_DH: &str = "x25519-hmac-sha256";
+
+pub struct Capability { pub request: bool, pub show: bool, pub bindings: Vec<String> }       // #[non_exhaustive]
+impl Capability { pub fn all() -> Self; pub fn to_value(&self) -> Value; pub fn from_meta(meta: &Map<String, Value>) -> Option<Self> }
+
+pub struct Limits { pub fields: usize, pub options: usize, pub schema_bytes: usize, pub name_bytes: usize, pub value_bytes: usize }   // 64, 256, 64 KiB, 128, 64 KiB; setters
+pub struct Form { pub title: Option<String>, pub description: Option<String>, pub fields: Vec<FormField> }
+pub struct FormField { pub field: Field, pub secret: bool, pub encoding: Option<String>, pub media_type: Option<String> }
+impl Form {
+    pub fn parse(schema: &Value, limits: &Limits) -> Result<Form, Error>;
+    pub fn field(&self, name: &str) -> Option<&FormField>;
+    pub fn check_plain(&self, values: &Map<String, Value>) -> Result<(), Error>;
+    pub fn check_sealed<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Result<(), Error>;
+    pub fn check_secret(&self, name: &str, value: &[u8]) -> Result<(), Error>;
+}
+
+pub enum Method { Request, Show }                                   // bound into every sealed field and binding
+pub struct IdentityId;                                              // sha256:<64 hex> of an SPKI; Display, FromStr, Ord
+pub struct Prover;                                                  // the receiver's identity key
+impl Prover {
+    pub fn ecdsa_p256(scalar: &[u8]) -> Result<Prover, Error>;  pub fn ecdsa_p256_pkcs8(der: &[u8]) -> Result<Prover, Error>;
+    pub fn x25519(secret: &[u8], collector_spki: &[u8]) -> Result<Prover, Error>;  pub fn x25519_pkcs8(der: &[u8], collector_spki: &[u8]) -> Result<Prover, Error>;
+    pub fn spki(&self) -> &[u8];  pub fn id(&self) -> IdentityId;
+}
+pub struct Verifier;                                                // the collector's side: identities it knows
+impl Verifier {
+    pub fn builder() -> VerifierBuilder;   // .trust(id) .trust_spki(&[u8]) .x25519_identity(&[u8]) .max_lifetime(Duration) (5 min) .build()
+    pub fn collector(&self, method: Method, request_id: &str, form: &Form, recipient: &Recipient, now: u64) -> Result<Collector, Error>;
+}
+pub struct Receiver;
+impl Receiver {
+    pub fn new(method: Method, request_id: impl Into<String>, form: &Form, prover: &Prover, now: u64, lifetime: Duration) -> Result<Receiver, Error>;
+    pub const fn recipient(&self) -> &Recipient;  pub fn request_id(&self) -> &str;
+    pub fn open(&self, name: &str, sealed: &Sealed) -> Result<SecretValue, Error>;
+    pub fn open_values(&self, plain: &Map<String, Value>, sealed: &BTreeMap<String, Sealed>) -> Result<Opened, Error>;
+}
+pub struct Collector;
+impl Collector { pub const fn holder(&self) -> IdentityId; pub fn seal(&self, name: &str, value: &str) -> Result<Sealed, Error>; pub fn is_secret(&self, name: &str) -> bool }
+pub struct Recipient { pub key: [u8; 32], pub binding: Binding }    // to_value / from_value
+pub struct Binding { pub method: String, pub key: Vec<u8>, pub expires: u64, pub audience: Option<IdentityId>, pub proof: Vec<u8> }   // to_value / from_value
+pub struct Sealed { pub enc: [u8; 32], pub ct: Vec<u8> }           // to_value / from_value
+pub struct Opened { pub plain: Map<String, Value>, pub secrets: BTreeMap<String, SecretValue> }
+pub struct SecretValue;  // expose() -> &[u8], expose_str() -> &str; zeroed on drop; Debug is "SecretValue(..)"
+// Messages, each with to_value / from_value: RequestParams, RequestReply (Accept { plain, sealed } | Decline | Cancel), ShowOpen,
+// ShowOpened (Ready(Recipient) | Decline | Cancel), ShowDeliver, ShowDone (Shown | Cancel)
+pub enum Error { Schema, Malformed, Unsupported, Key, UnknownIdentity, BadProof, Expired, WrongAudience, Field, Seal, Open, TooLarge }   // #[non_exhaustive], static reasons, never a value
+```
+
+- **Roles.** The receiver of the secret values makes a key pair for the request (`Receiver::new`) and sends `recipient()`: the host for a `request`, the frontend (in answer to the `open` step) for a `show`. The collector (`Verifier::collector`) refuses the key unless its binding verifies against an identity the verifier was told to trust; it then seals each secret field (`Collector::seal`). Nothing is sealed to an unverified key, and `now` is an argument (Unix seconds): the module reads no clock.
+- **Sealing.** HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM, one message per field, no aad; the `info` is the extension's label, the method, the request id and the field name, each length-prefixed, so a ciphertext opens only for the field and request it was sealed for. A secret value is its text (UTF-8, or decimal for a number) and is never parsed as JSON.
+- **Forms.** A secret field is `writeOnly` or `x-sensitive`, must be text or a number, and may carry no `default`, `const`, `enum`, `oneOf` or `examples`. `check_plain` refuses a name the form lacks, a secret field holding a plain value, a missing required one, and a value that does not fit (as `Elicitor`'s answers must). `open_values` checks both halves before it opens anything.
+- **Bindings.** `ecdsa-p256-sha256` for an identity that signs (the `webcrypto` peer method); `x25519-hmac-sha256` for one that cannot (the `noise` method), which needs `Verifier::x25519_identity` and a `Prover::x25519` made for that collector. A binding ends at the receiver's `lifetime`; the verifier refuses one that ended or lasts past its `max_lifetime`.
+- **Secrets in memory.** Plaintexts, the per-request private key, the identity keys and the derived MAC key are zeroed on drop (`zeroize`); no `Debug` prints a value, key or proof. Copies a move leaves on the stack and `serde_json` intermediate strings of plain values are not zeroed.
+- **Not here.** The handle store, the use and show tools, approvals, output scrubbing, routing to the owner's frontend, and certificate chains for `tls` identities.
 
 ## Errors
 

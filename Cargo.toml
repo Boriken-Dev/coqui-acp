@@ -56,6 +56,20 @@ data-encoding = { version = "2", default-features = false, features = ["alloc"] 
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 
 
+# The secret-prompt extension's sealing: RFC 9180 HPKE, base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM.
+hpke = { version = "0.15.1", default-features = false, features = ["alloc", "getrandom", "x25519", "aes"] }
+# The extension's key bindings: ECDSA over P-256 and SHA-256, the signature of the webcrypto peer method, and PKCS#8 for its keys.
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8"] }
+# The extension's Diffie-Hellman proof for a peer identity that cannot sign (the noise method's X25519 static key), at hpke's version.
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
+# The proof's key derivation and tag.
+hkdf = { version = "0.13", default-features = false }
+hmac = { version = "0.13", default-features = false }
+# Secrets that are zeroed when dropped.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# Constant-time tag comparison.
+subtle = { version = "2", default-features = false }
+
 # `antigravity`: the one RFC 3339 reader this workspace uses.
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 # `antigravity`: a blocking HTTP client for the agent's own loopback port, TLS by rustls with ring and a verifier it can switch off for
