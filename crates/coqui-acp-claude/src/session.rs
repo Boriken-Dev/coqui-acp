@@ -123,10 +123,58 @@ pub struct Model {
     pub id: String,
     /// Its name for people.
     pub name: String,
-    /// What it is, with the model it resolves to when that differs from its id.
+    /// What it is, as Claude Code words it.
     pub description: Option<String>,
     /// The efforts it takes; empty when it takes none.
     pub efforts: Vec<String>,
+    /// The model it resolves to (`claude-opus-5-5`), as Claude Code reports it.
+    pub resolved: Option<String>,
+    /// The resolved model's name and version for people (`Opus 5.5`).
+    pub version: Option<String>,
+}
+
+impl Model {
+    /// What to show a person: the version where the name is only the family (`Opus` is `Opus 5.5`), and `Default (Opus 5.5)`
+    /// for the default, which resolves to a model of its own.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match &self.version {
+            Some(version) if self.id == "default" => format!("Default ({version})"),
+            Some(version) if version.starts_with(&self.name) => version.clone(),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+/// `Opus 5.5` for `claude-opus-5-5`: the words of a model id and its short numbers joined by dots, up to a date.
+/// `None` when the id has no number.
+#[must_use]
+pub fn version_of(resolved: &str) -> Option<String> {
+    let id = resolved.split('[').next().unwrap_or(resolved);
+    let id = id.strip_prefix("claude-").unwrap_or(id);
+    let mut words = Vec::new();
+    let mut numbers = Vec::new();
+    for part in id.split('-') {
+        if part.is_empty() {
+            return None;
+        }
+        if part.bytes().all(|b| b.is_ascii_digit()) {
+            if part.len() > 2 {
+                break;
+            }
+            numbers.push(part);
+        } else if part.bytes().all(|b| b.is_ascii_alphabetic()) {
+            let mut chars = part.chars();
+            let first = chars.next()?.to_ascii_uppercase();
+            words.push(format!("{first}{}", chars.as_str()));
+        } else {
+            return None;
+        }
+    }
+    if words.is_empty() || numbers.is_empty() {
+        return None;
+    }
+    Some(format!("{} {}", words.join(" "), numbers.join(".")))
 }
 
 /// The models of an `initialize` answer, `None` when it lists none at all, as distinct from an empty list. The answer's
@@ -142,16 +190,11 @@ pub fn models_of(answer: &Value) -> Option<Vec<Model>> {
                 let resolved = model
                     .get("resolvedModel")
                     .and_then(Value::as_str)
-                    .filter(|resolved| *resolved != id);
-                let description = match (model.get("description").and_then(Value::as_str), resolved)
-                {
-                    (Some(text), Some(resolved)) => {
-                        Some(format!("{text} (resolves to {resolved})"))
-                    }
-                    (Some(text), None) => Some(text.to_string()),
-                    (None, Some(resolved)) => Some(format!("resolves to {resolved}")),
-                    (None, None) => None,
-                };
+                    .map(str::to_string);
+                let description = model
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let efforts = if model.get("supportsEffort").and_then(Value::as_bool) == Some(true)
                 {
                     model
@@ -174,6 +217,8 @@ pub fn models_of(answer: &Value) -> Option<Vec<Model>> {
                         .to_string(),
                     description,
                     efforts,
+                    version: resolved.as_deref().and_then(version_of),
+                    resolved,
                 })
             })
             .collect(),

@@ -480,9 +480,13 @@ impl AcpHarness for ClaudeProvider {
                             models
                                 .into_iter()
                                 .map(|model| {
-                                    let mut info = ModelInfo::new(model.id);
-                                    info.name = Some(model.name);
+                                    let mut info = ModelInfo::new(model.id.clone());
+                                    info.name = Some(model.label());
                                     info.description = model.description;
+                                    info.resolved = model.resolved;
+                                    info.version = model.version;
+                                    info.efforts = model.efforts;
+                                    info.is_default = model.id == "default";
                                     info
                                 })
                                 .collect(),

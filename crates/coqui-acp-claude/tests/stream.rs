@@ -225,13 +225,11 @@ fn a_recorded_initialize_lists_models_with_their_efforts_and_never_the_account()
     let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(ids, ["default", "opus", "fable", "sonnet", "haiku"]);
     assert_eq!(models[4].efforts, ["low", "medium", "high", "xhigh", "max"]);
-    assert!(
-        models[0]
-            .description
-            .as_deref()
-            .unwrap()
-            .contains("resolves to claude-opus-5-5")
-    );
+    assert_eq!(models[0].resolved.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(models[0].version.as_deref(), Some("Opus 5.5"));
+    assert_eq!(models[0].label(), "Default (Opus 5.5)");
+    assert_eq!(models[2].label(), "Fable 5.1");
+    assert_eq!(models[2].resolved.as_deref(), Some("claude-fable-5-1"));
     assert!(!format!("{models:?}").contains("apiKeySource"));
 }
 
@@ -391,9 +389,10 @@ fn the_models_claude_code_lists_are_read_from_its_initialize_answer() {
     assert_eq!(models[0].name, "Default (recommended)");
     assert_eq!(
         models[0].description.as_deref(),
-        Some("Use the default model (resolves to claude-opus-5-5)")
+        Some("Use the default model")
     );
-    assert_eq!(models[1].description, None, "an id that resolves to itself");
+    assert_eq!(models[1].description, None);
+    assert_eq!(models[1].version.as_deref(), Some("Haiku 5.5"));
     assert!(
         !format!("{models:?}").contains("someone@example"),
         "the account is never read"
@@ -1524,4 +1523,24 @@ fn a_rejected_event_is_a_reported_hit() {
         (hit.resets_at, hit.bucket.as_deref()),
         (Some(1_790_000_000), Some("seven_day"))
     );
+}
+
+#[test]
+fn a_version_is_the_words_and_short_numbers_of_the_id_up_to_a_date() {
+    use coqui_acp_claude::version_of;
+    assert_eq!(version_of("claude-opus-5-5").as_deref(), Some("Opus 5.5"));
+    assert_eq!(
+        version_of("claude-sonnet-4-5-20250929").as_deref(),
+        Some("Sonnet 4.5")
+    );
+    assert_eq!(
+        version_of("claude-3-5-haiku-20241022").as_deref(),
+        Some("Haiku 3.5")
+    );
+    assert_eq!(
+        version_of("claude-opus-5-5[1m]").as_deref(),
+        Some("Opus 5.5")
+    );
+    assert_eq!(version_of("claude-standin"), None);
+    assert_eq!(version_of(""), None);
 }

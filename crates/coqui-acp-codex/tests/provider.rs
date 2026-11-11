@@ -266,6 +266,9 @@ fn it_lists_models_and_reads_usage_through_the_spawner_it_is_given() {
             .expect("answered");
         assert!(listing.known, "{listing:?}");
         assert_eq!(listing.models[0].id, "gpt-standin");
+        assert_eq!(listing.models[0].efforts, ["low", "high"]);
+        assert_eq!(listing.models[0].default_effort.as_deref(), Some("low"));
+        assert!(listing.models[0].is_default);
         let report = provider()
             .usage(
                 UsageQuery::new().environment(environment),

@@ -444,6 +444,9 @@ impl AcpHarness for CodexProvider {
                         let mut info = ModelInfo::new(model.id);
                         info.name = Some(model.name);
                         info.description = model.description;
+                        info.efforts = model.efforts;
+                        info.default_effort = model.default_effort;
+                        info.is_default = model.is_default;
                         info
                     })
                     .collect(),

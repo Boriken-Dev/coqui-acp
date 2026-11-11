@@ -313,6 +313,10 @@ fn recorded_initialize_and_model_list_give_the_version_and_models() {
             .any(|model| model.id == "gpt-6-luna" && model.efforts.contains(&"low".to_string()))
     );
     assert_eq!(models.iter().filter(|model| model.is_default).count(), 1);
+    assert!(
+        models.iter().all(|model| !model.efforts.is_empty()),
+        "each model lists its own efforts"
+    );
 }
 
 #[test]

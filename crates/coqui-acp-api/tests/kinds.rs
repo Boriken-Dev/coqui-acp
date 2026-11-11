@@ -238,7 +238,20 @@ fn every_models_keys_are_pinned() {
             &["known", "models", "unknown_because"],
             &["known"],
         ),
-        ("ModelInfo", &["description", "id", "name"], &["id"]),
+        (
+            "ModelInfo",
+            &[
+                "default_effort",
+                "description",
+                "efforts",
+                "id",
+                "is_default",
+                "name",
+                "resolved",
+                "version",
+            ],
+            &["id"],
+        ),
         (
             "SessionRecordFile",
             &["format", "path"],

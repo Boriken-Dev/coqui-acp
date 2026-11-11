@@ -419,11 +419,7 @@ impl State {
             .models
             .iter()
             .map(|known| {
-                OptionValue::new(
-                    known.id.clone(),
-                    known.name.clone(),
-                    known.description.clone(),
-                )
+                OptionValue::new(known.id.clone(), known.label(), known.description.clone())
             })
             .collect();
         if !models.iter().any(|value| value.id == model) {

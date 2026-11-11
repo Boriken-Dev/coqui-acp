@@ -5,6 +5,8 @@
     reason = "a test names what it uses from std"
 )]
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -493,5 +495,71 @@ fn an_empty_list_of_setting_sources_loads_none_and_absent_leaves_the_flag_off() 
         assert_eq!(found, flag, "{args:?}");
         drop(channel);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// What the recorded `initialize` of Claude Code 2.1.318 gives a host that asks for the models before any session: no
+/// turn is made, since the stand-in replays only the recording's control answers.
+#[test]
+fn models_lists_the_recorded_models_with_versions_and_efforts_and_no_turn() {
+    let environment: coqui_acp_api::Environment = [(
+        "COQUI_ACP_CLAUDE_REPLAY",
+        support::fixtures()
+            .join("cli_session")
+            .to_string_lossy()
+            .into_owned(),
+    )]
+    .into_iter()
+    .collect();
+    let provider = ClaudeProvider::new(ProviderSettings {
+        executable: support::replay_program().to_string_lossy().into_owned(),
+        ..ProviderSettings::default()
+    });
+    let listing = provider
+        .models(
+            coqui_acp_api::ModelsRequest::new().environment(environment),
+            LocalSpawner::new().into_object(),
+            Keeper.into_object(),
+        )
+        .expect("answered");
+    assert!(listing.known, "{listing:?}");
+    let seen: Vec<_> = listing
+        .models
+        .iter()
+        .map(|model| {
+            (
+                model.id.as_str(),
+                model.name.as_deref().unwrap(),
+                model.resolved.as_deref().unwrap(),
+                model.version.as_deref().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (
+                "default",
+                "Default (Opus 5.5)",
+                "claude-opus-5-5",
+                "Opus 5.5"
+            ),
+            ("opus", "Opus 5.5", "claude-opus-5-5", "Opus 5.5"),
+            ("fable", "Fable 5.1", "claude-fable-5-1", "Fable 5.1"),
+            ("sonnet", "Sonnet 5.5", "claude-sonnet-5-5", "Sonnet 5.5"),
+            ("haiku", "Haiku 5.5", "claude-haiku-5-5", "Haiku 5.5"),
+        ]
+    );
+    assert_eq!(
+        listing
+            .models
+            .iter()
+            .filter(|model| model.is_default)
+            .count(),
+        1,
+        "only the default entry"
+    );
+    for model in &listing.models {
+        assert_eq!(model.efforts, ["low", "medium", "high", "xhigh", "max"]);
     }
 }
