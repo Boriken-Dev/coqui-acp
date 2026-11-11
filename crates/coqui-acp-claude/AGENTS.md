@@ -61,8 +61,11 @@ pub fn permission_mode(&self) -> Option<String>                          // `cur
 pub fn set_permission_mode(&self, mode: &str) -> Result<(), Error>       // `set_permission_mode`; takes effect at once, in a running turn too
 pub fn on_permission_mode(&self, hook: impl Fn(&str) + Send + Sync + 'static)   // told each mode Claude Code reports or an "allow always" switches it to
 pub fn close(&self)                                                      // also on drop
-#[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>, pub efforts: Vec<String> }
+#[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>, pub efforts: Vec<String>,
+    pub resolved: Option<String>, pub version: Option<String> }
+pub fn Model::label(&self) -> String       // "Opus 5.5" for the family name "Opus"; "Default (Opus 5.5)" for `default`; else `name`
 pub fn models_of(answer: &Value) -> Option<Vec<Model>>
+pub fn version_of(resolved: &str) -> Option<String>      // "Opus 5.5" for claude-opus-5-5: the words and short numbers up to a date; None with no number
 pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error>
 ```
 
@@ -72,7 +75,7 @@ pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error>
 
 `ClaudeSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB; a longer output line ends the session), `tail_lines` (8) and `tail_line_bytes` (512) quoted by an exit, `initialize_timeout` (30 s), `control_timeout` (30 s), `exit_wait` (1 s for the exit status), `max_tools` (4096 tool calls kept for their results), `max_transcript_bytes` (64 MiB replayed). Also: `parser` (`ParserLimits`: `max_title_bytes` 256, `max_streamed` 64, `max_tasks` 1024), `exit_poll` (100 ms; an exit is noticed even with the output held open), `close_wait` (2 s), `max_queued_writes` (1024; past it a write fails rather than waits), `title_bytes` (80), `version_wait` (10 s; 0 does not ask), `version_bytes` (4096), `on_line: Option<LineHook>` (each line before anything reads it; `false` ends Claude Code).
 
-`models_of` reads `models[]` of an `initialize` answer: `value` as the id, `displayName`, `description` with `resolvedModel` when it differs, and `supportedEffortLevels` when `supportsEffort`. The answer's `account` is never read.
+`models_of` reads `models[]` of an `initialize` answer: `value` as the id, `displayName`, `description` as it stands, `resolvedModel` as `resolved` and its `version`, and `supportedEffortLevels` when `supportsEffort`. The answer's `account` is never read.
 
 ## Parser (`coqui_acp_claude::parse`)
 

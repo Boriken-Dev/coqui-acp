@@ -115,7 +115,7 @@ Exit status: 0 when the client closes the connection, 1 when reading it failed, 
 | Item | Purpose |
 | --- | --- |
 | `ClaudeLaunch`, `SessionStart`, `mcp_config` | What Claude Code is started with |
-| `ClaudeSession`, `ClaudeSettings`, `Model`, `models_of`, `user_blocks` | A running Claude Code |
+| `ClaudeSession`, `ClaudeSettings`, `Model`, `models_of`, `version_of`, `user_blocks` | A running Claude Code |
 | `Parser` (`parse`) | Stream-json lines as events |
 | `config_dir`, `transcript`, `replay` | A session's history |
 | `ClaudeAgent` | The ACP agent |
