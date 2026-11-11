@@ -402,6 +402,9 @@ impl AcpHarness for PiProvider {
                     .map(|model| {
                         let mut info = ModelInfo::new(model.id);
                         info.name = Some(model.name);
+                        info.efforts = model.efforts;
+                        info.default_effort = model.default_effort;
+                        info.is_default = model.is_default;
                         let mut about = vec![model.provider];
                         if model.reasoning {
                             about.push("reasoning".to_string());

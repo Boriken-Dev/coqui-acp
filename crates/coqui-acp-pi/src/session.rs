@@ -136,6 +136,12 @@ pub struct Model {
     pub images: bool,
     /// Its context window, in tokens.
     pub context_window: Option<u64>,
+    /// Whether Pi would use it with none named. Set only by [`PiSession::read_models`].
+    pub is_default: bool,
+    /// The thinking levels it takes, in Pi's order: listed only for the model Pi would use, empty for the others.
+    pub efforts: Vec<String>,
+    /// The level Pi starts that model at.
+    pub default_effort: Option<String>,
 }
 
 fn model_of(model: &Value) -> Option<Model> {
@@ -156,6 +162,9 @@ fn model_of(model: &Value) -> Option<Model> {
             .and_then(Value::as_array)
             .is_some_and(|kinds| kinds.iter().any(|kind| kind == "image")),
         context_window: model.get("contextWindow").and_then(Value::as_u64),
+        is_default: false,
+        efforts: Vec::new(),
+        default_effort: None,
     })
 }
 
@@ -250,18 +259,49 @@ impl PiSession {
         settings: PiSettings,
     ) -> Result<Vec<Model>, Error> {
         let session = Self::connect(launch, spawn, settings, |_| true, true)?;
-        let state = session.request("get_state", json!({}), session.settings.initialize_timeout);
-        let listed = state.and_then(|_| {
-            session
-                .request(
-                    "get_available_models",
-                    json!({}),
-                    session.settings.request_timeout,
-                )
-                .map(|data| models_of(&data))
-        });
+        let listed = session.read_listing();
         session.close();
         listed
+    }
+
+    /// The models, with the model Pi would use marked and, for that one alone, its thinking levels: Pi lists levels only for
+    /// the model in use, and a switch per model would be a command per entry.
+    fn read_listing(&self) -> Result<Vec<Model>, Error> {
+        let state = self.request("get_state", json!({}), self.settings.initialize_timeout)?;
+        let data = self.request(
+            "get_available_models",
+            json!({}),
+            self.settings.request_timeout,
+        )?;
+        let mut models = models_of(&data);
+        let current = state
+            .get("model")
+            .and_then(model_of)
+            .map(|model| model.id)
+            .filter(|id| models.iter().any(|model| &model.id == id));
+        if let Some(current) = current
+            && let Some(model) = models.iter_mut().find(|model| model.id == current)
+        {
+            model.is_default = true;
+            model.default_effort = state
+                .get("thinkingLevel")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Ok(levels) = self.request(
+                "get_available_thinking_levels",
+                json!({}),
+                self.settings.request_timeout,
+            ) {
+                model.efforts = levels
+                    .get("levels")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|level| level.as_str().map(str::to_string))
+                    .collect();
+            }
+        }
+        Ok(models)
     }
 
     /// Starts the process and its readers, with no command sent yet. `ephemeral` leaves the gate out and keeps no session.

@@ -382,3 +382,29 @@ impl LoginPrompter for Prompter {
         Ok(true)
     }
 }
+
+#[test]
+fn the_default_model_carries_its_thinking_levels_and_the_others_none() {
+    let dir = scratch("models-efforts");
+    let environment: coqui_acp_api::Environment =
+        [("PI_CODING_AGENT_DIR", dir.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+    let listing = provider()
+        .models(
+            ModelsRequest::new().environment(environment),
+            spawner(),
+            Keeper.into_object(),
+        )
+        .expect("answered");
+    let fast = &listing.models[0];
+    let think = &listing.models[1];
+    assert!(
+        !fast.is_default && fast.efforts.is_empty() && fast.default_effort.is_none(),
+        "{fast:?}"
+    );
+    assert!(think.is_default, "{think:?}");
+    assert_eq!(think.efforts, ["off", "minimal", "low", "medium", "high"]);
+    assert_eq!(think.default_effort.as_deref(), Some("medium"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

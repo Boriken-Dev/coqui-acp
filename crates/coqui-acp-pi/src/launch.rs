@@ -4,7 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use coqui_acp_harness::{Launch, Mode};
@@ -122,7 +122,7 @@ impl PiLaunch {
     /// level, the system prompt's file, and the caller's own arguments.
     #[must_use]
     pub fn launch(&self, extension: Option<&Path>, prompt: Option<&Path>) -> Launch {
-        let mut launch = Launch::new(self.executable.clone())
+        let mut launch = Launch::new(self.program())
             .args(["--mode", "rpc"])
             .cwd(&self.cwd)
             .clear_env(self.clear_env);
@@ -192,5 +192,67 @@ mod tests {
                 "/g/p.md"
             ]
         );
+    }
+}
+
+/// Where a program called `name` is, looking in the directories of `path` for each of `extensions` in turn; `None` when
+/// `name` already has a directory or an extension, or nothing is found.
+fn find_in(name: &OsStr, path: &OsStr, extensions: &[&str]) -> Option<PathBuf> {
+    let text = name.to_str()?;
+    if text.contains(['/', '\\']) || Path::new(text).extension().is_some() {
+        return None;
+    }
+    std::env::split_paths(path).find_map(|dir| {
+        extensions
+            .iter()
+            .map(|extension| dir.join(format!("{text}.{extension}")))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+impl PiLaunch {
+    /// The program to start. On Windows a bare `pi` is looked for in `PATH` as `pi.exe` and then `pi.cmd`, the shim npm
+    /// installs, which the system would not find by the bare name; the launch's own `PATH` is used when it sets one. Anything
+    /// else, and any other system, is `executable` as it is.
+    #[must_use]
+    pub fn program(&self) -> OsString {
+        if !cfg!(windows) {
+            return self.executable.clone();
+        }
+        let own = self.env.iter().find_map(|(name, value)| {
+            name.to_string_lossy()
+                .eq_ignore_ascii_case("PATH")
+                .then_some(value.clone())
+        });
+        let Some(path) = own.or_else(|| std::env::var_os("PATH")) else {
+            return self.executable.clone();
+        };
+        find_in(&self.executable, &path, &["exe", "cmd"])
+            .map_or_else(|| self.executable.clone(), PathBuf::into_os_string)
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::*;
+
+    #[test]
+    fn exe_comes_before_cmd_and_a_name_with_an_extension_or_directory_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("coqui-acp-pi-find-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pi.cmd"), "").unwrap();
+        let path = std::env::join_paths([&dir]).unwrap();
+        assert_eq!(
+            find_in(OsStr::new("pi"), &path, &["exe", "cmd"]),
+            Some(dir.join("pi.cmd"))
+        );
+        std::fs::write(dir.join("pi.exe"), "").unwrap();
+        assert_eq!(
+            find_in(OsStr::new("pi"), &path, &["exe", "cmd"]),
+            Some(dir.join("pi.exe"))
+        );
+        assert_eq!(find_in(OsStr::new("pi.cmd"), &path, &["exe", "cmd"]), None);
+        assert_eq!(find_in(OsStr::new("./pi"), &path, &["exe", "cmd"]), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

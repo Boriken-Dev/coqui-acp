@@ -90,7 +90,7 @@ impl PiAgent {
                 if self.settings.version_wait.is_zero() {
                     return None;
                 }
-                let mut launch = Launch::new(self.defaults.executable.clone())
+                let mut launch = Launch::new(self.defaults.program())
                     .arg("--version")
                     .clear_env(self.defaults.clear_env);
                 launch.env.clone_from(&self.defaults.env);

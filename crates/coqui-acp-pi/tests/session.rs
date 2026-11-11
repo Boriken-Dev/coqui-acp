@@ -509,3 +509,32 @@ fn a_program_that_is_not_there_is_a_spawn_error() {
     let error = PiSession::start(&launch, &PlainSpawn, PiSettings::new(), sink).unwrap_err();
     assert!(matches!(error, Error::Spawn(_)), "{error}");
 }
+
+/// npm installs Pi on Windows as `pi.cmd`, which a bare `pi` does not name to the system: the launch finds it in `PATH`.
+#[cfg(windows)]
+#[test]
+fn a_bare_pi_finds_the_npm_shim_on_windows_and_runs_a_turn_through_it() {
+    let world = world("cmd");
+    let shim = world.scratch.dir("npm");
+    std::fs::write(
+        shim.join("pi.cmd"),
+        format!("@\"{}\" %*\r\n", support::fake_program().display()),
+    )
+    .unwrap();
+    let mut launch = world.launch();
+    launch.executable = "pi".into();
+    let path = format!(
+        "{};{}",
+        shim.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    launch.env.insert("PATH".into(), path.into());
+    assert_eq!(launch.program(), shim.join("pi.cmd").into_os_string());
+    let (session, mut events) = world.start(&launch);
+    say(&session, "hello");
+    events.turn();
+    assert_eq!(events.said(), "echo: hello");
+    // A gated call goes through the shim too, its arguments (the gate's path among them) escaped by std.
+    say(&session, "ask");
+    events.until(|event| matches!(event, Event::Permission(_)));
+}
