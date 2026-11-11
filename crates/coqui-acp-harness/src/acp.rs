@@ -62,14 +62,20 @@ pub fn resolved_path(path: &Path) -> PathBuf {
 /// Whether `path`, followed through its links, lies in one of `roots`, followed through theirs.
 #[must_use]
 pub fn within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    // How it is written decides first: resolving a network or device path would open a connection to its host.
+    if parse::network(path) {
+        return false;
+    }
     let plain = path
         .components()
         .all(|part| !matches!(part, Component::ParentDir | Component::CurDir));
+    if !plain {
+        return false;
+    }
     let resolved = resolved_path(path);
-    plain
-        && roots
-            .iter()
-            .any(|root| resolved.starts_with(resolved_path(root)))
+    roots
+        .iter()
+        .any(|root| resolved.starts_with(resolved_path(root)))
 }
 
 /// Whether a host's narrowing takes `path`: inside `roots` unless there are none, and not on the network, as written or
