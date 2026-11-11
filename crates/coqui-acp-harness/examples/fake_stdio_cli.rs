@@ -12,8 +12,11 @@
 //! `refused-key`; with a login it rotates `auth.json`, or deletes it (exit 0) when `COQUI_ACP_FAKE_REFUSE` is set, or
 //! leaves it when `COQUI_ACP_FAKE_ROTATE` is `0`.
 //!
+//! A `swap_identity` file in `GROK_HOME` makes `models` write the login of another account (`account_id` `other`); a login
+//! keeps the `account_id` it had.
+//!
 //! `COQUI_ACP_FAKE_STDIO_LOG` names a file each start appends to: one line of JSON with the arguments and the names
-//! (never the values) of the environment, and the two directory variables' values.
+//! (never the values) of the environment, and the values of the two directory variables and of the endpoint variables.
 
 #![allow(
     clippy::std_instead_of_core,
@@ -30,6 +33,15 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 const DIRECTORY_VARIABLES: [&str; 2] = ["GROK_HOME", "PI_CODING_AGENT_DIR"];
+
+const ENDPOINT_VARIABLES: [&str; 6] = [
+    "GROK_CLI_CHAT_PROXY_BASE_URL",
+    "GROK_XAI_API_BASE_URL",
+    "GROK_MODELS_BASE_URL",
+    "GROK_MODELS_LIST_URL",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+];
 
 fn emit(value: &Value) {
     let mut out = std::io::stdout().lock();
@@ -57,7 +69,11 @@ fn log_start(args: &[String]) {
         .iter()
         .filter_map(|name| std::env::var(name).ok().map(|value| (*name, value)))
         .collect();
-    let line = json!({"args": args, "env_names": names, "directories": directories});
+    let endpoints: BTreeMap<&str, String> = ENDPOINT_VARIABLES
+        .iter()
+        .filter_map(|name| std::env::var(name).ok().map(|value| (*name, value)))
+        .collect();
+    let line = json!({"args": args, "env_names": names, "directories": directories, "endpoints": endpoints});
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -147,7 +163,18 @@ fn models() -> ! {
         exit(0);
     }
     if std::env::var("COQUI_ACP_FAKE_ROTATE").as_deref() != Ok("0") {
-        let text = json!({"fake_login": format!("rotated-{}", fresh())}).to_string();
+        let old: Value = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null);
+        let mut login = json!({"fake_login": format!("rotated-{}", fresh())});
+        if let Some(account) = old["account_id"].as_str() {
+            login["account_id"] = json!(account);
+        }
+        if home.join("swap_identity").exists() {
+            login["account_id"] = json!("other");
+        }
+        let text = login.to_string();
         if std::fs::write(&file, text).is_err() {
             exit(1);
         }

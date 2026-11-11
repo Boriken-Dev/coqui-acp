@@ -6,11 +6,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::ProviderError;
+use coqui_acp_api::guatiao::{Secret, Status};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKindInfo, AccountRef, EndpointSlot, HARNESS_LOGIN,
-    LoginMethodInfo,
+    AccountCatalog, AccountGrant, AccountKindInfo, AccountRef, EndpointSlot, Environment,
+    HARNESS_LOGIN, LoginMethodInfo,
 };
 use serde_json::{Map, Value, json};
 
@@ -235,8 +235,8 @@ pub struct Watched {
 
 /// A grant applied: what to set and what to watch. It holds credentials and shows none.
 pub struct Applied {
-    /// Variables to set, by name.
-    pub environment: Vec<(String, String)>,
+    /// Variables to set, by name; the values are credentials.
+    pub environment: Secret<Environment>,
     /// The login file to watch.
     pub watched: Option<Watched>,
     /// Whether the account needs the spawner's files.
@@ -248,7 +248,7 @@ impl core::fmt::Debug for Applied {
         f.debug_struct("Applied")
             .field(
                 "environment",
-                &self.environment.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+                &self.environment.expose().names().collect::<Vec<_>>(),
             )
             .field("watched", &self.watched)
             .finish_non_exhaustive()
@@ -332,24 +332,24 @@ pub fn apply(def: &HarnessDef, grant: &AccountGrant) -> Result<Option<Applied>, 
         )));
     }
     let text_of = |name: &str| settings.get(name).and_then(Value::as_str);
-    let mut environment = Vec::new();
+    let mut environment = Environment::new();
     for (key, variable) in kind.credential_variables {
         if let Some(value) = credentials.get(key) {
-            environment.push(((*variable).to_string(), value.to_string()));
+            environment.insert(*variable, value);
         }
     }
     for (setting, variable) in kind.setting_variables {
         if let Some(value) = text_of(setting) {
-            environment.push(((*variable).to_string(), value.to_string()));
+            environment.insert(*variable, value);
         }
     }
     if let Some((setting, key)) = kind.named_variable
         && let (Some(variable), Some(value)) = (text_of(setting), credentials.get(key))
     {
-        environment.push((variable.to_string(), value.to_string()));
+        environment.insert(variable, value);
     }
     if let (Some(variable), Some(dir)) = (kind.home_variable, &grant.state_dir) {
-        environment.push((variable.to_string(), dir.clone()));
+        environment.insert(variable, dir.as_str());
     }
     let mut watched = None;
     if let Some((path, key)) = kind.file {
@@ -359,8 +359,98 @@ pub fn apply(def: &HarnessDef, grant: &AccountGrant) -> Result<Option<Applied>, 
         }
     }
     Ok(Some(Applied {
-        environment,
+        environment: Secret::new(environment),
         watched,
         needs_files: kind.state_dir,
     }))
+}
+
+/// Whether `a` and `b` name the same variable: exactly, and on Windows, where the system ignores case, whatever the case.
+#[must_use]
+pub fn same_name(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// Whether the text of a login file holds a login that is settled: not blank, and, when it looks like JSON, whole. A file
+/// the harness is in the middle of writing (a truncated object) is not one.
+#[must_use]
+pub fn login_usable(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    !text.starts_with(['{', '[']) || serde_json::from_str::<Value>(text).is_ok()
+}
+
+/// The names under which a login file may say whose login it is. Not measured: no signed-in Grok file was seen, so these
+/// are the usual ones, and a file with none is not checked.
+const IDENTITY_KEYS: [&str; 4] = ["account_id", "user_id", "sub", "email"];
+
+/// Whose login the file's text says it is, when it says: the first of `account_id`, `user_id`, `sub` or `email` in the object or in an object one
+/// level down.
+#[must_use]
+pub fn identity_of(text: &str) -> Option<String> {
+    let Value::Object(top) = serde_json::from_str::<Value>(text).ok()? else {
+        return None;
+    };
+    let find = |object: &Map<String, Value>| {
+        IDENTITY_KEYS
+            .iter()
+            .find_map(|key| object.get(*key).and_then(Value::as_str))
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    };
+    find(&top).or_else(|| top.values().filter_map(Value::as_object).find_map(find))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_login_is_settled_when_whole() {
+        assert!(!login_usable(""));
+        assert!(!login_usable("  \n"));
+        assert!(!login_usable("{\"access"));
+        assert!(!login_usable("{\"a\": [1, 2"));
+        assert!(login_usable("{\"a\": 1}"));
+        assert!(login_usable("some plain text a harness keeps"));
+    }
+
+    #[test]
+    fn whose_login_it_is_is_read_from_the_usual_keys() {
+        assert_eq!(identity_of("{\"account_id\": \"A\"}").as_deref(), Some("A"));
+        assert_eq!(
+            identity_of("{\"tokens\": {\"email\": \"a@x\"}}").as_deref(),
+            Some("a@x")
+        );
+        assert_eq!(identity_of("{\"token\": \"t\"}"), None);
+        assert_eq!(identity_of("not json"), None);
+    }
+
+    #[test]
+    fn names_compare_by_the_systems_rules() {
+        assert!(same_name("GROK_HOME", "GROK_HOME"));
+        assert_eq!(same_name("GROK_HOME", "grok_home"), cfg!(windows));
+    }
+
+    #[test]
+    fn what_is_applied_shows_names_and_no_value() {
+        let grant = AccountGrant::new("a", "xai-api-key")
+            .credentials(coqui_acp_api::Credentials::from_iter([(
+                "api_key",
+                "secret-value-1f3a",
+            )]))
+            .state_dir("/some/dir");
+        let applied = apply(&grok::DEF, &grant)
+            .expect("it applies")
+            .expect("a kind");
+        let shown = alloc::format!("{applied:?}");
+        assert!(shown.contains("XAI_API_KEY"), "{shown}");
+        assert!(!shown.contains("secret-value-1f3a"), "{shown}");
+    }
 }

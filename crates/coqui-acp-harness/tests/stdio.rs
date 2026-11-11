@@ -276,7 +276,8 @@ fn a_pi_key_goes_in_the_variable_named_by_its_setting() {
     settings.set("variable", Value::from("GROQ_API_KEY"));
     let grant = AccountGrant::new("a-pi-key", "pi-api-key")
         .settings(Value::from(settings))
-        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]));
+        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
+        .state_dir(dir.to_str().expect("text"));
     let request = StartRequest::builder()
         .environment(environment)
         .account(grant)
@@ -301,7 +302,8 @@ fn a_pi_key_names_only_a_provider_variable() {
     settings.set("variable", Value::from("PATH"));
     let grant = AccountGrant::new("a-pi-key", "pi-api-key")
         .settings(Value::from(settings))
-        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]));
+        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
+        .state_dir(dir.to_str().expect("text"));
     let (sender, _received) = mpsc::channel();
     let refused = provider(StdioHarness::Pi).start(
         StartRequest::builder().account(grant).build(),
@@ -314,4 +316,238 @@ fn a_pi_key_names_only_a_provider_variable() {
     };
     assert_eq!(u32::from(error.status), 7, "{}", error.message());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn names_without(entry: &serde_json::Value, name: &str) -> bool {
+    !names_of(entry).iter().any(|n| {
+        if cfg!(windows) {
+            n.eq_ignore_ascii_case(name)
+        } else {
+            n == name
+        }
+    })
+}
+
+/// Every endpoint, provider-switch and cloud variable of the harness is removed from what the host passed, and the
+/// endpoint comes from the grant alone; on Windows, whatever the case the host wrote the name in.
+#[test]
+fn an_account_removes_the_endpoint_variables_of_the_host_and_sets_its_own() {
+    let dir = scratch("endpoints");
+    let log = dir.join("fake.log");
+    let mut environment: Environment = [
+        ("GROK_CLI_CHAT_PROXY_BASE_URL", "https://evil.example/proxy"),
+        ("GROK_MODELS_BASE_URL", "https://evil.example/models"),
+        ("GROK_MODELS_LIST_URL", "https://evil.example/list"),
+        ("COQUI_ACP_FAKE_STDIO_LOG", log.to_str().expect("text")),
+    ]
+    .into_iter()
+    .collect();
+    if cfg!(windows) {
+        environment.insert("grok_xai_api_base_url", "https://evil.example/lower");
+    }
+    let mut settings = Map::new();
+    settings.set("proxy_base_url", Value::from("https://good.example/proxy"));
+    let grant = AccountGrant::new("a-key", "xai-api-key")
+        .settings(Value::from(settings))
+        .credentials(Credentials::from_iter([("api_key", "grok-key-value-3f9a")]))
+        .state_dir(dir.to_str().expect("text"));
+    let request = StartRequest::builder()
+        .environment(environment)
+        .account(grant)
+        .build();
+    start_and_close(&provider(StdioHarness::Grok), request, &dir);
+    let entries = logged(&log);
+    let entry = entries.last().expect("a start");
+    assert_eq!(
+        entry["endpoints"]["GROK_CLI_CHAT_PROXY_BASE_URL"],
+        serde_json::json!("https://good.example/proxy"),
+        "{entry}"
+    );
+    for name in [
+        "GROK_MODELS_BASE_URL",
+        "GROK_MODELS_LIST_URL",
+        "GROK_XAI_API_BASE_URL",
+    ] {
+        assert!(
+            names_without(entry, name),
+            "{name} reached the harness: {entry}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same for the variables the host's own process has, which only the spawner can remove.
+#[test]
+fn an_account_removes_the_endpoint_variables_the_host_process_has() {
+    let dir = scratch("inherited");
+    let out = Command::new(std::env::current_exe().expect("the test knows itself"))
+        .args([
+            "--exact",
+            "inherited_inside",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("GROK_MODELS_BASE_URL", "https://evil.example/models")
+        .env("ANTHROPIC_BASE_URL", "https://evil.example/anthropic")
+        .env("COQUI_ACP_FAKE_STDIO_LOG", dir.join("fake.log"))
+        .env("STDIO_INHERITED_DIR", &dir)
+        .output()
+        .expect("the test runs itself");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[ignore = "run by the test that sets its environment"]
+fn inherited_inside() {
+    let dir = PathBuf::from(std::env::var("STDIO_INHERITED_DIR").expect("a directory"));
+    let log = dir.join("fake.log");
+    let grok = AccountGrant::new("a-key", "xai-api-key")
+        .credentials(Credentials::from_iter([("api_key", "grok-key-value-3f9a")]))
+        .state_dir(dir.to_str().expect("text"));
+    start_and_close(
+        &provider(StdioHarness::Grok),
+        StartRequest::builder().account(grok).build(),
+        &dir,
+    );
+    let mut settings = Map::new();
+    settings.set("variable", Value::from("GROQ_API_KEY"));
+    let pi = AccountGrant::new("a-pi-key", "pi-api-key")
+        .settings(Value::from(settings))
+        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
+        .state_dir(dir.to_str().expect("text"));
+    start_and_close(
+        &provider(StdioHarness::Pi),
+        StartRequest::builder().account(pi).build(),
+        &dir,
+    );
+    let entries = logged(&log);
+    assert_eq!(entries.len(), 2);
+    assert!(
+        names_without(&entries[0], "GROK_MODELS_BASE_URL"),
+        "{}",
+        entries[0]
+    );
+    assert!(
+        names_without(&entries[1], "ANTHROPIC_BASE_URL"),
+        "{}",
+        entries[1]
+    );
+}
+
+/// A renewal that leaves the login of another account in the file is refused and undone; one that keeps the account is
+/// answered.
+#[test]
+fn a_renewal_that_changes_whose_login_it_is_is_refused() {
+    let mine = r#"{"account_id":"mine","n":1}"#;
+    for (swap, refused) in [(true, true), (false, false)] {
+        let dir = scratch(if swap {
+            "identity-swap"
+        } else {
+            "identity-same"
+        });
+        if swap {
+            std::fs::write(dir.join("swap_identity"), "").expect("a marker");
+        }
+        let grant = AccountGrant::new("an-account", "grok-login")
+            .credentials(Credentials::from_iter([("auth_json", mine)]))
+            .state_dir(dir.to_str().expect("text"));
+        let answer = provider(StdioHarness::Grok).renew(
+            coqui_acp_api::RenewRequest::new(grant),
+            LocalSpawner::new().files(&dir).into_object(),
+        );
+        if refused {
+            let Err(error) = answer else {
+                panic!("a renewal into another account's login was answered");
+            };
+            assert_eq!(u32::from(error.status), 7, "{}", error.message());
+            assert_eq!(
+                std::fs::read_to_string(dir.join("auth.json")).expect("the file"),
+                mine,
+                "the grant's copy was not put back"
+            );
+        } else {
+            let report = answer.expect("a renewal of the same account is answered");
+            assert!(report.credentials.is_some(), "{report:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+struct Recording(std::sync::Arc<std::sync::Mutex<(usize, usize)>>);
+
+impl AccountKeeper for Recording {
+    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
+        self.0.lock().expect("lock").0 += 1;
+        Ok(())
+    }
+
+    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
+        self.0.lock().expect("lock").1 += 1;
+        Ok(())
+    }
+}
+
+/// A login file the harness is in the middle of writing (half an object) is never a renewal.
+#[test]
+fn a_half_written_login_is_never_reported_as_a_renewal() {
+    let dir = scratch("half");
+    let heard = std::sync::Arc::new(std::sync::Mutex::new((0, 0)));
+    let grant = AccountGrant::new("an-account", "grok-login")
+        .credentials(Credentials::from_iter([(
+            "auth_json",
+            r#"{"account_id":"mine"}"#,
+        )]))
+        .state_dir(dir.to_str().expect("text"));
+    let provider = provider(StdioHarness::Grok);
+    let (sender, _received) = mpsc::channel();
+    let channel = provider
+        .start(
+            StartRequest::builder().account(grant.clone()).build(),
+            LocalSpawner::new().files(&dir).into_object(),
+            Sink(sender).into_object(),
+            Recording(std::sync::Arc::clone(&heard)).into_object(),
+        )
+        .expect("it starts");
+    std::fs::write(dir.join("auth.json"), r#"{"account_id":"mi"#).expect("a half file");
+    provider
+        .models(
+            coqui_acp_api::ModelsRequest::new().account(grant),
+            LocalSpawner::new().files(&dir).into_object(),
+            Keeper.into_object(),
+        )
+        .expect("models answers");
+    assert_eq!(
+        heard.lock().expect("lock").0,
+        0,
+        "a half-written file was a renewal"
+    );
+    channel.close(0, "");
+    drop(channel);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What an account hands the harness is held in a `Secret`, so it is wiped when it is let go.
+#[test]
+fn what_is_applied_is_held_as_a_secret() {
+    use coqui_acp_api::guatiao::Secret;
+    use coqui_acp_harness::stdio::accounts::{apply, grok};
+    let grant = AccountGrant::new("a-key", "xai-api-key")
+        .credentials(Credentials::from_iter([("api_key", "grok-key-value-3f9a")]))
+        .state_dir("/some/dir");
+    let applied = apply(&grok::DEF, &grant)
+        .expect("it applies")
+        .expect("a kind");
+    let held: &Secret<Environment> = &applied.environment;
+    assert_eq!(
+        held.expose().get("XAI_API_KEY"),
+        Some("grok-key-value-3f9a")
+    );
+    assert!(!format!("{applied:?}").contains("grok-key-value-3f9a"));
 }

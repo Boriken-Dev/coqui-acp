@@ -213,7 +213,7 @@ impl StdioProvider {
                 dir,
                 grant.revision,
                 grant.credentials.expose(),
-                vec![Watched::new(watched.path, watched.key)],
+                vec![Watched::new(watched.path, watched.key).usable(accounts::login_usable)],
             )
             .map(Some)
     }
@@ -255,13 +255,13 @@ impl StdioProvider {
         }
         let mut variables = Environment::new();
         for (name, value) in environment.iter() {
-            if applied.is_some() && def.variables.contains(&name.as_str()) {
+            if applied.is_some() && def.variables.iter().any(|v| accounts::same_name(v, name)) {
                 continue;
             }
             variables.insert(name.as_str(), value.as_str());
         }
         if let Some(applied) = applied {
-            for (name, value) in &applied.environment {
+            for (name, value) in applied.environment.expose().iter() {
                 variables.insert(name.as_str(), value.as_str());
             }
             spec.remove_environment = def.variables.iter().map(|v| (*v).to_string()).collect();
@@ -440,7 +440,7 @@ impl AcpHarness for StdioProvider {
         let Some(hold) = self.hold(&grant, &applied, &spawner, None)? else {
             return Err(unsupported(kind.renew_unsupported));
         };
-        let renewed = self.renew_with(&hold, &spawner, &applied, args);
+        let renewed = self.renew_with(&hold, &spawner, &grant, &applied, args);
         hold.finish();
         renewed
     }
@@ -451,6 +451,7 @@ impl StdioProvider {
         &self,
         hold: &Hold,
         spawner: &Arc<Object<dyn ProcessSpawner>>,
+        grant: &AccountGrant,
         applied: &Applied,
         args: &[&str],
     ) -> Result<RenewReport, ProviderError> {
@@ -463,7 +464,7 @@ impl StdioProvider {
             return Err(gone(why));
         }
         let mut launch = Launch::new(self.program_name()).args(args.iter().copied());
-        for (name, value) in &applied.environment {
+        for (name, value) in applied.environment.expose().iter() {
             launch = launch.env(name.as_str(), value.as_str());
         }
         launch.remove_env = self.def().variables.iter().map(OsString::from).collect();
@@ -490,6 +491,7 @@ impl StdioProvider {
                 },
             ));
         }
+        self.refuse_another_account(spawner, grant, applied)?;
         let found = hold.look()?;
         if let Some(why) = found.lost.into_iter().next().or_else(|| hold.lost()) {
             return Err(gone(why));
@@ -504,5 +506,41 @@ impl StdioProvider {
                 "the login is not near its end, so the harness left it as it was",
             )),
         }
+    }
+
+    /// A renewal that left the login of another account in the file is undone: the grant's copy is put back, and the
+    /// renewal is refused. Only a file that says whose login it is can be told apart.
+    fn refuse_another_account(
+        &self,
+        spawner: &Arc<Object<dyn ProcessSpawner>>,
+        grant: &AccountGrant,
+        applied: &Applied,
+    ) -> Result<(), ProviderError> {
+        let Some(watched) = applied.watched else {
+            return Ok(());
+        };
+        let Some(mine) = grant
+            .credentials
+            .expose()
+            .get(watched.key)
+            .and_then(accounts::identity_of)
+        else {
+            return Ok(());
+        };
+        let files = Files::new(Arc::clone(spawner));
+        let Ok(Some(now)) = files.read(watched.path) else {
+            return Ok(());
+        };
+        let now = Secret::new(now);
+        if accounts::identity_of(now.expose()).is_some_and(|theirs| theirs != mine) {
+            if let Some(old) = grant.credentials.expose().get(watched.key) {
+                let _ = files.write(watched.path, old);
+            }
+            return Err(ProviderError::new(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the renewed login belongs to another account",
+            ));
+        }
+        Ok(())
     }
 }

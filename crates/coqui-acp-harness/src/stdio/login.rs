@@ -6,12 +6,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
+use coqui_acp_api::guatiao::{Secret, Status};
 use coqui_acp_api::{
     Credentials, LoginAnswer, LoginForm, LoginOutcome, LoginPrompter, OpenUrl, ProcessSpawner,
 };
 
+use super::accounts::login_usable;
 use crate::ThroughSpawner;
 use crate::account::Files;
 use crate::cli::{Cli, Next, plain};
@@ -70,16 +71,46 @@ impl Ctx<'_> {
         })
     }
 
-    /// The file `path` in the sign-in's directory.
+    /// The login file `path` in the sign-in's directory once it is settled: read again, a moment apart, while it is blank or
+    /// holds half an object.
     ///
     /// # Errors
     ///
-    /// The spawner's refusal; `GUATIAO_ERR_NOT_FOUND` for a file that is not there.
-    pub fn read_file(&self, path: &str) -> Result<String, ProviderError> {
-        self.files
-            .read(path)?
-            .ok_or_else(|| ProviderError::new(Status::GUATIAO_ERR_NOT_FOUND, "no such file"))
+    /// The spawner's refusal; `GUATIAO_ERR_NOT_FOUND` for a file that is not there or never settled.
+    pub fn read_settled(&self, path: &str) -> Result<Secret<String>, ProviderError> {
+        let text = settle(
+            || self.files.read(path).map(|text| text.map(Secret::new)),
+            Duration::from_millis(50),
+            20,
+        )?;
+        text.ok_or_else(|| {
+            ProviderError::new(Status::GUATIAO_ERR_NOT_FOUND, "no settled login file")
+        })
     }
+}
+
+/// Reads with `read` until a login is settled in what it gives, at most `tries` times, `pause` apart; the settled text, or
+/// `None` when the file was not there or never settled.
+///
+/// # Errors
+///
+/// What `read` refuses.
+pub fn settle(
+    mut read: impl FnMut() -> Result<Option<Secret<String>>, ProviderError>,
+    pause: Duration,
+    tries: usize,
+) -> Result<Option<Secret<String>>, ProviderError> {
+    for attempt in 0..tries {
+        if let Some(text) = read()?
+            && login_usable(text.expose())
+        {
+            return Ok(Some(text));
+        }
+        if attempt + 1 < tries {
+            std::thread::sleep(pause);
+        }
+    }
+    Ok(None)
 }
 
 /// A program a sign-in started, whose output is read a line at a time.
@@ -176,4 +207,33 @@ pub fn one(key: &str, value: &str) -> Credentials {
     let mut credentials = Credentials::new();
     credentials.insert(key, value.to_string());
     credentials
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_half_written_login_is_read_again_until_whole() {
+        let mut reads = vec!["", "{\"tok", "{\"tok\": 1}"].into_iter();
+        let got = settle(
+            || Ok(reads.next().map(|t| Secret::new(t.to_string()))),
+            Duration::from_millis(1),
+            5,
+        )
+        .expect("it reads")
+        .expect("it settles");
+        assert_eq!(got.expose(), "{\"tok\": 1}");
+    }
+
+    #[test]
+    fn a_login_that_never_settles_is_none() {
+        let got = settle(
+            || Ok(Some(Secret::new("{\"tok".to_string()))),
+            Duration::from_millis(1),
+            3,
+        )
+        .expect("it reads");
+        assert!(got.is_none());
+    }
 }

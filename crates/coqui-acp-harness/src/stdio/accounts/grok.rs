@@ -114,6 +114,20 @@ const VARIABLES: &[&str] = &[
     "GROK_CLI_CHAT_PROXY_BASE_URL",
     "GROK_XAI_API_BASE_URL",
     "GROK_HOME",
+    // Where the harness gets models and tokens, and what it reports to.
+    "GROK_MODELS_BASE_URL",
+    "GROK_MODELS_LIST_URL",
+    "GROK_AUTH_PROVIDER_ACCESS_TOKEN",
+    "GROK_AUTH_PROVIDER_REFRESH_TOKEN",
+    "GROK_AUTH_PROVIDER_EXPIRES_AT",
+    "GROK_DEPLOYMENT_KEY",
+    "GROK_TELEMETRY_EVENTS_URL",
+    "GROK_TELEMETRY_EVENTS_API_KEY",
+    "GROK_TELEMETRY_BUILD_EVENTS_URL",
+    "GROK_TELEMETRY_BUILD_EVENTS_API_KEY",
+    "GROK_TELEMETRY_MIXPANEL_TOKEN",
+    "GROK_TELEMETRY_BUILD_MIXPANEL_TOKEN",
+    "GROK_WEB_FETCH_PROXY",
 ];
 
 /// What Grok takes as an account.
@@ -147,20 +161,20 @@ pub static DEF: HarnessDef = HarnessDef {
         KindDef {
             id: API_KEY,
             title: "xAI API key",
-            description: "A key read from `XAI_API_KEY`. A login in `auth.json` of Grok's home wins over it, so give the account a directory of its own.",
+            description: "A key read from `XAI_API_KEY`, with Grok started in a directory of its own so that no login in `auth.json` and no endpoint in the person's own `config.toml` overrides it.",
             credentials: &[Credential {
                 key: "api_key",
                 required: true,
             }],
             settings: URL_SETTINGS,
-            state_dir: false,
+            state_dir: true,
             rotates: false,
-            history_portable: true,
+            history_portable: false,
             renews: false,
             endpoints: API_ENDPOINTS,
             notices: &[
                 "the credential is in the environment of every program the agent runs",
-                "Grok prefers a login in its home directory to the key",
+                "the account has a Grok home of its own, without the person's settings",
             ],
             credential_variables: &[("api_key", "XAI_API_KEY")],
             setting_variables: PROVIDER_VARIABLES,
@@ -312,19 +326,12 @@ fn browser_or_device(
         )));
     }
     let text = ctx
-        .read_file(AUTH_FILE)
+        .read_settled(AUTH_FILE)
         .map_err(|_| internal("`grok login` wrote no login file"))?;
-    if text.trim().is_empty() {
-        return Err(internal("`grok login` wrote an empty login file"));
-    }
     let checked = check(ctx, program, dir)?;
     // `grok models` may have renewed the login: the newer copy is the one to keep.
-    let text = ctx
-        .read_file(AUTH_FILE)
-        .ok()
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or(text);
-    let mut outcome = LoginOutcome::new(LOGIN, login::one("auth_json", &text));
+    let text = ctx.read_settled(AUTH_FILE).unwrap_or(text);
+    let mut outcome = LoginOutcome::new(LOGIN, login::one("auth_json", text.expose()));
     outcome.checked = checked;
     Ok(outcome)
 }
