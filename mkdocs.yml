@@ -20,3 +20,4 @@ nav:
   - Agents as providers: provider.md
   - Harnesses as agents: harnesses.md
   - Session history format: session-history.md
+  - Secret prompts: secrets.md
