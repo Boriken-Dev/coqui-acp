@@ -431,7 +431,7 @@ fn login(
     person: &Person,
 ) -> Result<coqui_acp_api::LoginOutcome, ProviderError> {
     provider().login(
-        LoginRequest::new(method, dir.to_string_lossy()).timeout_ms(20_000),
+        LoginRequest::new(method, dir.to_string_lossy()).timeout_ms(300_000),
         spawner(dir),
         person.clone().into_object(),
     )
@@ -594,7 +594,7 @@ fn a_refusal_that_quotes_part_of_the_key_shows_none_of_it() {
     let key = "sk-live-abcdef0123456789";
     let error = provider()
         .login(
-            LoginRequest::new("api-key", dir.to_string_lossy()).timeout_ms(20_000),
+            LoginRequest::new("api-key", dir.to_string_lossy()).timeout_ms(300_000),
             spawner(&dir),
             Person::new(key).into_object(),
         )

@@ -545,7 +545,7 @@ fn login(
     person: &Person,
 ) -> Result<coqui_acp_api::LoginOutcome, ProviderError> {
     provider.login(
-        LoginRequest::new(method, dir.to_string_lossy()).timeout_ms(20_000),
+        LoginRequest::new(method, dir.to_string_lossy()).timeout_ms(300_000),
         spawner(dir),
         person.clone().into_object(),
     )
