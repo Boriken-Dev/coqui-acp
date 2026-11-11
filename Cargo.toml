@@ -11,6 +11,7 @@ members = [
     "crates/coqui-acp-history",
     "crates/coqui-acp-page",
     "crates/coqui-acp-provider",
+    "crates/coqui-acp-secrets",
     "examples/provider-python",
 ]
 
