@@ -104,10 +104,6 @@ fn accept_edits_runs_an_edit_only_inside_the_roots_and_away_from_what_pi_loads()
             json!({"path": agent().join("extensions").join("x.ts"), "content": "x"}),
             false,
         ),
-        (
-            json!({"path": agent().join("models.json"), "content": "x"}),
-            false,
-        ),
         (json!({"content": "no path"}), false),
     ];
     for (n, (args, runs)) in cases.into_iter().enumerate() {
@@ -309,4 +305,44 @@ fn a_question_that_arrives_after_the_person_stopped_the_run_is_cancelled_not_ask
         .is_empty()
     );
     assert_eq!(last_answer(&written).as_deref(), Some("cancelled"));
+}
+
+#[test]
+fn a_credential_file_is_refused_not_asked_when_the_model_changes_it_in_every_mode_but_bypass() {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .expect("a home");
+    let paths = [
+        agent().join("auth.json"),
+        agent().join("models.json"),
+        home.join(".ssh").join("config"),
+    ];
+    for mode in [Mode::Manual, Mode::AcceptEdits, Mode::Plan] {
+        for tool in ["write", "edit"] {
+            for path in &paths {
+                let (mut parser, written) = parser_with(mode, false, &[agent()]);
+                parser.prompting();
+                let args = json!({"path": path, "content": "x"});
+                assert!(
+                    asked(feed(&mut parser, &call(tool, &args, "c"))).is_empty(),
+                    "{mode:?} {tool} {path:?}"
+                );
+                assert_eq!(
+                    last_answer(&written).as_deref(),
+                    Some("protected"),
+                    "{mode:?} {tool} {path:?}"
+                );
+            }
+        }
+    }
+    let (mut parser, written) = parser_with(Mode::Bypass, false, &[agent()]);
+    parser.prompting();
+    assert!(
+        asked(feed(
+            &mut parser,
+            &call("write", &json!({"path": paths[1], "content": "x"}), "b")
+        ))
+        .is_empty()
+    );
+    assert_eq!(last_answer(&written).as_deref(), Some("allow"));
 }

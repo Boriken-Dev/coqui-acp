@@ -306,7 +306,7 @@ impl Policy {
     /// | Plan | as Manual | refused as a plan | refused as a plan |
     /// | Bypass | run | run | run |
     ///
-    /// Outside the directories a read is asked; a credential file is refused in every mode but Bypass. A tool the person
+    /// Outside the directories a read is asked; a credential file is refused, read or changed, in every mode but Bypass. A tool the person
     /// allowed for the session is allowed by the rule it was allowed under, except in Plan; an edit stays inside the
     /// directories and away from what Pi loads.
     #[must_use]
@@ -336,6 +336,14 @@ impl Policy {
                 Mode::Manual | Mode::Plan if self.ask_for_reads => Decision::Ask,
                 _ => Decision::Allow,
             };
+        }
+        // A credential file is not changed by the model in any mode but Bypass, as it is not read.
+        if EDITS.contains(&tool)
+            && text(input, "path").is_some_and(|path| {
+                !cut(input, "path") && !scope.network(path) && scope.secret(path)
+            })
+        {
+            return Decision::Protected;
         }
         if self.mode == Mode::Plan {
             return Decision::Plan;
