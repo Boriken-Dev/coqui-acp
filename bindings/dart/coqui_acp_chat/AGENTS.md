@@ -6,70 +6,87 @@ import graph. Not published; alpha.
 
 ## The shape
 
-`ChatStore` holds `ChatSession`s. A session is one conversation: its state is plain fields and lists, it tells `addListener`
-listeners after each change and `events` (a stream) for what happens once. A `ChatConnection` carries the agent's updates in and the
-session's requests out; the session never opens, verifies or retries anything. Everything an agent sends is bounded by `ChatLimits`
-and read as untrusted: wrong types are ignored, text is cut, names lose control and bidi characters.
+`ChatStore` holds `ChatSession`s. A session is one conversation: its state is read through getters (lists and maps are unmodifiable
+views) and changed only by its methods; it tells `addListener` listeners after each change and `events` (a stream) for what
+happens once. A `ChatConnection` carries the agent's updates in and the session's requests out; the session never opens, verifies
+or retries anything. Everything an agent sends is bounded by `ChatLimits` and read as untrusted: wrong types are ignored, text is
+cut between characters, names lose control and bidi characters. Words for a person to read (usage figures, mode labels) belong
+to the UI, not here.
 
 ## Connection
 
-- `abstract class ChatConnection`: `updates: Stream<AcpSessionUpdate>`, `events: Stream<AcpEvent>` (a v1 turn's end, lost output, a
-  question answered cancelled), `isClosed`, `protocolVersion`, `prompt(sessionId, text, {attachments}) -> Future<String?>` (v2: the
-  inserted message's id; v1: completes when the turn ends), `cancel`, `setMode`, `setConfigOption -> Future<Map>`, `close`. Optional:
-  `reportsUsage` (false), `usageNotices`, `fetchUsage`.
+- `abstract class ChatConnection`: `updates: Stream<AcpSessionUpdate>`, `events: Stream<AcpEvent>`, `isClosed`, `protocolVersion`,
+  `prompt(sessionId, text, {attachments}) -> Future<String?>` (v2: the inserted message's id; v1: completes when the turn ends),
+  `cancel`, `setMode`, `setConfigOption -> Future<Map>`, `close`. Optional: `reportsUsage` (false), `usageNotices`, `fetchUsage`.
 - `AcpChatConnection(AcpClient)`, or `AcpChatConnection.routed(requests, (decider, elicitor) => AcpClient(...))`, which wires the
   client's decider and elicitor to `requests` (a `ChatRequests`, which `ChatStore` is) under this connection.
-- Permission and form requests are routed by the connection they came on **and** the session id: an agent picks its own ids, so two
-  agents can both say `s1`. `ChatStore.askPermission(request, from)` finds the session whose `connection` is `from`; none: `AcpDeny`
-  (question: `AcpElicitCancel`).
+- Requests are routed by the connection they came on **and** the session id (two agents can both say `s1`):
+  `ChatStore.askPermission(request, from)`; none: `AcpDeny` (question: `AcpElicitCancel`).
+- A v1 turn ends by the connection's `AcpCompleted`/`AcpCancelled`/`AcpFailed` for **this session's id** while it is working
+  (`coqui_acp` names the session in them), or else by the answer to its prompt. An end for a session that is not working is
+  ignored. `AcpOutputLost` carries no session and is noted in every session on the connection.
 
 ## ChatStore (extends `ChatNotifier`)
 
 `ChatStore({limits, recorder, hostNoticesKey, clock})`. `add({title, agent, peerId, sessionId, cwd}) -> ChatSession` (inserted first,
-selected), `sessions`, `selected`, `selectedId`, `select(id)` (clears `unread`), `waiting` (sessions with something for a person),
-`attention: Stream<Attention>` (`({session, kind})`, `AttentionKind` permission / question / finished; a stopped turn is not news, a
-finished turn in a session not selected sets `unread`), `forget(session)` (detach, keep the connection), `close(session)` (answer what
-waits cancelled, end the connection when no other session uses it), `dispose()`.
+selected), `sessions`, `selected`, `selectedId`, `select(id)` (clears `unread`), `waiting`, `attention: Stream<Attention>`
+(`({session, kind})`; a stopped turn is not news; a finished turn in a session not selected sets `unread` **before** any listener is
+told), `forget(session)` (detach, keep the connection), `close(session)` (answer what waits cancelled, end the connection when no
+other session uses it), `dispose()`.
 
 ## ChatSession (extends `ChatNotifier`)
 
 `ChatSession({required id, title, agent, peerId, sessionId, cwd, limits, recorder, hostNoticesKey, clock, agentNames = true})`.
+Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks `onChange`, `onAttention`, `onModeKept(mode, bypass)`.
 
-- **State**: `messages: List<ChatMessage>` (`role` user/agent/notice/thought/tool/compaction, `text`, `at`, `messageId`, `tool`,
-  `compaction`, `sentBy`, `turn`), `toolEntries`, `compactions`, `terminals`, `plan: List<PlanEntry>`, `commands`, `options:
-  List<ConfigOption>`, `usage: SessionUsage`, `usageReport`, `spend`, `reportsUsage`, `status` (`disconnected`/`connected`/
-  `working`), `title`, `unread`, `turns: List<ChatTurn>` (`startedAt`, `endedAt`, `outcome`, `duration(now)`), `currentTurn`.
-- **Input**: `apply(AcpSessionUpdate)` (a connection's updates arrive here by themselves), `applyOpened(AcpOpenedSession)`,
-  `attach(connection)` / `detach()` (a replaced or ended connection **withdraws** what it asked), `reopen(open)` (a replay is history,
-  not news; tool lines left open become `stopped`), `rename(name)` (the agent stops naming it).
-- **Prompts**: `send(text, {attachments, from}) -> Future<void>`: sent now, or queued while a turn runs (or a message is being
-  handed over); throws `StateError` past `queued`. `steer(text, ...)` puts it first and cancels the turn, which then goes on with it
-  (a turn ended to steer does not hold the queue). `steerQueued(message)`, `sendQueued([message])`, `editQueued`, `removeQueued([m])`,
-  `queue`, `queueHeld` (why the queue waits: `the turn was stopped`, `the turn failed`, `it could not be sent: ...`; null = goes on),
-  `cancel({from})` (answers open requests cancelled, then asks the agent).
-- **Requests**: `pendingPermissions: List<PermissionQuestion>` (`title`, `kind`, `detail`, `options` in the agent's order, `forPerson`,
-  `toolCallId`, `outcome`), `pendingQuestions: List<AgentQuestion>`. Answer with `answerPermission(allow:, by:)`,
-  `choosePermission(option, by:)`, `cancelPermission`, `settle(question, decision, by:)`, `answerQuestion(answer, by:)`,
-  `settleQuestion`; each returns whether **it** settled the request (the first answer wins). `settleElsewhere(question, by:,
-  optionId:)` records an answer learned from elsewhere. `settledPermissions`/`settledQuestions` keep the last `settledRequests`
-  with `outcome` (`Settled`: `how` answered/cancelled/withdrawn, `by`, `at`, `answer`).
-- **Options**: `choose(option, value) -> Future<bool refused>` (waits in `pending` while a turn runs and goes before the next prompt),
-  `mode`, `underlyingMode`, `inBypass`, `setBypass(on)` (answers requests that offer an allow, never a question or a plan).
-- **Clients**: `attachClient(id, {name})`, `detachClient(id)`, `clients`; `from:`/`by:` must name an attached client (or
-  `bypassClient`), else `StateError`. `ClientEvent` goes out on `events`.
-- **Replay**: `replay() -> Iterable<AcpSessionUpdate>` rebuilds messages (with `sentBy` in `_meta[chatClientMetaKey]`), tool calls,
-  terminals, compactions, plan, commands, options, usage, title and running state in another `ChatSession`. Notices the chat wrote,
-  waiting requests (read `pendingPermissions`) and `stopped` (goes as `cancelled`) are not carried. `chatClientMetaKey` is provisional.
-- **Events** (`events`, `sealed ChatEvent`): `AttentionEvent(kind)`, `PermissionSettledEvent`, `QuestionSettledEvent`, `ClientEvent`.
+- **State** (getters): `messages` (`ChatMessage`: `role`, `text`, `at`, `messageId`, `tool`, `compaction`, `sentBy`, `turn`),
+  `toolEntries`, `compactions`, `terminals`, `plan`, `commands`, `options`, `usage`, `usageReport`, `spend`, `reportsUsage`,
+  `status` (`disconnected`/`connected`/`working`), `title`, `agentNames`, `turns` (`ChatTurn`: `startedAt`, `endedAt`, `outcome`,
+  `duration(now)`), `currentTurn`, `queue`, `queueHeld`, `pendingPermissions`, `pendingQuestions`, `settledPermissions`,
+  `settledQuestions`, `pendingChoices`, `bypass`, `mode`, `underlyingMode`, `inBypass`, `chosenMode`, `targetMode`, `refusedModes`,
+  `opening`, `isReplaying`, `clients`, `connection`.
+- **Input**: `apply(AcpSessionUpdate)` (a connection's updates arrive by themselves), `applyOpened(AcpOpenedSession)`,
+  `attach(connection)` / `detach()`, `rename(name)`.
+- **Turns**: a turn starts at a v1 prompt or a v2 `running` state and ends on idle, an end event, the answer to a v1 prompt, or the
+  loss of the connection (failed). `ChatMessage.turn` is the turn running when an entry was added, and a prompt belongs to the turn
+  it starts. `TurnEvent(turn)` goes out on `events` for every end, cancelled included; history opened again ends none.
+- **Prompts**: `send(text, {attachments, from}) -> Future<void>` completes when the agent has been handed the message (v2: its
+  acknowledgement; v1: the prompt is under way and was not refused at once). The message is in the conversation before the agent can
+  answer, takes its id from the acknowledgement or its echo, and a prompt that is refused leaves nothing behind. Queued while a turn
+  runs or another message is being handed over; throws `StateError` past `queued`. `steer(text)` goes first, even past `queued`, and
+  cancels the turn. `steerQueued`, `sendQueued([m])`, `editQueued`, `removeQueued([m])`, `cancel({from})`.
+- **Requests**: `PermissionQuestion` (`title`, `kind`, `detail`, `options` in the agent's order, `forPerson`, `toolCallId`,
+  `outcome`), `AgentQuestion`. `answerPermission(allow:, by:)`, `choosePermission(option, by:)`, `cancelPermission`,
+  `settle(question, decision, by:)`, `answerQuestion`, `settleQuestion`: each returns whether **it** settled the request (the first
+  answer wins; `outcome` is `Settled`: `how` answered/cancelled/withdrawn, `by`, `at`, `answer`). A request whose connection ended
+  or was replaced, or whose conversation was let go, is **withdrawn**: its tool line is `stopped` and the agent is told it was
+  cancelled (so it never waits). Bypass is checked before the waiting limit.
+- **Modes and options**: `choose(option, value) -> Future<bool refused>` (held while a turn runs or the conversation opens),
+  `holdChoice`, `setBypass(on)`, `chooseMode(ModeEntry)`, `cycleMode()`, `leaveBypass()`, `canChangeMode`. Mode changes run one at a
+  time in the order asked; presses go on from `targetMode`; a mode the agent refused is in `refusedModes` and cycling skips it; nothing
+  changes while `opening`. `modeEntries(option)`, `nextMode`, `modeOrder`, `isBypassMode`, `bypassAnswer`, `ownBypass`.
+- **Reopening**: `reopen(open, {keptMode, keptBypass}) -> Future<AcpOpenedSession>`: when the agent sends the conversation it
+  replaces what is held (nothing twice); when it only resumes, what is held stays; history is not news; open tool lines become
+  `stopped`; the kept mode and Bypass are put back before anything is sent.
+- **Clients**: `attachClient(id, {name})`, `detachClient(id)`; `from:`/`by:` must name an attached client (or `bypassClient`).
 
-## Content types
+## Experimental: `package:coqui_acp_chat/experimental.dart`
+
+Not exported by the main library, because the wire a session hub would carry them on is not specified and the `_meta` keys are
+provisional: `ChatSessionHub` on `ChatSession` adds `replay() -> List<AcpSessionUpdate>` (messages with `sentBy` and times, tool
+calls, terminals, compactions, turns with their times and outcomes, plan, commands, options and the v1 mode, usage, title and
+whether the person named it), `applyReplay(updates)` (applies them as history, not news), and `settleElsewhere(question, by:,
+optionId:)` (`by` must be attached). Requests still waiting are not carried: read `pendingPermissions`. `chatClientMetaKey`.
+
+## Content types and parsers
 
 `ToolCall` (`id`, `title`, `kind`, `status: ToolStatus` pending/running/done/failed/cancelled/stopped, `blocks`, `locations`,
-`isOpen`, `changedPaths`) with `ToolBlock`: `ToolText`, `ToolDiff(path, oldText?, newText)`, `ToolPatch(text, paths)`, `ToolTerminal(terminalId)`.
-`TerminalView(command, output, exitCode)`; `PlanEntry`/`PlanStatus`; `Compaction`/`CompactionStatus`; `AgentCommandInfo`;
-`ConfigOption`/`Choice`/`OptionRole`/`roleOf`/`optionIn`/`modeOptionIn`/`PendingChoice`; `isBypassMode`, `bypassAnswer`,
-`ownBypass`; `SessionUsage`; `UsageReport` (the `dev.boriken.coqui.acp/usage` extension: `parse`, `toJson`, buckets, spend) with the
-words a usage control shows (`pillText`, `figureOf`, `compactCount`, `dollars`, ...); `reasonOf(error)`, `titleFrom(text)`, `toolRuns(entries)` (consecutive tool calls grouped, for a transcript that folds them).
+`isOpen`, `changedPaths`, `stop()`) with `ToolBlock`: `ToolText`, `ToolDiff(path, oldText?, newText)`, `ToolPatch(text, paths)`,
+`ToolTerminal(terminalId)`. `TerminalView` (`command`, `output` from its end, `exitCode`, `isRunning`); `PlanEntry`/`PlanStatus`;
+`Compaction`; `AgentCommandInfo`; `ConfigOption`/`Choice`/`OptionRole`/`roleOf`/`optionIn`/`modeOptionIn`/`PendingChoice`;
+`SessionUsage`; `UsageReport.parse(json, [limits])` (the `dev.boriken.coqui.acp/usage` extension: buckets, spend, `fractionPermille`,
+`resetsIn`; strings sanitised, lists cut at `usageBuckets`), `UsageSupport.parse`; `reasonOf(error)`, `titleFrom(text, [limits])`,
+`toolRuns(entries)` (consecutive tool calls grouped, for a transcript that folds them), `BoundedText`.
 
 ## Recording
 
@@ -80,15 +97,15 @@ words a usage control shows (`pillText`, `figureOf`, `compactCount`, `dollars`, 
 
 `entries` 5000, `messageText` 2 MiB, `pendingPermissions` 64, `pendingQuestions` 16, `settledRequests` 32, `queued` 20, `clients` 16,
 `turns` 1000, `toolText` 256 KiB, `terminalOutput` 256 KiB (kept from its end), `planEntries` 200, `commands` 500, `configOptions` 32,
-`choices` 200, `toolBlocks` 64, `locations` 64, `shortText` 512, `terminals` 256, `describedInput` 4000, `hostNotices` 4,
-`listShapes` 8, `shapeDepth` 8, `titleLength` 60. A request past `pendingPermissions`/`pendingQuestions` is answered cancelled and a notice says so.
+`choices` 200, `toolBlocks` 64, `locations` 64, `shortText` 512, `terminals` 256 (one still running is never dropped), `describedInput`
+4000, `hostNotices` 4, `listShapes` 8, `shapeDepth` 8, `titleLength` 60, `usageBuckets` 64. A request past `pendingPermissions` or
+`pendingQuestions` is answered cancelled and a notice says so; the names of what went with messages are remembered up to `entries`.
 
 ## Gotchas
 
-- A tool line from a connection that ended is `stopped` and its request `withdrawn`: **nothing is sent to the agent**.
-- `status` is `working` from a v2 `state_update` running, or at once for a v1 prompt; a v1 turn ends by the connection's `AcpCompleted`
-  /`AcpCancelled`/`AcpFailed` event.
+- `status` is `working` from a v2 `state_update` running, or at once for a v1 prompt.
 - `hostNoticesKey` (default none) names the `_meta` key of the host's notices in the answer to `session/new`; they show as the
   agent's word, never the chat's.
 - Attachments are `AcpAttachment`s already built; reading files, size checks and what an agent takes are the host's.
-- Tests: `dart test -p vm`; `dart test -p chrome` for the browser (the files tagged `@TestOn('vm')` read files and are skipped there).
+- Tests: `dart test -p vm`; `dart test -p chrome` (and `-c dart2wasm`) for the browser; the files tagged `@TestOn('vm')` read files
+  (`embedded_test.dart` holds the text the other tests carry to the files it came from; `import_graph_test.dart`).

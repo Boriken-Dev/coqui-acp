@@ -15,7 +15,7 @@ prompts, the queue, answers.
 - **The prompt queue**: messages written during a turn go when it ends, held (not dropped) after a stop or a failure; **steer**
   puts one ahead and ends the turn.
 - **Several attached clients**: each prompt is stamped with the client that sent it, **the first answer to a request wins** and the
-  others see it settled; a client that attaches late reads `replay()`.
+  others see it settled. (`replay()` for a client that attaches late is experimental, in `package:coqui_acp_chat/experimental.dart`.)
 - **Turns** with their start, end, duration and outcome.
 - **Every limit is a setting** (`ChatLimits`) with a default, taking any value from 0 up.
 
@@ -30,7 +30,7 @@ final opened = await connection.client.openSession(cwd: '/work');
 final session = store.add(title: 'Fix the test', agent: 'Claude', sessionId: opened.id)..attach(connection);
 
 session.addListener(() => print(session.messages.length));   // redraw
-await session.send('Fix the failing test');                     // queued if a turn is running
+await session.send('Fix the failing test');   // completes once the agent has been handed it; queued if a turn is running
 // when the agent asks: session.pendingPermissions.first.options ...
 session.choosePermission(session.pendingPermissions.first.options.first);
 ```
@@ -44,10 +44,10 @@ dart pub get
 dart format --set-exit-if-changed .
 dart analyze
 dart test -p vm
-dart test -p chrome      # the browser; the tests that read files (the vectors, the import graph) run on the VM only
+dart test -p chrome      # the browser (also `-c dart2wasm`); only the import graph and the embedded-text check read files, and run on the VM
 ```
 
-`test/fixtures/coding_task_updates.jsonl` is the kind and shape, never the text, of every update a real agent sent in a coding task.
+`test/support/embedded.dart` holds, as text, the kind and shape (never the text) of every update a real agent sent in a coding task, and `vectors/usage.json`.
 `vectors/usage.json` at the repository's root holds the usage model's conversations, shared with the Rust crate.
 
 ## License
