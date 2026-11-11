@@ -108,6 +108,8 @@ fn the_suite_inside() {
         .expect("the settings are taken");
     let outcome = Contract::new("claude")
         .program_agent(true)
+        // An empty history cannot be resumed, which the suite asks of an importer, so it checks the refusal;
+        // `tests/history.rs` holds the import and export of real histories.
         .imports(false)
         .holds(vec![Requirement::new(NO_PROJECT_MCP)])
         .run(&harness);
@@ -276,6 +278,7 @@ fn it_holds_what_it_can_and_refuses_the_rest_with_the_reason() {
 }
 
 #[test]
+#[cfg(not(feature = "history"))]
 fn what_it_does_not_do_yet_is_refused_unsupported_with_a_reason() {
     let provider = provider();
     let spawner = || -> Object<dyn ProcessSpawner> { LocalSpawner::new().into_object() };

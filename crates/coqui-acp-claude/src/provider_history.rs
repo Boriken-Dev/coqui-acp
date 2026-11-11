@@ -82,14 +82,11 @@ pub(crate) fn import(
         session.account.as_ref(),
     )?;
     if session.history.trim().is_empty() {
-        return if transcript(&config, &cwd, &session.session_id).is_ok() {
-            Err(error(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the id names a session already",
-            ))
-        } else {
-            Ok(ImportReport::new())
-        };
+        // Claude Code resumes a session only from messages it holds: there is nothing to seed.
+        return Err(error(
+            Status::GUATIAO_ERR_UNSUPPORTED,
+            "Claude Code cannot resume a session with no messages: import a history with a prompt in it",
+        ));
     }
     let doc = Document::from_slice(session.history.as_bytes()).map_err(|why| {
         error(

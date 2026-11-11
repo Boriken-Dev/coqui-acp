@@ -441,3 +441,122 @@ fn a_codex_session_goes_to_claude_with_what_claude_cannot_take_reported() {
         }
     ));
 }
+
+// ------------------------------------------------------------------------------------------
+// The provider
+// ------------------------------------------------------------------------------------------
+
+mod through_the_provider {
+    use super::*;
+    use coqui_acp_api::guatiao::library::{Object, ProviderError};
+    use coqui_acp_api::{
+        AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, Environment, ProcessSpawner,
+        SessionExport, SessionImport, line_too_large,
+    };
+    use coqui_acp_codex::{CodexProvider, ProviderSettings};
+    use coqui_acp_harness::LocalSpawner;
+
+    struct Keeper;
+
+    impl AccountKeeper for Keeper {
+        fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn spawner() -> Object<dyn ProcessSpawner> {
+        LocalSpawner::new().into_object()
+    }
+
+    fn keeper() -> Object<dyn AccountKeeper> {
+        Keeper.into_object()
+    }
+
+    #[test]
+    fn a_host_seeds_a_session_and_reads_it_back_in_pages() {
+        let scratch = Scratch::new("provider-history");
+        let work = scratch.0.join("work");
+        let mut environment = Environment::new();
+        environment.insert("CODEX_HOME", scratch.0.join("home").to_string_lossy());
+        let provider = CodexProvider::new(ProviderSettings::default());
+        let nothing = provider
+            .import_session(
+                SessionImport::new(ID, work.to_string_lossy(), String::new())
+                    .environment(environment.clone()),
+                spawner(),
+                keeper(),
+            )
+            .expect_err("nothing to seed");
+        assert_eq!(
+            nothing.status,
+            coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED
+        );
+        let doc = export(&fixture("turn.rollout.jsonl"), ID).unwrap();
+        let text = doc.to_string().unwrap();
+        let work_text = work.to_string_lossy().into_owned();
+        let seed = |text: String| {
+            provider.import_session(
+                SessionImport::new(ID, &work_text, text).environment(environment.clone()),
+                spawner(),
+                keeper(),
+            )
+        };
+        let report = seed(text.clone()).expect("imported");
+        assert!(report.seeded_from.is_some());
+        assert!(report.losses.is_empty(), "{:?}", report.losses);
+        assert!(seed(text).is_err(), "the id names a session now");
+        let mut joined = String::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut ask = SessionExport::new(ID, &work_text)
+                .environment(environment.clone())
+                .max_bytes(3000);
+            if let Some(after) = &after {
+                ask = ask.after(after.clone());
+            }
+            let page = provider
+                .export_session(ask, spawner(), keeper())
+                .expect("a page");
+            assert!(page.text.len() <= 3000 && page.text.ends_with('\n'));
+            joined.push_str(&page.text);
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        let back: coqui_acp_history::Document = joined.parse().expect("a history");
+        assert_eq!(back.header.id, ID);
+        assert_eq!(back.header.origin.harness, "codex");
+        assert!(
+            back.lines
+                .iter()
+                .any(|line| line.body.method() == "session/prompt")
+        );
+        let small = provider
+            .export_session(
+                SessionExport::new(ID, &work_text)
+                    .environment(environment.clone())
+                    .max_bytes(20),
+                spawner(),
+                keeper(),
+            )
+            .expect_err("too small");
+        assert!(line_too_large(small.message()).is_some());
+        let other = "11111111-2222-4333-8444-555555555555";
+        let missing = provider
+            .export_session(
+                SessionExport::new(other, &work_text).environment(environment),
+                spawner(),
+                keeper(),
+            )
+            .expect_err("no such session");
+        assert_eq!(
+            missing.status,
+            coqui_acp_api::guatiao::Status::GUATIAO_ERR_NOT_FOUND
+        );
+    }
+}
