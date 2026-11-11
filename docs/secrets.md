@@ -125,6 +125,15 @@ A signature with a high `s` is refused: one statement has one signature, and a p
 
 **What a relay still sees.** The size of a ciphertext is the value's plus 48 bytes, so a relay learns how long each secret is; nothing is padded. It also sees which fields were answered and when.
 
+## The host's tools
+
+The agent never speaks these methods. The host serves it three MCP tools, `secret_request`, `secret_use` and `secret_show`, and keeps each secret value under a handle in memory for the session. `coqui-acp-secrets` is that host side: the store (cleared and zeroed when the session ends), the tools, the person's approval of every use, output scrubbing and the file rules.
+
+- **Use.** `secret_use` writes a value to a file under the session's working roots, or runs a command with it in one environment variable. The person is shown the file or the command in full and must approve each use; an approval can be given for the rest of the session for that exact action and secret. The harness's permission mode (Full access, Bypass) never answers it.
+- **Show.** `secret_show` takes the value from a handle, a file under the roots, a host environment variable or a command, and displays it through `secret_show_open` and `secret_show_deliver`. An environment variable or a command source needs the person's approval.
+- **Scrubbing.** Everything a tool returns has the value, and its base64, hex, URL-encoded and JSON-escaped forms, replaced by the handle. This is a backstop for accidents: a reversed, split or otherwise transformed value passes it, and an agent that may run a command with the value can print it.
+- **Routing.** A session has one frontend, the owner's, and a request goes to no other client; an answer is believed only from that identity.
+
 ## Refusals
 
 A message that is not in the shapes above is `-32602` invalid params. A collector that refuses a key does not tell the agent more than that the person was not asked. Neither side puts a value, a key or a signature in an error message or a log.
