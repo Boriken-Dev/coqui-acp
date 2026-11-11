@@ -548,6 +548,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-acp-pi"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "clap",
+ "coqui-acp",
+ "coqui-acp-api",
+ "coqui-acp-harness",
+ "guatiao",
+ "guatiao-serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "coqui-acp-provider"
 version = "0.0.0-alpha.0"
 dependencies = [

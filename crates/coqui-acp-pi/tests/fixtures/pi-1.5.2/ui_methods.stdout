@@ -1,0 +1,12 @@
+{"id":"1","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"uiprobe","description":"Exercise every ctx.ui method","source":"extension","sourceInfo":{"path":"<RECORDER>/ui_probe.ts","source":"cli","scope":"temporary","origin":"top-level"}},{"name":"llama","description":"Manage llama.cpp router models","source":"extension","sourceInfo":{"path":"builtin:llama.cpp","source":"builtin","scope":"temporary","origin":"top-level"}},{"name":"mcp","description":"Manage MCP servers: sign in, reconnect, enable or disable, and change exposure","source":"extension","sourceInfo":{"path":"builtin:mcp","source":"builtin","scope":"temporary","origin":"top-level"}}]}}
+{"type":"extension_ui_request","id":"7ae3b90e-f5b3-47aa-82f4-07af44367a2a","method":"notify","message":"hello notify","notifyType":"warning"}
+{"type":"extension_ui_request","id":"dc61dac9-a928-41df-bd46-3877b654cf2e","method":"setStatus","statusKey":"probe","statusText":"status text"}
+{"type":"extension_ui_request","id":"48667d2e-d078-4b3b-abaf-1bbefeaff864","method":"setWidget","widgetKey":"probe","widgetLines":["widget line 1","widget line 2"]}
+{"type":"extension_ui_request","id":"df0afcea-9b20-494f-94c2-582dc905c384","method":"setTitle","title":"probe title"}
+{"type":"extension_ui_request","id":"d3c05d10-98fa-40f3-a6c0-78f20299e55b","method":"set_editor_text","text":"prefilled"}
+{"type":"extension_ui_request","id":"71f3f21d-4120-4a5a-a25c-995fbf5ae6f4","method":"select","title":"pick one","options":["a","b"]}
+{"type":"extension_ui_request","id":"90a88e28-e5a3-4368-b454-4c19fd2f81ed","method":"confirm","title":"sure?","message":"really"}
+{"type":"extension_ui_request","id":"34a42576-3d14-4861-a2a0-e34fb681d910","method":"input","title":"name?","placeholder":"placeholder"}
+{"type":"extension_ui_request","id":"1345d4ea-1f77-4e91-b50f-f23869b066d6","method":"editor","title":"edit","prefill":"line1\nline2"}
+{"type":"extension_ui_request","id":"2de1f04e-120a-47c5-bc7b-55e221b6109c","method":"notify","message":"done","notifyType":"info"}
+{"id":"2","type":"response","command":"prompt","success":true,"data":{"disposition":"handled"}}

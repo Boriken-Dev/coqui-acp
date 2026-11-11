@@ -5,6 +5,7 @@ members = [
     "crates/coqui-acp-bridge",
     "crates/coqui-acp-claude",
     "crates/coqui-acp-codex",
+    "crates/coqui-acp-pi",
     "crates/coqui-acp-harness",
     "crates/coqui-acp-api",
     "crates/coqui-acp-history",

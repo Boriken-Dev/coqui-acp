@@ -1,0 +1,15 @@
+{"id":"1","type":"response","command":"set_auto_retry","success":true}
+{"id":"2","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"[[500]] retry then abort_retry"}],"timestamp":1794400320830}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"[[500]] retry then abort_retry"}],"timestamp":1794400320830}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"stub","model":"stub-think","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1794400320859,"errorMessage":"500: {\"message\":\"stand-in forced 500\",\"type\":\"stub_error\",\"code\":\"500\"}","durationMs":25,"thinkingLevel":"medium"}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"stub","model":"stub-think","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1794400320859,"errorMessage":"500: {\"message\":\"stand-in forced 500\",\"type\":\"stub_error\",\"code\":\"500\"}","durationMs":25,"thinkingLevel":"medium"}}
+{"type":"turn_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"stub","model":"stub-think","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1794400320859,"errorMessage":"500: {\"message\":\"stand-in forced 500\",\"type\":\"stub_error\",\"code\":\"500\"}","durationMs":25,"thinkingLevel":"medium"},"toolResults":[]}
+{"type":"agent_end","messages":[],"willRetry":true}
+{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"500: {\"message\":\"stand-in forced 500\",\"type\":\"stub_error\",\"code\":\"500\"}"}
+{"type":"entry_appended","entry":{"type":"context_edit","id":"3191372a","parentId":"dddf15e1","timestamp":"2026-11-11T12:32:00.887Z","targetId":"dddf15e1","replacement":null}}
+{"type":"auto_retry_end","success":false,"attempt":1,"finalError":"Retry cancelled"}
+{"id":"3","type":"response","command":"abort_retry","success":true}
+{"type":"agent_settled","aborted":false}

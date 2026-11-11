@@ -1,0 +1,45 @@
+[package]
+name = "coqui-acp-pi"
+description = "Pi as an Agent Client Protocol agent, in Rust: a driver for its RPC mode and an ACP agent on it, with no Node of its own and no adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["acp", "agent", "pi", "rpc"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[[bin]]
+name = "coqui-acp-pi"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+coqui-acp-api = { path = "../coqui-acp-api" }
+coqui-acp-harness = { path = "../coqui-acp-harness", features = ["kind"] }
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+coqui-acp = { path = "../coqui-acp" }
+# The contract suite and `acp-harness-check`, which hold the provider to the kind.
+coqui-acp-api = { path = "../coqui-acp-api", features = ["contract"] }
+guatiao = { workspace = true, features = ["provider", "load"] }
+guatiao-serde = { workspace = true, features = ["json"] }
+
+# A real library the tests load: `cargo test` builds it into target/<profile>/examples.
+[[example]]
+name = "pi_provider"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true

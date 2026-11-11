@@ -1,0 +1,21 @@
+{"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"[[slow]] first"}],"timestamp":1794400312357}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"[[slow]] first"}],"timestamp":1794400312357}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"stub","model":"stub-think","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1794400312382}}
+{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"tick0 "}}
+{"id":"2","type":"response","command":"prompt","success":false,"error":"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."}
+{"type":"queue_update","steering":["second as steer"],"followUp":[]}
+{"id":"3","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}
+{"type":"queue_update","steering":["second as steer"],"followUp":["third as followUp"]}
+{"id":"4","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}
+{"type":"queue_update","steering":[],"followUp":[]}
+{"id":"5","type":"response","command":"clear_queue","success":true,"data":{"steering":["second as steer"],"followUp":["third as followUp"]}}
+{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"tick0 "}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"tick0 "}],"api":"openai-completions","provider":"stub","model":"stub-think","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"aborted","timestamp":1794400312382,"responseId":"chatcmpl-stub","errorMessage":"Request was aborted","durationMs":29,"thinkingLevel":"medium"}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"tick0 "}],"api":"openai-completions","provider":"stub","model":"stub-think","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"aborted","timestamp":1794400312382,"responseId":"chatcmpl-stub","errorMessage":"Request was aborted","durationMs":29,"thinkingLevel":"medium"},"toolResults":[]}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"agent_settled","aborted":true}
+{"id":"6","type":"response","command":"abort","success":true}

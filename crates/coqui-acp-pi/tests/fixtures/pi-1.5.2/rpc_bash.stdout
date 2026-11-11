@@ -1,0 +1,8 @@
+{"type":"bash_execution_update","id":"1","delta":"from rpc bash\n"}
+{"type":"bash_execution_update","id":"1","delta":"err\n"}
+{"id":"1","type":"response","command":"bash","success":true,"data":{"output":"from rpc bash\nerr\n","exitCode":0,"cancelled":false,"truncated":false}}
+{"type":"bash_execution_update","id":"2","delta":"hidden\n"}
+{"id":"2","type":"response","command":"bash","success":true,"data":{"output":"hidden\n","exitCode":0,"cancelled":false,"truncated":false}}
+{"id":"3","type":"response","command":"get_messages","success":true,"data":{"messages":[{"role":"bashExecution","command":"echo from rpc bash; echo err 1>&2","output":"from rpc bash\nerr\n","exitCode":0,"cancelled":false,"truncated":false,"timestamp":1794400307375},{"role":"bashExecution","command":"echo hidden","output":"hidden\n","exitCode":0,"cancelled":false,"truncated":false,"timestamp":1794400307464,"excludeFromContext":true}]}}
+{"id":"5","type":"response","command":"abort_bash","success":true}
+{"id":"4","type":"response","command":"bash","success":true,"data":{"output":"","cancelled":true,"truncated":false}}
