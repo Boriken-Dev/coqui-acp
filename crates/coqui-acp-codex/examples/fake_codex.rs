@@ -83,11 +83,11 @@ impl Fake {
         if let Ok(text) = std::fs::read_to_string(self.thread_file(id)) {
             return serde_json::from_str(&text).ok();
         }
-        self.from_rollout(id)
+        self.thread_of_rollout(id)
     }
 
     /// A thread made of a rollout nothing here wrote: the person's and the agent's messages, in turns.
-    fn from_rollout(&self, id: &str) -> Option<Value> {
+    fn thread_of_rollout(&self, id: &str) -> Option<Value> {
         let text = std::fs::read_to_string(self.rollout_file(id)).ok()?;
         let mut cwd = Value::Null;
         let mut turns = Vec::new();
