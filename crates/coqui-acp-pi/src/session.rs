@@ -367,7 +367,8 @@ impl PiSession {
             Parser::with_limits(Arc::clone(&writer), settings.max_tools, settings.parser)
                 .with_policy(Arc::clone(&policy))
                 .with_roots(&launch.cwd, launch.roots())
-                .with_protected(launch.agent_dirs()),
+                .with_protected(launch.agent_dirs())
+                .with_home(launch.home()),
         ));
         let tail = Arc::new(Mutex::new(Tail::new(
             settings.tail_lines,

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use coqui_acp_harness::acp::within_roots;
 use coqui_acp_harness::{Launch, Mode};
 
-use crate::Error;
+use crate::{Error, paths};
 
 /// How a session begins.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -114,7 +114,10 @@ fn find_in(
         return None;
     }
     std::env::split_paths(path)
-        .filter(|dir| plain_entry(dir) && !within_roots(dir, keep_out))
+        .filter(|dir| plain_entry(dir))
+        // `..` is resolved by how it is written before the entry is judged: `C:\tools\..\proj` is the project.
+        .map(|dir| paths::lexical(&dir))
+        .filter(|dir| !within_roots(dir, keep_out))
         .find_map(|dir| {
             extensions
                 .iter()
@@ -178,21 +181,29 @@ impl PiLaunch {
         }
     }
 
+    fn named(&self, name: &str) -> Option<PathBuf> {
+        self.env
+            .iter()
+            .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os(name).map(PathBuf::from))
+    }
+
+    /// The home directory Pi expands `~` to: `USERPROFILE` (Windows) or `HOME` of the launch's environment, else the
+    /// process's.
+    #[must_use]
+    pub fn home(&self) -> Option<PathBuf> {
+        self.named(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+    }
+
     /// Pi's agent directories: the launch's `PI_CODING_AGENT_DIR`, else the process's, else `~/.pi/agent`. Where Pi keeps
     /// its credentials and the code it loads.
     #[must_use]
     pub fn agent_dirs(&self) -> Vec<PathBuf> {
-        let named = |name: &str| {
-            self.env
-                .iter()
-                .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
-                .map(|(_, value)| PathBuf::from(value))
-                .or_else(|| std::env::var_os(name).map(PathBuf::from))
-        };
         let mut dirs = Vec::new();
-        if let Some(dir) = named("PI_CODING_AGENT_DIR") {
+        if let Some(dir) = self.named("PI_CODING_AGENT_DIR") {
             dirs.push(dir);
-        } else if let Some(home) = named(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        } else if let Some(home) = self.home() {
             dirs.push(home.join(".pi").join("agent"));
         }
         dirs
@@ -278,6 +289,17 @@ impl PiLaunch {
             launch
                 .env
                 .insert("NoDefaultCurrentDirectoryInExePath".into(), "1".into());
+            // The program search of Pi's own spawner (cross-spawn, `which`) tries the working directory first and honours a
+            // script extension (`.JS`) in PATHEXT: a project's `npm.js` would run. Only what the system runs as a program stays.
+            launch
+                .env
+                .retain(|name, _| !name.to_string_lossy().eq_ignore_ascii_case("PATHEXT"));
+            launch
+                .remove_env
+                .retain(|name| !name.to_string_lossy().eq_ignore_ascii_case("PATHEXT"));
+            launch
+                .env
+                .insert("PATHEXT".into(), ".COM;.EXE;.BAT;.CMD".into());
         }
         Ok(launch)
     }
@@ -388,6 +410,15 @@ mod tests {
         assert_eq!(find("pi"), Some(bin.join("pi.exe")));
         assert_eq!(find("pi.cmd"), None);
         assert_eq!(find("./pi"), None);
+        // A `..` that leads back into the project does not hide it.
+        let sneaky = bin.join("..").join("project");
+        let path = std::env::join_paths([&sneaky, &bin]).unwrap();
+        let find = |name: &str| find_in(OsStr::new(name), &path, &["exe", "cmd"], &keep_out);
+        assert_eq!(
+            find("pi"),
+            Some(bin.join("pi.exe")),
+            "an entry that resolves into the project was searched"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

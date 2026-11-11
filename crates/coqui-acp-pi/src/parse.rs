@@ -140,6 +140,8 @@ pub struct Parser {
     roots: Vec<PathBuf>,
     /// Pi's agent directories, where it keeps its credentials and the code it loads.
     protected: Vec<PathBuf>,
+    /// The home directory Pi expands `~` to, when it is not the process's own.
+    home: Option<PathBuf>,
     tools: BTreeMap<String, Tool>,
     order: VecDeque<String>,
     /// The ids given out to tool calls, so that a model that repeats one gets another.
@@ -189,6 +191,7 @@ impl Parser {
             cwd: PathBuf::new(),
             roots: Vec::new(),
             protected: Vec::new(),
+            home: None,
             tools: BTreeMap::new(),
             order: VecDeque::new(),
             used: BTreeSet::new(),
@@ -217,8 +220,20 @@ impl Parser {
         self
     }
 
+    /// The home directory Pi expands `~` to: the one of the environment Pi is started with.
+    #[must_use]
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
+    }
+
     fn scope(&self) -> Scope {
-        Scope::new(&self.cwd, self.roots.clone()).with_agent_dirs(self.protected.clone())
+        let scope =
+            Scope::new(&self.cwd, self.roots.clone()).with_agent_dirs(self.protected.clone());
+        match &self.home {
+            Some(home) => scope.with_home(Some(home.clone())),
+            None => scope,
+        }
     }
 
     /// The directory relative paths are against, and the directories a file may be read from for a write's old content.
@@ -1101,7 +1116,13 @@ impl Parser {
         call.locations = Some(locations);
         call.status = Some(ToolStatus::Pending);
         locked(&self.open).insert(dialog.to_string());
-        let remember = Policy::remember(&name, &asked.input);
+        // Nothing is remembered for a path Pi rewrites (`~`, `@`, a `file:` URL): it is asked about every time.
+        let rewritten = asked
+            .input
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| self.scope().indirect(path));
+        let remember = Policy::remember(&name, &asked.input).filter(|_| !rewritten);
         let responder = self.responder(dialog, remember.as_ref().map(|r| r.key.clone()));
         let mut options = vec![PermissionOption::new(ALLOW, "Allow", OptionKind::AllowOnce)];
         if let Some(remember) = remember {

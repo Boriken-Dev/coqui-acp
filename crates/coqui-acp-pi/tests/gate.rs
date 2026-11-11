@@ -238,7 +238,10 @@ fn always_allowing_a_command_covers_that_program_only_and_a_compound_command_off
         .iter()
         .find(|option| option.id == ALLOW_TOOL)
         .expect("an always option");
-    assert_eq!(always.name, "Always allow `git …` in this session");
+    assert_eq!(
+        always.name,
+        "Always allow `git …` in this session: every `git` command, including ones that run other programs"
+    );
     request
         .responder
         .answer(Outcome::Selected(ALLOW_TOOL.into()))

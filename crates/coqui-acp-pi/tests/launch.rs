@@ -162,6 +162,14 @@ mod windows {
                 .map(|v| v.to_string_lossy().into_owned()),
             Some("1".to_string())
         );
+        assert_eq!(
+            spawned
+                .env
+                .get(std::ffi::OsStr::new("PATHEXT"))
+                .map(|v| v.to_string_lossy().into_owned()),
+            Some(".COM;.EXE;.BAT;.CMD".to_string()),
+            "no script extension in the program search of Pi's own spawner"
+        );
         assert!(
             !spawned
                 .remove_env

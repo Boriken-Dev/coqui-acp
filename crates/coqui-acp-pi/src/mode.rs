@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 use std::path::{Component, Path, PathBuf};
 
 use coqui_acp_harness::acp::within_roots;
+
+use crate::paths;
 use coqui_acp_harness::mode;
 pub use coqui_acp_harness::mode::Mode;
 use serde_json::Value;
@@ -37,12 +39,19 @@ pub enum Decision {
 }
 
 /// Where the session works and what Pi keeps its credentials and code in.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Scope {
     cwd: PathBuf,
     roots: Vec<PathBuf>,
     agent_dirs: Vec<PathBuf>,
     home: Option<PathBuf>,
+    windows: bool,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self::new(Path::new("."), Vec::new())
+    }
 }
 
 /// `path` with the links of its longest existing part followed and the rest kept as written, so that a file not made yet
@@ -79,8 +88,28 @@ fn has_component(path: &Path, names: &[&str]) -> bool {
     })
 }
 
+/// Where in a person's home credentials are kept: directories and single files.
+const SECRET_HOME: [&str; 15] = [
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".azure",
+    ".netrc",
+    ".npmrc",
+    ".git-credentials",
+    ".config/gcloud",
+    ".config/gh",
+    ".docker/config.json",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    "AppData/Roaming/gcloud",
+    "AppData/Roaming/GitHub CLI",
+];
+
 impl Scope {
-    /// A scope in `cwd`, whose files a call may use freely when they lie in `roots` (`cwd` alone when empty).
+    /// A scope in `cwd`, whose files a call may use freely when they lie in `roots` (`cwd` alone when empty). The home
+    /// directory is the process's (`USERPROFILE` on Windows, `HOME` elsewhere): [`Scope::with_home`] names another.
     #[must_use]
     pub fn new(cwd: &Path, roots: Vec<PathBuf>) -> Self {
         let roots = if roots.is_empty() {
@@ -95,6 +124,7 @@ impl Scope {
             roots,
             agent_dirs: Vec::new(),
             home,
+            windows: cfg!(windows),
         }
     }
 
@@ -105,44 +135,58 @@ impl Scope {
         self
     }
 
+    /// The home directory Pi expands `~` to: what `os.homedir()` says for the environment Pi is started with.
+    #[must_use]
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
+    }
+
     /// The directory relative paths are against.
     #[must_use]
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }
 
-    fn path(&self, text: &str) -> PathBuf {
-        self.cwd.join(text)
+    fn pi(&self, text: &str) -> paths::Resolved {
+        paths::resolve(text, &self.cwd, self.home.as_deref(), self.windows)
     }
 
-    /// Whether the path is written as a network or device path (UNC, `//host/share`), which nothing
-    /// here resolves: resolving it would open a connection to its host.
+    /// Whether the path is written, or hidden by Pi's own rewriting, as a network or device path (UNC, `//host/share`,
+    /// `file://host/share`, any of these after `@`), which nothing here resolves: resolving it would open a connection to its
+    /// host.
     #[must_use]
     pub fn network(&self, text: &str) -> bool {
-        let path = self.path(text);
-        let shown = path.to_string_lossy();
-        shown.starts_with("\\\\") || shown.starts_with("//")
+        self.pi(text).network
     }
 
-    /// Whether the path lies in the session's directories.
+    /// Whether the text looks as if Pi rewrites it (`~`, `@`, a `file:` URL, `C:foo`) or could not be worked out: asked about
+    /// always, never allowed unasked or remembered.
+    #[must_use]
+    pub fn indirect(&self, text: &str) -> bool {
+        paths::indirect(text, self.windows) || self.pi(text).unknown
+    }
+
+    /// Whether the path, as Pi will resolve it, lies in the session's directories.
     #[must_use]
     pub fn inside(&self, text: &str) -> bool {
-        within_roots(&self.path(text), &self.roots)
+        let found = self.pi(text);
+        !found.network && !found.unknown && within_roots(&found.path, &self.roots)
     }
 
-    /// Whether the path holds credentials: Pi's `auth.json`, `models.json` (which can name a command that yields a key)
-    /// and `mcp-auth.json`, and what a person keeps secrets in (`.ssh`, `.aws`, `.gnupg`, `.kube`, `gcloud`, `.netrc`,
-    /// `.npmrc`).
+    /// Whether the path holds credentials: Pi's `auth.json`, `models.json` (which can name a command that yields a key) and
+    /// `mcp-auth.json` in an agent directory, and what a person keeps secrets in under their home (`.ssh`, `.aws`,
+    /// `.gnupg`, `.kube`, `.azure`, `gcloud`, `gh`, `.netrc`, `.npmrc`, `.git-credentials`, Cargo's and Docker's).
     #[must_use]
     pub fn secret(&self, text: &str) -> bool {
-        if self.network(text) {
+        let found = self.pi(text);
+        if found.network || found.unknown {
             return false;
         }
-        let path = resolved(&self.path(text));
+        let path = resolved(&found.path);
         let credentials = ["auth.json", "models.json", "mcp-auth.json"];
         if self.agent_dirs.iter().any(|dir| {
-            let dir = resolved(dir);
-            path.starts_with(&dir)
+            path.starts_with(resolved(dir))
                 && path
                     .file_name()
                     .is_some_and(|name| credentials.iter().any(|wanted| same(name, wanted)))
@@ -153,31 +197,23 @@ impl Scope {
             return false;
         };
         let home = resolved(home);
-        [
-            ".ssh",
-            ".aws",
-            ".gnupg",
-            ".kube",
-            ".netrc",
-            ".npmrc",
-            ".config/gcloud",
-            ".docker/config.json",
-        ]
-        .iter()
-        .any(|name| path.starts_with(home.join(name)))
+        SECRET_HOME.iter().any(|name| {
+            path.starts_with(home.join(name)) || resolved(&found.path).starts_with(home.join(name))
+        })
     }
 
     /// Whether Pi loads code or configuration from the path, so that a file written there runs later with no question: its
-    /// agent directories and `~/.pi`, any `.pi` or `.git` directory, and what holds credentials.
+    /// agent directories and `~/.pi`, any `.pi` or `.git` directory (hooks), and what holds credentials.
     #[must_use]
     pub fn loaded(&self, text: &str) -> bool {
-        if self.network(text) {
+        let found = self.pi(text);
+        if found.network || found.unknown {
             return false;
         }
-        let path = resolved(&self.path(text));
+        let path = resolved(&found.path);
         self.secret(text)
             || has_component(&path, &[".pi", ".git"])
-            || has_component(&self.path(text), &[".pi", ".git"])
+            || has_component(&found.path, &[".pi", ".git"])
             || self
                 .agent_dirs
                 .iter()
@@ -273,10 +309,16 @@ impl Policy {
             return None;
         }
         if COMMANDS.contains(&tool) {
+            // A command cut for its size cannot be said exactly: what follows the cut could be anything.
+            if cut(input, "command") {
+                return None;
+            }
             let program = program_of(text(input, "command")?)?;
             return Some(Remember {
                 key: format!("cmd:{program}"),
-                label: format!("Always allow `{program} …` in this session"),
+                label: format!(
+                    "Always allow `{program} …` in this session: every `{program}` command, including ones that run other programs"
+                ),
             });
         }
         if EDITS.contains(&tool) {
@@ -326,7 +368,7 @@ impl Policy {
                 if scope.secret(path) {
                     return Decision::Protected;
                 }
-                if !scope.inside(path) {
+                if scope.indirect(path) || !scope.inside(path) {
                     return Decision::Ask;
                 }
             } else if input.get("path").is_some_and(|value| !value.is_null()) {
@@ -355,7 +397,7 @@ impl Policy {
             if scope.network(path) {
                 return Decision::Ask;
             }
-            let free = scope.inside(path) && !scope.loaded(path);
+            let free = scope.inside(path) && !scope.indirect(path) && !scope.loaded(path);
             return if free && (self.mode == Mode::AcceptEdits || self.remembered(tool, input)) {
                 Decision::Allow
             } else {

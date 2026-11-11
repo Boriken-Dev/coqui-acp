@@ -10,6 +10,7 @@ mod gate;
 mod launch;
 pub mod mode;
 pub mod parse;
+pub mod paths;
 mod provider;
 mod session;
 

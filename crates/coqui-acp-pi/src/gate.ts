@@ -20,7 +20,11 @@ function bounded(input) {
 	for (const [key, value] of Object.entries(input)) {
 		if (typeof value === "string") {
 			if (value.length > TEXT_LIMIT) {
-				out[key] = value.slice(0, TEXT_LIMIT);
+				// Cut on a code point: a surrogate pair is not split.
+				let end = TEXT_LIMIT;
+				const last = value.charCodeAt(end - 1);
+				if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+				out[key] = value.slice(0, end);
 				cut.push(key);
 			} else out[key] = value;
 		} else {
