@@ -26,7 +26,7 @@ A receiver MUST refuse a form that is not a flat object with at least one proper
 
 A secret value is sent as its text: UTF-8 for text (canonical base64 text for bytes, when `contentEncoding` says `base64`; `base64url` is unpadded), the JSON number grammar for a number (`-?(0|[1-9][0-9]*)` for a whole number within 2^53 - 1; plus an optional fraction and exponent, finite, for any other number; no sign, space, leading zero, `.5` or `5.`). It is sealed as those bytes, so no JSON parser holds it. Unpadded base64url is canonical when it has no padding, only its own alphabet and zero trailing bits.
 
-**The digest of what the person is asked** is SHA-256 over these parts, each with a 4-byte big-endian length: `dev.boriken.coqui.acp/secret/v1 context`, the method (`request` or `show`), the session id, the request id, the message, the schema text, one byte that is 1 when a layout was sent and else 0, and the layout text (empty when none). The receiver's binding and every sealed field cover it, so a collector recomputes it from what it received before it draws anything: a schema with `writeOnly` removed, another message or session, or a changed layout is refused, because the binding no longer verifies. The request id is 1 to 128 bytes with no control character, and a host MUST NOT reuse one.
+**The digest of what the person is asked** is SHA-256 over these parts, each with a 4-byte big-endian length: `dev.boriken.coqui.acp/secret/v1 context`, the method (`request` or `show`), the session id, the request id, the message, the schema text, one byte that is 1 when a layout was sent and else 0, the layout text (empty when none), one byte that is 1 when plain values were sent (a show) and else 0, and the plain values text (empty when none). The receiver's binding and every sealed field cover it, so a collector recomputes it from what it received before it draws anything: a schema with `writeOnly` removed, another message or session, or a changed layout is refused, because the binding no longer verifies. The request id is 1 to 128 bytes with no control character, and a host MUST NOT reuse one.
 
 ## `_coqui_acp/secret_request`
 
@@ -45,10 +45,10 @@ The host asks the person for values. The host is the receiver of the secret ones
 }
 ```
 
-The answer is `{"action": "accept", "values": {...}, "auth": {...}}`, `{"action": "decline"}` or `{"action": "cancel"}`. In `values` a plain field holds its value and a secret field holds `{"enc": "<base64url>", "ct": "<base64url>"}`; `auth` is the frontend's binding of the sealed values:
+The answer is `{"action": "accept", "plain": "...", "values": {...}, "auth": {...}}`, `{"action": "decline"}` or `{"action": "cancel"}`. `plain` is the plain fields as **JSON object text** (a string), hashed as it was sent, never re-serialized. `values` holds only the secret fields, each `{"enc": "<base64url>", "ct": "<base64url>"}`, and a plain field there is malformed. `auth` is the frontend's binding of the whole answer:
 
 ```json
-{"action": "accept", "values": {"user": "ana", "password": {"enc": "...", "ct": "..."}}, "auth": {"method": "ecdsa-p256-sha256", "key": "...", "expires": 1700000240, "audience": "sha256:<host>", "proof": "..."}}
+{"action": "accept", "plain": "{\"user\":\"ana\"}", "values": {"password": {"enc": "...", "ct": "..."}}, "auth": {"method": "ecdsa-p256-sha256", "key": "...", "expires": 1700000240, "audience": "sha256:<host>", "proof": "..."}}
 ```
 
 The agent is never sent the answer. The host verifies `auth` against the frontend it expects, opens the sealed fields, keeps each secret under a handle, and gives the agent the plain values and the handles.
@@ -57,11 +57,13 @@ The agent is never sent the answer. The host verifies `auth` against the fronten
 
 The host shows the person values. The frontend is the receiver of the secret ones, so showing takes two requests, one shape each, and the frontend makes its key pair after the first.
 
-`secret_show_open`: the host sends the same fields as a request, without a recipient, and the plain values:
+`secret_show_open`: the host sends the same fields as a request, without a recipient, and the plain values as JSON object text:
 
 ```json
-{"sessionId": "s1", "requestId": "...", "message": "Your new API key", "schema": "{...}", "values": {"label": "ci"}}
+{"sessionId": "s1", "requestId": "...", "message": "Your new API key", "schema": "{...}", "values": "{\"label\":\"ci\"}"}
 ```
+
+The plain values are part of the digest of what is shown, so the frontend's binding covers them and a relay cannot change one.
 
 The frontend answers `{"action": "ready", "recipient": {"key": "...", "binding": {...}}}`, or `decline` or `cancel`. The binding covers the show's digest and is made for the host.
 
@@ -71,7 +73,7 @@ The frontend answers `{"action": "ready", "recipient": {"key": "...", "binding":
 {"sessionId": "s1", "requestId": "...", "values": {"key": {"enc": "...", "ct": "..."}}, "auth": {...}}
 ```
 
-The frontend refuses a deliver for a session and request id it has no open step pending for, verifies `auth` against the host it expects, and answers `{"action": "shown"}` when the person has seen the values and closed them, or `cancel`. A frontend MUST keep what it opened only for the one request and clear it when the display closes.
+The frontend refuses a deliver for a session and request id it has no open step pending for, verifies `auth` (over the open step's plain values text and the sealed values) against the host it expects, and answers `{"action": "shown"}` when the person has seen the values and closed them, or `cancel`. A frontend MUST keep what it opened only for the one request and clear it when the display closes.
 
 ## Sealing
 
@@ -93,9 +95,9 @@ A key is useless to a collector unless it knows whose key it is: a key a pipe pr
 {"method": "...", "key": "<holder's SPKI>", "expires": 1700000240, "audience": "sha256:...", "proof": "..."}
 ```
 
-There are two bindings per request. The **key binding** is the receiver's, over its per-request public key. The **values binding** is the sender's (`auth`), over the digest of the sealed values: SHA-256 of `dev.boriken.coqui.acp/secret/v1 values digest` and then, for each field in the byte order of the names, the name (4-byte length), `enc` and `ct` (4-byte length). The receiver verifies it before it opens anything, so a ciphertext changed, swapped, added or dropped on the way is refused; only a sender it expects can make one.
+There are two bindings per request. The **key binding** is the receiver's, over its per-request public key. The **values binding** is the sender's (`auth`), over the digest of the whole answer: SHA-256 of `dev.boriken.coqui.acp/secret/v1 values digest`, the plain values text (4-byte length, then the bytes as sent; for a show, the open step's `values` text), and then, for each sealed field in the byte order of the names, the name (4-byte length), `enc` and `ct` (4-byte length). The receiver verifies it before it reads or opens anything, so a plain value, a ciphertext or a name changed, swapped, added or dropped on the way is refused; only a sender it expects can make one.
 
-What a binding proves is this statement (each part with a 4-byte length): `dev.boriken.coqui.acp/secret/v1 binding` or `... values`, the method, the request id, the digest of what is asked, the receiver's 32-byte HPKE public key, the payload (empty for a key binding, the values digest for a values binding), the `expires` as 8 bytes, and the audience's 32-byte id. A proof for one request cannot be moved to another request, form, key or checker.
+What a binding proves is this statement (each part with a 4-byte length): `dev.boriken.coqui.acp/secret/v1 binding` or `... values`, the method, the request id, the digest of what is asked, the receiver's 32-byte HPKE public key, the payload (empty for a key binding, the answer's digest for a values binding), the `expires` as 8 bytes, and the audience's 32-byte id. A proof for one request cannot be moved to another request, form, key or checker.
 
 **Audience.** A binding is made for one identity, and a checker MUST know its own id and refuse a binding made for anyone else. A checker with no id of its own cannot check an audience, so it takes no binding.
 
