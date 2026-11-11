@@ -48,29 +48,39 @@ impl Fixture {
         (path, identity)
     }
 
-    /// `serve --mcp-offers`, returning the peer id it prints, once it is listening.
-    fn serve(&mut self, flags: &[&str], port: u16) -> String {
-        let log = std::fs::File::create(self.dir.join(format!("serve-{port}.log"))).unwrap();
-        let mut child = Command::new(BRIDGE)
-            .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
-            .args(flags)
-            .args(["--", "no-agent-is-ever-started"])
-            .env(coqui_agentic_peer::home::HOME_ENV, &self.home)
-            .stdout(Stdio::piped())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        self.children.push(child);
-        let until = Instant::now() + WAIT;
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < until, "nothing listened");
-            std::thread::sleep(Duration::from_millis(20));
+    /// `serve --mcp-offers` on a free port, returning the peer id it prints and the port, once it is listening. A port that
+    /// another test took between being chosen and being bound makes the bridge end without printing anything; it is then tried
+    /// on another, since a connection to the other test's bridge would be to one that does not know these peers.
+    fn serve(&mut self, flags: &[&str]) -> (String, u16) {
+        for _ in 0..50 {
+            let port = free_port();
+            let log = std::fs::File::create(self.dir.join(format!("serve-{port}.log"))).unwrap();
+            let mut child = Command::new(BRIDGE)
+                .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
+                .args(flags)
+                .args(["--", "no-agent-is-ever-started"])
+                .env(coqui_agentic_peer::home::HOME_ENV, &self.home)
+                .stdout(Stdio::piped())
+                .stderr(log)
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            if line.trim().is_empty() {
+                let _ = child.wait();
+                continue;
+            }
+            self.children.push(child);
+            let until = Instant::now() + WAIT;
+            while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+                assert!(Instant::now() < until, "nothing listened");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            return (line.trim().to_owned(), port);
         }
-        line.trim().to_owned()
+        panic!("no port stayed free long enough to bind");
     }
 
     /// The door's file for a peer, as the bridge wrote it.
@@ -214,17 +224,13 @@ fn with_peer(
     let (key, _) = fixture.identity("server");
     let (_, browser) = fixture.identity("browser");
     let peer = browser.peer_id().to_string();
-    let port = free_port();
-    let server = fixture.serve(
-        &[
-            "--identity",
-            key.to_str().unwrap(),
-            "--allow",
-            &peer,
-            "--mcp-offers",
-        ],
-        port,
-    );
+    let (server, port) = fixture.serve(&[
+        "--identity",
+        key.to_str().unwrap(),
+        "--allow",
+        &peer,
+        "--mcp-offers",
+    ]);
     over_link(port, browser, &server, |mux| body(&fixture, &peer, mux));
 }
 
@@ -433,19 +439,15 @@ fn a_shim_reaches_only_the_peer_it_names() {
     let (_, other) = fixture.identity("other");
     let browser_peer = browser.peer_id().to_string();
     let other_peer = other.peer_id().to_string();
-    let port = free_port();
-    let server = fixture.serve(
-        &[
-            "--identity",
-            key.to_str().unwrap(),
-            "--allow",
-            &browser_peer,
-            "--allow",
-            &other_peer,
-            "--mcp-offers",
-        ],
-        port,
-    );
+    let (server, port) = fixture.serve(&[
+        "--identity",
+        key.to_str().unwrap(),
+        "--allow",
+        &browser_peer,
+        "--allow",
+        &other_peer,
+        "--mcp-offers",
+    ]);
     over_link(port, other, &server, |mux| {
         let stream = mux.open_with("mcp-offer/1", STANDING).unwrap();
         assert_eq!(message(&stream), READY);
@@ -480,20 +482,16 @@ fn a_peer_allowed_something_else_cannot_stand_by() {
     let (key, _) = fixture.identity("server");
     let (_, browser) = fixture.identity("browser");
     let peer = browser.peer_id().to_string();
-    let port = free_port();
     let grant = format!("{peer}=acp/1");
-    let server = fixture.serve(
-        &[
-            "--identity",
-            key.to_str().unwrap(),
-            "--allow",
-            &peer,
-            "--mcp-offers",
-            "--grant",
-            &grant,
-        ],
-        port,
-    );
+    let (server, port) = fixture.serve(&[
+        "--identity",
+        key.to_str().unwrap(),
+        "--allow",
+        &peer,
+        "--mcp-offers",
+        "--grant",
+        &grant,
+    ]);
     over_link(port, browser, &server, |mux| {
         let stream = mux.open_with("mcp-offer/1", STANDING).unwrap();
         assert!(stream.receive(Some(WAIT)).is_err());
