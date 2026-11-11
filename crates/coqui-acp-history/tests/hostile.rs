@@ -40,23 +40,21 @@ fn refusal(text: &str) -> coqui_acp_history::HistoryError {
         .expect_err("the history should be refused")
 }
 
-#[test]
-fn a_turn_of_a_hundred_thousand_permission_requests_is_matched_in_linear_time() {
-    const N: usize = 100_000;
+/// A turn of `n` permission requests, answered in the order that costs a list the most.
+fn permission_turn(n: usize) -> String {
     let mut text = header_line("");
     text.push('\n');
     text.push_str(
         r#"{"method":"session/prompt","params":{"prompt":[{"text":"go","type":"text"}]}}"#,
     );
     text.push('\n');
-    for n in 0..N {
+    for n in 0..n {
         text.push_str(&format!(
             r#"{{"method":"session/request_permission","params":{{"options":[{{"optionId":"a"}}],"toolCall":{{"toolCallId":"call-{n}"}}}}}}"#
         ));
         text.push('\n');
     }
-    // Answered in the order that costs a list the most.
-    for n in (0..N).rev() {
+    for n in (0..n).rev() {
         text.push_str(&format!(
             r#"{{"method":"history/permission_answer","params":{{"outcome":{{"optionId":"a","outcome":"selected"}},"toolCallId":"call-{n}"}}}}"#
         ));
@@ -64,15 +62,34 @@ fn a_turn_of_a_hundred_thousand_permission_requests_is_matched_in_linear_time() 
     }
     text.push_str(r#"{"method":"history/turn_end","params":{"stopReason":"end_turn"}}"#);
     text.push('\n');
+    text
+}
 
-    let started = Instant::now();
-    let mut reader = Reader::builder(text.as_bytes()).open().unwrap();
-    while reader.next_entry().unwrap().is_some() {}
-    let took = started.elapsed();
-    assert_eq!(reader.summary().lines, 2 * N as u64 + 3);
+/// The shortest of three readings of `n` requests; the shortest is the one a busy machine disturbed least.
+fn reading_time(n: usize) -> Duration {
+    let text = permission_turn(n);
+    (0..3)
+        .map(|_| {
+            let started = Instant::now();
+            let mut reader = Reader::builder(text.as_bytes()).open().unwrap();
+            while reader.next_entry().unwrap().is_some() {}
+            assert_eq!(reader.summary().lines, 2 * n as u64 + 3);
+            started.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn a_turn_of_a_hundred_thousand_permission_requests_is_matched_in_linear_time() {
+    // Ten times the requests cost about ten times as much when matching is linear and a hundred times as much when it is
+    // quadratic; a bound in seconds would measure the machine. The slack of four is for a machine busy with other work.
+    const N: usize = 100_000;
+    let small = reading_time(N / 10);
+    let big = reading_time(N);
     assert!(
-        took < Duration::from_secs(10),
-        "{N} requests took {took:?}: matching them is not linear"
+        big < small * 40,
+        "{N} requests took {big:?} and a tenth of them {small:?}: matching them is not linear"
     );
 }
 
