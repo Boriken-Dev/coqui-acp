@@ -49,7 +49,7 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
   `attach(connection)` / `detach()`, `rename(name)`.
 - **Turns**: a turn starts at a v1 prompt or a v2 `running` state and ends on idle, an end event, the answer to a v1 prompt, or the
   loss of the connection (failed). `ChatMessage.turn` is the turn running when an entry was added, and a prompt belongs to the turn
-  it starts. `TurnEvent(turn)` goes out on `events` for every end, cancelled included; history opened again ends none.
+  it starts. `TurnEvent(turn)` goes out on `events` for every end, cancelled included; what a reopen replays ends none.
 - **Prompts**: `send(text, {attachments, from}) -> Future<void>` completes when the agent has been handed the message (v2: its
   acknowledgement; v1: the prompt is under way and was not refused at once). The message is in the conversation before the agent can
   answer, takes its id from the acknowledgement or its echo, and a prompt that is refused leaves nothing behind (a v1 prompt the agent fails before it said anything too; one it echoed in v2 stays). Queued while a turn
@@ -67,7 +67,10 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
   changes while `opening`: `chooseMode`, `cycleMode`, `leaveBypass` and `setBypass` do nothing then, so the kept mode holds. `modeEntries(option)`, `nextMode`, `modeOrder`, `isBypassMode`, `bypassAnswer`, `ownBypass`.
 - **Reopening**: `reopen(open, {keptMode, keptBypass}) -> Future<AcpOpenedSession>`: when the agent sends the conversation it
   replaces what is held (nothing twice); when it only resumes, what is held stays; history is not news; open tool lines become
-  `stopped`; the kept mode and Bypass are put back before anything is sent.
+  `stopped`; the kept mode and Bypass are put back before anything is sent. A second `reopen` while one is under way throws
+  `StateError`. A turn running when it starts ends as cancelled (a `TurnEvent`) and holds the queue; a queue the person held stays
+  held, and so does one behind a kept mode the agent did not take (it is then in `refusedModes`, and `chosenMode` follows the agent)
+  or that could not be put back; only otherwise are messages written while it opened sent.
 - **Clients**: `attachClient(id, {name})`, `detachClient(id)`; `from:`/`by:` must name an attached client (or `bypassClient`).
 
 ## Experimental: `package:coqui_acp_chat/experimental.dart`
@@ -98,7 +101,7 @@ optionId:)` (`by` must be attached). Requests still waiting are not carried: rea
 `entries` 5000, `messageText` 2 MiB, `pendingPermissions` 64, `pendingQuestions` 16, `settledRequests` 32, `queued` 20, `clients` 16,
 `turns` 1000, `toolText` 256 KiB, `terminalOutput` 256 KiB (kept from its end), `planEntries` 200, `commands` 500, `configOptions` 32,
 `choices` 200, `toolBlocks` 64, `locations` 64, `shortText` 512, `terminals` 256 (one still running is never dropped), `describedInput`
-4000, `hostNotices` 4, `listShapes` 8, `shapeDepth` 8, `titleLength` 60, `usageBuckets` 64. A request past `pendingPermissions` or
+4000, `hostNotices` 4, `listShapes` 8, `shapeDepth` 8, `titleLength` 60, `usageBuckets` 64, `handOverSeconds` 60 (0: no bound; a v2 agent that does not acknowledge a prompt in time fails `send`, and the queue behind it is held). A request past `pendingPermissions` or
 `pendingQuestions` is answered cancelled and a notice says so; the names of what went with messages are remembered up to `entries`.
 
 ## Gotchas

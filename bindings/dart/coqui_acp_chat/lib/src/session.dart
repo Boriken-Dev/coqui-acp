@@ -384,6 +384,9 @@ class ChatSession extends ChatNotifier {
   ChatMessage? _v1Local;
   ChatMessage? _v1Note;
   int _v1Before = 0;
+
+  /// The turns of v1 prompts whose answer has not come, oldest first: an end the connection reports belongs to the first of them.
+  final List<ChatTurn> _v1Awaiting = [];
   bool _replaying = false;
 
   /// Whether a message is being handed to the agent.
@@ -571,6 +574,7 @@ class ChatSession extends ChatNotifier {
     final previous = _connection;
     if (previous != null && !identical(previous, connection)) {
       _closeTurn(TurnOutcome.failed);
+      _v1Awaiting.clear();
       _withdraw();
     }
     _connection = connection;
@@ -597,6 +601,7 @@ class ChatSession extends ChatNotifier {
     _closeTurn(TurnOutcome.failed);
     _deferredEnd = null;
     _unacked.clear();
+    _v1Awaiting.clear();
     _withdraw();
   }
 
@@ -646,6 +651,10 @@ class ChatSession extends ChatNotifier {
     if (named != null && named != sessionId) return;
     // A turn end on a connection shared with other sessions is this one's only if this one is working.
     if (_status != ChatStatus.working) return;
+    // It belongs to the first prompt not yet answered: if that turn has ended another way, this is its second end, not the end of the
+    // one running now.
+    final owner = _v1Awaiting.firstOrNull;
+    if (owner != null && !identical(owner, currentTurn)) return;
     switch (event) {
       case AcpCompleted():
         _status = ChatStatus.connected;
@@ -734,11 +743,19 @@ class ChatSession extends ChatNotifier {
     String? keptMode,
     bool keptBypass = false,
   }) async {
-    // What the agent sends is history, and a turn running now is over with the process that held it.
-    _replaying = true;
-    if (currentTurn != null) _closeTurn(TurnOutcome.failed);
+    if (_opening) throw StateError('The conversation is being opened already');
+    // A turn running now is over with the process that held it: it ends here, and a queue behind it waits for the person.
+    final ending = currentTurn;
+    if (ending != null) _closeTurn(TurnOutcome.cancelled);
+    if (ending != null && _queue.isNotEmpty) {
+      _queueHeld ??= 'the turn was stopped';
+    }
     if (_status == ChatStatus.working) _status = ChatStatus.connected;
     _deferredEnd = null;
+    _v1Awaiting.clear();
+    final wasHeld = _queueHeld != null;
+    // What the agent sends is history, not news.
+    _replaying = true;
     final held = (
       messages: List.of(_messages),
       tools: Map.of(_toolEntries),
@@ -782,6 +799,7 @@ class ChatSession extends ChatNotifier {
     _bypass = keptBypass;
     _chosenMode = keptMode;
     var opened0 = false;
+    String? modeHold;
     try {
       final AcpOpenedSession opened;
       try {
@@ -803,7 +821,23 @@ class ChatSession extends ChatNotifier {
         final id = option?.id ?? OptionRole.mode.name;
         _pending[id] = PendingChoice(id, OptionRole.mode, keptMode);
       }
-      await _applyPending();
+      try {
+        await _applyPending();
+        final now = modeOptionIn(_options)?.current;
+        if (keptMode != null && keptMode != 'custom' && now != keptMode) {
+          // The agent is in another mode than the one it was left in, so what waits is the person's to send.
+          _refusedModes.add(keptMode);
+          _chosenMode = now;
+          modeHold =
+              'the mode it was left in (${shortText(keptMode, limits) ?? keptMode}) was not taken';
+        }
+      } catch (error) {
+        _note(
+          'The mode it was left in could not be put back: ${reasonOf(error)}',
+        );
+        _chosenMode = modeOptionIn(_options)?.current;
+        modeHold = 'the mode it was left in could not be put back';
+      }
       opened0 = true;
       return opened;
     } finally {
@@ -812,11 +846,13 @@ class ChatSession extends ChatNotifier {
       _keepMode();
       // Messages written while it opened go now, after the kept mode is back; if it did not open they wait for the person.
       if (_queue.isNotEmpty) {
-        if (opened0) {
+        if (!opened0) {
+          _queueHeld = 'the conversation could not be opened';
+        } else if (modeHold != null) {
+          _queueHeld = modeHold;
+        } else if (!wasHeld) {
           _queueHeld = null;
           _scheduleQueue();
-        } else {
-          _queueHeld = 'the conversation could not be opened';
         }
       }
       notifyListeners();
@@ -1818,6 +1854,12 @@ class ChatSession extends ChatNotifier {
     _delivering = true;
     try {
       await _handOver(connection, remote, text, attachments, from);
+    } catch (error) {
+      // What was queued behind it would wait for a turn that is not coming.
+      if (_queue.isNotEmpty && _queueHeld == null) {
+        _queueHeld = 'it could not be sent: ${reasonOf(error)}';
+      }
+      rethrow;
     } finally {
       _delivering = false;
       final ended = _deferredEnd;
@@ -1853,6 +1895,7 @@ class ChatSession extends ChatNotifier {
       _status = ChatStatus.working;
       _beginTurn();
       mine = currentTurn;
+      if (mine != null) _v1Awaiting.add(mine);
     }
     // The person's message goes in before the agent can answer it, however fast the answer comes.
     final local = text.trim().isEmpty
@@ -1874,6 +1917,7 @@ class ChatSession extends ChatNotifier {
       _v1Before = _applied;
     }
     void rollback() {
+      if (mine != null) _v1Awaiting.remove(mine);
       // Nothing came of the prompt, so what was shown for it goes, or a retry would show it twice. A v2 message the agent echoed
       // before refusing is one it recorded, and stays.
       if (v1) {
@@ -1919,11 +1963,16 @@ class ChatSession extends ChatNotifier {
     }
     final String? messageId;
     try {
-      messageId = await connection.prompt(
-        remote,
-        text,
-        attachments: attachments,
-      );
+      final answer = connection.prompt(remote, text, attachments: attachments);
+      final wait = limits.handOverSeconds;
+      messageId = wait == 0
+          ? await answer
+          : await answer.timeout(
+              Duration(seconds: wait),
+              onTimeout: () => throw StateError(
+                'the agent did not acknowledge the message within $wait seconds',
+              ),
+            );
     } catch (_) {
       rollback();
       rethrow;
@@ -1963,6 +2012,7 @@ class ChatSession extends ChatNotifier {
     }
     // The event that ends a turn is delivered a moment after the answer is given.
     await Future<void>.delayed(Duration.zero);
+    if (mine != null) _v1Awaiting.remove(mine);
     // Only the turn this prompt started: a later one is not ended by an answer that comes after it began.
     if (!identical(_connection, connection) ||
         _status != ChatStatus.working ||

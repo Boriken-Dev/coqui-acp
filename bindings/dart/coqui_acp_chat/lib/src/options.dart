@@ -82,7 +82,7 @@ List<ConfigOption>? parseConfigOptions(Object? raw, ChatLimits limits) {
         : null;
     if (entry is! Map ||
         id == null ||
-        entry['currentValue'] is! String ||
+        idText(entry['currentValue'], limits) == null ||
         entry['options'] is! List) {
       continue;
     }
@@ -115,7 +115,7 @@ List<ConfigOption>? parseConfigOptions(Object? raw, ChatLimits limits) {
 /// ACP v1's `modes` as an option; null when it is not a mode state or its current mode is not among those offered.
 ConfigOption? parseModes(Object? raw, ChatLimits limits) {
   if (raw is! Map ||
-      raw['currentModeId'] is! String ||
+      idText(raw['currentModeId'], limits) == null ||
       raw['availableModes'] is! List) {
     return null;
   }

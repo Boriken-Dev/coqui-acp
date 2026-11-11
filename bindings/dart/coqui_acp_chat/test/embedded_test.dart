@@ -8,15 +8,18 @@ import 'package:test/test.dart';
 
 import 'support/embedded.dart';
 
+// The repository's file, which a copy of the package alone does not have: the check then has nothing to hold the text to.
+final _vectors = File('../../../vectors/usage.json');
+
 void main() {
   test(
     "the usage vectors held here are the repository's vectors/usage.json",
     () {
-      expect(
-        usageVectors,
-        File('../../../vectors/usage.json').readAsStringSync(),
-      );
+      expect(usageVectors, _vectors.readAsStringSync());
     },
+    skip: _vectors.existsSync()
+        ? false
+        : 'run in the repository: vectors/usage.json is not two levels above this package',
   );
 
   test(

@@ -26,6 +26,7 @@ final class ChatLimits {
     this.shapeDepth = 8,
     this.titleLength = 60,
     this.usageBuckets = 64,
+    this.handOverSeconds = 60,
   }) : assert(
          entries >= 0 &&
              messageText >= 0 &&
@@ -50,7 +51,8 @@ final class ChatLimits {
              listShapes >= 0 &&
              shapeDepth >= 0 &&
              titleLength >= 0 &&
-             usageBuckets >= 0,
+             usageBuckets >= 0 &&
+             handOverSeconds >= 0,
        );
 
   /// The most entries (messages, tool lines, compactions) a conversation keeps; the oldest go first. Default 5000.
@@ -124,4 +126,8 @@ final class ChatLimits {
 
   /// The most buckets, models and sources a usage report keeps of each. Default 64.
   final int usageBuckets;
+
+  /// How long a v2 agent has to acknowledge a prompt before the message is taken as not handed over and `send` fails. 0 waits
+  /// without bound. Default 60.
+  final int handOverSeconds;
 }

@@ -148,7 +148,7 @@ void main() {
     );
 
     test(
-      'a turn running when it is opened is over, silently, and its late end is nobody\'s news',
+      'a turn running when it is opened ends as one cancelled, and its late end is nobody\'s news',
       () async {
         final s = started(version: 1);
         final turn = Completer<String?>();
@@ -165,7 +165,9 @@ void main() {
         turn.complete(null);
         s.agent.event(const AcpCompleted('end_turn', sessionId: 's1'));
         await settle();
-        expect(told.whereType<TurnEvent>(), isEmpty);
+        expect(told.whereType<TurnEvent>().map((e) => e.turn.outcome), [
+          TurnOutcome.cancelled,
+        ]);
         expect(told.whereType<AttentionEvent>(), isEmpty);
         s.store.dispose();
       },

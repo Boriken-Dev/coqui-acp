@@ -35,6 +35,7 @@ void main() {
         limits.shapeDepth,
         limits.titleLength,
         limits.usageBuckets,
+        limits.handOverSeconds,
       ],
       [
         5000,
@@ -61,6 +62,7 @@ void main() {
         8,
         60,
         64,
+        60,
       ],
     );
   });
@@ -93,6 +95,7 @@ void main() {
         shapeDepth: 0,
         titleLength: 0,
         usageBuckets: 0,
+        handOverSeconds: 0,
       );
       final (:store, :session, :agent) = started(limits: zero);
       feed(session, state('running'));
