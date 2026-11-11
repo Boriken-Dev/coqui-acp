@@ -1,5 +1,6 @@
 use super::binding::Method;
 use super::error::Error;
+use super::json::strict;
 use alloc::string::String;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -27,8 +28,14 @@ pub struct Context {
 
 /// Reads the plain values of an answer or a show from the JSON object text that was sent.
 pub(crate) fn plain_values(text: &str) -> Result<Map<String, Value>, Error> {
-    match serde_json::from_str(text) {
+    match strict(
+        text,
+        Error::Malformed,
+        "the plain values are not a JSON object",
+        "the plain values repeat a key",
+    ) {
         Ok(Value::Object(map)) => Ok(map),
+        Err(error) => Err(error),
         _ => Err(Error::Malformed("the plain values are not a JSON object")),
     }
 }

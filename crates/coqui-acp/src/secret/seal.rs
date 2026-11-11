@@ -250,6 +250,20 @@ fn open(private: &PrivateKey, info: &[u8], sealed: &Sealed) -> Result<Zeroizing<
     Ok(buffer)
 }
 
+/// What a context must be besides its id and its schema: a layout that changes nothing a secret question is, and plain values only in
+/// a show, which fit the form.
+fn check_context(method: Method, context: &Context, form: &Form) -> Result<(), Error> {
+    if let Some(layout) = &context.form {
+        form.check_layout(layout)?;
+    }
+    match (method, &context.values) {
+        (Method::Show, Some(values)) => form.check_plain(&plain_values(values)?),
+        (Method::Show, None) => Err(Error::Malformed("a show has no values")),
+        (Method::Request, Some(_)) => Err(Error::Malformed("a request carries no values")),
+        (Method::Request, None) => Ok(()),
+    }
+}
+
 fn check_id(request_id: &str) -> Result<(), Error> {
     if request_id.is_empty() || request_id.len() > 128 || request_id.chars().any(char::is_control) {
         return Err(Error::Malformed(
@@ -318,6 +332,7 @@ impl Receiver {
     ) -> Result<Self, Error> {
         check_id(&context.request_id)?;
         let form = Form::parse_text(&context.schema, limits)?;
+        check_context(method, context, &form)?;
         let digest = context.digest(method);
         let key: [u8; 32] = public
             .to_bytes()
@@ -388,6 +403,16 @@ impl Receiver {
         auth: &Binding,
         now: u64,
     ) -> Result<Opened, Error> {
+        // The binding it made is over; a later answer is refused whatever its sender proves.
+        if now
+            > self
+                .recipient
+                .binding
+                .expires
+                .saturating_add(verifier.skew_secs())
+        {
+            return Err(Error::Expired);
+        }
         self.form.check_sealed(sealed.keys().map(String::as_str))?;
         let payload = values_digest(plain, sealed);
         let statement = Statement {
@@ -455,11 +480,13 @@ impl Verifier {
         }
         PublicKey::from_bytes(&recipient.key)
             .map_err(|_| Error::Key("not an X25519 public key"))?;
+        let form = Form::parse_text(&context.schema, &self.limits)?;
+        check_context(method, context, &form)?;
         Ok(Collector {
             method,
             request_id: context.request_id.clone(),
             digest,
-            form: Form::parse_text(&context.schema, &self.limits)?,
+            form,
             key: recipient.key,
             holder,
         })
@@ -479,7 +506,8 @@ impl Collector {
         &self.form
     }
 
-    /// Seals the value of secret field `name`: UTF-8 text, or a number as decimal text.
+    /// Seals the value of secret field `name`: UTF-8 text, or a number as decimal text. The ciphertext is as long as the value plus 48
+    /// bytes (the encapsulated key and the tag), so its length tells a relay how long the secret is; nothing is padded.
     ///
     /// # Errors
     /// [`Error::Field`] for a name that is no secret question or a value that does not fit it; [`Error::Seal`].
@@ -497,7 +525,8 @@ impl Collector {
     /// the open step's values), and `sealed` is every sealed value of the answer.
     ///
     /// # Errors
-    /// [`Error::WrongAudience`] for a Diffie-Hellman identity not paired with the receiver's; [`Error::Seal`].
+    /// [`Error::Field`] for an answer the form does not allow; [`Error::WrongAudience`] for a Diffie-Hellman identity not paired with
+    /// the receiver's; [`Error::Seal`].
     pub fn authenticate(
         &self,
         prover: &Prover,
@@ -506,6 +535,10 @@ impl Collector {
         now: u64,
         lifetime: Duration,
     ) -> Result<Binding, Error> {
+        // A sender signs only an answer the form allows: a plain value for a secret question, or a required secret left out, is
+        // refused here, before anything is signed.
+        self.form.check_plain(&plain_values(plain)?)?;
+        self.form.check_sealed(sealed.keys().map(String::as_str))?;
         let payload = values_digest(plain, sealed);
         let statement = Statement {
             kind: Kind::Values,

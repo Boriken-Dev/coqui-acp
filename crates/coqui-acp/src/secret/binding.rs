@@ -496,6 +496,11 @@ impl Verifier {
         }
     }
 
+    /// How far a peer's clock may differ from this one's, in seconds.
+    pub(crate) fn skew_secs(&self) -> u64 {
+        self.skew.as_secs()
+    }
+
     /// This verifier's own identity.
     #[must_use]
     pub const fn id(&self) -> IdentityId {

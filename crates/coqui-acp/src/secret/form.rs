@@ -1,6 +1,7 @@
 //! A secret form: a JSON Schema object whose properties are the questions, with the secret ones marked `writeOnly` or `x-sensitive`.
 
 use super::error::Error;
+use super::json::strict;
 use crate::elicit::{self, Elicitation, Field, FieldKind};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -166,22 +167,29 @@ pub(crate) fn base64_canonical(text: &str) -> bool {
     BASE64.decode(text).is_ok()
 }
 
-/// The keywords that would let a secret field's schema say more than what it is, or make a frontend draw it as something else.
-const SECRET_DENIED: [&str; 14] = [
-    "default",
-    "const",
-    "enum",
-    "oneOf",
-    "examples",
-    "anyOf",
-    "allOf",
-    "pattern",
-    "if",
-    "then",
-    "else",
-    "not",
-    "$ref",
-    "dependentSchemas",
+/// The only keywords the schema's root may have: a flat object of questions.
+const ROOT_ALLOWED: [&str; 5] = ["type", "properties", "required", "title", "description"];
+
+/// The only keywords a secret field may have. Anything else could carry a value, a condition or a hint that makes a frontend draw
+/// or treat the field as something other than a secret.
+const SECRET_ALLOWED: [&str; 12] = [
+    "type",
+    "title",
+    "description",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "writeOnly",
+    "x-sensitive",
+    "contentEncoding",
+    "contentMediaType",
+    "format",
+];
+
+/// The widgets of a layout for a question that is not secret (guatiao-intake's suggestions, minus the masking one).
+const PLAIN_WIDGETS: [&str; 9] = [
+    "text", "textarea", "number", "slider", "checkbox", "toggle", "select", "radio", "dialog",
 ];
 
 impl Form {
@@ -198,8 +206,12 @@ impl Form {
         if schema.len() > limits.schema_bytes {
             return Err(Error::Schema("the schema is larger than the limit"));
         }
-        let value: Value =
-            serde_json::from_str(schema).map_err(|_| Error::Schema("the schema is not JSON"))?;
+        let value = strict(
+            schema,
+            Error::Schema,
+            "the schema is not JSON",
+            "the schema repeats a key",
+        )?;
         Self::parse(&value, limits)
     }
 
@@ -214,6 +226,14 @@ impl Form {
         if serde_json::to_vec(schema).map_or(usize::MAX, |bytes| bytes.len()) > limits.schema_bytes
         {
             return Err(Error::Schema("the schema is larger than the limit"));
+        }
+        if schema
+            .keys()
+            .any(|key| !ROOT_ALLOWED.contains(&key.as_str()))
+        {
+            return Err(Error::Schema(
+                "the schema has a keyword a flat form does not",
+            ));
         }
         if schema
             .get("type")
@@ -294,10 +314,19 @@ impl Form {
                 ) {
                     return Err(Error::Schema("a secret field is not text or a number"));
                 }
-                if SECRET_DENIED.iter().any(|key| property.contains_key(*key)) {
+                if property
+                    .keys()
+                    .any(|key| !SECRET_ALLOWED.contains(&key.as_str()))
+                {
                     return Err(Error::Schema(
-                        "a secret field carries a value or a choice in the schema",
+                        "a secret field has a keyword a secret field may not",
                     ));
+                }
+                if property
+                    .get("format")
+                    .is_some_and(|format| format != "password")
+                {
+                    return Err(Error::Schema("a secret field's format is not password"));
                 }
             }
             fields.push(FormField {
@@ -319,6 +348,100 @@ impl Form {
             fields,
             limits: *limits,
         })
+    }
+
+    /// Checks the layout that came with the form, as the JSON text that was sent: guatiao-intake's form document, `{"sections":
+    /// [{"id", "title"?, "description"?}], "fields": {<question>: {"widget"?, "placeholder"?, "unit"?, "visibleWhen"?}}}`, over a flat
+    /// form. A layout may place and label the questions; it may not change what a secret question is: a secret question has the
+    /// `password` widget or none, no other question has it, and a condition may not read a secret question's value.
+    ///
+    /// # Errors
+    /// [`Error::Schema`] for a layout that is not that, repeats a key, or names a question the form lacks; [`Error::TooLarge`].
+    pub fn check_layout(&self, text: &str) -> Result<(), Error> {
+        if text.len() > self.limits.schema_bytes {
+            return Err(Error::TooLarge("the layout"));
+        }
+        let value = strict(
+            text,
+            Error::Schema,
+            "the layout is not JSON",
+            "the layout repeats a key",
+        )?;
+        let layout = value
+            .as_object()
+            .ok_or(Error::Schema("the layout is not an object"))?;
+        let only = |map: &Map<String, Value>, keys: &[&str]| {
+            map.keys().all(|key| keys.contains(&key.as_str()))
+        };
+        if !only(layout, &["sections", "fields"]) {
+            return Err(Error::Schema(
+                "the layout has a key the form document does not define",
+            ));
+        }
+        let wrong = Error::Schema("the layout is not a form document");
+        if let Some(sections) = layout.get("sections") {
+            for section in sections.as_array().ok_or(wrong.clone())? {
+                let section = section.as_object().ok_or(wrong.clone())?;
+                let text = |key: &str| section.get(key).is_none_or(Value::is_string);
+                if !only(section, &["id", "title", "description"])
+                    || !section.get("id").is_some_and(Value::is_string)
+                    || !text("title")
+                    || !text("description")
+                {
+                    return Err(wrong);
+                }
+            }
+        }
+        if let Some(fields) = layout.get("fields") {
+            for (path, hints) in fields.as_object().ok_or(wrong.clone())? {
+                let question = self
+                    .field(path)
+                    .ok_or(Error::Schema("the layout names a question the form lacks"))?;
+                let hints = hints.as_object().ok_or(wrong.clone())?;
+                if !only(hints, &["widget", "placeholder", "unit", "visibleWhen"]) {
+                    return Err(Error::Schema(
+                        "the layout has a hint a flat form does not take",
+                    ));
+                }
+                if ["placeholder", "unit"]
+                    .iter()
+                    .any(|key| hints.get(*key).is_some_and(|hint| !hint.is_string()))
+                {
+                    return Err(wrong);
+                }
+                if let Some(widget) = hints.get("widget") {
+                    let widget = widget.as_str().ok_or(wrong.clone())?;
+                    let fits = if question.secret {
+                        widget == "password"
+                    } else {
+                        PLAIN_WIDGETS.contains(&widget)
+                    };
+                    if !fits {
+                        return Err(Error::Schema(
+                            "a widget that hides, shows or relabels a question the schema says otherwise",
+                        ));
+                    }
+                }
+                if let Some(when) = hints.get("visibleWhen") {
+                    let when = when.as_object().ok_or(wrong.clone())?;
+                    let target = when
+                        .get("field")
+                        .and_then(Value::as_str)
+                        .and_then(|name| self.field(name));
+                    let one_condition = when.contains_key("equals") != when.contains_key("in");
+                    if !only(when, &["field", "equals", "in"])
+                        || !one_condition
+                        || when.get("in").is_some_and(|list| !list.is_array())
+                        || target.is_none_or(|target| target.secret)
+                    {
+                        return Err(Error::Schema(
+                            "a condition that is not on a plain question of the form",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The limits the form was read under.

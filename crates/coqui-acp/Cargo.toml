@@ -21,7 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 # The secret-prompt extension (`coqui_acp::secret`): a value the person types or is shown travels sealed to a key only its receiver holds.
 secret = [
-    "dep:base64", "dep:data-encoding", "dep:hmac", "dep:hpke", "dep:p256", "dep:sha2",
+    "dep:base64", "dep:data-encoding", "dep:hmac", "dep:hpke", "dep:p256", "dep:serde", "dep:sha2",
     "dep:x25519-dalek", "dep:zeroize",
 ]
 
@@ -35,6 +35,7 @@ data-encoding = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 hpke = { workspace = true, optional = true }
 p256 = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 x25519-dalek = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }

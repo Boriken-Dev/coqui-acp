@@ -16,6 +16,7 @@ mod binding;
 mod context;
 mod error;
 mod form;
+mod json;
 mod seal;
 pub mod unprotected;
 mod wire;

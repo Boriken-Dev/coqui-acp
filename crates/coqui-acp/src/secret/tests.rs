@@ -308,7 +308,8 @@ fn forms() -> Value {
             {"name": "plain and secret fields", "schema": schema_text(), "secret": ["password", "token", "pin"], "plain": ["user"]},
             {"name": "a secret marked x-sensitive", "schema": flat(json!({"type": "string", "x-sensitive": true})), "secret": ["f"], "plain": []},
             {"name": "a plain choice", "schema": flat(json!({"type": "string", "oneOf": [{"const": "a", "title": "A"}]})), "secret": [], "plain": ["f"]},
-            {"name": "writeOnly false is plain", "schema": flat(json!({"type": "string", "writeOnly": false})), "secret": [], "plain": ["f"]}
+            {"name": "writeOnly false is plain", "schema": flat(json!({"type": "string", "writeOnly": false})), "secret": [], "plain": ["f"]},
+            {"name": "a secret with the password format", "schema": flat(json!({"type": "string", "writeOnly": true, "format": "password", "maxLength": 40})), "secret": ["f"], "plain": []}
         ],
         "refused": [
             {"name": "not JSON", "schema": "{", "kind": "schema"},
@@ -337,7 +338,62 @@ fn forms() -> Value {
             {"name": "x-sensitive that is not a boolean", "schema": flat(json!({"type": "string", "x-sensitive": 1})), "kind": "schema"},
             {"name": "a password format with no mark", "schema": flat(json!({"type": "string", "format": "password"})), "kind": "schema"},
             {"name": "a password format marked not secret", "schema": flat(json!({"type": "string", "format": "password", "writeOnly": false})), "kind": "schema"},
+            {"name": "a key twice: a plain question then a secret one", "schema": "{\"properties\":{\"a\":{\"type\":\"string\",\"title\":\"Password\"},\"a\":{\"type\":\"string\",\"writeOnly\":true,\"title\":\"PIN\"}}}", "kind": "schema"},
+            {"name": "a key twice inside a question", "schema": "{\"properties\":{\"a\":{\"type\":\"string\",\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a lone surrogate in a name", "schema": "{\"properties\":{\"\\ud800\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a lone surrogate in a title", "schema": "{\"properties\":{\"a\":{\"type\":\"string\",\"title\":\"\\udc00\"}}}", "kind": "schema"},
+            {"name": "a root default", "schema": "{\"default\":{},\"properties\":{\"f\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a root allOf", "schema": "{\"allOf\":[],\"properties\":{\"f\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a root if", "schema": "{\"if\":{},\"properties\":{\"f\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a root dependentSchemas", "schema": "{\"dependentSchemas\":{},\"properties\":{\"f\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a root $defs", "schema": "{\"$defs\":{},\"properties\":{\"f\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a root additionalProperties", "schema": "{\"additionalProperties\":true,\"properties\":{\"f\":{\"type\":\"string\"}}}", "kind": "schema"},
+            {"name": "a secret with $dynamicRef", "schema": flat(json!({"type": "string", "writeOnly": true, "$dynamicRef": "#x"})), "kind": "schema"},
+            {"name": "a secret with dependencies", "schema": flat(json!({"type": "string", "writeOnly": true, "dependencies": {}})), "kind": "schema"},
+            {"name": "a secret with contentSchema", "schema": flat(json!({"type": "string", "writeOnly": true, "contentSchema": {}})), "kind": "schema"},
+            {"name": "a secret with multipleOf", "schema": flat(json!({"type": "integer", "writeOnly": true, "multipleOf": 3})), "kind": "schema"},
+            {"name": "a secret with x-placeholder", "schema": flat(json!({"type": "string", "writeOnly": true, "x-placeholder": "hunter2"})), "kind": "schema"},
+            {"name": "a secret with readOnly", "schema": flat(json!({"type": "string", "writeOnly": true, "readOnly": true})), "kind": "schema"},
+            {"name": "a secret with a format other than password", "schema": flat(json!({"type": "string", "writeOnly": true, "format": "email"})), "kind": "schema"},
             {"name": "an integer bound past 2^53", "schema": flat(json!({"type": "integer", "maximum": 9007199254740992i64})), "kind": "schema"}
+        ]
+    })
+}
+
+fn layouts() -> Value {
+    let layout = |value: Value| value.to_string();
+    json!({
+        "accepted": [
+            {"name": "an empty form document", "schema": schema_text(), "layout": "{}"},
+            {"name": "sections only", "schema": schema_text(), "layout": layout(json!({"sections": [{"id": "", "title": "Login"}, {"id": "more", "description": "x"}]}))},
+            {"name": "a password widget on a secret question", "schema": schema_text(), "layout": layout(json!({"fields": {"password": {"widget": "password", "placeholder": "..."}, "token": {}}}))},
+            {"name": "hints on a plain question", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"widget": "text", "unit": "name", "placeholder": "who"}}}))},
+            {"name": "a condition on a plain question", "schema": schema_text(), "layout": layout(json!({"fields": {"password": {"visibleWhen": {"field": "user", "in": ["ana", "bo"]}}}}))}
+        ],
+        "refused": [
+            {"name": "not JSON", "schema": schema_text(), "layout": "{", "kind": "schema"},
+            {"name": "not an object", "schema": schema_text(), "layout": "[]", "kind": "schema"},
+            {"name": "a key twice", "schema": schema_text(), "layout": "{\"sections\":[],\"sections\":[]}", "kind": "schema"},
+            {"name": "a key twice in a hint", "schema": schema_text(), "layout": "{\"fields\":{\"user\":{\"widget\":\"text\",\"widget\":\"password\"}}}", "kind": "schema"},
+            {"name": "a lone surrogate", "schema": schema_text(), "layout": "{\"sections\":[{\"id\":\"\\ud800\"}]}", "kind": "schema"},
+            {"name": "a key the document does not define", "schema": schema_text(), "layout": "{\"extra\":1}", "kind": "schema"},
+            {"name": "a section with no id", "schema": schema_text(), "layout": "{\"sections\":[{\"title\":\"x\"}]}", "kind": "schema"},
+            {"name": "a section id that is no text", "schema": schema_text(), "layout": "{\"sections\":[{\"id\":1}]}", "kind": "schema"},
+            {"name": "a section with another key", "schema": schema_text(), "layout": "{\"sections\":[{\"id\":\"a\",\"x\":1}]}", "kind": "schema"},
+            {"name": "sections that are no list", "schema": schema_text(), "layout": "{\"sections\":{}}", "kind": "schema"},
+            {"name": "a field the form lacks", "schema": schema_text(), "layout": layout(json!({"fields": {"nothing": {}}})), "kind": "schema"},
+            {"name": "a nested form in a flat form", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"form": {}}}})), "kind": "schema"},
+            {"name": "an unknown hint", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"hidden": true}}})), "kind": "schema"},
+            {"name": "a masking widget on a plain question", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"widget": "password"}}})), "kind": "schema"},
+            {"name": "a plain widget on a secret question", "schema": schema_text(), "layout": layout(json!({"fields": {"password": {"widget": "text"}}})), "kind": "schema"},
+            {"name": "a textarea on a secret question", "schema": schema_text(), "layout": layout(json!({"fields": {"token": {"widget": "textarea"}}})), "kind": "schema"},
+            {"name": "a widget nobody defines on a plain question", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"widget": "secret"}}})), "kind": "schema"},
+            {"name": "a widget that is no text", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"widget": 1}}})), "kind": "schema"},
+            {"name": "a placeholder that is no text", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"placeholder": 1}}})), "kind": "schema"},
+            {"name": "a condition on a secret question's value", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"visibleWhen": {"field": "password", "equals": "x"}}}})), "kind": "schema"},
+            {"name": "a condition on a question the form lacks", "schema": schema_text(), "layout": layout(json!({"fields": {"user": {"visibleWhen": {"field": "nothing", "equals": "x"}}}})), "kind": "schema"},
+            {"name": "a condition with both equals and in", "schema": schema_text(), "layout": layout(json!({"fields": {"password": {"visibleWhen": {"field": "user", "equals": "x", "in": []}}}})), "kind": "schema"},
+            {"name": "a condition with neither", "schema": schema_text(), "layout": layout(json!({"fields": {"password": {"visibleWhen": {"field": "user"}}}})), "kind": "schema"}
         ]
     })
 }
@@ -371,6 +427,27 @@ fn refusals() -> Value {
         {"case": "verify", "name": "a noise proof for another collector", "base": b, "change": {"own_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, "expect": "wrong_audience"},
         {"case": "verify", "name": "a collector with no key agreement of its own", "base": b, "change": {"no_agreement": true}, "expect": "unsupported"},
         {"case": "open", "name": "values untouched are opened", "base": a, "change": {}, "expect": "ok"},
+        {"case": "open", "name": "an answer opened after the receiver's own binding ended and the skew", "base": a, "change": {"open_now": NOW + LIFETIME + 31}, "expect": "expired"},
+        {"case": "open", "name": "an answer opened at the edge of the receiver's binding plus the skew", "base": a, "change": {"open_now": NOW + LIFETIME + 30}, "expect": "ok"},
+        {"case": "open", "name": "a sender whose binding outlasts the receiver's is still late", "base": a, "change": {"authenticated": true, "auth_lifetime": 290, "open_now": NOW + LIFETIME + 31}, "expect": "expired"},
+        {"case": "open", "name": "an authenticated plain value for a secret question", "base": a, "change": {"authenticated": true, "plain": "{\"user\":\"ana\",\"password\":\"x\"}"}, "expect": "field"},
+        {"case": "open", "name": "an authenticated answer with no required plain value", "base": a, "change": {"authenticated": true, "plain": "{}"}, "expect": "field"},
+        {"case": "open", "name": "an authenticated answer with a required secret left out", "base": a, "change": {"authenticated": true, "authenticated_drop": "password"}, "expect": "field"},
+        {"case": "open", "name": "an authenticated plain text that repeats a key", "base": a, "change": {"authenticated": true, "plain": "{\"user\":\"mallory\",\"user\":\"ana\"}"}, "expect": "malformed"},
+        {"case": "open", "name": "an authenticated plain text that is no object", "base": a, "change": {"authenticated": true, "plain": "[]"}, "expect": "malformed"},
+        {"case": "authenticate", "name": "a sender asked to sign a plain value for a secret question", "base": a, "change": {"plain": "{\"user\":\"ana\",\"password\":\"x\"}"}, "expect": "field"},
+        {"case": "authenticate", "name": "a sender asked to sign an answer with a required secret left out", "base": a, "change": {"drop": "password"}, "expect": "field"},
+        {"case": "authenticate", "name": "a sender asked to sign an answer with no required plain value", "base": a, "change": {"plain": "{}"}, "expect": "field"},
+        {"case": "authenticate", "name": "a sender asked to sign plain text that repeats a key", "base": a, "change": {"plain": "{\"user\":\"a\",\"user\":\"b\"}"}, "expect": "malformed"},
+        {"case": "receiver", "name": "a context that is fine", "base": a, "change": {}, "expect": "ok"},
+        {"case": "receiver", "name": "a layout that masks a plain question", "base": a, "change": {"form": "{\"fields\":{\"user\":{\"widget\":\"password\"}}}"}, "expect": "schema"},
+        {"case": "receiver", "name": "a layout that shows a secret question as text", "base": a, "change": {"form": "{\"fields\":{\"password\":{\"widget\":\"text\"}}}"}, "expect": "schema"},
+        {"case": "receiver", "name": "a layout that is no JSON", "base": a, "change": {"form": "{"}, "expect": "schema"},
+        {"case": "receiver", "name": "a request that carries plain values", "base": a, "change": {"values": "{\"user\":\"ana\"}"}, "expect": "malformed"},
+        {"case": "receiver", "name": "a show with no plain values", "base": b, "change": {"values": null}, "expect": "malformed"},
+        {"case": "receiver", "name": "a show whose plain values repeat a key", "base": b, "change": {"values": "{\"user\":\"a\",\"user\":\"b\"}"}, "expect": "malformed"},
+        {"case": "receiver", "name": "a show whose plain values name a secret question", "base": b, "change": {"values": "{\"user\":\"a\",\"password\":\"b\"}"}, "expect": "field"},
+        {"case": "receiver", "name": "a schema that repeats a key", "base": a, "change": {"schema": "{\"properties\":{\"a\":{\"type\":\"string\"},\"a\":{\"type\":\"string\",\"writeOnly\":true}}}"}, "expect": "schema"},
         {"case": "open", "name": "a plain value changed after the answer was authenticated", "base": a, "change": {"plain": "{\"user\":\"mallory\"}"}, "expect": "bad_proof"},
         {"case": "open", "name": "a plain value added after the answer was authenticated", "base": a, "change": {"plain": "{\"user\":\"ana\",\"x\":1}"}, "expect": "bad_proof"},
         {"case": "open", "name": "the plain text written another way", "base": a, "change": {"plain": "{ \"user\": \"ana\" }"}, "expect": "bad_proof"},
@@ -530,9 +607,12 @@ fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
             Sealed::from_value(&field["sealed"]).unwrap(),
         );
     }
+    let plain_used = change["plain"]
+        .as_str()
+        .unwrap_or_else(|| case["plain"].as_str().unwrap());
     let reseal = change.as_object().is_some_and(|map| {
         map.keys()
-            .any(|key| key.starts_with("reseal_") || key == "seal_value")
+            .any(|key| key.starts_with("reseal_") || key == "seal_value" || key == "authenticated")
     });
     let mut auth = super::Binding::from_value(&case["auth"]).unwrap();
     if reseal {
@@ -556,6 +636,7 @@ fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
             .unwrap()
             .iter()
             .map(|f| (f["field"].as_str().unwrap(), f["value"].as_str().unwrap()))
+            .filter(|(name, _)| change["authenticated_drop"].as_str() != Some(name))
         {
             let target = if name == "password" {
                 as_field.unwrap_or(name)
@@ -578,7 +659,10 @@ fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
             );
             sealed.insert(name.to_string(), made);
         }
-        let payload = values_digest(case["plain"].as_str().unwrap(), &sealed);
+        if let Some(name) = change["authenticated_drop"].as_str() {
+            sealed.remove(name);
+        }
+        let payload = values_digest(plain_used, &sealed);
         auth = prover_s
             .bind(
                 &Statement {
@@ -589,7 +673,7 @@ fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
                     key: &own_recipient.key,
                     payload: &payload,
                 },
-                NOW + LIFETIME,
+                NOW + change["auth_lifetime"].as_u64().unwrap_or(LIFETIME),
                 &id_r,
             )
             .unwrap();
@@ -612,11 +696,71 @@ fn open_case(case: &Value, change: &Value) -> Result<(), Error> {
         sealed.remove(name);
     }
     let expected = change["expected_sender"].as_str().map_or(id_s, id_of);
+    receiver
+        .open_values(
+            &verifier_r,
+            &expected,
+            plain_used,
+            &sealed,
+            &auth,
+            change["open_now"].as_u64().unwrap_or(NOW),
+        )
+        .map(|_| ())
+}
+
+/// A receiver made for a context with one thing changed: the context itself is refused, before any binding.
+fn receiver_case(case: &Value, change: &Value) -> Result<(), Error> {
+    let method = method_of(case["method"].as_str().unwrap());
+    let ctx = context_of(case, change);
+    let (prover_r, prover_s) = provers(case);
+    let (private, public) = key_pair(&hex(case["recipient_ikm"].as_str().unwrap()));
+    Receiver::from_key_pair(
+        method,
+        &ctx,
+        &Limits::new(),
+        &prover_r,
+        &prover_s.id(),
+        NOW,
+        DEFAULT_LIFETIME,
+        private,
+        &public,
+    )
+    .map(|_| ())
+}
+
+/// A sender asked to sign an answer the form does not allow.
+fn authenticate_case(case: &Value, change: &Value) -> Result<(), Error> {
+    let method = method_of(case["method"].as_str().unwrap());
+    let ctx = context_of(case, &json!({}));
+    let (prover_r, prover_s) = provers(case);
+    let recipient = Recipient::from_value(&case["recipient"]).unwrap();
+    let tuning = Tuning {
+        trusts: Some(prover_r.id()),
+        ..Tuning::default()
+    };
+    let sender = verifier(
+        case["kind"].as_str().unwrap(),
+        case["sender_private"].as_str().unwrap(),
+        &tuning,
+    );
+    let collector = sender
+        .collector(&prover_r.id(), method, &ctx, &recipient, NOW)
+        .unwrap();
+    let mut sealed = BTreeMap::new();
+    for field in case["fields"].as_array().unwrap() {
+        let name = field["field"].as_str().unwrap();
+        if change["drop"].as_str() != Some(name) {
+            sealed.insert(
+                name.to_string(),
+                Sealed::from_value(&field["sealed"]).unwrap(),
+            );
+        }
+    }
     let plain = change["plain"]
         .as_str()
         .unwrap_or_else(|| case["plain"].as_str().unwrap());
-    receiver
-        .open_values(&verifier_r, &expected, plain, &sealed, &auth, NOW)
+    collector
+        .authenticate(&prover_s, plain, &sealed, NOW, DEFAULT_LIFETIME)
         .map(|_| ())
 }
 
@@ -805,12 +949,31 @@ fn check(doc: &Value) {
         );
     }
 
+    for item in doc["layouts"]["accepted"].as_array().unwrap() {
+        let form = Form::parse_text(item["schema"].as_str().unwrap(), &Limits::new()).unwrap();
+        form.check_layout(item["layout"].as_str().unwrap())
+            .unwrap_or_else(|error| panic!("{}: {error}", item["name"]));
+    }
+    for item in doc["layouts"]["refused"].as_array().unwrap() {
+        let form = Form::parse_text(item["schema"].as_str().unwrap(), &Limits::new()).unwrap();
+        let error = form
+            .check_layout(item["layout"].as_str().unwrap())
+            .expect_err(item["name"].as_str().unwrap());
+        assert_eq!(
+            kind(&error),
+            item["kind"].as_str().unwrap(),
+            "{}",
+            item["name"]
+        );
+    }
+
     for item in doc["refusals"].as_array().unwrap() {
         let case = find(&doc["bindings"], item["base"].as_str().unwrap());
-        let result = if item["case"] == "verify" {
-            verify_case(case, &item["change"]).map(|_| ())
-        } else {
-            open_case(case, &item["change"])
+        let result = match item["case"].as_str().unwrap() {
+            "verify" => verify_case(case, &item["change"]).map(|_| ()),
+            "open" => open_case(case, &item["change"]),
+            "receiver" => receiver_case(case, &item["change"]),
+            _ => authenticate_case(case, &item["change"]),
         };
         let name = item["name"].as_str().unwrap();
         match (item["expect"].as_str().unwrap(), result) {
@@ -828,7 +991,23 @@ fn generate() -> Map<String, Value> {
     out.insert("grammar".into(), grammar());
     out.insert("bindings".into(), Value::Array(base_cases()));
     out.insert("forms".into(), forms());
+    out.insert("layouts".into(), layouts());
     out.insert("refusals".into(), refusals());
+    // A lone surrogate cannot be written in JSON or held by a Rust string: the Rust tests only check the escape is refused where a
+    // text is read (forms.refused, layouts.refused). Clients whose strings can hold one must refuse it in every hashed part.
+    out.insert(
+        "surrogates".into(),
+        json!([
+            {"part": "session_id", "units": "d800", "expect": "malformed"},
+            {"part": "request_id", "units": "dc00", "expect": "malformed"},
+            {"part": "message", "units": "d800", "expect": "malformed"},
+            {"part": "schema", "units": "d83d", "expect": "malformed"},
+            {"part": "form", "units": "dfff", "expect": "malformed"},
+            {"part": "values", "units": "d800", "expect": "malformed"},
+            {"part": "plain", "units": "d800", "expect": "malformed"},
+            {"part": "field_name", "units": "d800", "expect": "schema"}
+        ]),
+    );
     out
 }
 
@@ -862,4 +1041,50 @@ fn vectors_are_current() {
             "{key} differs from what the code makes; rerun with COQUI_ACP_WRITE_VECTORS=1"
         );
     }
+}
+
+/// A recipient key of low order, bound as a receiver would, is refused when a collector seals to it.
+#[test]
+fn a_recipient_key_of_low_order_is_a_seal_refusal() {
+    let case = &base_cases()[0];
+    let (prover_r, prover_s) = provers(case);
+    let ctx = context_of(case, &json!({}));
+    let method = method_of(case["method"].as_str().unwrap());
+    let digest = ctx.digest(method);
+    let key = [0u8; 32];
+    let binding = prover_r
+        .bind(
+            &Statement {
+                kind: Kind::Key,
+                method,
+                request_id: &ctx.request_id,
+                digest: &digest,
+                key: &key,
+                payload: &[],
+            },
+            NOW + LIFETIME,
+            &prover_s.id(),
+        )
+        .unwrap();
+    let tuning = Tuning {
+        trusts: Some(prover_r.id()),
+        ..Tuning::default()
+    };
+    let collector = verifier(
+        case["kind"].as_str().unwrap(),
+        case["sender_private"].as_str().unwrap(),
+        &tuning,
+    )
+    .collector(
+        &prover_r.id(),
+        method,
+        &ctx,
+        &Recipient { key, binding },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        collector.seal("password", "correct horse").unwrap_err(),
+        Error::Seal
+    );
 }

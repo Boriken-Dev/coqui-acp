@@ -576,7 +576,6 @@ fn a_collector_seals_only_secret_fields_that_fit() {
 #[test]
 fn a_required_secret_left_out_or_a_plain_value_for_a_secret_is_refused() {
     let pair = pair();
-    let host_side = verifier_for(&pair.host, &pair.frontend);
     for (values, plain) in [
         (vec![], plain_user()),
         (
@@ -585,7 +584,7 @@ fn a_required_secret_left_out_or_a_plain_value_for_a_secret_is_refused() {
         ),
         (vec![("password", "correct horse")], "{}".to_string()),
     ] {
-        let (receiver, params) = request(&pair, "r1");
+        let (_, params) = request(&pair, "r1");
         let frontend_side = verifier_for(&pair.frontend, &pair.host);
         let collector = frontend_side
             .collector(
@@ -600,11 +599,9 @@ fn a_required_secret_left_out_or_a_plain_value_for_a_secret_is_refused() {
             .iter()
             .map(|(name, value)| ((*name).to_string(), collector.seal(name, value).unwrap()))
             .collect();
-        let auth = collector
-            .authenticate(&pair.frontend, &plain, &sealed, NOW, DEFAULT_LIFETIME)
-            .unwrap();
+        // The sender refuses to sign such an answer; the receiver's own checks are tried by the vectors, with a sender that signs it.
         assert!(matches!(
-            receiver.open_values(&host_side, &pair.frontend.id(), &plain, &sealed, &auth, NOW),
+            collector.authenticate(&pair.frontend, &plain, &sealed, NOW, DEFAULT_LIFETIME),
             Err(Error::Field(_))
         ));
     }
