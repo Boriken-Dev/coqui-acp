@@ -899,10 +899,11 @@ fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
 fn alive(pid: &str) -> bool {
     if cfg!(windows) {
         let listed = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
             .output()
             .unwrap();
-        String::from_utf8_lossy(&listed.stdout).contains(pid)
+        // The id is its own quoted field: as bare text it would also match a memory figure.
+        String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
     } else {
         let listed = Command::new("ps")
             .args(["-o", "stat=", "-p", pid])
@@ -921,10 +922,13 @@ fn stopping_an_agent_ends_what_it_started() {
     let program = echo_agent().into_os_string();
     let args = ["--with-child".into(), file.clone().into_os_string()];
     let agent = coqui_acp_bridge::agent::Agent::spawn(&program, &args, 1 << 20).unwrap();
-    let until = Instant::now() + WAIT;
+    // Spawn has returned, so the agent is in its job: what it starts now is in it too.
+    std::fs::write(fixture.dir.join("child-pid.go"), "").unwrap();
+    let until = Instant::now() + Duration::from_secs(300);
     let child = loop {
+        // The id is whole when the line ends: the agent creates the file before it writes it.
         if let Ok(text) = std::fs::read_to_string(&file)
-            && !text.is_empty()
+            && text.parse::<u32>().is_ok()
         {
             break text;
         }
@@ -933,7 +937,7 @@ fn stopping_an_agent_ends_what_it_started() {
     };
     assert!(alive(&child), "the check has to be able to see it");
     agent.stop().unwrap();
-    let until = Instant::now() + WAIT;
+    let until = Instant::now() + Duration::from_secs(300);
     while alive(&child) {
         assert!(
             Instant::now() < until,

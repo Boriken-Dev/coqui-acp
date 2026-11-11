@@ -17,6 +17,13 @@ fn main() {
         .skip_while(|arg| arg != "--with-child")
         .nth(1)
     {
+        // The agent is in its job object only once the bridge has put it there, and a process it starts before that is outside
+        // the job; the test says when by creating `<path>.go`.
+        let go = format!("{path}.go");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while !std::path::Path::new(&go).exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--deaf")
             .spawn()
