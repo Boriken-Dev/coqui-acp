@@ -19,6 +19,7 @@ use coqui_acp_api::{
 use serde_json::json;
 
 use super::{Credential, Endpoint, HarnessDef, KindDef, Setting};
+use crate::cli::address_in;
 use crate::login::reason;
 use crate::process::{Exit, Launch};
 use crate::provider::schema;
@@ -32,6 +33,9 @@ pub const API_KEY: &str = "xai-api-key";
 pub const OIDC: &str = "grok-oidc";
 
 const AUTH_FILE: &str = "auth.json";
+
+/// The hosts Grok's sign-in pages are on; an address a command prints elsewhere is not shown to the person.
+const SIGN_IN_HOSTS: &[&str] = &["accounts.x.ai", "auth.x.ai"];
 
 const URL_SETTINGS: &[Setting] = &[
     Setting {
@@ -262,10 +266,9 @@ impl Seen {
     fn line(&mut self, ctx: &Ctx<'_>, line: &str, device: bool) -> Result<(), ProviderError> {
         let text = line.trim();
         if self.url.is_none()
-            && (text.starts_with("https://") || text.starts_with("http://"))
-            && let Some(url) = text.split_whitespace().next()
+            && let Some(url) = address_in(text, SIGN_IN_HOSTS)
         {
-            self.url = Some(url.to_string());
+            self.url = Some(url);
         }
         if text.starts_with("Confirm this code") {
             self.after_confirm = true;
