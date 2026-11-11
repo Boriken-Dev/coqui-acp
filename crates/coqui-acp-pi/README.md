@@ -86,7 +86,7 @@ coqui-acp-pi --mode accept_edits --effort low
 
 | Flag | Default | What |
 | --- | --- | --- |
-| `--executable` (`COQUI_ACP_PI_EXECUTABLE`) | `pi` | The Pi program; on Windows npm's shim is `pi.cmd` |
+| `--executable` (`COQUI_ACP_PI_EXECUTABLE`) | `pi` | The Pi program; on Windows a bare `pi` is found in `PATH` as `pi.exe`, then `pi.cmd` (npm's shim) |
 | `--model`, `--effort` | Pi's | What every session starts with (`provider/id`, a thinking level) |
 | `--mode` | `manual` | The mode sessions start in and the loosest a client may choose: `manual`, `accept_edits` or `plan` |
 | `--allow-bypass` | off | Offers the Bypass mode: never ask |
@@ -125,6 +125,13 @@ own system message left out. They were recorded against a loopback stand-in for 
 login was used. `gate_live.stdout` is this crate's permission gate running in Pi itself, answered `allow`, `deny`, `plan`,
 cancelled and with a word it does not know. `permission_gate.stdout` is Pi asking through an earlier, simpler extension, its
 questions rewritten to the gate's.
+
+To re-record them: install pi (`npm install --prefix <dir> --ignore-scripts @earendil-works/pi-coding-agent@1.5.2`, Node 22.19 or later), run
+`python tools/record_harnesses/pi/record_pi.py <scratch> <dir>/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js <out>`
+(it starts `openai_chat_model.py`, a loopback stand-in for the model API, and runs pi in a throwaway agent directory with no
+credential), then `python tools/record_harnesses/pi/extract_fixtures.py <out> crates/coqui-acp-pi/tests/fixtures/pi-1.5.2`, which drops
+Pi's own system message and rewrites `permission_gate` to the gate's titles. `gate_probe.py` in the same directory runs the gate in Pi
+and writes `gate_live.stdout`.
 
 ## License
 

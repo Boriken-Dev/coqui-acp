@@ -15,7 +15,7 @@ Pi's side is `pi --mode rpc`: JSON lines on standard input and output, commands 
 ```rust
 #[non_exhaustive]                                       // Clone, PartialEq; Debug shows env names only
 pub struct PiLaunch {
-    pub executable: OsString,                  // "pi"; on Windows npm's shim is "pi.cmd"
+    pub executable: OsString,                  // "pi"; on Windows a bare "pi" is looked for in PATH as pi.exe, then pi.cmd (npm's shim); see program()
     pub cwd: PathBuf,                          // the process's working directory
     pub session: SessionStart,                 // New | Resume(id) | Load(id)
     pub model: Option<String>,                 // "provider/id" (--model)
@@ -35,6 +35,7 @@ pub struct PiLaunch {
 }
 pub fn PiLaunch::new(cwd: impl Into<PathBuf>) -> PiLaunch
 pub fn start_mode(&self) -> Mode                // mode, else Manual
+pub fn program(&self) -> OsString               // executable; on Windows a bare name resolved to pi.exe, else pi.cmd, in the launch's PATH or the process's
 pub fn launch(&self, extension: Option<&Path>, prompt: Option<&Path>) -> Launch   // pi --mode rpc [-e ext] [--session id] [--model m] [--thinking l] [--append-system-prompt file] extra
 #[non_exhaustive] pub enum SessionStart { New, Resume(String), Load(String) }
 pub fn valid_session_id(id: &str) -> bool       // letters, digits and dashes, 1 to 128
@@ -175,7 +176,7 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 - `describe`: title `Pi`, ACP versions 1 and 2, what `PiAgent` takes and `session/resume`, `resumes_wider`, usage none, and the cache hint: `cache_lifetime` says `ignored`, since this provider passes Pi no setting for it.
 - `refusal`, `start`: holds no requirement; each is `GUATIAO_ERR_UNSUPPORTED` with its name (Pi has no sandbox, no read-only mode and loads the person's extensions, skills and MCP servers). `start` on a spawner whose programs run elsewhere (`describe().local` false) is `UNSUPPORTED`: the gate is a file on this machine.
 - `accounts`: `harness-login` and the two kinds that were the stdio provider's. `pi-api-key` (credential `api_key`; setting `variable`, one of Pi's provider key variables only, so a setting cannot name `PATH`): the variable named carries the key and `PI_CODING_AGENT_DIR` is the `state_dir`, which holds no `auth.json` or `models.json` to override the key or its `baseUrl`. `pi-oauth` (credential `auth_json`, the text of `auth.json`; rotating): the file is placed in `state_dir`, watched and reported as in `coqui_acp_harness::account` (a changed file is `renewed`, a missing or blank one `lost`); Pi refreshes it itself under a lock. A start on any kind but `harness-login` removes every credential, endpoint and cloud-identity variable Pi reads (`accounts::DEF.variables`, also the catalog's `credential_variables`) from what it starts, and from the request's environment, names compared without case on Windows. Not measured: the variables Pi's dependencies add for providers newer than 1.5.0.
-- `models`: starts `pi --mode rpc --no-session` through the spawner, lists `get_available_models` and ends it (no session, no turn); no model with a credential is `unknown`. `usage`: `unsupported`, after looking at the account's file so a renewal is told.
+- `models`: starts `pi --mode rpc --no-session` through the spawner, lists `get_available_models` and ends it (no session, no turn); no model with a credential is `unknown`. `is_default` marks the model Pi would use, and only that model has `efforts` (its `get_available_thinking_levels`) and `default_effort` (Pi's starting level): Pi lists levels for the model in use only, so the others have none and `resolved` and `version` are unset. `usage`: `unsupported`, after looking at the account's file so a renewal is told.
 - `login`: `GUATIAO_ERR_UNSUPPORTED`, since Pi signs in only inside its terminal (`/login`, `pi auth login`); `renew`: `UNSUPPORTED` for both kinds after the grant is read (a key is not renewed; Pi refreshes a sign-in itself). `import_session`, `export_session`: `GUATIAO_ERR_UNSUPPORTED` with a reason (after checking the account): Pi keeps its sessions as files in its own agent directory, which the spawner's private files do not reach. `session_record`, `non_defaults`: the kind's defaults.
 
 ## Errors
@@ -202,4 +203,5 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 - A tool whose result holds an image shows its text only: the protocol's tool content has no image.
 - An empty message with an image is taken by Pi 1.5.2.
 - Project-local Pi settings are not read in RPC mode unless Pi is given `--approve`; pass it in `PiLaunch::extra_args` if wanted.
+- On Windows a `.cmd` is started through `cmd.exe`: std escapes its arguments and refuses one it cannot escape safely (Rust 1.77.2 and later). No text of the person is an argument, so none is refused.
 - Everything Pi writes is the model's or Pi's: untrusted.
