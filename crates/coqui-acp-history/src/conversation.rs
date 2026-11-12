@@ -799,7 +799,7 @@ pub fn call_note(call: &Call) -> String {
 /// codec runs on a time it read from a harness's file before it uses it.
 #[must_use]
 pub fn valid_time(at: &str) -> bool {
-    Line::text_prompt("x").at(at).to_json().is_ok()
+    crate::shape::is_timestamp(at)
 }
 
 /// The error a codec reports for a history it cannot write from.

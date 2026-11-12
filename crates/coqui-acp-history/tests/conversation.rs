@@ -286,3 +286,13 @@ impl BodyUpdate for Line {
         }
     }
 }
+
+#[test]
+fn a_time_is_valid_only_when_the_format_reads_it() {
+    use coqui_acp_history::conversation::valid_time;
+    assert!(valid_time("2026-11-12T10:00:00Z"));
+    assert!(valid_time("2026-11-12T10:00:00.250+02:00"));
+    assert!(!valid_time("not a time"));
+    assert!(!valid_time("2026-13-12T10:00:00Z"));
+    assert!(!valid_time(""));
+}
