@@ -161,7 +161,9 @@ fn option_tokens(text: &str) -> Vec<String> {
 /// Whether a module named in `NODE_OPTIONS` is a file written in full. A bare name is looked up from the working directory
 /// (`node_modules` of the project), which would run the project's code in Pi.
 fn written_in_full(module: &str) -> bool {
-    let module = module.trim_matches('"');
+    if module.contains('"') {
+        return false;
+    }
     let bytes = module.as_bytes();
     module.starts_with(['/', '\\'])
         || (bytes.len() >= 3
@@ -185,6 +187,20 @@ fn trusted_node_options(options: &str) -> String {
     let mut at = 0;
     while at < tokens.len() {
         let token = &tokens[at];
+        // Node takes the quotes out of a token: `--req"uire"` is `--require`, and `"evil"` is `evil`. What can be read that way
+        // is not trusted; a flag written with a quote takes its value with it.
+        let plain = token.replace('"', "");
+        let flag = plain
+            .split_once('=')
+            .map_or(plain.as_str(), |(flag, _)| flag);
+        if plain != *token && LOADING.iter().any(|loading| flag.starts_with(loading)) {
+            at += if LOADING.contains(&plain.as_str()) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
         if LOADING.contains(&token.as_str()) {
             if let Some(module) = tokens.get(at + 1)
                 && written_in_full(module)
@@ -427,8 +443,14 @@ impl PiLaunch {
         let keep_out: Vec<String> = {
             let mut dirs = self.roots();
             dirs.push(self.cwd.clone());
+            // A relative directory (the host's own, `.`) would be read inside the directory Pi works in.
             dirs.iter()
-                .map(|dir| dir.to_string_lossy().into_owned())
+                .map(|dir| {
+                    std::path::absolute(dir)
+                        .unwrap_or_else(|_| dir.clone())
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .collect()
         };
         launch.env.insert(

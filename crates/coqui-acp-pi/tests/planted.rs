@@ -178,3 +178,58 @@ fn cmd_is_not_given_a_command_that_names_a_file_of_the_project() {
         );
     }
 }
+
+/// What cross-spawn makes of a file with a `#!` line it found is `node <file>`: the file can be anywhere under the project,
+/// not only in the working directory, when it was named by its path.
+#[test]
+fn a_script_with_a_shebang_line_deep_in_the_project_is_not_handed_to_an_interpreter() {
+    let Some(node_dir) = std::env::var_os("COQUI_ACP_PI_REAL_PATH") else {
+        eprintln!("skipped: no Node named (COQUI_ACP_PI_REAL_PATH)");
+        return;
+    };
+    let scratch = Scratch::new("deep-shebang");
+    let (project, gates) = (scratch.dir("project"), scratch.dir("gates"));
+    let tools = project.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let marker = scratch.0.join("RAN");
+    std::fs::write(
+        tools.join("npm.cmd"),
+        format!(
+            "#!/usr/bin/env node\nrequire('fs').writeFileSync({:?}, 'x');\n",
+            marker.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let gate = Gate::write(Some(&gates), None).expect("written");
+    let probe = scratch.0.join("probe.cjs");
+    std::fs::write(
+        &probe,
+        "require('child_process').spawnSync(process.argv[2], [process.argv[3]]);\n",
+    )
+    .unwrap();
+    let node = Path::new(&node_dir).join("node.exe");
+    let run = |guarded: bool| {
+        let _ = std::fs::remove_file(&marker);
+        let mut command = std::process::Command::new(&node);
+        if guarded {
+            command.arg("--require").arg(gate.guard());
+        }
+        command
+            .arg(&probe)
+            .arg(&node)
+            .arg(tools.join("npm.cmd"))
+            .current_dir(&scratch.0)
+            .env(
+                "COQUI_ACP_PI_KEEP_OUT",
+                serde_json::json!([project.to_string_lossy()]).to_string(),
+            )
+            .output()
+            .expect("node runs");
+        marker.exists()
+    };
+    assert!(
+        run(false),
+        "node no longer runs the script the control starts"
+    );
+    assert!(!run(true), "the project's script was handed to node");
+}

@@ -132,11 +132,10 @@ function ofTheProject(candidate, cwds) {
   return cwds.some((cwd) => fold(path.dirname(path.resolve(cwd, candidate))) === fold(path.resolve(cwd)));
 }
 
-// Whether `candidate` is a file with a `#!` line directly in a working directory: what cross-spawn found there and hands to
-// the interpreter its first line names.
+// Whether `candidate` is a file of the project with a `#!` line: what cross-spawn found and hands to the interpreter its
+// first line names.
 function planted(candidate, cwds) {
-  if (typeof candidate !== 'string' || !written(candidate)) return false;
-  if (!cwds.some((cwd) => fold(path.dirname(path.resolve(cwd, candidate))) === fold(path.resolve(cwd)))) return false;
+  if (!ofTheProject(candidate, cwds)) return false;
   try {
     const fd = fs.openSync(candidate, 'r');
     const head = Buffer.alloc(2);

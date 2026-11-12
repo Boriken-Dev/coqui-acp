@@ -427,3 +427,55 @@ fn a_working_directory_over_a_protected_place_is_refused_by_the_persons_list() {
     let allowed = Some(vec!["~/.claude".to_string(), "!~/.claude".to_string()]);
     assert!(launch_in(&home, allowed).credential_root().is_none());
 }
+
+/// The host's directory is written in full before it is kept out: a relative one would be taken inside Pi's own directory.
+#[test]
+fn a_relative_working_directory_is_kept_out_in_full() {
+    let mut launch = PiLaunch::new(".");
+    launch.executable = support::fake_program().into();
+    let guard = std::env::temp_dir().join("guard.cjs");
+    let made = launch
+        .launch_guarded(None, None, Some(&guard))
+        .expect("a command");
+    let keep: Vec<String> = serde_json::from_str(
+        &made
+            .env
+            .get(std::ffi::OsStr::new("COQUI_ACP_PI_KEEP_OUT"))
+            .expect("the directories")
+            .to_string_lossy(),
+    )
+    .unwrap();
+    let here = std::path::absolute(".").unwrap();
+    assert!(
+        keep.iter()
+            .all(|dir| std::path::Path::new(dir).is_absolute()),
+        "{keep:?}"
+    );
+    assert!(
+        keep.iter().any(|dir| std::path::Path::new(dir) == here),
+        "{keep:?}"
+    );
+}
+
+#[test]
+fn a_loading_option_with_a_quote_in_it_is_dropped() {
+    let scratch = Scratch::new("node-quotes");
+    let (cwd, home) = (scratch.dir("work"), scratch.dir("home"));
+    let mut launch = launching(&cwd, &home);
+    launch.env.insert(
+        "NODE_OPTIONS".into(),
+        "--req\"uire\" evil --require \"evil2\" -r\"evil3\" --import=\"evil4\" --max-old-space-size=64".into(),
+    );
+    let guard = scratch.dir("gates").join("guard.cjs");
+    let made = launch
+        .launch_guarded(None, None, Some(&guard))
+        .expect("a command");
+    let options = made
+        .env
+        .get(std::ffi::OsStr::new("NODE_OPTIONS"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(!options.contains("evil"), "{options}");
+    assert!(options.ends_with("--max-old-space-size=64"), "{options}");
+}
