@@ -609,3 +609,87 @@ fn a_permission_asked_twice_for_one_call_is_recorded_once_and_answered_once() {
     assert_eq!(bodies(&doc), ["prompt", "request", "answer", "end"]);
     doc.check().unwrap();
 }
+
+#[test]
+fn a_recording_at_its_byte_limit_with_times_and_a_late_header_reads_back() {
+    let limit = 20_000;
+    let mut rec = recorder().max_total_bytes(limit);
+    open(&mut rec, 1);
+    let at = "2026-11-12T10:00:00.123456+02:00";
+    rec.observe_at(
+        Direction::Sent,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+            "params": {"sessionId": SESSION, "prompt": [{"type": "text", "text": "x"}]}}),
+        Some(at),
+    );
+    for n in 0..400 {
+        rec.observe_at(
+            Direction::Received,
+            &json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": SESSION,
+                "update": chunk("agent_message_chunk", &n.to_string())}}),
+            Some(at),
+        );
+    }
+    // A late, maximal header.
+    rec.observe_at(
+        Direction::Received,
+        &json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": SESSION,
+            "update": {"sessionUpdate": "current_mode_update", "currentModeId": "m".repeat(256)}}}),
+        Some(at),
+    );
+    assert!(rec.truncated());
+    let doc = rec.finish().unwrap();
+    let bytes = doc.to_vec().unwrap();
+    assert!(
+        bytes.len() as u64 <= limit,
+        "{} bytes over {limit}",
+        bytes.len()
+    );
+    Document::from_slice(&bytes).expect("it reads back");
+}
+
+#[test]
+fn a_failed_resume_does_not_make_its_session_the_one_followed() {
+    let mut rec = recorder();
+    sent(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "session/resume",
+            "params": {"sessionId": "gone", "cwd": "/w", "mcpServers": []}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "no such session"}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "gone", "update": chunk("agent_message_chunk", "ghost")}}),
+    );
+    sent(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/w", "mcpServers": []}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": SESSION}}),
+    );
+    update(&mut rec, chunk("agent_message_chunk", "real"));
+    let doc = rec.finish().unwrap();
+    assert_eq!(bodies(&doc), ["update"]);
+    assert_eq!(doc.header.origin.session_id.as_deref(), Some(SESSION));
+}
+
+#[test]
+fn a_resume_that_succeeds_is_followed_from_its_answer() {
+    let mut rec = recorder();
+    sent(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "session/resume",
+            "params": {"sessionId": SESSION, "cwd": "/w", "mcpServers": []}}),
+    );
+    received(&mut rec, json!({"jsonrpc": "2.0", "id": 1, "result": {}}));
+    update(&mut rec, chunk("agent_message_chunk", "back"));
+    let doc = rec.finish().unwrap();
+    assert_eq!(bodies(&doc), ["update"]);
+    assert_eq!(doc.header.origin.session_id.as_deref(), Some(SESSION));
+}

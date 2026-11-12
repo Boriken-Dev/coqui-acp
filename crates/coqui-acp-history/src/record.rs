@@ -48,7 +48,12 @@ pub struct SessionRecorder {
     session: Option<String>,
     /// Requests the client sent that are not answered, by request id.
     initializing: BTreeSet<String>,
-    opening: BTreeMap<String, Option<String>>,
+    /// Opens not yet answered, by request id: the `cwd` asked for and, for a load or resume, the session.
+    opening: BTreeMap<String, (Option<String>, Option<String>)>,
+    /// What the header takes at most, in bytes, so that it cannot outgrow its share of the byte limit.
+    header_cap: u64,
+    /// Bytes the time of the message being observed adds to a line.
+    at_extra: u64,
     modes: BTreeMap<String, String>,
     /// The prompt whose answer ends the open turn.
     prompt: Option<String>,
@@ -65,8 +70,14 @@ impl SessionRecorder {
     /// names.
     #[must_use]
     pub fn new(id: impl Into<String>, origin: Origin) -> Self {
+        let header = Header::new(id, origin);
+        // A header holds a few fields the agent chooses, each bounded by the format: 12 KiB covers them
+        // all as written, escapes included.
+        let header_cap = header.to_line().map_or(0, |line| line.len() as u64 + 1) + 12 * 1024;
         Self {
-            header: Header::new(id, origin),
+            header,
+            header_cap,
+            at_extra: 0,
             recorder: Recorder::new(),
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             max_lines: DEFAULT_MAX_LINES,
@@ -142,9 +153,13 @@ impl SessionRecorder {
             return;
         };
         let at = at.filter(|at| valid_time(at)).map(str::to_owned);
-        if self.header.created_at.is_none() {
-            self.header.created_at.clone_from(&at);
+        if self.header.created_at.is_none()
+            && let Some(first) = at.clone()
+        {
+            self.header_set(|header| header.created_at = Some(first));
         }
+        // `,"at":".."` on every line that has a time.
+        self.at_extra = at.as_ref().map_or(0, |at| at.len() as u64 + 7);
         let stamp = Stamp::at(at);
         let id = object
             .get("id")
@@ -199,14 +214,23 @@ impl SessionRecorder {
     fn header_set(&mut self, apply: impl FnOnce(&mut Header)) -> bool {
         let mut candidate = self.header.clone();
         apply(&mut candidate);
+        let cap = self.header_cap();
         let accepted = candidate.to_line().is_ok_and(|line| {
-            strict::parse(&line, 1, &Bounds::default())
-                .is_ok_and(|value| Header::from_value(value).is_ok())
+            (line.len() as u64) < cap
+                && strict::parse(&line, 1, &Bounds::default())
+                    .is_ok_and(|value| Header::from_value(value).is_ok())
         });
         if accepted {
             self.header = candidate;
         }
         accepted
+    }
+
+    /// The share of the byte limit the header may take: its room to grow, but never more than a
+    /// quarter of the limit (its first size at least).
+    fn header_cap(&self) -> u64 {
+        let first = self.header_cap.saturating_sub(12 * 1024);
+        self.header_cap.min(self.max_total_bytes / 4).max(first)
     }
 
     /// Whether another line fits; counts the one it refuses.
@@ -230,19 +254,15 @@ impl SessionRecorder {
             let readable = (json.len() as u64) <= self.max_line_bytes
                 && strict::parse(&json, 2, &Bounds::default())
                     .is_ok_and(|value| Line::from_value(value, 2).is_ok());
-            readable.then_some(json.len() as u64 + 1)
+            let json_len = json.len() as u64 + self.at_extra;
+            (readable && json_len <= self.max_line_bytes).then_some(json_len + 1)
         });
         let Some(size) = size else {
             self.skipped += 1;
             return false;
         };
-        let header = self
-            .header
-            .to_line()
-            .map_or(0, |line| line.len() as u64 + 1);
-        // Room for the header to grow with a later mode or model.
-        let slack = (self.max_total_bytes / 4).min(4096);
-        if header + slack + self.bytes + size > self.max_total_bytes {
+        // The header has its share, whatever the agent later puts in it.
+        if self.header_cap() + self.bytes + size > self.max_total_bytes {
             self.truncated = true;
             return false;
         }
@@ -257,14 +277,16 @@ impl SessionRecorder {
             }
             ("session/new" | "session/fork", Some(id)) => {
                 let cwd = params.get("cwd").and_then(Value::as_str).map(str::to_owned);
-                self.opening.insert(id, cwd);
+                self.opening.insert(id, (cwd, None));
             }
             ("session/load" | "session/resume", Some(id)) => {
-                if let Some(session) = params.get("sessionId").and_then(Value::as_str) {
-                    self.adopt(session);
-                }
+                // Followed from the answer: a refused open names no session.
+                let session = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 let cwd = params.get("cwd").and_then(Value::as_str).map(str::to_owned);
-                self.opening.insert(id, cwd);
+                self.opening.insert(id, (cwd, session));
             }
             ("session/set_mode", Some(id)) => {
                 if self.belongs(params)
@@ -386,10 +408,19 @@ impl SessionRecorder {
             }
             return;
         }
-        if let Some(cwd) = self.opening.remove(id) {
+        if let Some((cwd, asked)) = self.opening.remove(id) {
             if let Some(result) = result {
-                if let Some(session) = result.get("sessionId").and_then(Value::as_str) {
+                let opened = result
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or(asked);
+                if let Some(session) = &opened {
                     self.adopt(session);
+                }
+                // Only the session followed gives the header its mode, model and directory.
+                if opened.is_none() || self.session != opened {
+                    return;
                 }
                 if let Some(mode) = result
                     .pointer("/modes/currentModeId")
