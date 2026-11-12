@@ -25,7 +25,7 @@ use coqui_acp_api::{
     UsageQuery, UsageReport, WorkingRoots,
 };
 use coqui_acp_history::replay::{Replay, ReplaySettings};
-use coqui_acp_history::{Document, HistoryError};
+use coqui_acp_history::{Document, HistoryError, RedactionSettings, Redactor};
 
 use std::ffi::OsString;
 
@@ -96,6 +96,11 @@ pub struct StdioSettings {
     /// The most bytes of one message, tool input or tool output in a replay; one over it is cut and reported.
     #[map(default = 4096)]
     pub replay_max_item_bytes: u64,
+    /// Regular expressions whose matches are removed from the history before it is replayed (`[redacted]` in their place).
+    /// A replay carries tool output and messages verbatim, so a secret a tool once printed would go to the agent's
+    /// model: list the patterns of the secrets your sessions can hold.
+    #[map(default)]
+    pub replay_redact_patterns: Vec<String>,
 }
 
 impl StdioSettings {
@@ -112,6 +117,7 @@ impl StdioSettings {
             max_message_bytes: 64 * 1024 * 1024,
             replay_max_bytes: 0,
             replay_max_item_bytes: 4096,
+            replay_redact_patterns: Vec::new(),
         }
     }
 }
@@ -395,13 +401,31 @@ impl AcpHarness for StdioProvider {
             let mut settings = ReplaySettings::default();
             settings.max_bytes = self.settings.replay_max_bytes;
             settings.max_item_bytes = self.settings.replay_max_item_bytes;
-            Some(Replay::of(&document, &settings))
+            if self.settings.replay_redact_patterns.is_empty() {
+                Some(Replay::of(&document, &settings))
+            } else {
+                let mut redaction = RedactionSettings::default();
+                redaction
+                    .patterns
+                    .clone_from(&self.settings.replay_redact_patterns);
+                let mut redactor = Redactor::try_new(&redaction).map_err(|_| {
+                    bad("a pattern to redact from a replay is not a usable expression")
+                })?;
+                let redacted =
+                    Replay::of_redacted(&document, &settings, &mut redactor).map_err(|_| {
+                        bad("the history cannot be redacted into one this provider can read")
+                    })?;
+                Some(redacted)
+            }
         };
         let context = replay.as_ref().and_then(Replay::block);
         self.replays
             .add(&session.session_id, context)
             .map_err(|refusal| match refusal {
                 replay::Refusal::Named => bad("the id already names an imported session"),
+                replay::Refusal::Live => bad(
+                    "the id names a session the agent holds: import only at a UUID the host minted",
+                ),
                 replay::Refusal::Full => ProviderError::new(
                     Status::GUATIAO_ERR_BUSY,
                     "too many imported sessions wait to be opened",

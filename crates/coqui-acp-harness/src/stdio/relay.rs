@@ -161,10 +161,25 @@ impl Shared {
         let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
             return Verdict::Reply(error_reply(&Value::Null, -32700, "parse error"));
         };
-        if value.is_object() {
+        let opened = if value.is_object() {
             let mut mapping = self.mapping.lock().unwrap_or_else(PoisonError::into_inner);
-            mapping.outbound(&self.replays, &mut value);
+            mapping.outbound(&self.replays, &mut value)
+        } else {
+            None
+        };
+        let verdict = self.judge(value);
+        // An open the checks refused never reaches the agent: the import is not used up by it.
+        if let Some(request) = opened
+            && !matches!(verdict, Verdict::Forward { .. })
+        {
+            let mut mapping = self.mapping.lock().unwrap_or_else(PoisonError::into_inner);
+            mapping.undo(&self.replays, &request);
         }
+        verdict
+    }
+
+    /// What to do with a message of the host, after an import's open was rewritten.
+    fn judge(&self, value: Value) -> Verdict {
         let Some(object) = value.as_object() else {
             return Verdict::Reply(error_reply(&Value::Null, -32600, "invalid request"));
         };
