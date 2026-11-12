@@ -15,7 +15,7 @@ sealing of each value, are [`coqui_acp::secret`](https://docs.rs/coqui-acp); thi
 
 - `secret_request`: asks the person for a form; the agent gets the plain answers and one handle per secret field.
 - `secret_use`: writes a secret to a file under the session's roots, or runs a command with it in an environment variable, after the
-  person approves that exact file or command. Full access and Bypass do not approve it.
+  session's permission mode decides: Bypass approves it, any other mode asks the person (allow once or for the session). A session allowance and Bypass both trust the contents of the folder the command runs in.
 - `secret_show`: shows the person a value (from a handle, a file, an environment variable or a command) on their own screen.
 - A per-session store, cleared and zeroed when the session ends; every limit is a setting with a default.
 - Output scrubbing: the value and its base64, hex, URL-encoded and JSON-escaped forms are replaced by the handle in everything a
