@@ -32,8 +32,9 @@ pub use files::PrivateDir;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{
     CacheLifetime, DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo, HistoryLoss, ImportReport,
-    LINE_TOO_LARGE, ModelInfo, ModelListing, NonDefault, SeedPoint, SessionExport, SessionImport,
-    SessionQuery, SessionRecordFile, StartRequest, StartRequestBuilder, Takes, line_too_large,
+    LINE_TOO_LARGE, ModelInfo, ModelListing, NonDefault, REPLAYED_AS_PROMPT, SeedPoint,
+    SessionExport, SessionImport, SessionQuery, SessionRecordFile, StartRequest,
+    StartRequestBuilder, Takes, line_too_large,
 };
 pub use requirement::{
     ANSWER_ONLY, DENIED_PATHS, FILES_UNDER, NAMES, NETWORK, NO_COMMANDS, NO_PROJECT_MCP,

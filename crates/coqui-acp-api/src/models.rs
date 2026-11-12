@@ -506,7 +506,21 @@ impl ImportReport {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Whether the harness took the history as context in a prompt (`replayed_as_prompt` among the
+    /// losses) rather than as a session of its own. When it did, the session is a fresh one in the
+    /// harness that the provider opens at the imported id, and the history reaches the model in the
+    /// first prompt only.
+    #[must_use]
+    pub fn replayed(&self) -> bool {
+        self.losses
+            .iter()
+            .any(|loss| loss.kind == REPLAYED_AS_PROMPT)
+    }
 }
+
+/// The loss kind of an import that replayed the history as a prompt's context.
+pub const REPLAYED_AS_PROMPT: &str = "replayed_as_prompt";
 
 /// A position in a history.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
