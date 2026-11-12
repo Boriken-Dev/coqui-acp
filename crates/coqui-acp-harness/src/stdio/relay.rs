@@ -22,6 +22,7 @@ use coqui_acp_api::{
 };
 use serde_json::{Value, json};
 
+use super::replay::{Mapping, Replays};
 use crate::account::{Hold, Watcher};
 use crate::provider::track;
 
@@ -44,6 +45,8 @@ pub(crate) struct Params {
     pub roots: WorkingRoots,
     /// The account's hold, and how often its files are looked at.
     pub hold: Option<(Hold, Duration)>,
+    /// The sessions imported by replay, which this connection may open.
+    pub replays: Arc<Replays>,
 }
 
 #[derive(Default)]
@@ -75,6 +78,9 @@ struct Shared {
     roots: WorkingRoots,
     max_message_bytes: usize,
     max_requests: usize,
+    replays: Arc<Replays>,
+    /// The sessions of this connection opened from an import, and their ids.
+    mapping: Mutex<Mapping>,
 }
 
 impl Shared {
@@ -152,9 +158,13 @@ fn directories_of(params: &Value) -> Result<Vec<String>, &'static str> {
 
 impl Shared {
     fn inspect(&self, bytes: &[u8]) -> Verdict {
-        let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
             return Verdict::Reply(error_reply(&Value::Null, -32700, "parse error"));
         };
+        if value.is_object() {
+            let mut mapping = self.mapping.lock().unwrap_or_else(PoisonError::into_inner);
+            mapping.outbound(&self.replays, &mut value);
+        }
         let Some(object) = value.as_object() else {
             return Verdict::Reply(error_reply(&Value::Null, -32600, "invalid request"));
         };
@@ -320,8 +330,20 @@ fn read_output(shared: &Shared) {
                 continue;
             }
             // Whatever the program prints that is not one JSON value is not a message.
-            let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            let Ok(mut value) = serde_json::from_slice::<Value>(line) else {
                 continue;
+            };
+            let changed = {
+                let mut mapping = shared
+                    .mapping
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                mapping.inbound(&shared.replays, &mut value)
+            };
+            let line = if changed {
+                value.to_string().into_bytes()
+            } else {
+                line.to_vec()
             };
             let mut state = shared.lock();
             if let Some(object) = value.as_object()
@@ -339,7 +361,7 @@ fn read_output(shared: &Shared) {
             if state.dead {
                 break 'reading;
             }
-            state.outbound.push_back(line.to_vec());
+            state.outbound.push_back(line);
             drop(state);
             shared.changed.notify_all();
         }
@@ -534,6 +556,7 @@ pub(crate) fn open(params: Params) -> Result<Object<dyn Channel>, ProviderError>
         max_requests,
         roots,
         hold,
+        replays,
     } = params;
     let process = match spawner.spawn(spec) {
         Ok(process) => Arc::new(process),
@@ -552,6 +575,8 @@ pub(crate) fn open(params: Params) -> Result<Object<dyn Channel>, ProviderError>
         roots,
         max_message_bytes,
         max_requests,
+        replays,
+        mapping: Mutex::new(Mapping::default()),
     });
     let ending = Ending {
         spawner,

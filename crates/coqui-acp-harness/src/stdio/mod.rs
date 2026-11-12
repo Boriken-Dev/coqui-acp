@@ -19,10 +19,13 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
-    Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter, LoginRequest,
-    ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport, RenewRequest, Requirement,
-    SessionExport, SessionImport, SpawnSpec, StartRequest, UsageQuery, UsageReport, WorkingRoots,
+    Environment, ExportPage, HarnessInfo, HistoryLoss, ImportReport, LoginOutcome, LoginPrompter,
+    LoginRequest, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport,
+    RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SpawnSpec, StartRequest,
+    UsageQuery, UsageReport, WorkingRoots,
 };
+use coqui_acp_history::replay::{Replay, ReplaySettings};
+use coqui_acp_history::{Document, HistoryError};
 
 use std::ffi::OsString;
 
@@ -34,6 +37,7 @@ use crate::process::Launch;
 pub mod accounts;
 mod login;
 mod relay;
+mod replay;
 
 use accounts::{Applied, HarnessDef};
 
@@ -83,6 +87,15 @@ pub struct StdioSettings {
     /// The largest message a connection takes, in bytes; one more ends it.
     #[map(default = 67_108_864)]
     pub max_message_bytes: u64,
+    /// How many bytes of an imported history the first prompt of a session carries, as context the agent reads. 0, the
+    /// default, imports nothing: these agents keep no transcript the provider can write, and a replay sends the history to
+    /// the agent's model, so it is a choice. A history over it keeps its newest turns and the import reports what it
+    /// cut.
+    #[map(default = 0)]
+    pub replay_max_bytes: u64,
+    /// The most bytes of one message, tool input or tool output in a replay; one over it is cut and reported.
+    #[map(default = 4096)]
+    pub replay_max_item_bytes: u64,
 }
 
 impl StdioSettings {
@@ -97,6 +110,8 @@ impl StdioSettings {
             command_timeout_ms: 60_000,
             max_requests: 32,
             max_message_bytes: 64 * 1024 * 1024,
+            replay_max_bytes: 0,
+            replay_max_item_bytes: 4096,
         }
     }
 }
@@ -116,6 +131,8 @@ impl StdioSettings {
 pub struct StdioProvider {
     settings: StdioSettings,
     accounts: Arc<Accounts>,
+    /// Sessions imported by replay, shared by every connection.
+    replays: Arc<replay::Replays>,
 }
 
 impl From<StdioSettings> for StdioProvider {
@@ -153,6 +170,7 @@ impl StdioProvider {
         Self {
             settings,
             accounts: Arc::new(Accounts::new()),
+            replays: Arc::new(replay::Replays::default()),
         }
     }
 
@@ -321,6 +339,7 @@ impl AcpHarness for StdioProvider {
             max_requests: usize::try_from(self.settings.max_requests).unwrap_or(usize::MAX),
             roots: WorkingRoots::new(request.working_roots.clone()),
             hold,
+            replays: Arc::clone(&self.replays),
         })
     }
 
@@ -352,9 +371,62 @@ impl AcpHarness for StdioProvider {
         if let Some(grant) = &session.account {
             accounts::known(self.def(), &grant.reference())?;
         }
-        Err(unsupported(
-            "this provider does not seed a session in an agent it does not keep the sessions of",
-        ))
+        if self.settings.replay_max_bytes == 0 {
+            return Err(unsupported(
+                "this provider does not seed a session in an agent it does not keep the sessions of; set replay_max_bytes to replay the history as context in the first prompt",
+            ));
+        }
+        let bad = |why: &str| ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why);
+        if uuid::Uuid::parse_str(&session.session_id).is_err() {
+            return Err(bad("the session id is not a UUID"));
+        }
+        let replay = if session.history.trim().is_empty() {
+            None
+        } else {
+            let document =
+                Document::from_slice(session.history.as_bytes()).map_err(|error| match error {
+                    HistoryError::UnknownVersion { .. } | HistoryError::UnknownFormat => {
+                        unsupported(
+                            "this provider does not read that version of the history format",
+                        )
+                    }
+                    _ => bad("the history is not one this provider can read"),
+                })?;
+            let mut settings = ReplaySettings::default();
+            settings.max_bytes = self.settings.replay_max_bytes;
+            settings.max_item_bytes = self.settings.replay_max_item_bytes;
+            Some(Replay::of(&document, &settings))
+        };
+        let context = replay.as_ref().and_then(Replay::block);
+        self.replays
+            .add(&session.session_id, context)
+            .map_err(|refusal| match refusal {
+                replay::Refusal::Named => bad("the id already names an imported session"),
+                replay::Refusal::Full => ProviderError::new(
+                    Status::GUATIAO_ERR_BUSY,
+                    "too many imported sessions wait to be opened",
+                ),
+            })?;
+        let mut report = ImportReport::new();
+        if let Some(replay) = replay {
+            report.seeded_from = replay.seeded_from().map(|point| {
+                let mut seed = SeedPoint::line(point.line);
+                seed.digest = Some(point.digest.clone());
+                seed
+            });
+            report.losses = replay
+                .report()
+                .losses()
+                .iter()
+                .map(|loss| {
+                    let mut out = HistoryLoss::new(loss.kind.clone(), loss.count);
+                    out.detail.clone_from(&loss.detail);
+                    out
+                })
+                .collect();
+            report.compacted = replay.cut_items() > 0;
+        }
+        Ok(report)
     }
 
     fn export_session(

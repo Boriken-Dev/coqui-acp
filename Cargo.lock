@@ -509,6 +509,7 @@ dependencies = [
  "base64 0.22.1",
  "coqui-acp",
  "coqui-acp-api",
+ "coqui-acp-history",
  "guatiao",
  "guatiao-serde",
  "rcgen",

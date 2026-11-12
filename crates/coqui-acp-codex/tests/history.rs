@@ -524,6 +524,7 @@ mod through_the_provider {
         let report = seed(text.clone()).expect("imported");
         assert!(report.seeded_from.is_some());
         assert!(report.losses.is_empty(), "{:?}", report.losses);
+        assert!(!report.replayed(), "a native import is not a replay");
         assert!(seed(text).is_err(), "the id names a session now");
         let mut joined = String::new();
         let mut after: Option<String> = None;

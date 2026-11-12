@@ -22,7 +22,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 # `antigravity`: the quota Antigravity (`agy`) reports on its own loopback port, as usage buckets.
 antigravity = ["dep:serde", "dep:time", "dep:ureq"]
 # The acp_harness kind's spawner on this machine, and Spawn through any host's spawner.
-kind = ["dep:guatiao-serde"]
+kind = ["dep:guatiao-serde", "dep:coqui-acp-history"]
 
 [dependencies]
 coqui-acp-api = { path = "../coqui-acp-api" }
@@ -31,6 +31,7 @@ serde = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 guatiao-serde = { workspace = true, optional = true }
+coqui-acp-history = { path = "../coqui-acp-history", optional = true }
 serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -77,6 +78,10 @@ required-features = ["kind"]
 
 [[test]]
 name = "stdio"
+required-features = ["kind"]
+
+[[test]]
+name = "replay"
 required-features = ["kind"]
 
 [[test]]
