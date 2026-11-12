@@ -29,6 +29,12 @@ struct Cli {
     /// The Pi program. On Windows npm's shim is `pi.cmd`.
     #[arg(long, env = "COQUI_ACP_PI_EXECUTABLE", default_value = "pi")]
     executable: OsString,
+    /// A Node executable (an absolute path) that runs Pi's CLI `--script`, instead of an `--executable` on the PATH.
+    #[arg(long, env = "COQUI_ACP_PI_NODE", requires = "script")]
+    node: Option<PathBuf>,
+    /// Pi's CLI script (an absolute path), which `--node` runs.
+    #[arg(long, env = "COQUI_ACP_PI_SCRIPT", requires = "node")]
+    script: Option<PathBuf>,
     /// The model every session starts with, as provider/id.
     #[arg(long)]
     model: Option<String>,
@@ -87,6 +93,8 @@ fn main() -> ExitCode {
     let settings = settings_of(&cli);
     let mut defaults = PiLaunch::new(".");
     defaults.executable = cli.executable;
+    defaults.node = cli.node;
+    defaults.script = cli.script;
     defaults.model = cli.model;
     defaults.effort = cli.effort;
     defaults.mode = cli.mode;

@@ -408,3 +408,15 @@ fn the_default_model_carries_its_thinking_levels_and_the_others_none() {
     assert_eq!(think.default_effort.as_deref(), Some("medium"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn node_and_script_are_settings_and_the_program_is_the_node() {
+    let settings = settings_from(r#"{"node": "/n/node", "script": "/p/cli.js"}"#).expect("read");
+    assert_eq!(settings.node.as_deref(), Some("/n/node"));
+    assert_eq!(settings.script.as_deref(), Some("/p/cli.js"));
+    assert_eq!(settings.executable, "pi");
+    let none = settings_from("{}").unwrap();
+    assert!(none.node.is_none() && none.script.is_none());
+    let provider = PiProvider::new(settings);
+    assert_eq!(provider.program().unwrap().as_deref(), Some("/n/node"));
+}

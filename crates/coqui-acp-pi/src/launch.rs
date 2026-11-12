@@ -39,7 +39,14 @@ pub fn valid_session_id(id: &str) -> bool {
 #[non_exhaustive]
 pub struct PiLaunch {
     /// The program: `pi`, or the path of one. On Windows a bare `pi` is looked for in `PATH` (see [`PiLaunch::command`]).
+    /// Left at `pi` when `node` and `script` are set.
     pub executable: OsString,
+    /// A Node executable (an absolute path) that runs Pi's CLI `script` instead of `executable`; both are set or neither.
+    /// Nothing is looked up on `PATH`, and no `.cmd` shim is run.
+    pub node: Option<PathBuf>,
+    /// Pi's CLI script (an absolute path, `dist/bundle/cli.js`), which `node` runs. Setting either together with an
+    /// `executable` other than `pi` is refused.
+    pub script: Option<PathBuf>,
     /// The directory Pi works in: the process's own, since Pi has no other way to be given one.
     pub cwd: PathBuf,
     /// A new session, or an earlier one.
@@ -90,6 +97,8 @@ impl fmt::Debug for PiLaunch {
         // The environment may hold a credential: only its names are shown.
         f.debug_struct("PiLaunch")
             .field("executable", &self.executable)
+            .field("node", &self.node)
+            .field("script", &self.script)
             .field("cwd", &self.cwd)
             .field("session", &self.session)
             .field("model", &self.model)
@@ -243,6 +252,8 @@ impl PiLaunch {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             executable: "pi".into(),
+            node: None,
+            script: None,
             cwd: cwd.into(),
             session: SessionStart::New,
             model: None,
@@ -367,7 +378,10 @@ impl PiLaunch {
 
     /// The program to start, and the arguments that come before Pi's own.
     ///
-    /// On any system but Windows this is `executable`. On Windows nothing is started through `cmd.exe` and nothing is found
+    /// With `node` and `script` set, the program is that Node and the script is its first argument, on every system: both
+    /// must be absolute existing files outside the session's directories, and `executable` stays `pi`.
+    ///
+    /// Otherwise, on any system but Windows this is `executable`. On Windows nothing is started through `cmd.exe` and nothing is found
     /// by a search that includes the project: a bare `pi` is looked for in `PATH` (absolute entries outside the session's
     /// directories) as `pi.exe`, then `pi.cmd`. npm's `pi.cmd` is not run: its script (`cli.js`) is read from it and
     /// started with an absolute `node.exe`, the one beside the shim or the first on `PATH` outside the session's
@@ -375,8 +389,13 @@ impl PiLaunch {
     ///
     /// # Errors
     ///
-    /// [`Error::Refused`] when, on Windows, `pi` or `node` is not to be found that way.
+    /// [`Error::Refused`] when `node` and `script` are not set together, are set with another `executable`, or are not
+    /// absolute existing files outside the session's directories; and when, on Windows, `pi` or `node` is not to be found
+    /// that way.
     pub fn command(&self) -> Result<(OsString, Vec<OsString>), Error> {
+        if self.node.is_some() || self.script.is_some() {
+            return self.node_command();
+        }
         if !cfg!(windows) {
             return Ok((self.executable.clone(), Vec::new()));
         }
@@ -415,6 +434,58 @@ impl PiLaunch {
             })?
         };
         Ok((node.into_os_string(), vec![script.into_os_string()]))
+    }
+
+    /// `node` and `script` as the program and its leading argument, after the checks they get on every system.
+    fn node_command(&self) -> Result<(OsString, Vec<OsString>), Error> {
+        let (Some(node), Some(script)) = (&self.node, &self.script) else {
+            return Err(Error::Refused(
+                "`node` and `script` are set together or not at all".into(),
+            ));
+        };
+        if self.executable != "pi" {
+            return Err(Error::Refused(
+                "`executable` and `node` with `script` are two ways to name Pi: set one".into(),
+            ));
+        }
+        let mut keep_out = self.roots();
+        keep_out.push(self.cwd.clone());
+        let keep_out: Vec<PathBuf> = keep_out
+            .iter()
+            .map(|dir| std::path::absolute(dir).unwrap_or_else(|_| dir.clone()))
+            .collect();
+        for (what, path) in [("node", node), ("script", script)] {
+            if !path.is_absolute() || !plain_entry(path) {
+                return Err(Error::Refused(format!(
+                    "`{what}` is not a path written in full on this machine: {}",
+                    path.display()
+                )));
+            }
+            if !path.is_file() {
+                return Err(Error::Refused(format!(
+                    "`{what}` is not an existing file: {}",
+                    path.display()
+                )));
+            }
+            // `..` is resolved by how it is written before the path is judged, then its links are followed.
+            if within_roots(&paths::lexical(path), &keep_out) {
+                return Err(Error::Refused(format!(
+                    "`{what}` is inside a directory of the session: {}",
+                    path.display()
+                )));
+            }
+        }
+        if node.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        }) {
+            return Err(Error::Refused(
+                "`node` is a script, not a Node executable: nothing is run through cmd.exe".into(),
+            ));
+        }
+        Ok((
+            node.clone().into_os_string(),
+            vec![script.clone().into_os_string()],
+        ))
     }
 
     /// Loads `guard` into a Pi that runs on Node, ahead of whatever `NODE_OPTIONS` the launch already has.

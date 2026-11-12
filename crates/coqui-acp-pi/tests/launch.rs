@@ -479,3 +479,130 @@ fn a_loading_option_with_a_quote_in_it_is_dropped() {
     assert!(!options.contains("evil"), "{options}");
     assert!(options.ends_with("--max-old-space-size=64"), "{options}");
 }
+
+/// A launch of the stand-in as the Node of a private install, with `cli.js` beside it, outside the session's directories.
+fn node_and_script(scratch: &Scratch, cwd: &std::path::Path, home: &std::path::Path) -> PiLaunch {
+    let install = scratch.dir("private-node");
+    let script = install.join("cli.js");
+    std::fs::write(&script, "// Pi's script\n").unwrap();
+    let mut launch = launching(cwd, home);
+    launch.executable = "pi".into();
+    launch.node = Some(support::fake_program());
+    launch.script = Some(script);
+    launch
+}
+
+fn refusal(launch: &PiLaunch) -> String {
+    match launch.launch(None, None) {
+        Err(Error::Refused(why)) => why,
+        other => panic!("not refused: {other:?}"),
+    }
+}
+
+#[test]
+fn a_node_and_a_script_run_pi_through_that_node_with_the_guard_loaded() {
+    let scratch = Scratch::new("node-script");
+    let (cwd, home) = (scratch.dir("work"), scratch.dir("home"));
+    let mut launch = node_and_script(&scratch, &cwd, &home);
+    launch
+        .env
+        .insert("PI_SKIP_VERSION_CHECK".into(), "1".into());
+    launch.gate_dir = Some(scratch.dir("gates"));
+    let script = launch.script.clone().unwrap();
+    let made = launch.launch(None, None).expect("a command");
+    assert_eq!(std::path::Path::new(&made.program), support::fake_program());
+    assert_eq!(made.args[0], script.as_os_str(), "the script comes first");
+    assert_eq!(made.args[1], "--mode");
+    let (_session, _) = start(&launch).expect("it starts");
+    let started = &logged(&home)[0];
+    let args = started["args"].as_array().unwrap();
+    assert_eq!(args[0].as_str().unwrap(), script.to_string_lossy());
+    assert!(args.iter().any(|arg| arg == "--no-approve"), "{args:?}");
+    let names = started["env_names"].as_array().unwrap();
+    for wanted in [
+        "NODE_OPTIONS",
+        "COQUI_ACP_PI_KEEP_OUT",
+        "PI_SKIP_VERSION_CHECK",
+    ] {
+        assert!(names.iter().any(|n| n == wanted), "{wanted}: {names:?}");
+    }
+}
+
+#[test]
+fn node_and_script_come_together_and_not_with_an_executable() {
+    let scratch = Scratch::new("node-script-both");
+    let (cwd, home) = (scratch.dir("work"), scratch.dir("home"));
+    let mut launch = node_and_script(&scratch, &cwd, &home);
+    launch.executable = support::fake_program().into();
+    assert!(refusal(&launch).contains("set one"));
+    assert!(matches!(start(&launch), Err(Error::Refused(_))));
+    launch.executable = "pi".into();
+    let script = launch.script.take();
+    assert!(refusal(&launch).contains("together"));
+    launch.node = None;
+    launch.script = script;
+    assert!(refusal(&launch).contains("together"));
+}
+
+#[test]
+fn node_and_script_must_be_absolute_existing_files() {
+    let scratch = Scratch::new("node-script-paths");
+    let (cwd, home) = (scratch.dir("work"), scratch.dir("home"));
+    let good = node_and_script(&scratch, &cwd, &home);
+    let mut launch = good.clone();
+    launch.script = Some("cli.js".into());
+    assert!(refusal(&launch).contains("`script`"), "relative script");
+    launch = good.clone();
+    launch.node = Some("node".into());
+    assert!(refusal(&launch).contains("`node`"), "relative node");
+    launch = good.clone();
+    launch.script = Some(scratch.0.join("private-node").join("missing.js"));
+    assert!(refusal(&launch).contains("existing"), "missing script");
+    launch = good.clone();
+    launch.node = Some(scratch.dir("private-node"));
+    assert!(
+        refusal(&launch).contains("existing"),
+        "a directory is no file"
+    );
+    let shim = scratch.0.join("private-node").join("node.cmd");
+    std::fs::write(&shim, "@echo off\r\n").unwrap();
+    launch = good;
+    launch.node = Some(shim);
+    assert!(refusal(&launch).contains("cmd.exe"), "a shim");
+}
+
+#[test]
+fn a_script_or_node_inside_the_session_is_refused_however_it_is_spelled() {
+    let scratch = Scratch::new("node-script-inside");
+    let (cwd, home, more) = (
+        scratch.dir("work"),
+        scratch.dir("home"),
+        scratch.dir("more"),
+    );
+    let mut launch = node_and_script(&scratch, &cwd, &home);
+    launch.additional_directories.push(more.clone());
+    let planted = cwd.join("cli.js");
+    std::fs::write(&planted, "// the project's\n").unwrap();
+    let good_script = launch.script.clone();
+    launch.script = Some(planted.clone());
+    assert!(refusal(&launch).contains("inside"), "{planted:?}");
+    // A `..` that leads back into the project does not hide it.
+    launch.script = Some(
+        scratch
+            .dir("private-node")
+            .join("..")
+            .join("work")
+            .join("cli.js"),
+    );
+    assert!(refusal(&launch).contains("inside"));
+    let more_script = more.join("cli.js");
+    std::fs::write(&more_script, "").unwrap();
+    launch.script = Some(more_script);
+    assert!(refusal(&launch).contains("inside"), "an added directory");
+    launch.script = good_script;
+    let copy = cwd.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(support::fake_program(), &copy).unwrap();
+    launch.node = Some(copy);
+    assert!(refusal(&launch).contains("inside"), "a node of the project");
+    assert!(matches!(start(&launch), Err(Error::Refused(_))));
+}

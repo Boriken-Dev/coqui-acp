@@ -38,6 +38,12 @@ pub struct ProviderSettings {
     /// `pi.cmd`.
     #[map(default = String::from("pi"))]
     pub executable: String,
+    /// A Node executable, an absolute path, that runs Pi's CLI `script` instead of an `executable` looked up on the `PATH`
+    /// (a private Node and Pi's `dist/bundle/cli.js`): nothing is looked up and no `.cmd` shim is run. Set with `script`,
+    /// and not with an `executable` other than `pi`; neither may lie in a session's directories.
+    pub node: Option<String>,
+    /// Pi's CLI script, an absolute path, which `node` runs.
+    pub script: Option<String>,
     /// The model every session starts on, as `provider/id`; Pi's own when absent.
     pub model: Option<String>,
     /// The thinking level every session starts at; the model's own when absent.
@@ -90,6 +96,8 @@ impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
             executable: "pi".into(),
+            node: None,
+            script: None,
             model: None,
             effort: None,
             mode: None,
@@ -175,6 +183,8 @@ impl PiProvider {
     fn launch(&self, environment: &Environment) -> PiLaunch {
         let mut launch = PiLaunch::new(".");
         launch.executable = OsString::from(&self.settings.executable);
+        launch.node = self.settings.node.as_ref().map(PathBuf::from);
+        launch.script = self.settings.script.as_ref().map(PathBuf::from);
         launch.model.clone_from(&self.settings.model);
         launch.effort.clone_from(&self.settings.effort);
         launch.mode = self.settings.mode;
@@ -368,7 +378,12 @@ impl AcpHarness for PiProvider {
     }
 
     fn program(&self) -> Result<Option<String>, ProviderError> {
-        Ok(Some(self.settings.executable.clone()))
+        Ok(Some(
+            self.settings
+                .node
+                .clone()
+                .unwrap_or_else(|| self.settings.executable.clone()),
+        ))
     }
 
     fn import_session(

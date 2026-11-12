@@ -6,6 +6,7 @@
 //! - `COQUI_ACP_PI_REAL_PATH`: a directory with `node` in it, put first on Pi's `PATH`;
 //! - `COQUI_ACP_PI_REAL_PYTHON`: a Python, which runs `tools/record_harnesses/pi/openai_chat_model.py`;
 //! - `COQUI_ACP_PI_REAL_NODE` (the gate test): a Node with `.ts` support.
+//! - `COQUI_ACP_PI_REAL_NODE_EXE` and `COQUI_ACP_PI_REAL_SCRIPT` (the node-and-script test): a Node and that Pi's `cli.js`.
 #![allow(
     clippy::std_instead_of_core,
     clippy::std_instead_of_alloc,
@@ -499,4 +500,27 @@ fn a_real_pi_listing_models_from_the_host_directory_never_runs_a_program_on_its_
         "a program on the project's bin ran while the models were listed: {ran}"
     );
     assert!(models.is_ok(), "{models:?}");
+}
+
+/// A private Node and Pi's own `cli.js` (`COQUI_ACP_PI_REAL_NODE_EXE`, `COQUI_ACP_PI_REAL_SCRIPT`), as a host that installs Pi
+/// itself launches it: the gate and the guard load, and a turn ends.
+#[test]
+fn a_real_pi_started_as_a_node_and_its_script_loads_the_gate_and_answers() {
+    let (Some(world), Some(node), Some(script)) = (
+        world("real-node-script"),
+        env("COQUI_ACP_PI_REAL_NODE_EXE"),
+        env("COQUI_ACP_PI_REAL_SCRIPT"),
+    ) else {
+        eprintln!("skipped: no real Pi, Node and script named");
+        return;
+    };
+    let mut launch = world.launch(Mode::Manual);
+    launch.executable = "pi".into();
+    launch.node = Some(PathBuf::from(node));
+    launch.script = Some(PathBuf::from(script));
+    let (sink, mut events) = Events::new();
+    let session = PiSession::start(&launch, &PlainSpawn, PiSettings::new(), sink)
+        .expect("the real Pi starts with the gate through its node and script");
+    let said = world.turn(&session, &mut events, "alpha");
+    assert!(said.contains("TurnEnd"), "{said}");
 }
