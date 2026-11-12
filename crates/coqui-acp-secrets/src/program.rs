@@ -145,7 +145,7 @@ pub(crate) fn plan(line: &CommandLine, cwd: &Path, places: &Places) -> Result<La
         }
     };
     // What the person is shown has nothing hidden in it.
-    for shown in std::iter::once(&program).chain(target.iter()) {
+    for shown in core::iter::once(&program).chain(target.iter()) {
         if crate::text::has_hidden(&shown.to_string_lossy()) {
             return Err(Error::Command(
                 "the program's path holds a hidden character",
@@ -190,7 +190,7 @@ mod tests {
         let dir = Tmp::new("pathext");
         std::fs::write(dir.0.join("dart"), "#!/bin/sh").unwrap();
         std::fs::write(dir.0.join("dart.bat"), "@echo off").unwrap();
-        let (program, _) = resolve_in(&[dir.0.clone()], "dart").unwrap();
+        let (program, _) = resolve_in(core::slice::from_ref(&dir.0), "dart").unwrap();
         assert_eq!(
             program
                 .file_name()
@@ -209,10 +209,10 @@ mod tests {
         let dir = Tmp::new("links");
         std::fs::write(dir.0.join("xz"), "x").unwrap();
         std::os::unix::fs::symlink(dir.0.join("xz"), dir.0.join("xzcat")).unwrap();
-        let (program, target) = resolve_in(&[dir.0.clone()], "xzcat").unwrap();
+        let (program, target) = resolve_in(core::slice::from_ref(&dir.0), "xzcat").unwrap();
         assert_eq!(program.file_name().unwrap(), "xzcat");
         assert_eq!(target.unwrap().file_name().unwrap(), "xz");
-        let (program, target) = resolve_in(&[dir.0.clone()], "xz").unwrap();
+        let (program, target) = resolve_in(core::slice::from_ref(&dir.0), "xz").unwrap();
         assert_eq!(program.file_name().unwrap(), "xz");
         assert!(target.is_none());
     }
