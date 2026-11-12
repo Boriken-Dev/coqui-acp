@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use coqui_agentic_peer::auth::{Identity, Proof, Trust};
 use coqui_agentic_peer::auth::{Sealed, prove_out};
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
-use coqui_web_channel::Channel as _;
+use coqui_transport::Channel as _;
 use serde_json::{Value, json};
 
 const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
@@ -189,12 +189,14 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn dial(port: u16) -> coqui_web_channel::websocket::Channel {
-    use coqui_web_channel::Dialer as _;
+fn dial(port: u16) -> coqui_transport_web::websocket::Channel {
+    use coqui_transport_web::Dialer as _;
     let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/link")).unwrap();
-    coqui_web_channel::websocket::Dialer::new()
-        .with_frames(coqui_web_channel::websocket::Frames::Binary)
-        .dial(coqui_web_channel::Kind::WebSocket, &url, WAIT)
+    coqui_transport_web::websocket::Dialer::builder()
+        .frames(coqui_transport_web::websocket::Frames::Binary)
+        .build()
+        .unwrap()
+        .dial(coqui_transport_web::Kind::WebSocket, &url, WAIT)
         .unwrap()
 }
 
@@ -203,7 +205,7 @@ fn over_link(
     port: u16,
     client: Identity,
     server: &str,
-    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>),
+    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_transport_web::websocket::Channel>>),
 ) {
     let method = Proof::builder(client)
         .responders(Trust::pinned([server.parse().unwrap()]))
@@ -218,7 +220,7 @@ fn over_link(
 /// A bridge, with a peer of one identity on a link to it, handed to `body`.
 fn with_peer(
     name: &str,
-    body: impl FnOnce(&Fixture, &str, &Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>),
+    body: impl FnOnce(&Fixture, &str, &Mux<'_, Sealed<'_, coqui_transport_web::websocket::Channel>>),
 ) {
     let mut fixture = Fixture::new(name);
     let (key, _) = fixture.identity("server");
@@ -274,7 +276,7 @@ fn accept_within(listener: &std::net::TcpListener) -> std::net::TcpStream {
     }
 }
 
-fn message<C: coqui_web_channel::Channel>(stream: &C) -> Vec<u8> {
+fn message<C: coqui_transport::Channel>(stream: &C) -> Vec<u8> {
     stream.receive(Some(WAIT)).unwrap().unwrap()
 }
 
@@ -464,7 +466,7 @@ fn a_shim_reaches_only_the_peer_it_names() {
         );
         assert!(matches!(
             stream.receive(Some(Duration::from_millis(300))),
-            Err(coqui_web_channel::Failure::Timeout)
+            Err(coqui_transport::Failure::Timeout)
         ));
         assert!(!fixture.door(&browser_peer).exists());
         // The one that names it gets it.
@@ -528,7 +530,7 @@ fn a_wrong_token_or_a_web_request_reaches_nothing() {
         gets_nothing(web);
         assert!(matches!(
             stream.receive(Some(Duration::from_millis(300))),
-            Err(coqui_web_channel::Failure::Timeout)
+            Err(coqui_transport::Failure::Timeout)
         ));
         // The stream is still free for the real thing.
         let mut client = fixture.start_client(peer);

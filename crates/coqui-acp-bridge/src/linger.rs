@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use coqui_web_channel::Channel;
+use coqui_transport::Channel;
 
 use crate::agent::{Agent, Output};
 use crate::relay::{LinkEnd, relay_holding};

@@ -16,7 +16,8 @@ use coqui_agentic_peer::auth::{Identity, Proof, Trust};
 use coqui_agentic_peer::auth::{Sealed, prove_out};
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
 use coqui_peer_webcrypto::TrustStore;
-use coqui_web_channel::{Channel, Dialer, Failure, Kind, websocket};
+use coqui_transport::{Channel, Failure};
+use coqui_transport_web::{Dialer, Kind, websocket};
 use serde_json::{Value, json};
 
 const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
@@ -277,8 +278,10 @@ impl Peer {
 
     fn dial(&self) -> websocket::Channel {
         let url = url::Url::parse(&format!("ws://127.0.0.1:{}/agent", self.port)).unwrap();
-        websocket::Dialer::new()
-            .with_frames(websocket::Frames::Binary)
+        websocket::Dialer::builder()
+            .frames(websocket::Frames::Binary)
+            .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, Duration::from_secs(10))
             .unwrap()
     }

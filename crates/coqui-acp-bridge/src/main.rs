@@ -35,8 +35,9 @@ use coqui_net_acl::{Acl, Action, IpNet, Rule};
 use coqui_peer::pair::{CodeAlphabet, Pin};
 use coqui_peer::{PeerId, TrustStore};
 use coqui_peer_tls as tls;
-use coqui_web_channel::websocket::Frames;
-use coqui_web_channel::{Channel, Dialer, Failure, Kind, Limits, websocket, webtransport};
+use coqui_transport::{Channel, Failure};
+use coqui_transport_web::websocket::Frames;
+use coqui_transport_web::{Dialer, Kind, Limits, websocket, webtransport};
 use url::Url;
 
 mod standing;
@@ -573,15 +574,23 @@ fn end_with_the_certificate(advertised: Option<Advertised>) {
     });
 }
 
+/// The listener's TLS: the configuration, or none for a plain listener.
+fn server_tls_of(config: Option<Arc<rustls::ServerConfig>>) -> websocket::ServerTls {
+    config.map_or(websocket::ServerTls::Plain, websocket::ServerTls::Config)
+}
+
 fn limits() -> Limits {
-    Limits::default().with_max_message(MAX_LINE)
+    let mut limits = Limits::default();
+    limits.max_message = MAX_LINE;
+    limits
 }
 
 /// What a channel starts with while its peer has proved nothing; the proof raises it.
 fn unproven_limits() -> Limits {
-    Limits::default()
-        .with_max_message(auth::MAX_PROOF_MESSAGE)
-        .with_pending(UNPROVEN_PENDING)
+    let mut limits = Limits::default();
+    limits.max_message = auth::MAX_PROOF_MESSAGE;
+    limits.pending = UNPROVEN_PENDING;
+    limits
 }
 
 /// A count of what is running, with a ceiling.
@@ -1297,11 +1306,12 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
             .client_auth(tls::ClientAuth::Required(trust))
             .build()
             .map_err(|error| error.to_string())?;
-        let listener = websocket::Listener::bind(args.listen, Some(Arc::new(built.config)))
-            .map_err(|failure| failure.to_string())?
-            .with_limits(limits())
-            .with_origins(args.origins.clone())
-            .with_admission(admit);
+        let listener = websocket::Listener::builder(args.listen, Arc::new(built.config))
+            .limits(limits())
+            .origins(args.origins.clone())
+            .admission(admit)
+            .build()
+            .map_err(|failure| failure.to_string())?;
         let bound = listener
             .local_addr()
             .map_err(|failure| failure.to_string())?;
@@ -1369,23 +1379,25 @@ fn serve(args: &Serve) -> Result<ExitCode, String> {
         }
         None => args.tls_identity.as_deref().map(server_tls).transpose()?,
     };
-    let plain = websocket::Listener::bind(args.listen, tls_config.clone())
-        .map_err(|failure| failure.to_string())?
-        .with_limits(unproven_limits())
-        .with_frames(Frames::Binary)
-        .with_origins(args.origins.clone())
-        .with_admission(admit.clone());
+    let plain = websocket::Listener::builder(args.listen, server_tls_of(tls_config.clone()))
+        .limits(unproven_limits())
+        .frames(Frames::Binary)
+        .origins(args.origins.clone())
+        .admission(admit.clone())
+        .build()
+        .map_err(|failure| failure.to_string())?;
     // Every listener is bound before anything says this agent exists, so what is announced is there.
     let quic = args
         .webtransport_port
         .map(|port| {
             let tls_config = tls_config.ok_or("WebTransport needs --tls-identity")?;
             let address = SocketAddr::new(args.listen.ip(), port);
-            let listener = webtransport::Listener::bind(address, tls_config)
-                .map_err(|failure| failure.to_string())?
-                .with_limits(unproven_limits())
-                .with_origins(args.origins.clone())
-                .with_admission(admit);
+            let listener = webtransport::Listener::builder(address, tls_config)
+                .limits(unproven_limits())
+                .origins(args.origins.clone())
+                .admission(admit)
+                .build()
+                .map_err(|failure| failure.to_string())?;
             Ok::<_, String>(listener)
         })
         .transpose()?;
@@ -1465,11 +1477,12 @@ fn serve_unproven(
     } else {
         args.origins.clone()
     };
-    let listener = websocket::Listener::bind(args.listen, tls_config)
-        .map_err(|failure| failure.to_string())?
-        .with_limits(limits())
-        .with_origins(origins)
-        .with_admission(admit);
+    let listener = websocket::Listener::builder(args.listen, server_tls_of(tls_config))
+        .limits(limits())
+        .origins(origins)
+        .admission(admit)
+        .build()
+        .map_err(|failure| failure.to_string())?;
     let bound = listener
         .local_addr()
         .map_err(|failure| failure.to_string())?;
@@ -1501,17 +1514,17 @@ enum DialProof {
     Transport,
 }
 
-fn in_band_dialer(args: &Dial) -> Result<websocket::Dialer, String> {
-    let mut dialer = websocket::Dialer::new()
-        .with_limits(unproven_limits())
-        .with_frames(Frames::Binary);
+fn in_band_dialer(args: &Dial) -> Result<websocket::DialerBuilder, String> {
+    let mut dialer = websocket::Dialer::builder()
+        .limits(unproven_limits())
+        .frames(Frames::Binary);
     if args.url.scheme() == "wss" {
-        dialer = dialer.with_tls(in_band_tls(args.ca_file.as_ref())?);
+        dialer = dialer.tls(in_band_tls(args.ca_file.as_ref())?);
     }
     Ok(dialer)
 }
 
-fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
+fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::DialerBuilder), String> {
     if args.paired {
         if !args.expect.is_empty() {
             return Err("--expect belongs to --tls-identity".to_owned());
@@ -1571,16 +1584,16 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
             if args.url.scheme() != "wss" {
                 return Err("mutual TLS needs a wss:// URL".to_owned());
             }
-            let dialer = websocket::Dialer::new()
-                .with_tls(mtls_client(path, args)?)
-                .with_limits(limits());
+            let dialer = websocket::Dialer::builder()
+                .tls(mtls_client(path, args)?)
+                .limits(limits());
             Ok((DialProof::Transport, dialer))
         }
         (None, None) if args.no_peer_proof => {
             if args.url.scheme() != "ws" || !args.expect.is_empty() || args.ca_file.is_some() {
                 return Err("--no-peer-proof is for a ws:// on loopback".to_owned());
             }
-            let dialer = websocket::Dialer::new().with_limits(limits());
+            let dialer = websocket::Dialer::builder().limits(limits());
             Ok((DialProof::Transport, dialer))
         }
         (None, None) => {
@@ -1597,9 +1610,9 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::Dialer), String> {
                 .server(remote_trust(args)?)
                 .build()
                 .map_err(|error| error.to_string())?;
-            let dialer = websocket::Dialer::new()
-                .with_tls(Arc::new(built.config))
-                .with_limits(limits());
+            let dialer = websocket::Dialer::builder()
+                .tls(Arc::new(built.config))
+                .limits(limits());
             Ok((DialProof::Transport, dialer))
         }
         _ => Err("give --identity or --tls-identity, not both".to_owned()),
@@ -1654,8 +1667,12 @@ fn dial(args: &Dial) -> Result<ExitCode, String> {
     if let Some(file) = &args.bearer_file {
         let token = std::fs::read_to_string(file)
             .map_err(|error| format!("the bearer file could not be read: {error}"))?;
-        dialer = dialer.with_header("authorization", format!("Bearer {}", token.trim()));
+        dialer = dialer.headers(vec![(
+            "authorization".to_owned(),
+            format!("Bearer {}", token.trim()),
+        )]);
     }
+    let mut dialer = dialer.build().map_err(|error| error.to_string())?;
     let mut wait = Duration::from_secs(1);
     let longest = Duration::from_secs(args.max_backoff_seconds);
     if args
@@ -1718,20 +1735,17 @@ fn pair_accept_mode(args: &PairAccept) -> Result<ExitCode, String> {
     eprintln!("pairing by {}", identity.method());
     let store = Arc::new(home::store(args.store.as_deref()).map_err(|error| error.to_string())?);
     let tls_config = args.tls_identity.as_deref().map(server_tls).transpose()?;
-    let listener = websocket::Listener::bind(args.listen, tls_config)
-        .map_err(|failure| failure.to_string())?
-        .with_frames(Frames::Binary)
-        .with_limits(
-            Limits::default()
-                .with_max_message(auth::MAX_PROOF_MESSAGE)
-                .with_pending(UNPROVEN_PENDING),
-        )
-        .with_origins(if args.origins.is_empty() {
+    let listener = websocket::Listener::builder(args.listen, server_tls_of(tls_config))
+        .frames(Frames::Binary)
+        .limits(unproven_limits())
+        .origins(if args.origins.is_empty() {
             vec![NO_BROWSER.to_owned()]
         } else {
             args.origins.clone()
         })
-        .with_admission(admission(&args.permit, &args.deny)?);
+        .admission(admission(&args.permit, &args.deny)?)
+        .build()
+        .map_err(|failure| failure.to_string())?;
     let run = Duration::from_secs(args.run_seconds);
     let desk = pairing::desk().map_err(|error| error.to_string())?;
     let shown = desk.show_pin().map_err(|error| error.to_string())?;
@@ -1808,12 +1822,13 @@ fn pair_dial_mode(args: &PairDial) -> Result<ExitCode, String> {
     let identity = proof_identity(args.identity.as_deref(), args.method, true)?;
     eprintln!("pairing by {}", identity.method());
     let store = home::store(args.store.as_deref()).map_err(|error| error.to_string())?;
-    let mut dialer = websocket::Dialer::new()
-        .with_frames(Frames::Binary)
-        .with_limits(unproven_limits());
+    let mut dialer = websocket::Dialer::builder()
+        .frames(Frames::Binary)
+        .limits(unproven_limits());
     if args.url.scheme() == "wss" {
-        dialer = dialer.with_tls(in_band_tls(args.ca_file.as_ref())?);
+        dialer = dialer.tls(in_band_tls(args.ca_file.as_ref())?);
     }
+    let mut dialer = dialer.build().map_err(|error| error.to_string())?;
     let limit = Duration::from_secs(args.timeout_seconds);
     let channel = dialer
         .dial(
@@ -1915,12 +1930,13 @@ fn forward_mode(args: &Forward) -> Result<ExitCode, String> {
             None,
         )
     };
-    let mut dialer = websocket::Dialer::new()
-        .with_limits(unproven_limits())
-        .with_frames(Frames::Binary);
+    let mut dialer = websocket::Dialer::builder()
+        .limits(unproven_limits())
+        .frames(Frames::Binary);
     if args.url.scheme() == "wss" {
-        dialer = dialer.with_tls(in_band_tls(args.ca_file.as_ref())?);
+        dialer = dialer.tls(in_band_tls(args.ca_file.as_ref())?);
     }
+    let mut dialer = dialer.build().map_err(|error| error.to_string())?;
     let allowed = AllowedTargets {
         peers: args.peers.iter().cloned().collect(),
         grants,

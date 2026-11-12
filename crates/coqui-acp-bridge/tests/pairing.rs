@@ -20,8 +20,9 @@ use coqui_agentic_peer::auth::Identity;
 use coqui_agentic_peer::pairing;
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pairing, Pin, PinRole};
 use coqui_peer_webcrypto::{TrustStore, random};
-use coqui_web_channel::websocket::{self, Frames};
-use coqui_web_channel::{Channel, Dialer, Kind};
+use coqui_transport::Channel;
+use coqui_transport_web::websocket::{self, Frames};
+use coqui_transport_web::{Dialer, Kind};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use url::Url;
 
@@ -175,17 +176,20 @@ fn front_door(dir: &Dir) -> Tls {
 
 /// A proxy that ends TLS and passes messages to a plain backend, on a path under `/v1`.
 fn proxy(tls: Arc<rustls::ServerConfig>, backend: u16) -> (u16, thread::JoinHandle<()>) {
-    let front = websocket::Listener::bind(loopback(), Some(tls))
-        .unwrap()
-        .with_frames(Frames::Binary);
+    let front = websocket::Listener::builder(loopback(), tls)
+        .frames(Frames::Binary)
+        .build()
+        .unwrap();
     let port = front.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
         let Ok(outer) = front.accept(Some(WAIT)) else {
             return;
         };
         let url = Url::parse(&format!("ws://127.0.0.1:{backend}/backend")).unwrap();
-        let inner = websocket::Dialer::new()
-            .with_frames(Frames::Binary)
+        let inner = websocket::Dialer::builder()
+            .frames(Frames::Binary)
+            .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         forward(&outer, &inner, None);
@@ -330,13 +334,16 @@ fn sides(name: &str) -> Sides {
 }
 
 fn binary_pair() -> (websocket::Channel, websocket::Channel) {
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_frames(Frames::Binary);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
     let accepting = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
-    let near = websocket::Dialer::new()
-        .with_frames(Frames::Binary)
+    let near = websocket::Dialer::builder()
+        .frames(Frames::Binary)
+        .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     (near, accepting.join().unwrap())

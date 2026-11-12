@@ -5,7 +5,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web_channel::{Channel, Failure};
+use coqui_transport::{Channel, Failure};
 
 use crate::agent::{Agent, Output, WriteEnd};
 use crate::linger::Backlog;

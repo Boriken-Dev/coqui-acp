@@ -12,7 +12,7 @@ use coqui_agentic_peer::auth::{Identity, Proof, Trust};
 use coqui_agentic_peer::auth::{Sealed, prove_out};
 use coqui_agentic_peer::link::capabilities;
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
-use coqui_web_channel::Channel as _;
+use coqui_transport::Channel as _;
 
 const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
 const WAIT: Duration = Duration::from_secs(10);
@@ -125,12 +125,14 @@ fn wait_for_port(port: u16) {
     }
 }
 
-fn dial(port: u16) -> coqui_web_channel::websocket::Channel {
-    use coqui_web_channel::Dialer;
+fn dial(port: u16) -> coqui_transport_web::websocket::Channel {
+    use coqui_transport_web::Dialer;
     let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/link")).unwrap();
-    coqui_web_channel::websocket::Dialer::new()
-        .with_frames(coqui_web_channel::websocket::Frames::Binary)
-        .dial(coqui_web_channel::Kind::WebSocket, &url, WAIT)
+    coqui_transport_web::websocket::Dialer::builder()
+        .frames(coqui_transport_web::websocket::Frames::Binary)
+        .build()
+        .unwrap()
+        .dial(coqui_transport_web::Kind::WebSocket, &url, WAIT)
         .unwrap()
 }
 
@@ -139,7 +141,7 @@ fn over_link(
     port: u16,
     client: Identity,
     server: &str,
-    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>),
+    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_transport_web::websocket::Channel>>),
 ) {
     let method = Proof::builder(client)
         .responders(Trust::pinned([server.parse().unwrap()]))
@@ -151,7 +153,7 @@ fn over_link(
     Mux::run(&sealed, Side::Dialed, Limits::default(), None, body);
 }
 
-fn initialized<C: coqui_web_channel::Channel>(stream: &C) {
+fn initialized<C: coqui_transport::Channel>(stream: &C) {
     stream.send(INITIALIZE).unwrap();
     let answer: serde_json::Value =
         serde_json::from_slice(&stream.receive(Some(WAIT)).unwrap().unwrap()).unwrap();
@@ -224,7 +226,7 @@ fn a_grant_names_what_a_peer_may_open_and_keeps_the_rest_refused() {
         assert_eq!(capabilities(mux, WAIT).unwrap().offers, ["mcp"]);
         assert_eq!(
             mux.open("acp/1").unwrap().receive(Some(WAIT)),
-            Err(coqui_web_channel::Failure::Permission)
+            Err(coqui_transport::Failure::Permission)
         );
         initialized(&mux.open("mcp").unwrap());
     });
@@ -302,7 +304,7 @@ fn one_pairing_and_a_new_capability_is_a_grant_counted_at_once() {
         assert_eq!(capabilities(mux, WAIT).unwrap().offers, ["acp/1"]);
         assert_eq!(
             mux.open("mcp").unwrap().receive(Some(WAIT)),
-            Err(coqui_web_channel::Failure::Permission)
+            Err(coqui_transport::Failure::Permission)
         );
         granting("grant");
         assert_eq!(capabilities(mux, WAIT).unwrap().offers, ["acp/1", "mcp"]);
@@ -312,7 +314,7 @@ fn one_pairing_and_a_new_capability_is_a_grant_counted_at_once() {
         granting("revoke");
         assert_eq!(
             mcp.receive(Some(WAIT)),
-            Err(coqui_web_channel::Failure::Permission)
+            Err(coqui_transport::Failure::Permission)
         );
         assert!(matches!(
             mcp.end(),
@@ -570,7 +572,7 @@ fn forwarding_is_refused_by_default_and_a_target_takes_a_grant_of_its_own() {
         let stream = coqui_agentic_peer::forward::connect(mux, &target).unwrap();
         assert_eq!(
             stream.receive(Some(WAIT)),
-            Err(coqui_web_channel::Failure::Permission)
+            Err(coqui_transport::Failure::Permission)
         );
     });
 }
@@ -809,15 +811,15 @@ struct Stalling<'a, C> {
     began: Instant,
 }
 
-impl<C: coqui_web_channel::Channel> coqui_web_channel::Channel for Stalling<'_, C> {
-    fn send(&self, message: &[u8]) -> Result<(), coqui_web_channel::Failure> {
+impl<C: coqui_transport::Channel> coqui_transport::Channel for Stalling<'_, C> {
+    fn send(&self, message: &[u8]) -> Result<(), coqui_transport::Failure> {
         self.inner.send(message)
     }
 
     fn receive(
         &self,
         timeout: Option<Duration>,
-    ) -> Result<Option<Vec<u8>>, coqui_web_channel::Failure> {
+    ) -> Result<Option<Vec<u8>>, coqui_transport::Failure> {
         let into_cycle = self.began.elapsed().as_millis() % 2000;
         if into_cycle < 1500 {
             std::thread::sleep(Duration::from_millis(
