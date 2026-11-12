@@ -19,9 +19,9 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
-/// The most sessions waiting to be opened, so a host that imports and never opens cannot make the
+/// How many imports may wait to be opened by default, so a host that imports and never opens cannot make the
 /// provider hold histories without limit.
-const MAX_WAITING: usize = 64;
+pub(crate) const WAITING_MAX: u64 = 64;
 /// How long an import waits to be opened by default, in seconds.
 pub(crate) const WAITING_SECS: u64 = 60 * 60;
 /// How many agent session ids are remembered as live by default.
@@ -49,6 +49,7 @@ pub(crate) struct Replays {
     inner: Mutex<Inner>,
     waits: Duration,
     max_seen: usize,
+    max_waiting: usize,
 }
 
 impl Default for Replays {
@@ -60,15 +61,20 @@ impl Default for Replays {
 impl Replays {
     /// Imports that expire after `waits`.
     pub(crate) fn expiring(waits: Duration) -> Self {
-        Self::limited(waits, usize::try_from(REMEMBERED_IDS).unwrap_or(usize::MAX))
+        Self::limited(
+            waits,
+            usize::try_from(REMEMBERED_IDS).unwrap_or(usize::MAX),
+            usize::try_from(WAITING_MAX).unwrap_or(usize::MAX),
+        )
     }
 
     /// Imports that expire after `waits`, and the last `max_seen` agent session ids remembered.
-    pub(crate) fn limited(waits: Duration, max_seen: usize) -> Self {
+    pub(crate) fn limited(waits: Duration, max_seen: usize, max_waiting: usize) -> Self {
         Self {
             inner: Mutex::new(Inner::default()),
             waits,
             max_seen,
+            max_waiting,
         }
     }
 
@@ -93,7 +99,7 @@ impl Replays {
         if inner.waiting.contains_key(session) {
             return Err(Refusal::Named);
         }
-        if inner.waiting.len() >= MAX_WAITING {
+        if inner.waiting.len() >= self.max_waiting {
             return Err(Refusal::Full);
         }
         inner.waiting.insert(
@@ -331,12 +337,22 @@ mod tests {
 
     #[test]
     fn only_the_last_remembered_ids_are_held() {
-        let replays = Replays::limited(Duration::from_secs(60), 2);
+        let replays = Replays::limited(Duration::from_secs(60), 2, 8);
         for id in ["a", "b", "c"] {
             replays.see(id);
         }
         assert!(replays.add("a", None).is_ok(), "the oldest was forgotten");
         assert_eq!(replays.add("c", None), Err(Refusal::Live));
+    }
+
+    #[test]
+    fn no_more_imports_wait_than_the_cap_and_zero_refuses_all() {
+        let replays = Replays::limited(Duration::from_secs(60), 8, 2);
+        assert!(replays.add("a", None).is_ok());
+        assert!(replays.add("b", None).is_ok());
+        assert_eq!(replays.add("c", None), Err(Refusal::Full));
+        let none = Replays::limited(Duration::from_secs(60), 8, 0);
+        assert_eq!(none.add("a", None), Err(Refusal::Full));
     }
 
     #[test]

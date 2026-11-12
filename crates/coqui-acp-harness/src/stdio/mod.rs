@@ -109,6 +109,9 @@ pub struct StdioSettings {
     /// none).
     #[map(default = 4096)]
     pub replay_remembered_ids: u64,
+    /// How many imported histories may wait to be opened at once (64 by default; 0 refuses every import).
+    #[map(default = 64)]
+    pub replay_waiting_max: u64,
 }
 
 impl StdioSettings {
@@ -128,6 +131,7 @@ impl StdioSettings {
             replay_redact_patterns: Vec::new(),
             replay_waiting_secs: replay::WAITING_SECS,
             replay_remembered_ids: replay::REMEMBERED_IDS,
+            replay_waiting_max: replay::WAITING_MAX,
         }
     }
 }
@@ -186,6 +190,7 @@ impl StdioProvider {
         let replays = replay::Replays::limited(
             Duration::from_secs(settings.replay_waiting_secs),
             usize::try_from(settings.replay_remembered_ids).unwrap_or(usize::MAX),
+            usize::try_from(settings.replay_waiting_max).unwrap_or(usize::MAX),
         );
         Self {
             settings,
