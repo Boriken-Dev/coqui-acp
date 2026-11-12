@@ -515,6 +515,12 @@ fn deliver(mut sink: Object<dyn ChannelSink>, shared: &Shared, ending: Ending) {
         shared.process.wait(1000).ok()
     };
     wait_for(shared, |state| state.reader_done && state.errors_done);
+    // Imports this connection took and did not use wait again.
+    shared
+        .mapping
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .restore_all(&shared.replays);
     let Ending { spawner, hold } = ending;
     if let Some((hold, watcher)) = hold {
         if let Some(watcher) = watcher {
