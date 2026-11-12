@@ -124,14 +124,16 @@ pub fn call_note(&Call) -> String;  valid_time(&str) -> bool /* as the format re
 #[non_exhaustive] pub enum Direction { Sent, Received }          // as the client sees the message
 pub struct SessionRecorder;                                      // Debug
 pub fn SessionRecorder::new(id: impl Into<String> /*UUID*/, origin: Origin) -> SessionRecorder;
+pub fn session(self, id: impl Into<String>) -> Self;                                        // follow this agent session only
 pub fn max_line_bytes(self, n: u64) -> Self;  pub fn max_lines(self, n: u64) -> Self;      // defaults: the reader's
+pub fn max_total_bytes(self, n: u64) -> Self;                                              // default DEFAULT_DOCUMENT_MAX_TOTAL_BYTES; sets `truncated`
 pub fn observe(&mut self, direction: Direction, message: &Value);                         // one JSON-RPC message
 pub fn observe_at(&mut self, direction: Direction, message: &Value, at: Option<&str>);    // with an RFC 3339 time (a bad one is dropped)
 pub fn skipped(&self) -> u64;  pub fn truncated(&self) -> bool;
 pub fn finish(self) -> Result<Document, HistoryError>;            // a turn still open stays open
 ```
 
-Feed it every message of one connection in order; it keeps one session's (the id from `session/new`, `session/load` or `session/resume`, else the first it sees), ignores what it does not know and never fails the connection it watches. Updates are written as the agent sent them (v1 and v2); it adds only the turn structure (`session/prompt` and its answer, `session/cancel`), permission requests and the client's answers, a `current_mode_update` for a `session/set_mode` the agent did not announce, a `history/compaction` with its summary for a completed version 2 compaction, and header fields from `initialize` (`acpVersion`, `origin.version`), `session/new` (`cwd` when it is a valid path, mode, model) and mode updates. A message whose line the format refuses or that is over `max_line_bytes` is `skipped`; at `max_lines` (header included) it stops and `truncated` is true. A `session/load` replay is recorded as the updates it is. Never build a path from what it records.
+Feed it every message of one connection in order; it keeps one session's (the one given to `session`, else the one the first `session/new`, `session/load` or `session/resume` it saw names; updates before that are not recorded, and a later open does not move it), ignores what it does not know and never fails the connection it watches. Updates are written as the agent sent them (v1 and v2); it adds only the turn structure (`session/prompt` and its answer, `session/cancel`), permission requests and the client's answers, a `current_mode_update` for a `session/set_mode` the agent did not announce, a `history/compaction` with its summary for a completed version 2 compaction, and header fields from `initialize` (`acpVersion`, `origin.version`), `session/new` (`cwd` when it is a valid path, mode, model) and mode updates. A message whose line the writer would refuse (parsed under the default `Bounds`: nesting 64, 500,000 values) or that is over `max_line_bytes` is `skipped`; a header value the format refuses (session id, mode, model, version, `protocolVersion`, `cwd`) is dropped; at `max_lines` (header included) or `max_total_bytes` it stops and `truncated` is true, so `finish` gives a history that always writes and reads back. A `session/load` replay is recorded as the updates it is. Never build a path from what it records.
 
 ## Replay as context (`coqui_acp_history::replay`)
 
@@ -139,6 +141,8 @@ Feed it every message of one connection in order; it keeps one session's (the id
 #[non_exhaustive] pub struct ReplaySettings { pub max_bytes: u64 /* 32768 */, pub max_item_bytes: u64 /* 4096 */ }   // Default, guatiao ToValue/FromValue/Schema, Serialize
 pub struct Replay;                                                 // Debug, Clone
 pub fn Replay::of(doc: &Document, settings: &ReplaySettings) -> Replay;
+pub fn Replay::of_redacted(doc: &Document, settings: &ReplaySettings, redactor: &mut Redactor) -> Result<Replay, HistoryError>;   // a copy of doc is redacted first
+pub fn redaction(&self) -> Option<&RedactionReport>;
 pub fn text(&self) -> Option<&str>;  pub fn block(&self) -> Option<Value>;                 // None: nothing to replay, or none fits
 pub fn prompt(&self, blocks: Vec<Value>) -> Vec<Value>;            // the replay block first, the client's blocks untouched
 pub fn report(&self) -> &LossReport;  pub fn seeded_from(&self) -> Option<&SeedPoint>;
@@ -146,7 +150,7 @@ pub fn kept_turns(&self) -> u64;  pub fn cut_items(&self) -> u64;
 pub const DEFAULT_MAX_BYTES: u64;  pub const DEFAULT_MAX_ITEM_BYTES: u64;
 ```
 
-For an agent with no way to import a history. Starts at the latest compaction summary (`Conversation::of`), keeps the newest whole turns whose block is within `max_bytes` (markers and sentences included), starting at a turn, and quotes every line of the record with `| ` between two markers carrying a digest of the record; control, separator, direction and zero-width characters are written `\u{..}`. The text says it is data and not instructions; the format is in `docs/session-history.md` ("Replaying a history as context"). Reasoning is not replayed; a tool call is one entry (name, status, input, output) and never runs. The report has `replayed_as_prompt` (1) when anything was carried, and `history_cut` (items), `item_cut`, `non_text_omitted`, `thinking`, `tool_as_note`, `summary_missing` as they apply; nothing carried (an empty history, or none fits) gives `text()` of `None` and no `replayed_as_prompt`. It is a defence in depth: the quotation is this crate's, whether an agent honours it is the agent's.
+For an agent with no way to import a history. Starts at the latest compaction summary (`Conversation::of`), keeps the newest whole turns whose block is within `max_bytes` (markers and sentences included), starting at a turn, and quotes every line of the record with `| ` between two markers carrying a digest of the record; every Unicode format character, variation selector, tag character, filler, control and separator is written `\u{..}`, and an item's limit is counted after that; a line after the first of an item is indented two spaces so a history cannot forge a labelled line. **Everything is replayed verbatim, secrets a tool printed included, to whichever model reads it: use `of_redacted` when they cannot be ruled out.** The text says it is data and not instructions; the format is in `docs/session-history.md` ("Replaying a history as context"). Reasoning is not replayed; a tool call is one entry (name, status, input, output) and never runs. The report has `replayed_as_prompt` (1) when anything was carried, and `history_cut` (items), `item_cut`, `non_text_omitted`, `thinking`, `tool_as_note`, `summary_missing` as they apply; nothing carried (an empty history, or none fits) gives `text()` of `None` and no `replayed_as_prompt`. It is a defence in depth: the quotation is this crate's, whether an agent honours it is the agent's.
 
 ## Paging (`coqui_acp_history::paging`)
 
