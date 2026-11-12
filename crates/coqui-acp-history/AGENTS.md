@@ -4,7 +4,7 @@ Header-file-style reference for the `coqui-acp-history` crate: every public item
 
 Cargo feature `cli` (off by default) builds the `coqui-acp-history` command and pulls in `clap`. MSRV Rust 1.89. Default dependencies: `agent-client-protocol` (for ACP's `StopReason` and `ToolKind`), `guatiao` and `guatiao-serde` (settings, and the JSON text of `non_defaults`), `regex`, `serde`, `serde_json` (with `float_roundtrip`, so a double reads back exactly), `sha2`, `data-encoding`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
-Imports: everything is at the crate root except the tool table, `coqui_acp_history::tools`. `StopReason` is ACP's (`agent_client_protocol::schema::v1`), re-exported.
+Imports: everything is at the crate root except the tool table, `coqui_acp_history::tools`, and the modules `conversation`, `paging`, `patch`, `record` and `replay`. `StopReason` is ACP's (`agent_client_protocol::schema::v1`), re-exported.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state. Text only: the crate reads and writes UTF-8 JSON Lines; it parses no harness's own files (the Claude and Codex codecs live in `coqui-acp-claude` and `coqui-acp-codex`, behind their `history` feature, and are built on `conversation` below).
 
@@ -111,12 +111,42 @@ pub struct Boundary { pub summary: String, pub trigger: Option<Trigger>, pub pre
 pub struct Recorder;   // new, is_open, prompt, update, message, thought, note, cancel, end_turn, compaction, finish() -> Vec<Line>
 pub fn native_meta(harness: &str, fields: Map) -> Option<Value>;  pub fn native_of(meta: Option<&Value>, harness: &str) -> Option<&Map>;
 pub fn derived_uuid(session, what, n) -> String;  is_uuid(&str) -> bool;  clean_id(id, taken) -> String;  shell_text(&[&str]) -> String;
-pub fn call_note(&Call) -> String;  valid_time(&str) -> bool;
+pub fn call_note(&Call) -> String;  valid_time(&str) -> bool /* as the format reads a timestamp */;
 ```
 
-`Conversation::of` seeds as `Document::seed` does (the latest compaction that has a summary, then what follows) when `use_summary`, and from the first line, with no boundary's text anywhere, when not. A tool call's `tool_call` and `tool_call_update`s are merged into one `Call`, which appears as an `Item::Call` where it was announced and an `Item::Result` where it ended (or where this ended it). It closes what the history left open, as the format's rule (a): a call with no result ends `cancelled` (`closed_calls`, an `Item::Result` before the turn's end) and a turn left open ends `Cancelled` (`closed_turn`, an `Item::TurnEnd` with `closed_here`). A permission request and its answer, and a compaction boundary other than the seed's, are not items (rule (b); a boundary with no summary is `summary_missing`). A result for a call the seed does not hold is a `Call` with `announced` false, for a writer to drop. Chunks of one message or thought are joined; ACP updates that are no conversation (usage, modes, commands) are ignored.
+`Conversation::of` seeds as `Document::seed` does (the latest compaction that has a summary, then what follows) when `use_summary`, and from the first line, with no boundary's text anywhere, when not. A tool call's `tool_call` and `tool_call_update`s are merged into one `Call`, which appears as an `Item::Call` where it was announced and an `Item::Result` where it ended (or where this ended it). It closes what the history left open, as the format's rule (a): a call with no result ends `cancelled` (`closed_calls`, an `Item::Result` before the turn's end) and a turn left open ends `Cancelled` (`closed_turn`, an `Item::TurnEnd` with `closed_here`). A permission request and its answer, and a compaction boundary other than the seed's, are not items (rule (b); a boundary with no summary is `summary_missing`). A result for a call the seed does not hold is a `Call` with `announced` false, for a writer to drop. Chunks of one message or thought are joined (a chunk with another `messageId` starts a new one); ACP updates that are no conversation (usage, modes, commands) are ignored. A history whose header says `acpVersion` 2 or more is read as version 2: `agent_message`, `agent_thought` and `user_message` replace the content of the message with their `messageId`, the first `tool_call_update` of a call announces it (there is no `tool_call`), and `plan_update` is a plan. `Recorder` also has `permission_request`, `permission_answer` and `len`.
 
 `Recorder` builds lines that keep the order rules: `prompt` ends an open turn first as `end_turn` (a codec that knows better ends it itself), `cancel` and `end_turn` do nothing with no turn open, and `finish` leaves a turn open as a recording cut short. A codec puts what only its own harness reads into a line's `_meta` with `Stamp::native(harness, fields)` and reads it back with `native_of`, which answers only when the object names that harness.
+
+## Recorder of any ACP agent (`coqui_acp_history::record`)
+
+```rust
+#[non_exhaustive] pub enum Direction { Sent, Received }          // as the client sees the message
+pub struct SessionRecorder;                                      // Debug
+pub fn SessionRecorder::new(id: impl Into<String> /*UUID*/, origin: Origin) -> SessionRecorder;
+pub fn max_line_bytes(self, n: u64) -> Self;  pub fn max_lines(self, n: u64) -> Self;      // defaults: the reader's
+pub fn observe(&mut self, direction: Direction, message: &Value);                         // one JSON-RPC message
+pub fn observe_at(&mut self, direction: Direction, message: &Value, at: Option<&str>);    // with an RFC 3339 time (a bad one is dropped)
+pub fn skipped(&self) -> u64;  pub fn truncated(&self) -> bool;
+pub fn finish(self) -> Result<Document, HistoryError>;            // a turn still open stays open
+```
+
+Feed it every message of one connection in order; it keeps one session's (the id from `session/new`, `session/load` or `session/resume`, else the first it sees), ignores what it does not know and never fails the connection it watches. Updates are written as the agent sent them (v1 and v2); it adds only the turn structure (`session/prompt` and its answer, `session/cancel`), permission requests and the client's answers, a `current_mode_update` for a `session/set_mode` the agent did not announce, a `history/compaction` with its summary for a completed version 2 compaction, and header fields from `initialize` (`acpVersion`, `origin.version`), `session/new` (`cwd` when it is a valid path, mode, model) and mode updates. A message whose line the format refuses or that is over `max_line_bytes` is `skipped`; at `max_lines` (header included) it stops and `truncated` is true. A `session/load` replay is recorded as the updates it is. Never build a path from what it records.
+
+## Replay as context (`coqui_acp_history::replay`)
+
+```rust
+#[non_exhaustive] pub struct ReplaySettings { pub max_bytes: u64 /* 32768 */, pub max_item_bytes: u64 /* 4096 */ }   // Default, guatiao ToValue/FromValue/Schema, Serialize
+pub struct Replay;                                                 // Debug, Clone
+pub fn Replay::of(doc: &Document, settings: &ReplaySettings) -> Replay;
+pub fn text(&self) -> Option<&str>;  pub fn block(&self) -> Option<Value>;                 // None: nothing to replay, or none fits
+pub fn prompt(&self, blocks: Vec<Value>) -> Vec<Value>;            // the replay block first, the client's blocks untouched
+pub fn report(&self) -> &LossReport;  pub fn seeded_from(&self) -> Option<&SeedPoint>;
+pub fn kept_turns(&self) -> u64;  pub fn cut_items(&self) -> u64;
+pub const DEFAULT_MAX_BYTES: u64;  pub const DEFAULT_MAX_ITEM_BYTES: u64;
+```
+
+For an agent with no way to import a history. Starts at the latest compaction summary (`Conversation::of`), keeps the newest whole turns whose block is within `max_bytes` (markers and sentences included), starting at a turn, and quotes every line of the record with `| ` between two markers carrying a digest of the record; control, separator, direction and zero-width characters are written `\u{..}`. The text says it is data and not instructions; the format is in `docs/session-history.md` ("Replaying a history as context"). Reasoning is not replayed; a tool call is one entry (name, status, input, output) and never runs. The report has `replayed_as_prompt` (1) when anything was carried, and `history_cut` (items), `item_cut`, `non_text_omitted`, `thinking`, `tool_as_note`, `summary_missing` as they apply; nothing carried (an empty history, or none fits) gives `text()` of `None` and no `replayed_as_prompt`. It is a defence in depth: the quotation is this crate's, whether an agent honours it is the agent's.
 
 ## Paging (`coqui_acp_history::paging`)
 
@@ -147,7 +177,7 @@ Off unless a caller builds a `Redactor`. Strings are changed everywhere in the h
 ```rust
 #[non_exhaustive] pub struct Loss { pub kind: String, pub count: u64, pub detail: Option<String> }   // guatiao ToValue/FromValue/Schema
 pub struct LossReport;   // add(kind, count, detail), losses(), count(kind), is_empty(), IntoIterator, Extend/FromIterator<Loss>
-pub const THINKING, TOOL_AS_NOTE, ATTACHMENT_BY_DIGEST, REPLAYED_AS_PROMPT, SUMMARY_MISSING: &str;
+pub const THINKING, TOOL_AS_NOTE, ATTACHMENT_BY_DIGEST, REPLAYED_AS_PROMPT, SUMMARY_MISSING, HISTORY_CUT, ITEM_CUT, NON_TEXT_OMITTED: &str;
 ```
 
 `Loss` is shaped for the `acp_harness` kind's `ImportReport.losses`; an importer fills it, nothing in this crate does. `detail` never holds lost content. The kinds are an open vocabulary.

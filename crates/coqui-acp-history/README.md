@@ -25,6 +25,12 @@ reference implementation, and `vectors/session_history/` holds the cases a reade
 - `Redactor`: removes values and patterns, only when asked, and reports what it removed by rule position, never by text.
 - `tools`: the table that names each harness's built-in tools once (`read`, `write`, `edit`, `patch`, `shell`, `grep`, `glob`,
   `fetch`), with the key renames each direction.
+- `record::SessionRecorder`: records any ACP agent's session from the messages its client exchanges with it (version 1 and 2
+  updates as the agent sent them, turns, cancels, permissions, modes, compactions) into a `Document`, so a session of an agent
+  with no files of its own can be exported.
+- `replay::Replay`: for an agent that cannot import a history, the newest turns that fit a size budget as one quoted block for the
+  first prompt, and a loss report that says it was replayed and what was cut. The text is delimited and escaped as data, not
+  instructions.
 - `LossReport`: what an import could not carry (thinking dropped, tools turned into notes, attachments known only by digest).
 - Settings as Guatiao values: `Bounds`, `ReaderSettings`, `WriterSettings`, `RedactionSettings`, each with defaults, unknown keys
   refused, and `non_defaults()`.
