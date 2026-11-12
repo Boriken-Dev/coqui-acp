@@ -365,7 +365,10 @@ impl Conversation {
                 Body::Compaction { summary: None, .. }
             )
         });
-        let mut builder = Builder::default();
+        let mut builder = Builder {
+            v2: doc.header.acp_version.is_some_and(|version| version >= 2),
+            ..Builder::default()
+        };
         for line in lines {
             builder.line(line);
         }
@@ -385,6 +388,13 @@ impl Conversation {
 
 #[derive(Default)]
 struct Builder {
+    /// Whether the updates are ACP version 2's: a `tool_call_update` for a call not yet seen then
+    /// announces it, as version 2 has no `tool_call`.
+    v2: bool,
+    /// The item each message id names, so a version 2 upsert replaces it.
+    ids: BTreeMap<String, usize>,
+    /// The id of the message or thought the last chunk belonged to.
+    last_id: Option<String>,
     items: Vec<Item>,
     calls: BTreeMap<String, Call>,
     pending: Vec<String>,
@@ -428,25 +438,74 @@ impl Builder {
 
     fn update(&mut self, update: &Value, stamp: Stamp) {
         let kind = update.get("sessionUpdate").and_then(Value::as_str);
+        let message_id = update
+            .get("messageId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         match kind {
             Some(chunk @ ("agent_message_chunk" | "agent_thought_chunk")) => {
                 let Some(text) = update.pointer("/content/text").and_then(Value::as_str) else {
                     return;
                 };
+                let same_message = message_id.is_none()
+                    || self.last_id.is_none()
+                    || message_id == self.last_id;
                 match (chunk, self.items.last_mut()) {
                     ("agent_message_chunk", Some(Item::Message { text: kept, .. }))
-                    | ("agent_thought_chunk", Some(Item::Thought { text: kept, .. })) => {
+                    | ("agent_thought_chunk", Some(Item::Thought { text: kept, .. }))
+                        if same_message =>
+                    {
                         kept.push_str(text);
                     }
-                    ("agent_message_chunk", _) => self.items.push(Item::Message {
-                        text: text.to_owned(),
-                        stamp,
-                    }),
-                    _ => self.items.push(Item::Thought {
-                        text: text.to_owned(),
-                        stamp,
-                    }),
+                    _ => {
+                        let item = if chunk == "agent_message_chunk" {
+                            Item::Message {
+                                text: text.to_owned(),
+                                stamp,
+                            }
+                        } else {
+                            Item::Thought {
+                                text: text.to_owned(),
+                                stamp,
+                            }
+                        };
+                        self.items.push(item);
+                        if let Some(id) = &message_id {
+                            self.ids.insert(id.clone(), self.items.len() - 1);
+                        }
+                    }
                 }
+                self.last_id = message_id;
+            }
+            Some(whole @ ("agent_message" | "agent_thought" | "user_message")) => {
+                // Version 2: the content replaces what the message held; absent leaves it.
+                let Some(blocks) = update.get("content").and_then(Value::as_array) else {
+                    return;
+                };
+                let text = blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("
+");
+                let item = match whole {
+                    "agent_message" => Item::Message { text, stamp },
+                    "agent_thought" => Item::Thought { text, stamp },
+                    _ => Item::Note {
+                        block: json!({"type": "text", "text": text}),
+                        stamp,
+                    },
+                };
+                match message_id.as_ref().and_then(|id| self.ids.get(id)) {
+                    Some(&at) => self.items[at] = item,
+                    None => {
+                        self.items.push(item);
+                        if let Some(id) = &message_id {
+                            self.ids.insert(id.clone(), self.items.len() - 1);
+                        }
+                    }
+                }
+                self.last_id = message_id;
             }
             Some("user_message_chunk") => {
                 if let Some(block) = update.get("content").filter(|block| block.is_object()) {
@@ -464,8 +523,17 @@ impl Builder {
                     });
                 }
             }
+            Some("plan_update") => {
+                if let Some(entries) = update.pointer("/plan/entries").and_then(Value::as_array) {
+                    self.items.push(Item::Plan {
+                        entries: entries.clone(),
+                        stamp,
+                    });
+                }
+            }
             Some(kind @ ("tool_call" | "tool_call_update")) => {
-                self.tool(kind == "tool_call", update, stamp)
+                let announces = kind == "tool_call" || self.v2;
+                self.tool(announces, update, stamp);
             }
             _ => {}
         }
@@ -579,6 +647,18 @@ impl Recorder {
         Self::default()
     }
 
+    /// How many lines it holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Whether it holds no line.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
     /// Whether a turn is open.
     #[must_use]
     pub fn is_open(&self) -> bool {
@@ -622,6 +702,29 @@ impl Recorder {
             json!({"sessionUpdate": "user_message_chunk", "content": block}),
             stamp,
         );
+    }
+
+    /// The agent asked for leave to run a tool call; nothing when no turn is open.
+    pub fn permission_request(&mut self, tool_call: Value, options: Vec<Value>, stamp: Stamp) {
+        if self.open {
+            self.push(
+                Line::new(Body::PermissionRequest { tool_call, options }),
+                stamp,
+            );
+        }
+    }
+
+    /// The client's answer to the request for `tool_call_id`; nothing when no turn is open.
+    pub fn permission_answer(&mut self, tool_call_id: String, outcome: Value, stamp: Stamp) {
+        if self.open {
+            self.push(
+                Line::new(Body::PermissionAnswer {
+                    tool_call_id,
+                    outcome,
+                }),
+                stamp,
+            );
+        }
     }
 
     /// The client cancelled the turn; nothing when none is open.

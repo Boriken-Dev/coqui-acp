@@ -40,6 +40,7 @@ mod loss;
 mod order;
 pub mod paging;
 pub mod patch;
+pub mod record;
 mod reader;
 mod redact;
 mod seed;
