@@ -158,8 +158,8 @@ impl SessionRecorder {
         {
             self.header_set(|header| header.created_at = Some(first));
         }
-        // `,"at":".."` on every line that has a time.
-        self.at_extra = at.as_ref().map_or(0, |at| at.len() as u64 + 7);
+        // `,"at":".."` (the time and eight bytes around it) on every line that has a time.
+        self.at_extra = at.as_ref().map_or(0, |at| at.len() as u64 + 8);
         let stamp = Stamp::at(at);
         let id = object
             .get("id")

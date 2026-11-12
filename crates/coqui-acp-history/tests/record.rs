@@ -693,3 +693,48 @@ fn a_resume_that_succeeds_is_followed_from_its_answer() {
     assert_eq!(bodies(&doc), ["update"]);
     assert_eq!(doc.header.origin.session_id.as_deref(), Some(SESSION));
 }
+
+#[test]
+fn a_line_is_counted_with_its_time_to_the_byte() {
+    use coqui_acp_history::Line;
+    let at = "2026-11-12T10:00:00.123456+02:00";
+    let update_value = chunk("agent_message_chunk", "exactly");
+    let exact = Line::update(update_value.clone())
+        .at(at)
+        .to_json()
+        .unwrap()
+        .len() as u64;
+    let message = json!({"jsonrpc": "2.0", "method": "session/update",
+        "params": {"sessionId": SESSION, "update": update_value}});
+    for (limit, kept) in [(exact, 1), (exact - 1, 0)] {
+        let mut rec = recorder().max_line_bytes(limit);
+        open(&mut rec, 1);
+        rec.observe_at(Direction::Received, &message, Some(at));
+        assert_eq!(rec.skipped(), 1 - kept, "limit {limit}");
+        assert_eq!(
+            rec.finish().unwrap().lines.len() as u64,
+            kept,
+            "limit {limit}"
+        );
+    }
+}
+
+#[test]
+fn a_recording_of_a_hundred_thousand_timed_lines_reads_back_at_the_default_limit() {
+    let at = "2026-11-12T10:00:00.123456+02:00";
+    let mut rec = recorder();
+    open(&mut rec, 1);
+    let message = json!({"jsonrpc": "2.0", "method": "session/update",
+        "params": {"sessionId": SESSION, "update": chunk("agent_message_chunk", &"y".repeat(100))}});
+    for _ in 0..100_000 {
+        rec.observe_at(Direction::Received, &message, Some(at));
+    }
+    assert!(
+        rec.truncated(),
+        "a hundred thousand lines are more than 16 MiB"
+    );
+    let doc = rec.finish().unwrap();
+    let bytes = doc.to_vec().unwrap();
+    assert!(bytes.len() as u64 <= coqui_acp_history::DEFAULT_DOCUMENT_MAX_TOTAL_BYTES);
+    Document::from_slice(&bytes).expect("it reads back under the document limit");
+}
