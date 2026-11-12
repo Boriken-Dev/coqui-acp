@@ -63,6 +63,10 @@ pub struct PiLaunch {
     pub modes: Option<Vec<Mode>>,
     /// Whether Manual and Plan ask even before a tool that only reads.
     pub ask_for_reads: bool,
+    /// The protected paths, in gitignore syntax (`!` allows, a later line wins, `~/` is the home directory): what the model
+    /// may not read or change without leave. `None` takes [`crate::protect::RECOMMENDED`] with the agent directory's own
+    /// credential files; a list written here replaces all of it.
+    pub protected: Option<Vec<String>>,
     /// Whether a working directory may hold the places credentials are kept (the person's home, say, with its `.ssh`), which a
     /// session is otherwise refused. A search from there (`grep` passes `--hidden`) reads them.
     pub allow_credential_roots: bool,
@@ -234,6 +238,7 @@ impl PiLaunch {
             allow_bypass: false,
             modes: None,
             ask_for_reads: false,
+            protected: None,
             allow_credential_roots: false,
             isolated: false,
             gate_dir: None,
@@ -301,6 +306,24 @@ impl PiLaunch {
         dirs
     }
 
+    /// The list of protected paths this launch decides by: the person's own, else the recommendations and the credential
+    /// files of the agent directory (`auth.json`, `models.json`, `mcp-auth.json`).
+    #[must_use]
+    pub fn protected_list(&self) -> crate::protect::Protected {
+        if let Some(lines) = &self.protected {
+            return crate::protect::Protected::new(lines, cfg!(windows));
+        }
+        let own: Vec<String> = self
+            .agent_dirs()
+            .iter()
+            .flat_map(|dir| {
+                ["auth.json", "models.json", "mcp-auth.json"]
+                    .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        crate::protect::Protected::recommended(own, cfg!(windows))
+    }
+
     /// The first working directory that holds a place credentials are kept in (Pi's `auth.json` and `models.json`, the
     /// person's `.ssh` and the like), when the launch does not allow it.
     #[must_use]
@@ -310,14 +333,12 @@ impl PiLaunch {
         }
         let scope = crate::mode::Scope::new(&self.cwd, self.roots())
             .with_agent_dirs(self.agent_dirs())
-            .with_home(self.home());
+            .with_home(self.home())
+            .with_list(self.protected_list());
         self.roots()
             .into_iter()
             .chain(core::iter::once(self.cwd.clone()))
-            .find(|root| {
-                let text = root.to_string_lossy();
-                scope.reaches_secret(Some(&text)) || scope.secret(&text)
-            })
+            .find(|root| scope.reaches_secret(Some(&root.to_string_lossy())))
     }
 
     fn path_value(&self) -> Option<OsString> {

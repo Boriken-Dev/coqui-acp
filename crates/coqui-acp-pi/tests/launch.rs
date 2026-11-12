@@ -392,26 +392,38 @@ fn the_listing_of_the_models_loads_the_guard_and_works_in_an_empty_directory() {
     );
 }
 
+/// The list is the person's: a working directory is refused for what the list names, and not for what they took out of it.
 #[test]
-fn a_session_in_a_directory_of_another_tool_s_credentials_is_refused() {
-    let scratch = Scratch::new("tool-credentials");
-    let home = scratch.dir("home");
-    for dir in [".claude", ".codex", ".ssh"] {
-        let cwd = scratch.dir("home").join(dir);
-        std::fs::create_dir_all(&cwd).unwrap();
-        let mut launch = PiLaunch::new(&cwd);
+fn a_working_directory_over_a_protected_place_is_refused_by_the_persons_list() {
+    let scratch = Scratch::new("persons-list");
+    let (home, agent) = (scratch.dir("home"), scratch.dir("agent"));
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let launch_in = |cwd: &std::path::Path, protected: Option<Vec<String>>| {
+        let mut launch = PiLaunch::new(cwd);
         launch.executable = support::fake_program().into();
         for name in ["HOME", "USERPROFILE"] {
             launch.env.insert(name.into(), home.clone().into());
         }
         launch
             .env
-            .insert("PI_CODING_AGENT_DIR".into(), scratch.dir("agent").into());
-        let Err(error) = start(&launch) else {
-            panic!("a session opened in ~/{dir}");
-        };
-        let said = error.to_string();
-        assert!(said.contains("credentials"), "{said}");
-        assert!(!said.contains("  "), "a run of spaces in: {said}");
-    }
+            .insert("PI_CODING_AGENT_DIR".into(), agent.clone().into());
+        launch.protected = protected;
+        launch
+    };
+    // The recommendations name `~/.ssh`: the home directory holds a place, so it is refused.
+    assert!(launch_in(&home, None).credential_root().is_some());
+    // A list without it, or one that names nothing of the home directory, does not refuse it.
+    let without = Some(vec!["secret.key".to_string()]);
+    assert!(launch_in(&home, without).credential_root().is_none());
+    assert!(
+        launch_in(&home, Some(Vec::new()))
+            .credential_root()
+            .is_none()
+    );
+    // A list with an entry of the person's own refuses the directory that holds it.
+    let own = Some(vec!["~/.claude/notes".to_string()]);
+    assert!(launch_in(&home, own).credential_root().is_some());
+    // And what the person allows again is not a place.
+    let allowed = Some(vec!["~/.claude".to_string(), "!~/.claude".to_string()]);
+    assert!(launch_in(&home, allowed).credential_root().is_none());
 }

@@ -59,6 +59,10 @@ pub struct ProviderSettings {
     /// call runs after the gate approved it.
     #[map(default = false)]
     pub isolated: bool,
+    /// The protected paths, in gitignore syntax (`!` allows, a later line wins, `~/` is the home directory): what the model
+    /// may not read or change without leave. Absent takes this crate's recommendations (`coqui_acp_pi::protect::RECOMMENDED`);
+    /// a list written here replaces them, so copy the ones to keep.
+    pub protected: Option<Vec<String>>,
     /// Whether a session's working directory may hold the places credentials are kept in (a home directory with its `.ssh`):
     /// a search from there reads them, so a session is refused otherwise.
     #[map(default = false)]
@@ -93,6 +97,7 @@ impl Default for ProviderSettings {
             modes: None,
             ask_for_reads: false,
             isolated: false,
+            protected: None,
             allow_credential_roots: false,
             max_acp_version: 2,
             max_sessions: 8,
@@ -178,6 +183,7 @@ impl PiProvider {
         launch.ask_for_reads = self.settings.ask_for_reads;
         launch.isolated = self.settings.isolated;
         launch.allow_credential_roots = self.settings.allow_credential_roots;
+        launch.protected.clone_from(&self.settings.protected);
         for (name, value) in environment.iter() {
             launch.env.insert(name.into(), value.into());
         }

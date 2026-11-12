@@ -141,6 +141,7 @@ pub struct Parser {
     /// Pi's agent directories, where it keeps its credentials and the code it loads.
     protected: Vec<PathBuf>,
     private: Vec<PathBuf>,
+    list: Option<crate::protect::Protected>,
     /// The home directory Pi expands `~` to, when it is not the process's own.
     home: Option<PathBuf>,
     tools: BTreeMap<String, Tool>,
@@ -193,6 +194,7 @@ impl Parser {
             roots: Vec::new(),
             protected: Vec::new(),
             private: Vec::new(),
+            list: None,
             home: None,
             tools: BTreeMap::new(),
             order: VecDeque::new(),
@@ -222,6 +224,13 @@ impl Parser {
         self
     }
 
+    /// The list of protected paths, in place of this crate's recommendations.
+    #[must_use]
+    pub fn with_list(mut self, list: crate::protect::Protected) -> Self {
+        self.list = Some(list);
+        self
+    }
+
     /// Directories of the translator's own (the launch's private one, which holds the gate): the model changes nothing in
     /// them, in any mode but Bypass.
     #[must_use]
@@ -238,9 +247,20 @@ impl Parser {
     }
 
     fn scope(&self) -> Scope {
-        let scope = Scope::new(&self.cwd, self.roots.clone())
+        let mut scope = Scope::new(&self.cwd, self.roots.clone())
             .with_agent_dirs(self.protected.clone())
             .with_private(self.private.clone());
+        match &self.list {
+            Some(list) => scope = scope.with_list(list.clone()),
+            // No list given: the recommendations and the credential files of the agent directories.
+            None => {
+                let own = self.protected.iter().flat_map(|dir| {
+                    ["auth.json", "models.json", "mcp-auth.json"]
+                        .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+                });
+                scope = scope.with_list(crate::protect::Protected::recommended(own, cfg!(windows)));
+            }
+        }
         match &self.home {
             Some(home) => scope.with_home(Some(home.clone())),
             None => scope,

@@ -11,6 +11,7 @@ mod launch;
 pub mod mode;
 pub mod parse;
 pub mod paths;
+pub mod protect;
 mod provider;
 mod session;
 

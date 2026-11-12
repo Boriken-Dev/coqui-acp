@@ -47,6 +47,10 @@ struct Cli {
     /// Load only the permission gate: none of the person's own extensions and no MCP servers.
     #[arg(long)]
     isolated: bool,
+    /// A protected path pattern in gitignore syntax (`!` allows, a later line wins, `~/` is the home directory), repeated
+    /// and in order; any replaces the recommended list.
+    #[arg(long = "protected", value_name = "PATTERN", allow_hyphen_values = true)]
+    protected: Vec<String>,
     /// Let a session work in a directory that holds the places credentials are kept in (a home directory).
     #[arg(long)]
     allow_credential_roots: bool,
@@ -90,6 +94,7 @@ fn main() -> ExitCode {
     defaults.ask_for_reads = cli.ask_for_reads;
     defaults.isolated = cli.isolated;
     defaults.allow_credential_roots = cli.allow_credential_roots;
+    defaults.protected = (!cli.protected.is_empty()).then(|| cli.protected.clone());
     let agent = PiAgent::new().defaults(defaults);
     match serve(
         Arc::new(agent),

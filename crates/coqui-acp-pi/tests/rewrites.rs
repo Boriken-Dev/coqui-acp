@@ -520,3 +520,41 @@ fn nothing_is_written_in_the_directory_that_holds_the_gate() {
         }
     }
 }
+
+/// Taking an entry out of the list unprotects it, and an entry the person adds protects: the list decides, not the code.
+#[test]
+fn the_persons_list_replaces_the_recommended_one() {
+    use coqui_acp_pi::protect::Protected;
+    let decide = |lines: &[&str], text: &str, tool: &str| {
+        let (parser, written) = parser_in(Mode::Manual);
+        let mut parser = parser.with_list(Protected::new(lines.iter().copied(), cfg!(windows)));
+        parser.prompting();
+        let asked = run(
+            &mut parser,
+            &call(tool, &json!({"path": text, "content": "x"}), "l"),
+        );
+        (asked.len(), answer(&written))
+    };
+    // Recommended: the key is refused.
+    let recommended = coqui_acp_pi::protect::RECOMMENDED;
+    assert_eq!(
+        decide(recommended, "~/.ssh/id_rsa", "read").1.as_deref(),
+        Some("protected")
+    );
+    // The person's list leaves `.ssh` out: outside the project, so a question, not a refusal.
+    let (asked, said) = decide(&["~/.codex/auth.json"], "~/.ssh/id_rsa", "read");
+    assert_eq!((asked, said), (1, None));
+    // `!` takes one entry of the recommendation back; the others stay.
+    let mut lines: Vec<&str> = recommended.to_vec();
+    lines.push("!~/.ssh/config");
+    assert_eq!(decide(&lines, "~/.ssh/config", "read").0, 1);
+    assert_eq!(
+        decide(&lines, "~/.ssh/id_rsa", "read").1.as_deref(),
+        Some("protected")
+    );
+    // An entry of their own is refused to write as to read.
+    for tool in ["read", "write"] {
+        let found = decide(&["~/vault/**/*.key"], "~/vault/a/b/x.key", tool);
+        assert_eq!(found.1.as_deref(), Some("protected"), "{tool}");
+    }
+}

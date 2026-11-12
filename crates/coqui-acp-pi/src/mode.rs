@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use coqui_acp_harness::acp::within_roots;
 
 use crate::paths;
+use crate::protect::Protected;
 use coqui_acp_harness::mode;
 pub use coqui_acp_harness::mode::Mode;
 use serde_json::Value;
@@ -45,6 +46,7 @@ pub struct Scope {
     roots: Vec<PathBuf>,
     agent_dirs: Vec<PathBuf>,
     private: Vec<PathBuf>,
+    list: Protected,
     home: Option<PathBuf>,
     windows: bool,
 }
@@ -103,31 +105,6 @@ fn has_component(path: &Path, names: &[&str]) -> bool {
     })
 }
 
-/// Where in a person's home credentials are kept: directories and single files.
-const SECRET_HOME: [&str; 21] = [
-    ".ssh",
-    ".aws",
-    ".gnupg",
-    ".kube",
-    ".azure",
-    ".netrc",
-    ".npmrc",
-    ".git-credentials",
-    ".config/gcloud",
-    ".config/gh",
-    ".docker/config.json",
-    ".cargo/credentials",
-    ".cargo/credentials.toml",
-    ".pypirc",
-    ".codex/auth.json",
-    ".claude/.credentials.json",
-    ".config/git/credentials",
-    ".config/gh/hosts.yml",
-    ".kube/config",
-    "AppData/Roaming/gcloud",
-    "AppData/Roaming/GitHub CLI",
-];
-
 impl Scope {
     /// A scope in `cwd`, whose files a call may use freely when they lie in `roots` (`cwd` alone when empty). The home
     /// directory is the process's (`USERPROFILE` on Windows, `HOME` elsewhere): [`Scope::with_home`] names another.
@@ -145,6 +122,7 @@ impl Scope {
             roots,
             agent_dirs: Vec::new(),
             private: Vec::new(),
+            list: Protected::recommended(Vec::<String>::new(), cfg!(windows)),
             home,
             windows: cfg!(windows),
         }
@@ -154,6 +132,13 @@ impl Scope {
     #[must_use]
     pub fn with_agent_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.agent_dirs = dirs;
+        self
+    }
+
+    /// The list of protected paths, in place of this crate's recommendations.
+    #[must_use]
+    pub fn with_list(mut self, list: Protected) -> Self {
+        self.list = list;
         self
     }
 
@@ -216,32 +201,17 @@ impl Scope {
         !found.network && !found.unknown && within_roots(&found.path, &self.roots)
     }
 
-    /// Whether the path holds credentials: Pi's `auth.json`, `models.json` (which can name a command that yields a key) and
-    /// `mcp-auth.json` in an agent directory, and what a person keeps secrets in under their home (`.ssh`, `.aws`,
-    /// `.gnupg`, `.kube`, `.azure`, `gcloud`, `gh`, `.netrc`, `.npmrc`, `.git-credentials`, Cargo's and Docker's).
+    /// Whether the path is one the protected list names (by default this crate's recommendations: Pi's `auth.json`,
+    /// `models.json` and `mcp-auth.json`, and what a person keeps secrets in under their home), once worked out as Pi will
+    /// open it.
     #[must_use]
     pub fn secret(&self, text: &str) -> bool {
         let found = self.pi(text);
         if found.network || found.unknown {
             return false;
         }
-        let path = resolved(&found.path);
-        let credentials = ["auth.json", "models.json", "mcp-auth.json"];
-        if self.agent_dirs.iter().any(|dir| {
-            path.starts_with(resolved(dir))
-                && path
-                    .file_name()
-                    .is_some_and(|name| credentials.iter().any(|wanted| same(name, wanted)))
-        }) {
-            return true;
-        }
-        let Some(home) = &self.home else {
-            return false;
-        };
-        let home = resolved(home);
-        SECRET_HOME.iter().any(|name| {
-            path.starts_with(home.join(name)) || resolved(&found.path).starts_with(home.join(name))
-        })
+        let home = self.home.as_deref().map(resolved);
+        self.list.protects(&resolved(&found.path), home.as_deref())
     }
 
     /// Whether a name in the path holds a `:` on Windows, which the file system reads as a stream of the file before it
@@ -249,21 +219,6 @@ impl Scope {
     #[must_use]
     pub fn stream(&self, text: &str) -> bool {
         self.pi(text).stream
-    }
-
-    /// Where credentials are kept: the files Pi keeps its own in, and what a person keeps secrets in under their home.
-    fn secret_places(&self) -> Vec<PathBuf> {
-        let mut places = Vec::new();
-        for dir in &self.agent_dirs {
-            for name in ["auth.json", "models.json", "mcp-auth.json"] {
-                places.push(resolved(&dir.join(name)));
-            }
-        }
-        if let Some(home) = &self.home {
-            let home = resolved(home);
-            places.extend(SECRET_HOME.iter().map(|name| home.join(name)));
-        }
-        places
     }
 
     /// Whether a search that starts at `root` (the working directory when absent) would reach a credential: the root holds
@@ -281,9 +236,12 @@ impl Scope {
                 resolved(&found.path)
             }
         };
-        self.secret_places()
+        let home = self.home.as_deref().map(resolved);
+        self.list
+            .places(home.as_deref())
             .iter()
-            .any(|place| under(place, &start, self.windows))
+            .filter(|place| self.list.protects(&resolved(place), home.as_deref()))
+            .any(|place| under(&resolved(place), &start, self.windows))
     }
 
     /// Whether Pi loads code or configuration from the path, so that a file written there runs later with no question: its

@@ -389,6 +389,7 @@ impl PiSession {
                 .with_roots(&launch.cwd, launch.roots())
                 .with_protected(launch.agent_dirs())
                 .with_private(vec![gate.dir().to_path_buf()])
+                .with_list(launch.protected_list())
                 .with_home(launch.home()),
         ));
         let tail = Arc::new(Mutex::new(Tail::new(
