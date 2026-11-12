@@ -213,10 +213,8 @@ impl SessionRecorder {
                 }
             }
             ("session/prompt", Some(id)) => self.prompted(id, params, stamp),
-            ("session/cancel", None) if self.belongs(params) => {
-                if self.room() {
-                    self.recorder.cancel(stamp);
-                }
+            ("session/cancel", None) if self.belongs(params) && self.room() => {
+                self.recorder.cancel(stamp);
             }
             _ => {}
         }

@@ -12,6 +12,12 @@ pub const TOOL_AS_NOTE: &str = "tool_as_note";
 pub const ATTACHMENT_BY_DIGEST: &str = "attachment_by_digest";
 /// The target has no transcript of its own: the history was replayed to it as a prompt.
 pub const REPLAYED_AS_PROMPT: &str = "replayed_as_prompt";
+/// Turns of the history left out of a replay to fit its size limit; counted in items.
+pub const HISTORY_CUT: &str = "history_cut";
+/// One item of a replayed history cut short to fit its own limit.
+pub const ITEM_CUT: &str = "item_cut";
+/// A content block with no text (an image, audio) that a replay could only name.
+pub const NON_TEXT_OMITTED: &str = "non_text_omitted";
 /// The history's latest compaction boundary has no summary, so the seed starts earlier or at the
 /// start.
 pub const SUMMARY_MISSING: &str = "summary_missing";

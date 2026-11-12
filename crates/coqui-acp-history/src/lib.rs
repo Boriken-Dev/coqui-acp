@@ -42,6 +42,7 @@ pub mod paging;
 pub mod patch;
 pub mod record;
 mod reader;
+pub mod replay;
 mod redact;
 mod seed;
 mod settings;
@@ -56,8 +57,8 @@ pub use error::{HistoryError, OrderRule};
 pub use header::{FORMAT, Header, Origin, Redacted, VERSION};
 pub use line::{ATTACHMENT_META_KEY, Body, Line, NATIVE_META_KEY, Stop, Trigger};
 pub use loss::{
-    ATTACHMENT_BY_DIGEST, Loss, LossReport, REPLAYED_AS_PROMPT, SUMMARY_MISSING, THINKING,
-    TOOL_AS_NOTE,
+    ATTACHMENT_BY_DIGEST, HISTORY_CUT, ITEM_CUT, Loss, LossReport, NON_TEXT_OMITTED,
+    REPLAYED_AS_PROMPT, SUMMARY_MISSING, THINKING, TOOL_AS_NOTE,
 };
 pub use order::{Boundary, Summary};
 pub use reader::{Entry, Reader, ReaderBuilder};
