@@ -58,7 +58,7 @@ pub use header::{FORMAT, Header, Origin, Redacted, VERSION};
 pub use line::{ATTACHMENT_META_KEY, Body, Line, NATIVE_META_KEY, Stop, Trigger};
 pub use loss::{
     ATTACHMENT_BY_DIGEST, HISTORY_CUT, ITEM_CUT, Loss, LossReport, NON_TEXT_OMITTED,
-    REPLAYED_AS_PROMPT, SUMMARY_MISSING, THINKING, TOOL_AS_NOTE,
+    REDACTION_LIMIT, REPLAYED_AS_PROMPT, SUMMARY_MISSING, THINKING, TOOL_AS_NOTE,
 };
 pub use order::{Boundary, Summary};
 pub use reader::{Entry, Reader, ReaderBuilder};

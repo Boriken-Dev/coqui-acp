@@ -32,6 +32,8 @@
 //! the history first; a caller that cannot rule secrets out should use it.
 
 use alloc::collections::BTreeSet;
+use core::time::Duration;
+use std::time::Instant;
 
 use data_encoding::HEXLOWER;
 use guatiao::{FromValue, Schema, ToValue};
@@ -41,7 +43,7 @@ use sha2::{Digest, Sha256};
 
 use crate::conversation::{Call, Conversation, Item};
 use crate::{
-    Document, HISTORY_CUT, HistoryError, ITEM_CUT, LossReport, NON_TEXT_OMITTED,
+    Document, HISTORY_CUT, HistoryError, ITEM_CUT, LossReport, NON_TEXT_OMITTED, REDACTION_LIMIT,
     REPLAYED_AS_PROMPT, RedactionReport, Redactor, SUMMARY_MISSING, SeedPoint, THINKING,
     TOOL_AS_NOTE,
 };
@@ -50,6 +52,10 @@ use crate::{
 pub const DEFAULT_MAX_BYTES: u64 = 32 * 1024;
 /// The most bytes of one message, tool input or tool output by default.
 pub const DEFAULT_MAX_ITEM_BYTES: u64 = 4 * 1024;
+/// The most bytes of text one replay's redaction scans by default.
+pub const DEFAULT_REDACT_BYTES: u64 = 4 * 1024 * 1024;
+/// The most milliseconds one replay's redaction runs by default.
+pub const DEFAULT_REDACT_MILLIS: u64 = 2000;
 
 const BEGIN: &str = "<<< BEGIN SESSION HISTORY ";
 const END: &str = "<<< END SESSION HISTORY ";
@@ -67,6 +73,12 @@ pub struct ReplaySettings {
     /// The most bytes of one message, tool input or tool output; one over it is cut and reported.
     #[map(default = DEFAULT_MAX_ITEM_BYTES)]
     pub max_item_bytes: u64,
+    /// The most bytes of text a redactor scans in one replay, summed; past it the rest is not shown.
+    #[map(default = DEFAULT_REDACT_BYTES)]
+    pub redact_max_bytes: u64,
+    /// The most time, in milliseconds, a redactor may spend on one replay; past it the rest is not shown.
+    #[map(default = DEFAULT_REDACT_MILLIS)]
+    pub redact_max_millis: u64,
 }
 
 impl Default for ReplaySettings {
@@ -74,6 +86,8 @@ impl Default for ReplaySettings {
         Self {
             max_bytes: DEFAULT_MAX_BYTES,
             max_item_bytes: DEFAULT_MAX_ITEM_BYTES,
+            redact_max_bytes: DEFAULT_REDACT_BYTES,
+            redact_max_millis: DEFAULT_REDACT_MILLIS,
         }
     }
 }
@@ -114,6 +128,10 @@ impl Replay {
     /// whole turns that fit.
     #[must_use]
     pub fn of(doc: &Document, settings: &ReplaySettings) -> Self {
+        Self::build(doc, settings, &mut Prep::none())
+    }
+
+    fn build(doc: &Document, settings: &ReplaySettings, prep: &mut Prep<'_>) -> Self {
         let conversation = Conversation::of(doc, true);
         let mut report = LossReport::new();
         if conversation.summary_missing {
@@ -126,12 +144,13 @@ impl Replay {
         let item_cap = usize::try_from(settings.max_item_bytes).unwrap_or(usize::MAX);
         let summary = conversation.summary.as_ref().map(|boundary| {
             let mut entry = Entry::default();
-            let (text, cut) = esc_cap(&boundary.summary, item_cap.saturating_mul(4));
+            let shown = prep.one(&boundary.summary, item_cap.saturating_mul(4));
+            let (text, cut) = esc_cap(&shown, item_cap.saturating_mul(4));
             entry.cut += u64::from(cut);
             entry.lines = lines_of("[summary of the turns before these]", &text);
             entry
         });
-        let entries = entries_of(&conversation, item_cap);
+        let entries = entries_of(&conversation, item_cap, prep);
         let total_items = entries.len() as u64 + u64::from(summary.is_some());
         let seeded_from = conversation.seeded_from.clone();
 
@@ -201,25 +220,41 @@ impl Replay {
             );
             replay.text = Some(fitted.text);
         }
+        replay.report.add(
+            REDACTION_LIMIT,
+            prep.limited,
+            Some("text not shown because redacting it would have passed the redaction limits"),
+        );
         replay
     }
 
-    /// The replay of a copy of `doc` from which `redactor` removed its values and patterns first;
-    /// `doc` is not changed. Tool output and messages are otherwise replayed verbatim, secrets
-    /// included. [`Replay::redaction`] says what was removed.
+    /// The replay of `doc` with `redactor`'s values and patterns removed from the text the replay
+    /// shows; `doc` is not changed.
+    ///
+    /// The redactor runs over each item as the replay renders it, after the pieces of the item are
+    /// joined (the chunks of a message, the content items of a tool result, the blocks of a
+    /// prompt, a tool's input with its keys), so a secret split across them is found; format and
+    /// zero-width characters are removed before matching. Tool output and messages are otherwise
+    /// replayed verbatim, secrets included.
+    ///
+    /// The cost is bounded: an item is read up to four times its limit, no more than
+    /// [`ReplaySettings::redact_max_bytes`] are scanned in all and no more than
+    /// [`ReplaySettings::redact_max_millis`] spent; text past either is not shown (it reads
+    /// `[not shown: redaction limit reached]`) and counted as [`crate::REDACTION_LIMIT`]. The
+    /// patterns run in time linear in the text (Rust's `regex`, with no look-around or
+    /// back-references).
     ///
     /// # Errors
     ///
-    /// The redaction would leave a line the format refuses.
+    /// None today; the result is a `Result` so that a redaction that can fail may.
     pub fn of_redacted(
         doc: &Document,
         settings: &ReplaySettings,
         redactor: &mut Redactor,
     ) -> Result<Self, HistoryError> {
-        let mut copy = doc.clone();
-        let removed = redactor.document(&mut copy)?;
-        let mut replay = Self::of(&copy, settings);
-        replay.redaction = Some(removed);
+        let mut prep = Prep::with(redactor, settings);
+        let mut replay = Self::build(doc, settings, &mut prep);
+        replay.redaction = Some(redactor.report().clone());
         Ok(replay)
     }
 
@@ -374,23 +409,118 @@ fn fit(summary: Option<&Entry>, entries: &[Entry], max: u64, fixed: u64) -> Fitt
     }
 }
 
-fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
+/// What text becomes before it is escaped: as it is, or with a redactor over it, within limits.
+struct Prep<'a> {
+    redactor: Option<&'a mut Redactor>,
+    bytes_left: u64,
+    deadline: Instant,
+    /// Texts not shown because a limit was spent.
+    limited: u64,
+}
+
+/// What stands for text the redaction limits kept from being scanned.
+const NOT_SHOWN: &str = "[not shown: redaction limit reached]";
+
+impl<'a> Prep<'a> {
+    fn none() -> Self {
+        Self {
+            redactor: None,
+            bytes_left: u64::MAX,
+            deadline: Instant::now(),
+            limited: 0,
+        }
+    }
+
+    fn with(redactor: &'a mut Redactor, settings: &ReplaySettings) -> Self {
+        Self {
+            redactor: Some(redactor),
+            bytes_left: settings.redact_max_bytes,
+            deadline: Instant::now() + Duration::from_millis(settings.redact_max_millis),
+            limited: 0,
+        }
+    }
+
+    /// The text of one item made of `parts` joined by `sep`. With a redactor, each part is read up
+    /// to `read` bytes, format characters are dropped, and the item is redacted after joining, so
+    /// a secret split across parts is found; `None` when a limit is spent.
+    fn merge(&mut self, parts: &[&str], sep: &str, read: usize) -> Option<String> {
+        let Some(redactor) = self.redactor.as_deref_mut() else {
+            return Some(parts.join(sep));
+        };
+        let cleaned: Vec<String> = parts.iter().map(|part| strip(part, read)).collect();
+        let total: u64 = cleaned.iter().map(|part| part.len() as u64).sum();
+        if total > self.bytes_left || Instant::now() >= self.deadline {
+            self.limited += 1;
+            return None;
+        }
+        self.bytes_left -= total;
+        let flat: String = cleaned.concat();
+        let redacted = redactor.redact_text(&flat);
+        if redacted == flat {
+            return Some(cleaned.join(sep));
+        }
+        if cleaned.len() > 1 {
+            // A match inside one part keeps the separators; one across parts cannot.
+            let each: Vec<String> = cleaned
+                .iter()
+                .map(|part| redactor.redact_quiet(part))
+                .collect();
+            if each.concat() == redacted {
+                return Some(each.join(sep));
+            }
+        }
+        Some(redacted)
+    }
+
+    /// One text, redacted, or what stands for it when a limit is spent.
+    fn one(&mut self, text: &str, read: usize) -> String {
+        self.merge(&[text], "", read)
+            .unwrap_or_else(|| NOT_SHOWN.to_owned())
+    }
+
+    /// An item of parts, or what stands for it when a limit is spent.
+    fn joined(&mut self, parts: &[&str], sep: &str, read: usize) -> String {
+        self.merge(parts, sep, read)
+            .unwrap_or_else(|| NOT_SHOWN.to_owned())
+    }
+}
+
+/// `text` up to `read` bytes with the characters the block writes out dropped.
+fn strip(text: &str, read: usize) -> String {
+    let mut end = text.len().min(read);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end]
+        .chars()
+        .filter(|c| !hidden(*c) || *c == '\n' || *c == '\t')
+        .collect()
+}
+
+/// How much of an item a redactor reads: four times what is shown.
+fn read_of(cap_bytes: usize) -> usize {
+    cap_bytes.saturating_mul(4)
+}
+
+fn entries_of(conversation: &Conversation, cap_bytes: usize, prep: &mut Prep<'_>) -> Vec<Entry> {
     let mut entries = Vec::new();
     let mut rendered: BTreeSet<&str> = BTreeSet::new();
+    let read = read_of(cap_bytes);
     for item in &conversation.items {
         let mut entry = Entry::default();
         match item {
             Item::Prompt { blocks, .. } => {
                 entry.starts_turn = true;
-                let text = blocks_text(blocks, cap_bytes, &mut entry);
+                let text = blocks_text(blocks, cap_bytes, prep, &mut entry);
                 entry.lines = lines_of("[user]", &text);
             }
             Item::Note { block, .. } => {
-                let text = blocks_text(core::slice::from_ref(block), cap_bytes, &mut entry);
+                let text = blocks_text(core::slice::from_ref(block), cap_bytes, prep, &mut entry);
                 entry.lines = lines_of("[user, outside a prompt]", &text);
             }
             Item::Message { text, .. } => {
-                let (text, cut) = esc_cap(text, cap_bytes);
+                let shown = prep.one(text, read);
+                let (text, cut) = esc_cap(&shown, cap_bytes);
                 entry.cut += u64::from(cut);
                 entry.lines = lines_of("[agent]", &text);
             }
@@ -402,11 +532,11 @@ fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
                     && let Some(call) = conversation.call(id)
                 {
                     entry.tools = 1;
-                    entry.lines = call_lines(call, cap_bytes, &mut entry.cut);
+                    entry.lines = call_lines(call, cap_bytes, prep, &mut entry.cut);
                 }
             }
             Item::Plan { entries: plan, .. } => {
-                entry.lines = plan_lines(plan, cap_bytes, &mut entry.cut);
+                entry.lines = plan_lines(plan, cap_bytes, prep, &mut entry.cut);
             }
             Item::Cancel { .. } => entry.lines = vec!["[user cancelled the turn]".to_owned()],
             Item::TurnEnd {
@@ -416,7 +546,8 @@ fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
                 ..
             } => {
                 let line = if let Some(error) = error {
-                    let (error, cut) = esc_cap(error, cap_bytes);
+                    let shown = prep.one(error, read);
+                    let (error, cut) = esc_cap(&shown, cap_bytes);
                     entry.cut += u64::from(cut);
                     format!("[turn failed: {error}]")
                 } else if *closed_here {
@@ -433,32 +564,39 @@ fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
     entries
 }
 
-/// The text of content blocks, escaped and cut by what it costs escaped.
-fn blocks_text(blocks: &[Value], cap_bytes: usize, entry: &mut Entry) -> String {
+/// A field of a block, redacted, escaped and cut to `cap_bytes`.
+fn field(text: &str, cap_bytes: usize, prep: &mut Prep<'_>, cut: &mut u64) -> String {
+    let shown = prep.one(text, read_of(cap_bytes));
+    let (text, was_cut) = esc_cap(&shown, cap_bytes);
+    *cut += u64::from(was_cut);
+    text
+}
+
+/// The text of content blocks as one item, redacted after joining, escaped and cut as a whole.
+fn blocks_text(
+    blocks: &[Value],
+    cap_bytes: usize,
+    prep: &mut Prep<'_>,
+    entry: &mut Entry,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
         let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(text) = text(block.get("text")) {
-                    let (text, cut) = esc_cap(&text, cap_bytes);
-                    entry.cut += u64::from(cut);
                     parts.push(text);
                 }
             }
             Some("resource_link") => {
-                let name = escape(&text(block.get("name")).unwrap_or_default());
-                let uri = escape(&text(block.get("uri")).unwrap_or_default());
+                let name = text(block.get("name")).unwrap_or_default();
+                let uri = text(block.get("uri")).unwrap_or_default();
                 parts.push(format!("[attachment: {name} {uri}]"));
             }
             Some("resource") => {
-                let uri = escape(&text(block.pointer("/resource/uri")).unwrap_or_default());
+                let uri = text(block.pointer("/resource/uri")).unwrap_or_default();
                 match text(block.pointer("/resource/text")) {
-                    Some(body) => {
-                        let (body, cut) = esc_cap(&body, cap_bytes);
-                        entry.cut += u64::from(cut);
-                        parts.push(format!("[attachment: {uri}]\n{body}"));
-                    }
+                    Some(body) => parts.push(format!("[attachment: {uri}]\n{body}")),
                     None => {
                         entry.non_text += 1;
                         parts.push(format!("[binary attachment omitted: {uri}]"));
@@ -475,42 +613,80 @@ fn blocks_text(blocks: &[Value], cap_bytes: usize, entry: &mut Entry) -> String 
             }
         }
     }
-    parts.join("\n")
+    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let joined = prep.joined(&refs, "\n", read_of(cap_bytes));
+    let (text, cut) = esc_cap(&joined, cap_bytes);
+    entry.cut += u64::from(cut);
+    text
 }
 
-fn call_lines(call: &Call, cap_bytes: usize, cut: &mut u64) -> Vec<String> {
+/// The text of a tool's output as parts: `rawOutput` when it is text or holds text blocks, else
+/// the text of its content items, else `rawOutput` as it is.
+fn output_parts(call: &Call) -> Vec<String> {
+    let from_value = |value: &Value| -> Vec<String> {
+        match value {
+            Value::String(text) => vec![text.clone()],
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    if let Some(parts) = call
+        .raw_output
+        .as_ref()
+        .map(from_value)
+        .filter(|parts| !parts.is_empty())
+    {
+        return parts;
+    }
+    let parts: Vec<String> = call
+        .content
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("content"))
+        .filter_map(|item| item.pointer("/content/text").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    if !parts.is_empty() {
+        return parts;
+    }
+    call.raw_output
+        .as_ref()
+        .map(|value| vec![value.to_string()])
+        .unwrap_or_default()
+}
+
+fn call_lines(call: &Call, cap_bytes: usize, prep: &mut Prep<'_>, cut: &mut u64) -> Vec<String> {
     let name = call
         .name
         .as_deref()
         .or(call.title.as_deref())
         .unwrap_or("tool");
     let status = call.status.as_deref().unwrap_or("unknown");
-    let mut head = format!("[tool {} {}]", escape(name), escape(status));
+    let name = field(name, cap_bytes, prep, cut);
+    let status = field(status, cap_bytes, prep, cut);
+    let mut head = format!("[tool {name} {status}]");
     if let Some(input) = &call.raw_input {
-        let (input, was_cut) = esc_cap(&input.to_string(), cap_bytes);
-        *cut += u64::from(was_cut);
+        // The input as JSON, keys included.
+        let input = field(&input.to_string(), cap_bytes, prep, cut);
         head.push(' ');
         head.push_str(&input);
     }
     let mut lines = split(&head);
-    let output = call.output_text();
-    let output = if output.is_empty() {
-        call.raw_output
-            .as_ref()
-            .map(Value::to_string)
-            .unwrap_or_default()
-    } else {
-        output
-    };
-    if !output.is_empty() {
-        let (output, was_cut) = esc_cap(&output, cap_bytes);
+    let parts = output_parts(call);
+    if !parts.is_empty() {
+        let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let joined = prep.joined(&refs, "\n", read_of(cap_bytes));
+        let (output, was_cut) = esc_cap(&joined, cap_bytes);
         *cut += u64::from(was_cut);
         lines.extend(split(&format!("-> {output}")));
     }
     lines
 }
 
-fn plan_lines(plan: &[Value], cap_bytes: usize, cut: &mut u64) -> Vec<String> {
+fn plan_lines(plan: &[Value], cap_bytes: usize, prep: &mut Prep<'_>, cut: &mut u64) -> Vec<String> {
     let mut lines = vec!["[plan]".to_owned()];
     for entry in plan {
         let content = entry.get("content").and_then(Value::as_str).unwrap_or("");
@@ -518,9 +694,9 @@ fn plan_lines(plan: &[Value], cap_bytes: usize, cut: &mut u64) -> Vec<String> {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("pending");
-        let (content, was_cut) = esc_cap(content, cap_bytes);
-        *cut += u64::from(was_cut);
-        lines.extend(split(&format!("- [{}] {content}", escape(status))));
+        let content = field(content, cap_bytes, prep, cut);
+        let status = field(status, cap_bytes, prep, cut);
+        lines.extend(split(&format!("- [{status}] {content}")));
     }
     lines
 }
@@ -546,23 +722,24 @@ fn hidden(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(
             u32::from(c),
-            0xAD | 0x61C | 0x6DD | 0x70F | 0x8E2 | 0x115F | 0x1160 | 0x180E | 0x3164 | 0xFEFF
+            0xAD | 0x34F | 0x61C | 0x6DD | 0x70F | 0x8E2 | 0x115F | 0x1160 | 0x180F | 0x3164
+                | 0xFEFF
                 | 0xFFA0
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180E
                 | 0x600..=0x605
                 | 0x890..=0x891
                 | 0x200B..=0x200F
                 | 0x2028..=0x202E
                 | 0x2060..=0x206F
                 | 0xFE00..=0xFE0F
-                | 0xFFF9..=0xFFFB
+                | 0xFFF0..=0xFFFB
                 | 0x110BD
                 | 0x110CD
                 | 0x13430..=0x1343F
                 | 0x1BCA0..=0x1BCA3
                 | 0x1D173..=0x1D17A
-                | 0xE0001
-                | 0xE0020..=0xE007F
-                | 0xE0100..=0xE01EF
+                | 0xE0000..=0xE0FFF
         )
 }
 
@@ -573,16 +750,6 @@ fn shown(c: char, out: &mut String) {
     } else {
         out.push(c);
     }
-}
-
-/// `text` with every character that could end a line, move a terminal or hide or reorder what is
-/// read written as `\u{..}`. A line feed and a tab stay.
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        shown(c, &mut out);
-    }
-    out
 }
 
 /// `text` escaped and cut so that the escaped text is at most `max` bytes, and whether it was cut.

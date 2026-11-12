@@ -207,6 +207,21 @@ impl Redactor {
         Some(out)
     }
 
+    /// `text` with every stretch a value or a pattern matches replaced, the removals counted in
+    /// the report. For a caller that redacts text of its own making, not a history's lines.
+    pub fn redact_text(&mut self, text: &str) -> String {
+        let out = self.text(text);
+        self.settle();
+        out.unwrap_or_else(|| text.to_owned())
+    }
+
+    /// As [`Redactor::redact_text`], counting nothing.
+    pub(crate) fn redact_quiet(&mut self, text: &str) -> String {
+        let out = self.text(text);
+        self.forget();
+        out.unwrap_or_else(|| text.to_owned())
+    }
+
     /// Redacts the strings under `root`; the keys `kept` of `root` itself, when their values are
     /// strings, stay as they are.
     fn walk(&mut self, root: &mut Value, kept: &[&str]) {

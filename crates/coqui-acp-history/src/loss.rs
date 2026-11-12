@@ -16,6 +16,8 @@ pub const REPLAYED_AS_PROMPT: &str = "replayed_as_prompt";
 pub const HISTORY_CUT: &str = "history_cut";
 /// One item of a replayed history cut short to fit its own limit.
 pub const ITEM_CUT: &str = "item_cut";
+/// Text a replay did not show because redacting it would have passed the redaction limits.
+pub const REDACTION_LIMIT: &str = "redaction_limit";
 /// A content block with no text (an image, audio) that a replay could only name.
 pub const NON_TEXT_OMITTED: &str = "non_text_omitted";
 /// The history's latest compaction boundary has no summary, so the seed starts earlier or at the

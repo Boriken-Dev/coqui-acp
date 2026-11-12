@@ -429,3 +429,166 @@ fn a_redactor_removes_what_it_is_given_from_the_replay_and_not_from_the_history(
     assert_eq!(replay.redaction().map(|r| r.replaced), Some(2));
     assert!(document.to_string().unwrap().contains("hunter2-secret"));
 }
+
+fn redacting(values: &[&str], patterns: &[&str]) -> coqui_acp_history::Redactor {
+    let mut settings = coqui_acp_history::RedactionSettings::default();
+    settings.values = values.iter().map(|v| (*v).to_owned()).collect();
+    settings.patterns = patterns.iter().map(|v| (*v).to_owned()).collect();
+    coqui_acp_history::Redactor::try_new(&settings).unwrap()
+}
+
+fn redacted_text(lines: Vec<Line>, redactor: &mut coqui_acp_history::Redactor) -> String {
+    let replay = Replay::of_redacted(&doc(lines), &ReplaySettings::default(), redactor).unwrap();
+    replay.text().expect("a replay").to_owned()
+}
+
+#[test]
+fn a_secret_split_across_message_chunks_is_removed() {
+    let lines = vec![
+        Line::text_prompt("go"),
+        chunk("agent_message_chunk", "the key is hunt"),
+        chunk("agent_message_chunk", "er2-sec"),
+        chunk("agent_message_chunk", "ret done"),
+        end(),
+    ];
+    let text = redacted_text(lines, &mut redacting(&["hunter2-secret"], &[]));
+    assert!(!text.contains("hunter2"), "{text}");
+    assert!(!text.contains("secret done"), "{text}");
+    assert!(text.contains("[redacted]"));
+}
+
+#[test]
+fn a_secret_split_across_content_items_and_prompt_blocks_is_removed() {
+    let lines = vec![
+        Line::prompt(vec![
+            json!({"type": "text", "text": "use hunter2-"}),
+            json!({"type": "text", "text": "secret now"}),
+        ]),
+        Line::update(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "name": "Bash", "title": "x",
+                "kind": "execute", "status": "pending", "rawInput": {"command": "env"}}),
+        ),
+        Line::update(
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+                "content": [
+                    {"type": "content", "content": {"type": "text", "text": "TOKEN=hunter2"}},
+                    {"type": "content", "content": {"type": "text", "text": "-secret"}}]}),
+        ),
+        end(),
+    ];
+    let text = redacted_text(lines, &mut redacting(&["hunter2-secret"], &[]));
+    assert!(!text.contains("hunter2"), "{text}");
+    assert!(!text.contains("-secret"), "{text}");
+}
+
+#[test]
+fn a_secret_as_a_key_or_with_invisible_characters_in_it_is_removed() {
+    let lines = vec![
+        Line::text_prompt("a hunter2\u{200b}-sec\u{ad}ret b"),
+        Line::update(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "name": "Bash", "title": "x",
+                "kind": "execute", "status": "pending",
+                "rawInput": {"hunter2-secret": 1, "ok": "fine"}}),
+        ),
+        end(),
+    ];
+    let text = redacted_text(lines, &mut redacting(&[], &["hunter2-secret"]));
+    assert!(!text.contains("hunter2"), "{text}");
+    assert!(text.contains("fine"));
+}
+
+#[test]
+fn the_redaction_limits_hide_the_rest_and_say_so() {
+    let mut settings = ReplaySettings::default();
+    settings.redact_max_bytes = 40;
+    let mut lines = Vec::new();
+    for n in 0..5 {
+        lines.extend(turn(
+            &format!("question number {n} with some length"),
+            &format!("answer {n} with some length"),
+        ));
+    }
+    let replay = Replay::of_redacted(
+        &doc(lines.clone()),
+        &settings,
+        &mut redacting(&["zzz"], &[]),
+    )
+    .unwrap();
+    let text = replay.text().expect("a replay");
+    assert!(
+        text.contains("[not shown: redaction limit reached]"),
+        "{text}"
+    );
+    assert!(replay.report().count(coqui_acp_history::REDACTION_LIMIT) > 0);
+    assert!(!text.contains("answer 4 with some length") || text.contains("[not shown"));
+
+    let mut settings = ReplaySettings::default();
+    settings.redact_max_millis = 0;
+    let replay =
+        Replay::of_redacted(&doc(lines), &settings, &mut redacting(&["zzz"], &[])).unwrap();
+    let text = replay.text().expect("a replay");
+    assert!(!text.contains("question number"), "{text}");
+    assert!(replay.report().count(coqui_acp_history::REDACTION_LIMIT) > 0);
+}
+
+#[test]
+fn one_oversized_field_is_cut_and_the_turn_is_kept() {
+    let big = "n".repeat(200_000);
+    let lines = vec![
+        Line::prompt(vec![
+            json!({"type": "text", "text": "read it"}),
+            json!({"type": "resource_link", "name": big, "uri": big}),
+        ]),
+        Line::update(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "name": big, "title": big,
+                "kind": "read", "status": big, "rawInput": {}}),
+        ),
+        Line::update(json!({"sessionUpdate": "plan", "entries": [
+                {"content": "c", "priority": "high", "status": big}]})),
+        chunk("agent_message_chunk", "kept answer"),
+        end(),
+    ];
+    let replay = Replay::of(&doc(lines), &ReplaySettings::default());
+    let text = replay.text().expect("the turn survives its big fields");
+    assert!(text.len() < 20_000, "{} bytes", text.len());
+    assert!(text.contains("kept answer"));
+    assert!(text.contains("read it"));
+}
+
+#[test]
+fn a_prompt_is_cut_as_a_whole() {
+    let blocks: Vec<Value> = (0..200)
+        .map(|n| json!({"type": "text", "text": format!("block {n} {}", "p".repeat(500))}))
+        .collect();
+    let lines = vec![
+        Line::prompt(blocks),
+        chunk("agent_message_chunk", "fine"),
+        end(),
+    ];
+    let replay = Replay::of(&doc(lines), &ReplaySettings::default());
+    let text = replay.text().expect("a replay");
+    assert!(text.contains("fine"));
+    assert!(text.contains("block 0 "), "the prompt is cut, not dropped");
+    assert!(text.len() < 12_000, "{} bytes", text.len());
+}
+
+#[test]
+fn more_invisible_characters_are_written_out() {
+    let said = "a\u{34f}b\u{17b4}c\u{17b5}d\u{180b}e\u{180d}f\u{180f}g\u{fff0}h\u{fff8}i\u{e0fff}j\u{e0000}k";
+    let replay = Replay::of(&doc(turn(said, "ok")), &ReplaySettings::default());
+    let text = replay.text().unwrap();
+    for c in [
+        '\u{34f}',
+        '\u{17b4}',
+        '\u{17b5}',
+        '\u{180b}',
+        '\u{180d}',
+        '\u{180f}',
+        '\u{fff0}',
+        '\u{fff8}',
+        '\u{e0fff}',
+        '\u{e0000}',
+    ] {
+        assert!(!text.contains(c), "{c:?} in the text");
+    }
+}
