@@ -454,9 +454,11 @@ mod tests {
 
     #[test]
     fn a_redaction_gives_up_when_its_time_has_passed_and_counts_nothing() {
-        let mut settings = RedactionSettings::default();
-        settings.values = vec!["secret".into()];
-        settings.patterns = vec!["s[a-z]+t".into()];
+        let settings = RedactionSettings {
+            values: vec!["secret".into()],
+            patterns: vec!["s[a-z]+t".into()],
+            ..RedactionSettings::default()
+        };
         let mut redactor = Redactor::try_new(&settings).unwrap();
         let text = "a secret here, and another secret";
         assert_eq!(redactor.redact_until(text, Instant::now(), true), None);
