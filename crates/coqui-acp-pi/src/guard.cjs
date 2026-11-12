@@ -8,8 +8,11 @@
 //    array of the directories of the session);
 //  - on Windows a program started by a bare name is looked for here, on that PATH, and not found means it fails to start;
 //  - `where` is started in this file's own directory, which holds nothing of the project's;
-//  - on Windows a program, or the script an interpreter or `cmd.exe /c` is given, that is an executable file directly in the
-//    working directory is not started: that is the answer of a search that began there.
+//  - on Windows a program that is a file of the project (inside one of those directories, or directly in the working
+//    directory), whatever its name, is not started; nor is a script with a `#!` line directly in the working directory that
+//    is given to an interpreter (what cross-spawn makes of a file it found there); nor is `cmd.exe /c` given a command line
+//    that names a path in the project (carets and quotes are removed first). These are the answers of a search that began
+//    in the project.
 //
 // Only the functions that start a program without a shell are wrapped; one that goes through a shell is searched by that
 // shell, which NoDefaultCurrentDirectoryInExePath keeps out of the directory.
@@ -20,7 +23,6 @@ const path = require('path');
 
 const windows = process.platform === 'win32';
 const fold = (text) => (windows ? text.toLowerCase() : text);
-const EXECUTABLE = /\.(com|exe|bat|cmd)$/i;
 const here = __dirname;
 
 function parseKeepOut() {
@@ -105,23 +107,45 @@ function refuse(message) {
   return path.join(here, 'no-such-program', 'refused');
 }
 
-// The first token of what `cmd.exe /c` is given.
+// What `cmd.exe /c` is given, as one text with the quoting and escaping that hide a path taken away.
 function payload(args) {
   const at = args.findIndex((arg) => typeof arg === 'string' && /^\/[ck]$/i.test(arg));
-  const text = at >= 0 ? args[at + 1] : undefined;
-  if (typeof text !== 'string') return undefined;
-  const quoted = /^\s*"([^"]*)"/.exec(text);
-  return quoted ? quoted[1] : text.trim().split(/\s+/)[0];
+  if (at < 0) return '';
+  return args
+    .slice(at + 1)
+    .filter((arg) => typeof arg === 'string')
+    .join(' ')
+    .replace(/[\^"]/g, '')
+    .replace(/\//g, '\\')
+    .toLowerCase();
 }
 
-// Whether `candidate` is an executable file written in full that lies directly in one of the working directories: a search
-// that began there found it. A name written without a directory is an argument, not a file found.
-function direct(candidate, cwds) {
-  if (typeof candidate !== 'string' || !EXECUTABLE.test(candidate) || !written(candidate)) return false;
-  return cwds.some((cwd) => {
-    const full = path.resolve(cwd, candidate);
-    return fold(path.dirname(full)) === fold(path.resolve(cwd));
-  });
+function names(text, directories) {
+  return directories.some((directory) => text.includes(fold(path.resolve(directory)).replace(/\//g, '\\')));
+}
+
+// Whether `candidate`, written in full, is a file of the project: inside a directory of the session or directly in a
+// working directory.
+function ofTheProject(candidate, cwds) {
+  if (typeof candidate !== 'string' || !written(candidate)) return false;
+  if (inside(candidate)) return true;
+  return cwds.some((cwd) => fold(path.dirname(path.resolve(cwd, candidate))) === fold(path.resolve(cwd)));
+}
+
+// Whether `candidate` is a file with a `#!` line directly in a working directory: what cross-spawn found there and hands to
+// the interpreter its first line names.
+function planted(candidate, cwds) {
+  if (typeof candidate !== 'string' || !written(candidate)) return false;
+  if (!cwds.some((cwd) => fold(path.dirname(path.resolve(cwd, candidate))) === fold(path.resolve(cwd)))) return false;
+  try {
+    const fd = fs.openSync(candidate, 'r');
+    const head = Buffer.alloc(2);
+    const read = fs.readSync(fd, head, 0, 2, 0);
+    fs.closeSync(fd);
+    return read === 2 && head.toString('latin1') === '#!';
+  } catch {
+    return false;
+  }
 }
 
 function adjusted(file, args, options) {
@@ -145,9 +169,12 @@ function adjusted(file, args, options) {
   }
   if (options && typeof options.cwd === 'string') cwds.push(options.cwd);
   const list = Array.isArray(args) ? args : [];
-  const candidates = [target, list[0]];
-  if (/^cmd(\.exe)?$/i.test(path.basename(target))) candidates.push(payload(list));
-  if (candidates.some((candidate) => direct(candidate, cwds))) {
+  const directories = cwds.concat(keepOut);
+  const refused =
+    ofTheProject(target, cwds) ||
+    planted(list[0], cwds) ||
+    (/^cmd(\.exe)?$/i.test(path.basename(target)) && names(payload(list), directories));
+  if (refused) {
     target = refuse('not starting a program that is a file of the project');
   }
   return { file: target, options: changed };

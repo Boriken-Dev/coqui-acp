@@ -108,3 +108,73 @@ fn where_does_not_find_a_shell_in_the_project_once_the_guard_is_loaded() {
         "the project's bash.exe was found"
     );
 }
+
+/// `cmd.exe /c` is given a path under the project in every way cmd.exe reads one: quoted, after `call`, unquoted, with a
+/// caret in the name, with forward slashes. With the guard loaded none of them runs.
+#[test]
+fn cmd_is_not_given_a_command_that_names_a_file_of_the_project() {
+    let Some(node_dir) = std::env::var_os("COQUI_ACP_PI_REAL_PATH") else {
+        eprintln!("skipped: no Node named (COQUI_ACP_PI_REAL_PATH)");
+        return;
+    };
+    let scratch = Scratch::new("cmd-line");
+    let (project, gates) = (scratch.dir("project"), scratch.dir("gates"));
+    let marker = scratch.0.join("RAN");
+    std::fs::write(
+        project.join("x.cmd"),
+        format!("@echo ran> \"{}\"\r\n", marker.display()),
+    )
+    .unwrap();
+    let gate = Gate::write(Some(&gates), None).expect("written");
+    let probe = scratch.0.join("probe.cjs");
+    std::fs::write(
+        &probe,
+        "require('child_process').spawnSync('cmd.exe', ['/d', '/s', '/c', process.argv[2]], \
+         { windowsVerbatimArguments: true, cwd: process.argv[3] });\n",
+    )
+    .unwrap();
+    let dir = project.to_string_lossy().into_owned();
+    let lines = [
+        format!("\"{dir}\\x.cmd\" a"),
+        format!("call \"{dir}\\x.cmd\""),
+        format!("{dir}\\x.cmd a"),
+        format!("{dir}\\x^.cmd"),
+        format!("\"{}\"", format!("{dir}\\x.cmd").replace('\\', "/")),
+        format!("c^a^l^l {dir}\\x.cmd"),
+    ];
+    let system = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    let path = std::env::join_paths([
+        Path::new(&system).join("System32"),
+        Path::new(&node_dir).to_path_buf(),
+    ])
+    .unwrap();
+    let run = |line: &str, guarded: bool| {
+        let _ = std::fs::remove_file(&marker);
+        let mut node = std::process::Command::new(Path::new(&node_dir).join("node.exe"));
+        if guarded {
+            node.arg("--require").arg(gate.guard());
+        }
+        node.arg(&probe)
+            .arg(line)
+            .arg(&project)
+            .current_dir(&scratch.0)
+            .env("PATH", &path)
+            .env(
+                "COQUI_ACP_PI_KEEP_OUT",
+                serde_json::json!([dir]).to_string(),
+            )
+            .output()
+            .expect("node runs");
+        marker.exists()
+    };
+    assert!(
+        run(&lines[0], false),
+        "cmd.exe no longer runs the batch file the control starts"
+    );
+    for line in &lines {
+        assert!(
+            !run(line, true),
+            "cmd.exe ran the project's file for {line}"
+        );
+    }
+}

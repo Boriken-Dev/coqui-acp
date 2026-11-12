@@ -140,6 +140,7 @@ pub struct Parser {
     roots: Vec<PathBuf>,
     /// Pi's agent directories, where it keeps its credentials and the code it loads.
     protected: Vec<PathBuf>,
+    private: Vec<PathBuf>,
     /// The home directory Pi expands `~` to, when it is not the process's own.
     home: Option<PathBuf>,
     tools: BTreeMap<String, Tool>,
@@ -191,6 +192,7 @@ impl Parser {
             cwd: PathBuf::new(),
             roots: Vec::new(),
             protected: Vec::new(),
+            private: Vec::new(),
             home: None,
             tools: BTreeMap::new(),
             order: VecDeque::new(),
@@ -220,6 +222,14 @@ impl Parser {
         self
     }
 
+    /// Directories of the translator's own (the launch's private one, which holds the gate): the model changes nothing in
+    /// them, in any mode but Bypass.
+    #[must_use]
+    pub fn with_private(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.private = dirs;
+        self
+    }
+
     /// The home directory Pi expands `~` to: the one of the environment Pi is started with.
     #[must_use]
     pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
@@ -228,8 +238,9 @@ impl Parser {
     }
 
     fn scope(&self) -> Scope {
-        let scope =
-            Scope::new(&self.cwd, self.roots.clone()).with_agent_dirs(self.protected.clone());
+        let scope = Scope::new(&self.cwd, self.roots.clone())
+            .with_agent_dirs(self.protected.clone())
+            .with_private(self.private.clone());
         match &self.home {
             Some(home) => scope.with_home(Some(home.clone())),
             None => scope,

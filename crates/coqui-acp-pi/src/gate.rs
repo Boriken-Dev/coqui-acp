@@ -72,6 +72,20 @@ impl Gate {
     ///
     /// The directory or a file could not be written, or the directory could not be closed to others.
     pub fn write(parent: Option<&Path>, system_prompt: Option<&str>) -> io::Result<Self> {
+        let gate = Self::make(parent, system_prompt)?;
+        std::fs::write(
+            &gate.extension,
+            GATE_SOURCE.replace("__NONCE__", &gate.nonce),
+        )?;
+        std::fs::write(&gate.guard, GUARD_SOURCE)?;
+        if let (Some(path), Some(text)) = (&gate.prompt, system_prompt) {
+            std::fs::write(path, text)?;
+        }
+        Ok(gate)
+    }
+
+    /// The directory, made exclusively and closed to others, and the paths in it.
+    fn make(parent: Option<&Path>, system_prompt: Option<&str>) -> io::Result<Self> {
         let base = parent.map_or_else(std::env::temp_dir, Path::to_path_buf);
         std::fs::create_dir_all(&base)?;
         let nonce = uuid::Uuid::new_v4().to_string();
@@ -90,14 +104,18 @@ impl Gate {
             nonce,
         };
         close_to_others(&gate.dir)?;
-        std::fs::write(
-            &gate.extension,
-            GATE_SOURCE.replace("__NONCE__", &gate.nonce),
-        )?;
+        Ok(gate)
+    }
+
+    /// Writes the guard alone, to a new directory made as [`Gate::write`] makes its own: for a Pi that runs no tool (the
+    /// listing of its models), which still must not find a program in the project.
+    ///
+    /// # Errors
+    ///
+    /// As [`Gate::write`].
+    pub fn guard_only(parent: Option<&Path>) -> io::Result<Self> {
+        let gate = Self::make(parent, None)?;
         std::fs::write(&gate.guard, GUARD_SOURCE)?;
-        if let (Some(path), Some(text)) = (&gate.prompt, system_prompt) {
-            std::fs::write(path, text)?;
-        }
         Ok(gate)
     }
 

@@ -455,3 +455,68 @@ fn a_search_from_a_directory_above_a_credential_is_asked_about_not_answered_by_r
     );
     assert_eq!(answer(&written).as_deref(), Some("allow"));
 }
+
+/// What other tools keep their sign-in in is refused as Pi's own is.
+#[test]
+fn the_credentials_of_the_persons_other_tools_are_refused() {
+    let places = [
+        "~/.codex/auth.json",
+        "~/.claude/.credentials.json",
+        "~/.config/git/credentials",
+        "~/.config/gh/hosts.yml",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.netrc",
+        "~/.docker/config.json",
+        "~/.kube/config",
+        "~/.aws/credentials",
+        "~/.azure/accessTokens.json",
+        "~/.config/gcloud/credentials.db",
+    ];
+    for mode in [Mode::Manual, Mode::AcceptEdits, Mode::Plan] {
+        for text in places {
+            for tool in ["read", "write"] {
+                let (mut parser, written) = parser_in(mode);
+                parser.prompting();
+                let asked = run(
+                    &mut parser,
+                    &call(tool, &json!({"path": text, "content": "x"}), "c"),
+                );
+                assert!(asked.is_empty(), "{mode:?} {tool} {text} was asked");
+                assert_eq!(
+                    answer(&written).as_deref(),
+                    Some("protected"),
+                    "{mode:?} {tool} {text}"
+                );
+            }
+        }
+    }
+}
+
+/// The directory holding the gate is code Pi loads: the model changes nothing in it.
+#[test]
+fn nothing_is_written_in_the_directory_that_holds_the_gate() {
+    let gate = std::env::temp_dir().join("coqui-acp-pi-fixture-gate");
+    for mode in [Mode::Manual, Mode::AcceptEdits, Mode::Plan] {
+        for name in ["gate.ts", "guard.cjs", "other.txt"] {
+            let path = gate.join(name);
+            let (parser, written) = parser_in(mode);
+            let mut parser = parser.with_private(vec![gate.clone()]);
+            parser.prompting();
+            let asked = run(
+                &mut parser,
+                &call(
+                    "write",
+                    &json!({"path": path.to_string_lossy(), "content": "x"}),
+                    "g",
+                ),
+            );
+            assert!(asked.is_empty(), "{mode:?} {name} was asked");
+            assert_eq!(
+                answer(&written).as_deref(),
+                Some("protected"),
+                "{mode:?} {name}"
+            );
+        }
+    }
+}

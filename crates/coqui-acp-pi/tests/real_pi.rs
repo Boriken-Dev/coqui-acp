@@ -338,6 +338,7 @@ fn a_real_pi_never_runs_a_program_the_project_plants_under_the_name_of_npm_or_gi
         .unwrap();
         let mut launch = world.launch(Mode::Manual);
         launch.env.remove(std::ffi::OsStr::new("PI_OFFLINE"));
+        unreachable(&mut launch);
         launch.isolated = isolated;
         let (sink, events) = Events::new();
         let session = PiSession::start(&launch, &PlainSpawn, PiSettings::new(), sink)
@@ -354,4 +355,94 @@ fn a_real_pi_never_runs_a_program_the_project_plants_under_the_name_of_npm_or_gi
             "isolated {isolated}: a program of the project ran at startup: {ran}"
         );
     }
+}
+
+/// Plants `names` in the project, each a script that writes its name to a mark, and has the agent directory's settings name
+/// packages (and `extra`, more settings). Returns the mark's path.
+#[cfg(windows)]
+fn plant(world: &World, names: &[&str], extra: &str) -> PathBuf {
+    let marker = world.scratch.0.join("RAN");
+    let body = format!(
+        "#!/usr/bin/env node\nrequire('fs').appendFileSync({:?}, process.argv[1] + '\\n');\n",
+        marker.to_string_lossy()
+    );
+    for name in names {
+        std::fs::write(world.project.join(name), &body).unwrap();
+    }
+    std::fs::write(
+        world.home.join(".pi").join("agent").join("settings.json"),
+        format!(
+            r#"{{"defaultProvider": "stub", "defaultModel": "stub-fast"{extra},
+                "packages": ["npm:coqui-no-such-package-xyz", "git:github.com/coqui-no-such/repo"]}}"#
+        ),
+    )
+    .unwrap();
+    marker
+}
+
+/// Points the registry and github at a closed port, so that the real npm and git a guarded Pi falls back on fail at once.
+#[cfg(windows)]
+fn unreachable(launch: &mut PiLaunch) {
+    for (name, value) in [
+        ("npm_config_registry", "http://127.0.0.1:9/"),
+        ("npm_config_fetch_retries", "0"),
+        ("npm_config_fetch_timeout", "2000"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "url.http://127.0.0.1:9/.insteadOf"),
+        ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+    ] {
+        launch.env.insert(name.into(), value.into());
+    }
+}
+
+/// Waits for a planted program to write its mark, as long as one that was found would take.
+#[cfg(windows)]
+fn ran(marker: &Path) -> String {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !marker.exists() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    std::fs::read_to_string(marker).unwrap_or_default()
+}
+
+/// The listing of the models starts Pi too, in the directory the host has: it runs no tool, and still starts npm and git.
+#[cfg(windows)]
+#[test]
+fn a_real_pi_listing_models_never_runs_a_program_the_project_plants() {
+    let Some(world) = world("real-listing") else {
+        eprintln!("skipped: no real Pi named");
+        return;
+    };
+    let marker = plant(&world, &["npm.cmd", "npm.EXE", "git.bat", "git.exe"], "");
+    let mut launch = world.launch(Mode::Manual);
+    launch.env.remove(std::ffi::OsStr::new("PI_OFFLINE"));
+    unreachable(&mut launch);
+    let models = PiSession::read_models(&launch, &PlainSpawn, PiSettings::new());
+    let ran = ran(&marker);
+    assert!(
+        ran.is_empty(),
+        "a program of the project ran while the models were listed: {ran}"
+    );
+    assert!(models.is_ok(), "{models:?}");
+}
+
+/// A file with no extension is found by cross-spawn's second lookup, which ignores PATHEXT, when the program is on no PATH.
+#[cfg(windows)]
+#[test]
+fn a_real_pi_never_runs_an_extensionless_file_of_the_project_named_as_a_program() {
+    let Some(world) = world("real-extensionless") else {
+        eprintln!("skipped: no real Pi named");
+        return;
+    };
+    let marker = plant(&world, &["pnpm", "git"], r#", "npmCommand": ["pnpm"]"#);
+    let mut launch = world.launch(Mode::Manual);
+    launch.env.remove(std::ffi::OsStr::new("PI_OFFLINE"));
+    unreachable(&mut launch);
+    let (sink, events) = Events::new();
+    let session = PiSession::start(&launch, &PlainSpawn, PiSettings::new(), sink)
+        .expect("the real Pi starts with the gate");
+    let ran = ran(&marker);
+    drop((session, events));
+    assert!(ran.is_empty(), "a file of the project ran: {ran}");
 }

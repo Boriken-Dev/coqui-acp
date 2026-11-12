@@ -129,6 +129,83 @@ fn find_in(
         })
 }
 
+/// The tokens of a `NODE_OPTIONS` value: split at spaces outside double quotes, each kept as written.
+fn option_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in text.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            ' ' | '\t' if !quoted => {
+                if !current.is_empty() {
+                    tokens.push(core::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Whether a module named in `NODE_OPTIONS` is a file written in full. A bare name is looked up from the working directory
+/// (`node_modules` of the project), which would run the project's code in Pi.
+fn written_in_full(module: &str) -> bool {
+    let module = module.trim_matches('"');
+    let bytes = module.as_bytes();
+    module.starts_with(['/', '\\'])
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
+/// `options` without the modules Node would look up from the project: `--require`, `-r`, `--import` and the loader flags
+/// keep only an absolute path.
+fn trusted_node_options(options: &str) -> String {
+    const LOADING: [&str; 5] = [
+        "--require",
+        "-r",
+        "--import",
+        "--loader",
+        "--experimental-loader",
+    ];
+    let tokens = option_tokens(options);
+    let mut kept: Vec<String> = Vec::new();
+    let mut at = 0;
+    while at < tokens.len() {
+        let token = &tokens[at];
+        if LOADING.contains(&token.as_str()) {
+            if let Some(module) = tokens.get(at + 1)
+                && written_in_full(module)
+            {
+                kept.push(token.clone());
+                kept.push(module.clone());
+            }
+            at += 2;
+            continue;
+        }
+        if let Some((flag, module)) = token.split_once('=')
+            && LOADING.contains(&flag)
+        {
+            if written_in_full(module) {
+                kept.push(token.clone());
+            }
+            at += 1;
+            continue;
+        }
+        kept.push(token.clone());
+        at += 1;
+    }
+    kept.join(" ")
+}
+
 /// The script an npm shim (`pi.cmd`) runs, from its text: the `.js` path written under the shim's own directory
 /// (`%dp0%`).
 fn shim_script(shim: &Path, text: &str) -> Option<PathBuf> {
@@ -237,7 +314,10 @@ impl PiLaunch {
         self.roots()
             .into_iter()
             .chain(core::iter::once(self.cwd.clone()))
-            .find(|root| scope.reaches_secret(Some(&root.to_string_lossy())))
+            .find(|root| {
+                let text = root.to_string_lossy();
+                scope.reaches_secret(Some(&text)) || scope.secret(&text)
+            })
     }
 
     fn path_value(&self) -> Option<OsString> {
@@ -314,7 +394,10 @@ impl PiLaunch {
             .flatten();
         let options = match before {
             Some(before) if !before.as_os_str().is_empty() => {
-                format!("{require} {}", before.to_string_lossy())
+                format!(
+                    "{require} {}",
+                    trusted_node_options(&before.to_string_lossy())
+                )
             }
             _ => require,
         };

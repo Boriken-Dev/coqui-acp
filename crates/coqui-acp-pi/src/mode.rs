@@ -44,6 +44,7 @@ pub struct Scope {
     cwd: PathBuf,
     roots: Vec<PathBuf>,
     agent_dirs: Vec<PathBuf>,
+    private: Vec<PathBuf>,
     home: Option<PathBuf>,
     windows: bool,
 }
@@ -103,7 +104,7 @@ fn has_component(path: &Path, names: &[&str]) -> bool {
 }
 
 /// Where in a person's home credentials are kept: directories and single files.
-const SECRET_HOME: [&str; 15] = [
+const SECRET_HOME: [&str; 21] = [
     ".ssh",
     ".aws",
     ".gnupg",
@@ -117,6 +118,12 @@ const SECRET_HOME: [&str; 15] = [
     ".docker/config.json",
     ".cargo/credentials",
     ".cargo/credentials.toml",
+    ".pypirc",
+    ".codex/auth.json",
+    ".claude/.credentials.json",
+    ".config/git/credentials",
+    ".config/gh/hosts.yml",
+    ".kube/config",
     "AppData/Roaming/gcloud",
     "AppData/Roaming/GitHub CLI",
 ];
@@ -137,6 +144,7 @@ impl Scope {
             cwd: cwd.to_path_buf(),
             roots,
             agent_dirs: Vec::new(),
+            private: Vec::new(),
             home,
             windows: cfg!(windows),
         }
@@ -147,6 +155,26 @@ impl Scope {
     pub fn with_agent_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.agent_dirs = dirs;
         self
+    }
+
+    /// The translator's own directories (the one holding the gate): code Pi loads, which the model never changes.
+    #[must_use]
+    pub fn with_private(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.private = dirs;
+        self
+    }
+
+    /// Whether the path lies in one of the translator's own directories.
+    #[must_use]
+    pub fn private(&self, text: &str) -> bool {
+        let found = self.pi(text);
+        if found.network || found.unknown {
+            return false;
+        }
+        let path = resolved(&found.path);
+        self.private
+            .iter()
+            .any(|dir| under(&path, &resolved(dir), self.windows))
     }
 
     /// The home directory Pi expands `~` to: what `os.homedir()` says for the environment Pi is started with.
@@ -454,10 +482,13 @@ impl Policy {
                 _ => Decision::Allow,
             };
         }
-        // A credential file is not changed by the model in any mode but Bypass, as it is not read.
+        // A credential file is not changed by the model in any mode but Bypass, as it is not read; nor is the directory that
+        // holds the gate, which Pi loads.
         if EDITS.contains(&tool)
             && text(input, "path").is_some_and(|path| {
-                !cut(input, "path") && !scope.network(path) && scope.secret(path)
+                !cut(input, "path")
+                    && !scope.network(path)
+                    && (scope.secret(path) || scope.private(path))
             })
         {
             return Decision::Protected;

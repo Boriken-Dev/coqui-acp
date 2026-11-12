@@ -320,7 +320,7 @@ impl PiSession {
         }
         if !ephemeral && let Some(root) = launch.credential_root() {
             return Err(Error::Refused(format!(
-                "the working directory {} holds the places credentials are kept in; a search from there would read them                  (allow_credential_roots lets a launch do it)",
+                "the working directory {} holds the places credentials are kept in; a search from there would read them (allow_credential_roots lets a launch do it)",
                 root.display()
             )));
         }
@@ -337,18 +337,31 @@ impl PiSession {
             return Err(Error::Refused("that is not a Pi session id".into()));
         }
         let sink: Arc<dyn Fn(Event) -> bool + Send + Sync> = Arc::new(sink);
+        // Every start loads the guard, the listing of the models too. That one runs no tool: it gets no gate, and works in an
+        // empty directory of its own with the host's directory kept out of every program search.
         let gate = if ephemeral {
-            None
+            Gate::guard_only(launch.gate_dir.as_deref())
         } else {
-            Some(
-                Gate::write(launch.gate_dir.as_deref(), launch.system_prompt.as_deref())
-                    .map_err(Error::Spawn)?,
-            )
+            Gate::write(launch.gate_dir.as_deref(), launch.system_prompt.as_deref())
+        }
+        .map_err(Error::Spawn)?;
+        let neutral;
+        let launch = if ephemeral {
+            let work = gate.dir().join("work");
+            std::fs::create_dir_all(&work).map_err(Error::Spawn)?;
+            let mut moved = launch.clone();
+            moved.additional_directories = vec![launch.cwd.clone()];
+            moved.working_roots = Vec::new();
+            moved.cwd = work;
+            neutral = moved;
+            &neutral
+        } else {
+            launch
         };
         let mut command = launch.launch_guarded(
-            gate.as_ref().map(Gate::extension),
-            gate.as_ref().and_then(Gate::prompt),
-            gate.as_ref().map(Gate::guard),
+            (!ephemeral).then(|| gate.extension()),
+            gate.prompt(),
+            Some(gate.guard()),
         )?;
         if ephemeral {
             command = command.arg("--no-session");
@@ -375,6 +388,7 @@ impl PiSession {
                 .with_policy(Arc::clone(&policy))
                 .with_roots(&launch.cwd, launch.roots())
                 .with_protected(launch.agent_dirs())
+                .with_private(vec![gate.dir().to_path_buf()])
                 .with_home(launch.home()),
         ));
         let tail = Arc::new(Mutex::new(Tail::new(
@@ -440,8 +454,8 @@ impl PiSession {
             choice,
             titled: AtomicBool::new(false),
             sink,
-            gate_command: gate.as_ref().map(Gate::command),
-            _gate: gate,
+            gate_command: (!ephemeral).then(|| gate.command()),
+            _gate: Some(gate),
         })
     }
 

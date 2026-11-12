@@ -329,3 +329,89 @@ fn a_tilde_in_the_agent_directory_is_the_home_pi_expands_it_to() {
         .insert("PI_CODING_AGENT_DIR".into(), "plain/dir".into());
     assert_eq!(launch.agent_dirs(), [cwd.join("plain").join("dir")]);
 }
+
+#[test]
+fn the_persons_node_options_keep_only_modules_written_in_full() {
+    let scratch = Scratch::new("node-options");
+    let (cwd, home) = (scratch.dir("work"), scratch.dir("home"));
+    let absolute = if cfg!(windows) {
+        "C:/tools/trace.js"
+    } else {
+        "/tools/trace.js"
+    };
+    let mut launch = launching(&cwd, &home);
+    launch.env.insert(
+        "NODE_OPTIONS".into(),
+        format!(
+            "--max-old-space-size=64 --require evil -r evil2 --import=evil3 --require {absolute} --import ./local.mjs --loader x"
+        )
+        .into(),
+    );
+    let guard = scratch.dir("gates").join("guard.cjs");
+    let made = launch
+        .launch_guarded(None, None, Some(&guard))
+        .expect("a command");
+    let options = made
+        .env
+        .get(std::ffi::OsStr::new("NODE_OPTIONS"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let written = guard.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        options,
+        format!("--require {written} --max-old-space-size=64 --require {absolute}")
+    );
+}
+
+#[test]
+fn the_listing_of_the_models_loads_the_guard_and_works_in_an_empty_directory() {
+    let scratch = Scratch::new("listing");
+    let (cwd, home, gates) = (
+        scratch.dir("work"),
+        scratch.dir("home"),
+        scratch.dir("gates"),
+    );
+    let mut launch = launching(&cwd, &home);
+    launch.gate_dir = Some(gates.clone());
+    let _ = PiSession::read_models(&launch, &PlainSpawn, PiSettings::new());
+    let started = &logged(&home)[0];
+    let names = started["env_names"].as_array().unwrap();
+    for wanted in ["NODE_OPTIONS", "COQUI_ACP_PI_KEEP_OUT"] {
+        assert!(names.iter().any(|n| n == wanted), "{wanted} is missing");
+    }
+    let ran_in = std::path::PathBuf::from(started["cwd"].as_str().unwrap());
+    assert!(
+        ran_in != cwd && ran_in.starts_with(&gates),
+        "Pi listed the models in {ran_in:?}, not in a directory of its own"
+    );
+    assert_eq!(
+        std::fs::read_dir(&gates).unwrap().count(),
+        0,
+        "the directory outlived the listing"
+    );
+}
+
+#[test]
+fn a_session_in_a_directory_of_another_tool_s_credentials_is_refused() {
+    let scratch = Scratch::new("tool-credentials");
+    let home = scratch.dir("home");
+    for dir in [".claude", ".codex", ".ssh"] {
+        let cwd = scratch.dir("home").join(dir);
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut launch = PiLaunch::new(&cwd);
+        launch.executable = support::fake_program().into();
+        for name in ["HOME", "USERPROFILE"] {
+            launch.env.insert(name.into(), home.clone().into());
+        }
+        launch
+            .env
+            .insert("PI_CODING_AGENT_DIR".into(), scratch.dir("agent").into());
+        let Err(error) = start(&launch) else {
+            panic!("a session opened in ~/{dir}");
+        };
+        let said = error.to_string();
+        assert!(said.contains("credentials"), "{said}");
+        assert!(!said.contains("  "), "a run of spaces in: {said}");
+    }
+}
