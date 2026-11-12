@@ -22,10 +22,10 @@ use serde_json::{Value, json};
 /// The most sessions waiting to be opened, so a host that imports and never opens cannot make the
 /// provider hold histories without limit.
 const MAX_WAITING: usize = 64;
-/// How long an import waits to be opened.
-const WAITING_FOR: Duration = Duration::from_secs(60 * 60);
-/// The most agent session ids remembered as live.
-const MAX_SEEN: usize = 4096;
+/// How long an import waits to be opened by default, in seconds.
+pub(crate) const WAITING_SECS: u64 = 60 * 60;
+/// How many agent session ids are remembered as live by default.
+pub(crate) const REMEMBERED_IDS: u64 = 4096;
 
 /// A session imported by replay that no connection has opened yet.
 #[derive(Debug)]
@@ -48,20 +48,27 @@ struct Inner {
 pub(crate) struct Replays {
     inner: Mutex<Inner>,
     waits: Duration,
+    max_seen: usize,
 }
 
 impl Default for Replays {
     fn default() -> Self {
-        Self::expiring(WAITING_FOR)
+        Self::expiring(Duration::from_secs(WAITING_SECS))
     }
 }
 
 impl Replays {
     /// Imports that expire after `waits`.
     pub(crate) fn expiring(waits: Duration) -> Self {
+        Self::limited(waits, usize::try_from(REMEMBERED_IDS).unwrap_or(usize::MAX))
+    }
+
+    /// Imports that expire after `waits`, and the last `max_seen` agent session ids remembered.
+    pub(crate) fn limited(waits: Duration, max_seen: usize) -> Self {
         Self {
             inner: Mutex::new(Inner::default()),
             waits,
+            max_seen,
         }
     }
 
@@ -110,7 +117,7 @@ impl Replays {
         let mut inner = self.lock();
         if inner.seen.insert(session.to_owned()) {
             inner.order.push_back(session.to_owned());
-            while inner.order.len() > MAX_SEEN {
+            while inner.order.len() > self.max_seen {
                 if let Some(oldest) = inner.order.pop_front() {
                     inner.seen.remove(&oldest);
                 }
@@ -320,6 +327,16 @@ mod tests {
         assert_eq!(replays.add("live-1", None), Err(Refusal::Live));
         assert_eq!(replays.add("live-2", None), Err(Refusal::Live));
         assert!(replays.add("minted", None).is_ok());
+    }
+
+    #[test]
+    fn only_the_last_remembered_ids_are_held() {
+        let replays = Replays::limited(Duration::from_secs(60), 2);
+        for id in ["a", "b", "c"] {
+            replays.see(id);
+        }
+        assert!(replays.add("a", None).is_ok(), "the oldest was forgotten");
+        assert_eq!(replays.add("c", None), Err(Refusal::Live));
     }
 
     #[test]

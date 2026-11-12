@@ -101,6 +101,14 @@ pub struct StdioSettings {
     /// model: list the patterns of the secrets your sessions can hold.
     #[map(default)]
     pub replay_redact_patterns: Vec<String>,
+    /// How long an imported history waits for a connection to open its session before it is forgotten, in seconds (an
+    /// hour by default; 0 forgets it at once).
+    #[map(default = 3600)]
+    pub replay_waiting_secs: u64,
+    /// How many session ids the agent reported are remembered, so that no import takes one (4096 by default; 0 remembers
+    /// none).
+    #[map(default = 4096)]
+    pub replay_remembered_ids: u64,
 }
 
 impl StdioSettings {
@@ -118,6 +126,8 @@ impl StdioSettings {
             replay_max_bytes: 0,
             replay_max_item_bytes: 4096,
             replay_redact_patterns: Vec::new(),
+            replay_waiting_secs: replay::WAITING_SECS,
+            replay_remembered_ids: replay::REMEMBERED_IDS,
         }
     }
 }
@@ -173,10 +183,14 @@ impl StdioProvider {
     /// A provider configured as `settings` say.
     #[must_use]
     pub fn new(settings: StdioSettings) -> Self {
+        let replays = replay::Replays::limited(
+            Duration::from_secs(settings.replay_waiting_secs),
+            usize::try_from(settings.replay_remembered_ids).unwrap_or(usize::MAX),
+        );
         Self {
             settings,
             accounts: Arc::new(Accounts::new()),
-            replays: Arc::new(replay::Replays::default()),
+            replays: Arc::new(replays),
         }
     }
 
