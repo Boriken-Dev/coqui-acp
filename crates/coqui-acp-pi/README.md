@@ -92,6 +92,7 @@ coqui-acp-pi --mode accept_edits --effort low
 | `--allow-bypass` | off | Offers the Bypass mode: never ask |
 | `--ask-for-reads` | off | Asks before a tool that only reads, too, in Manual and Plan modes |
 | `--isolated` | off | Pi loads only the permission gate: none of the person's own extensions, no MCP servers |
+| `--protected` | recommended list | A protected path pattern in gitignore syntax (`!` allows, a later line wins, `~/` is the home directory), repeated; any replaces the recommended list (Pi's auth files and the usual credential places) |
 | `--allow-credential-roots` | off | Let a session work in a directory that holds the places credentials are kept in (a home directory with its `.ssh`); otherwise it is refused |
 | `--max-acp-version` | 2 | The highest ACP version answered |
 | `--max-sessions` | 8 | Sessions at once |
