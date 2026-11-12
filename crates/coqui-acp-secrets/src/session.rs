@@ -13,7 +13,7 @@ use crate::files::Places;
 use crate::ledger::Ledger;
 use crate::run::{ProcessRunner, Runner};
 use crate::scrub::Scrubber;
-use crate::{Approval, Decision, Error, Event, Frontend, Settings};
+use crate::{Approval, Decision, Error, Event, Frontend, Mode, Settings};
 
 type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 type Observer = Arc<dyn Fn(&Event) + Send + Sync>;
@@ -186,6 +186,11 @@ impl Core {
         }
     }
 
+    /// Refuses once the session has ended: a value copied out before it ended is not used after.
+    pub(crate) fn check_alive(&self) -> Result<(), Error> {
+        self.state().map(|_| ())
+    }
+
     pub(crate) fn handle_count(&self) -> usize {
         self.state.lock().map_or(0, |state| state.handles.len())
     }
@@ -224,6 +229,14 @@ impl Inner {
 
     /// Asks the person, unless this exact action for this secret was allowed for the session already.
     pub(crate) fn approve(&self, core: &Core, approval: &Approval) -> Result<(), Error> {
+        // A secret's use is a permission: the session's mode decides, as it does for the agent's own tools.
+        if core.frontend.mode() == Mode::Bypass {
+            self.emit(&Event::Bypassed {
+                session_id: core.id.clone(),
+                action: approval.action.clone(),
+            });
+            return Ok(());
+        }
         let key = approval.key();
         if core.allowed(&key) {
             self.emit(&Event::Answered {

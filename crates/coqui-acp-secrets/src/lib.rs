@@ -9,14 +9,16 @@ mod files;
 mod host;
 mod ledger;
 mod mcp;
+mod program;
 mod run;
 mod scrub;
 mod session;
 mod settings;
+mod text;
 mod tools;
 
 pub use error::Error;
-pub use host::{Action, Approval, Decision, Event, Frontend};
+pub use host::{Action, Approval, Decision, Event, FOLDER_NOTICE, Frontend, Mode};
 pub use run::{CommandLine, CommandOutput, CommandSpec, ProcessRunner, Runner};
 pub use session::{Secrets, SecretsBuilder, SessionConfig};
 pub use settings::{NonDefault, Settings};

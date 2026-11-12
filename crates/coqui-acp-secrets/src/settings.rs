@@ -21,6 +21,8 @@ pub struct Settings {
     pub request_memory: Duration,
     /// The message of a prompt, in bytes. Default 2048.
     pub max_message_bytes: usize,
+    /// The plain values of a show, as JSON text, in bytes. Default 64 KiB.
+    pub max_values_bytes: usize,
     /// A command, as the person is shown it, in bytes. Default 8192.
     pub max_command_bytes: usize,
     /// How long a command may run. Default 60 s.
@@ -37,6 +39,10 @@ pub struct Settings {
     /// The environment variables a command inherits from the host; every other one is removed. Default `PATH`, `HOME`, the
     /// temporary-directory and locale variables, and Windows' `SystemRoot`, `ComSpec`, `PATHEXT`, `USERPROFILE`.
     pub inherit_env: Vec<String>,
+    /// Variable names a secret may not be put in, because they change how a program is found or started: a name, or a prefix ending
+    /// in `*`, compared without regard to case. A small default of the mechanism's own; the person adds to it for the programs they
+    /// run, and nothing here claims to be complete.
+    pub denied_variables: Vec<String>,
     /// The shortest piece of a secret's base64 form that scrubbing looks for inside other text, in characters. Default 8: shorter
     /// pieces would match unrelated output. The whole value is always looked for, in every form.
     pub scrub_min_piece: usize,
@@ -51,6 +57,7 @@ impl Default for Settings {
             answer_lifetime: DEFAULT_LIFETIME,
             request_memory: Duration::from_secs(330),
             max_message_bytes: 2048,
+            max_values_bytes: 64 * 1024,
             max_command_bytes: 8192,
             command_timeout: Duration::from_secs(60),
             max_output_bytes: 64 * 1024,
@@ -70,6 +77,24 @@ impl Default for Settings {
                 "ComSpec",
                 "PATHEXT",
                 "USERPROFILE",
+            ]
+            .map(String::from)
+            .to_vec(),
+            denied_variables: [
+                "PATH",
+                "PATHEXT",
+                "COMSPEC",
+                "IFS",
+                "ENV",
+                "BASH_ENV",
+                "HOME",
+                "USERPROFILE",
+                "TMPDIR",
+                "TEMP",
+                "TMP",
+                "SYSTEMROOT",
+                "LD_*",
+                "DYLD_*",
             ]
             .map(String::from)
             .to_vec(),
@@ -142,6 +167,12 @@ impl Settings {
             base.max_message_bytes.to_string(),
         );
         note(
+            "max_values_bytes",
+            self.max_values_bytes > base.max_values_bytes,
+            self.max_values_bytes.to_string(),
+            base.max_values_bytes.to_string(),
+        );
+        note(
             "max_command_bytes",
             self.max_command_bytes > base.max_command_bytes,
             self.max_command_bytes.to_string(),
@@ -186,6 +217,17 @@ impl Settings {
             "inherit_env",
             !extra.is_empty(),
             format!("{extra:?}"),
+            "the default list".into(),
+        );
+        let dropped: Vec<&String> = base
+            .denied_variables
+            .iter()
+            .filter(|name| !self.denied_variables.contains(name))
+            .collect();
+        note(
+            "denied_variables",
+            !dropped.is_empty(),
+            format!("without {dropped:?}"),
             "the default list".into(),
         );
         note(

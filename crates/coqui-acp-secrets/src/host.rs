@@ -44,7 +44,29 @@ pub trait Frontend: Send + Sync {
     /// # Errors
     /// [`Error::Frontend`].
     fn approve(&self, approval: &Approval) -> Result<Decision, Error>;
+
+    /// The session's permission mode now. A secret's use is a permission like any other: in [`Mode::Bypass`] (Full access) it is
+    /// approved without asking, in any other mode `approve` is asked. Read at every use, so a change of mode applies at once. A host
+    /// that has a permission decider answers from the same one here; the default is [`Mode::Ask`].
+    fn mode(&self) -> Mode {
+        Mode::Ask
+    }
 }
+
+/// How the session's permission mode treats a secret's use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Mode {
+    /// The person is asked, with allow once and allow for the session.
+    Ask,
+    /// Approved without asking, as the harness's own tools are in Full access. Like a session allowance, it trusts the contents of
+    /// the folder the command runs in.
+    Bypass,
+}
+
+/// What every approval of a command says about its folder.
+pub const FOLDER_NOTICE: &str = "The scripts, hooks and configuration in this folder belong to the agent, which can change them: \
+    whatever this command runs from there can read the secret.";
 
 /// What the person is asked to allow.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +80,8 @@ pub struct Approval {
     pub secret: String,
     /// What would be done with it.
     pub action: Action,
+    /// What the person must be told besides the action: for a command, [`FOLDER_NOTICE`]. Show it.
+    pub notice: Option<&'static str>,
 }
 
 /// What an [`Approval`] is for. Each shows the person everything that is done: a path or a command in full.
@@ -74,8 +98,9 @@ pub enum Action {
         mode_applied: bool,
         /// Whether an existing file is replaced.
         overwrite: bool,
-        /// Whether the file is under the agent's roots: its own tools can read it back, whatever its mode.
-        readable_by_agent: bool,
+        /// Whether the file is under the session's roots. The host's agent is assumed to read and change files there with its own
+        /// tools, whatever the file's mode, so a secret written there is the agent's to read.
+        under_roots: bool,
     },
     /// Run a command with the secret in an environment variable. Whoever runs it can read the value.
     RunCommand {
@@ -83,6 +108,9 @@ pub enum Action {
         variable: String,
         /// The command in full (see [`CommandLine::display`](crate::CommandLine::display)).
         command: String,
+        /// The program that will start, by full path: for shell text the shell. What the command names is resolved on a search path
+        /// that leads nowhere under the session's roots; a program named by a path is shown as the file that path is.
+        program: PathBuf,
         /// Where it starts.
         cwd: PathBuf,
     },
@@ -90,6 +118,8 @@ pub enum Action {
     ShowCommand {
         /// The command in full.
         command: String,
+        /// The program that will start, by full path.
+        program: PathBuf,
         /// Where it starts.
         cwd: PathBuf,
     },
@@ -142,6 +172,13 @@ pub enum Event {
         /// The session.
         session_id: String,
         /// What was asked.
+        action: Action,
+    },
+    /// An approval was not asked because the session's mode approves it.
+    Bypassed {
+        /// The session.
+        session_id: String,
+        /// What was approved.
         action: Action,
     },
     /// An approval was answered.

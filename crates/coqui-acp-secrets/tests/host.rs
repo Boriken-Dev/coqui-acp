@@ -22,14 +22,16 @@ use coqui_acp::secret::{
     Verifier,
 };
 use coqui_acp_secrets::{
-    Action, Approval, CommandOutput, CommandSpec, Decision, Error, Event, Frontend, ProcessRunner,
-    Runner, Secrets, SecretsBuilder, SessionConfig, SessionTools, Settings,
+    Action, Approval, CommandOutput, CommandSpec, Decision, Error, Event, FOLDER_NOTICE, Frontend,
+    Mode, ProcessRunner, Runner, Secrets, SecretsBuilder, SessionConfig, SessionTools, Settings,
 };
 use data_encoding::{HEXLOWER, HEXUPPER};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 const NOW: u64 = 1_700_000_000;
+/// A program every machine has on its search path, outside any test directory.
+const SH: &str = if cfg!(windows) { "cmd" } else { "sh" };
 
 /// What the person types: the plain answers' JSON text and the secret values by field.
 type Typed = (String, Vec<(String, String)>);
@@ -120,6 +122,8 @@ struct Person {
     pending: Mutex<Option<(Receiver, String)>>,
     shown: Mutex<Vec<BTreeMap<String, String>>>,
     show_answer: Mutex<Option<&'static str>>,
+    /// Whether the session's permission mode approves without asking.
+    bypass: std::sync::atomic::AtomicBool,
     /// Runs while the person is deciding.
     while_deciding: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
@@ -162,6 +166,7 @@ impl Person {
             shown: Mutex::default(),
             show_answer: Mutex::default(),
             while_deciding: Mutex::default(),
+            bypass: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -296,9 +301,19 @@ impl Frontend for Person {
         Ok(ShowDone::Shown)
     }
 
+    fn mode(&self) -> Mode {
+        if self.bypass.load(Ordering::SeqCst) {
+            Mode::Bypass
+        } else {
+            Mode::Ask
+        }
+    }
+
     fn approve(&self, approval: &Approval) -> Result<Decision, Error> {
         self.asked.lock().unwrap().push(approval.clone());
-        if let Some(hook) = &*self.while_deciding.lock().unwrap() {
+        // The hook runs once and is out of the lock while it runs, so a call it makes is not held up by itself.
+        let hook = self.while_deciding.lock().unwrap().take();
+        if let Some(hook) = hook {
             hook();
         }
         Ok(self
@@ -364,7 +379,7 @@ impl Drop for Dir {
 }
 
 struct Setup {
-    secrets: Secrets,
+    secrets: Arc<Secrets>,
     tools: SessionTools,
     person: Arc<Person>,
     clock: Arc<AtomicU64>,
@@ -445,7 +460,7 @@ fn setup_out(
         )
         .unwrap();
     Setup {
-        secrets,
+        secrets: Arc::new(secrets),
         tools,
         person,
         clock,
@@ -577,7 +592,7 @@ fn a_value_never_appears_in_a_result_an_update_a_history_an_event_or_a_debug_pri
     let ran = record(
         &setup.tools,
         "secret_use",
-        json!({"handle": handle, "env": {"name": "REGISTRY_PASSWORD", "command": ["login", "--password-env", "REGISTRY_PASSWORD"]}}),
+        json!({"handle": handle, "env": {"name": "REGISTRY_PASSWORD", "command": [SH, "--password-env", "REGISTRY_PASSWORD"]}}),
     );
     assert!(ran["stdout"].as_str().unwrap().contains(&handle));
     let wrote = record(
@@ -681,7 +696,7 @@ fn a_use_without_approval_does_not_run_or_write() {
     let (command, error) = call(
         &setup.tools,
         "secret_use",
-        &json!({"handle": handle, "env": {"name": "PW", "command": ["deploy"]}}),
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "deploy"]}}),
     );
     assert!(error);
     assert!(
@@ -704,23 +719,22 @@ fn a_use_without_approval_does_not_run_or_write() {
     let (_, error) = call(
         &setup.tools,
         "secret_use",
-        &json!({"handle": handle, "env": {"name": "PW", "command": ["deploy"]}}),
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "deploy"]}}),
     );
     assert!(error);
     assert_eq!(setup.runs.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn every_use_is_asked_whatever_the_harness_mode_and_only_an_exact_session_allowance_skips_it() {
-    // The tools take no permission mode: Full access and Bypass are the harness's, and nothing of them reaches here, so they cannot
-    // answer. A use is asked each time unless the person said "for the session" about that exact action for that exact secret.
+fn a_uses_approval_follows_the_permission_mode_and_a_session_allowance_is_exact() {
+    // A secret's use is a permission like the agent's own. Asked in the other modes, with allow once and allow for the session.
     let setup = setup("modes");
     let handle = ask(&setup);
     let use_it = |command: &str| {
         call(
             &setup.tools,
             "secret_use",
-            &json!({"handle": handle, "env": {"name": "PW", "command": [command]}}),
+            &json!({"handle": handle, "env": {"name": "PW", "command": [SH, command]}}),
         )
     };
     setup.person.will_decide(&[Decision::Once, Decision::Deny]);
@@ -742,13 +756,57 @@ fn every_use_is_asked_whatever_the_harness_mode_and_only_an_exact_session_allowa
     assert!(use_it("other").1, "another command is asked: and denied");
     assert_eq!(setup.person.asked().len(), 4);
     assert_eq!(setup.runs.load(Ordering::SeqCst), 3);
-    // The approval names the secret by its field and the command in full.
+    // The approval names the secret by its field, the command in full, the program by its full path, and the folder notice.
     let asked = setup.person.asked();
     assert_eq!(asked[0].secret, "password");
+    assert_eq!(asked[0].notice, Some(FOLDER_NOTICE));
     assert!(
-        matches!(&asked[0].action, Action::RunCommand { variable, command, .. }
-        if variable == "PW" && command == "deploy")
+        matches!(&asked[0].action, Action::RunCommand { variable, command, program, .. }
+        if variable == "PW" && command == &format!("{SH} deploy") && program.is_absolute()
+            && !program.starts_with(setup.root.path()))
     );
+}
+
+#[test]
+fn in_bypass_a_use_is_approved_without_asking_and_a_change_of_mode_applies_at_once() {
+    let setup = setup("bypass");
+    let handle = ask(&setup);
+    let args = json!({"handle": handle, "env": {"name": "PW", "command": [SH, "deploy"]}});
+    setup.person.bypass.store(true, Ordering::SeqCst);
+    assert!(!call(&setup.tools, "secret_use", &args).1);
+    let (written, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "file": {"path": "bypassed.key"}}),
+    );
+    assert!(!error, "{written}");
+    assert!(
+        setup.person.asked().is_empty(),
+        "Bypass answers; nobody is asked"
+    );
+    assert_eq!(setup.runs.load(Ordering::SeqCst), 1);
+    assert!(
+        setup
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, Event::Bypassed { .. }))
+    );
+    // Back to asking: the next use is put to the person, who says no.
+    setup.person.bypass.store(false, Ordering::SeqCst);
+    assert!(call(&setup.tools, "secret_use", &args).1);
+    assert_eq!(setup.person.asked().len(), 1);
+    // A show from a command is a use too.
+    setup.person.bypass.store(true, Ordering::SeqCst);
+    let (shown, error) = call(
+        &setup.tools,
+        "secret_show",
+        &json!({"message": "m", "schema": schema(), "values": {"user": "ana"},
+                "secrets": {"password": {"command": [SH, "read"]}}}),
+    );
+    assert!(!error, "{shown}");
+    assert_eq!(setup.person.asked().len(), 1);
 }
 
 #[test]
@@ -763,7 +821,7 @@ fn a_session_allowance_is_for_one_secret_only() {
         call(
             &setup.tools,
             "secret_use",
-            &json!({"handle": handle, "env": {"name": "PW", "command": ["deploy"]}}),
+            &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "deploy"]}}),
         )
         .1
     };
@@ -858,7 +916,7 @@ fn a_file_is_written_under_the_roots_after_approval_and_the_person_is_told_the_a
         &json!({"handle": handle, "file": {"path": "config/app.key"}}),
     );
     assert!(!error, "{result}");
-    assert_eq!(result["readable_by_agent"], true);
+    assert_eq!(result["under_roots"], true);
     let file = setup.root.path().join("config").join("app.key");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), PASSWORD);
     #[cfg(unix)]
@@ -873,7 +931,7 @@ fn a_file_is_written_under_the_roots_after_approval_and_the_person_is_told_the_a
     assert!(matches!(
         &asked[0].action,
         Action::WriteFile {
-            readable_by_agent: true,
+            under_roots: true,
             overwrite: false,
             mode: 0o600,
             ..
@@ -919,11 +977,11 @@ fn a_write_directory_of_the_settings_is_allowed_and_is_not_readable_by_the_agent
         &json!({"handle": handle, "file": {"path": target.display().to_string()}}),
     );
     assert!(!error, "{result}");
-    assert_eq!(result["readable_by_agent"], false);
+    assert_eq!(result["under_roots"], false);
     assert!(matches!(
         &setup.person.asked()[0].action,
         Action::WriteFile {
-            readable_by_agent: false,
+            under_roots: false,
             ..
         }
     ));
@@ -936,7 +994,7 @@ fn the_sessions_end_clears_the_store_and_the_tools_refuse() {
     setup
         .person
         .will_decide(&[Decision::Session, Decision::Session]);
-    let args = json!({"handle": handle, "env": {"name": "PW", "command": ["deploy"]}});
+    let args = json!({"handle": handle, "env": {"name": "PW", "command": [SH, "deploy"]}});
     assert!(!call(&setup.tools, "secret_use", &args).1);
     assert_eq!(setup.tools.handle_count(), 1);
 
@@ -1001,7 +1059,7 @@ fn a_handle_belongs_to_its_session() {
     let (result, error) = call(
         &other,
         "secret_use",
-        &json!({"handle": handle, "env": {"name": "PW", "command": ["deploy"]}}),
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "deploy"]}}),
     );
     assert!(error, "{result}");
     assert!(result["error"].as_str().unwrap().contains("no such secret"));
@@ -1141,7 +1199,7 @@ fn a_handle_expires_and_the_store_has_a_limit() {
     let (result, error) = call(
         &setup.tools,
         "secret_use",
-        &json!({"handle": first, "env": {"name": "PW", "command": ["deploy"]}}),
+        &json!({"handle": first, "env": {"name": "PW", "command": [SH, "deploy"]}}),
     );
     assert!(error, "{result}");
     assert_eq!(setup.tools.handle_count(), 0);
@@ -1209,14 +1267,14 @@ fn a_show_from_a_command_needs_approval_and_the_output_never_comes_back() {
             &setup.tools,
             "secret_show",
             &json!({"message": "Your new key", "schema": schema(), "values": {"user": "ana"},
-                    "secrets": {"password": {"command": ["vault", "read", "key"]}}}),
+                    "secrets": {"password": {"command": [SH, "read", "key"]}}}),
         )
     };
     let (result, error) = show(None);
     assert!(error, "{result}");
     assert_eq!(setup.runs.load(Ordering::SeqCst), 0);
     assert!(
-        matches!(&setup.person.asked()[0].action, Action::ShowCommand { command, .. } if command == "vault read key")
+        matches!(&setup.person.asked()[0].action, Action::ShowCommand { command, .. } if command == &format!("{SH} read key"))
     );
 
     let (result, error) = show(Some(Decision::Once));
@@ -1404,6 +1462,8 @@ fn the_process_runner_gives_the_secret_by_environment_only_and_ends_a_slow_comma
     let output = ProcessRunner
         .run(&CommandSpec {
             command: &line,
+            program: &system_shell(),
+            path: None,
             cwd: &cwd,
             secret: Some(("SECRET_TEST_VAR", b"s3cret")),
             timeout: Duration::from_secs(30),
@@ -1419,6 +1479,7 @@ fn the_process_runner_gives_the_secret_by_environment_only_and_ends_a_slow_comma
         "the host's environment is not inherited: {text}"
     );
 
+    let host_path = std::env::var_os("PATH");
     let slow = coqui_acp_secrets::CommandLine::Shell(
         if cfg!(windows) {
             "ping -n 20 127.0.0.1 > nul"
@@ -1431,6 +1492,8 @@ fn the_process_runner_gives_the_secret_by_environment_only_and_ends_a_slow_comma
     let output = ProcessRunner
         .run(&CommandSpec {
             command: &slow,
+            program: &system_shell(),
+            path: host_path.as_deref(),
             cwd: &cwd,
             secret: None,
             timeout: Duration::from_millis(300),
@@ -1504,7 +1567,7 @@ fn output_cut_inside_the_secret_leaves_no_piece_of_it() {
     let (result, error) = call(
         &setup.tools,
         "secret_use",
-        &json!({"handle": handle, "env": {"name": "PW", "command": ["deploy"]}}),
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "deploy"]}}),
     );
     assert!(!error, "{result}");
     let stdout = result["stdout"].as_str().unwrap();
@@ -1513,4 +1576,378 @@ fn output_cut_inside_the_secret_leaves_no_piece_of_it() {
         "{stdout}"
     );
     assert!(!stdout.contains(&PASSWORD[..3]), "{stdout}");
+}
+
+fn system_shell() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32")
+            .join("cmd.exe")
+    } else {
+        PathBuf::from("/bin/sh")
+    }
+}
+
+#[test]
+fn a_program_planted_in_the_folder_does_not_take_the_place_of_a_system_tool() {
+    let setup = setup("planted");
+    let handle = ask(&setup);
+    // Files an agent could plant under the roots, named like the tools a command or the shell would start.
+    for name in ["deploy", "deploy.cmd", "deploy.exe", "cmd.exe", "sh"] {
+        std::fs::write(setup.root.path().join(name), "planted").unwrap();
+    }
+    setup.person.will_decide(&[Decision::Once; 4]);
+    // A bare name that is only in the folder is not found: the folder is not on the search path.
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": ["deploy"]}}),
+    );
+    assert!(error, "{result}");
+    assert_eq!(setup.runs.load(Ordering::SeqCst), 0);
+    assert!(setup.person.asked().is_empty());
+    // A name that exists as a system tool is that tool, whatever is planted beside the command.
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "x"]}}),
+    );
+    assert!(!error, "{result}");
+    // Shell text starts the platform's shell by full path.
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": "echo hi"}}),
+    );
+    assert!(!error, "{result}");
+    let asked = setup.person.asked();
+    for approval in &asked {
+        let Action::RunCommand { program, .. } = &approval.action else {
+            panic!("{approval:?}")
+        };
+        assert!(
+            program.is_absolute() && !program.starts_with(setup.root.path()),
+            "{program:?}"
+        );
+    }
+    let Action::RunCommand { program, .. } = &asked[1].action else {
+        panic!()
+    };
+    assert_eq!(program.file_name(), system_shell().file_name());
+}
+
+#[test]
+fn a_program_named_by_a_path_is_shown_as_the_file_it_is() {
+    let setup = setup("pathprog");
+    let handle = ask(&setup);
+    let script = if cfg!(windows) { "run.cmd" } else { "run.sh" };
+    std::fs::write(setup.root.path().join(script), "echo").unwrap();
+    setup.person.will_decide(&[Decision::Once]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [format!("./{script}")]}}),
+    );
+    assert!(!error, "{result}");
+    let Action::RunCommand { program, .. } = &setup.person.asked()[0].action else {
+        panic!()
+    };
+    assert_eq!(program.file_name().unwrap().to_str().unwrap(), script);
+    assert!(program.is_absolute());
+}
+
+#[test]
+fn writing_over_a_hard_link_leaves_the_file_it_links_to_alone() {
+    let setup = setup("hardlink");
+    let handle = ask(&setup);
+    let outside = Dir::new("hardlink-outside");
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let link = setup.root.path().join("linked.txt");
+    std::fs::hard_link(&victim, &link).unwrap();
+    setup.person.will_decide(&[Decision::Once]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "file": {"path": "linked.txt", "overwrite": true}}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    assert_eq!(std::fs::read_to_string(&link).unwrap(), PASSWORD);
+    // No temporary file is left beside it.
+    let names: Vec<_> = std::fs::read_dir(setup.root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+}
+
+#[test]
+fn what_the_person_reads_cannot_hide_anything() {
+    let setup = setup("hidden");
+    let handle = ask(&setup);
+    setup.person.will_decide(&[Decision::Once; 4]);
+    // Paths with format characters, line separators, no-break spaces or a long run of spaces are refused.
+    for path in [
+        "a\u{200b}b",
+        "a\u{2028}b",
+        "a\u{a0}b",
+        "a\u{202e}b",
+        "a     b",
+        "a\u{feff}",
+    ] {
+        let (_, error) = call(
+            &setup.tools,
+            "secret_use",
+            &json!({"handle": handle, "file": {"path": path}}),
+        );
+        assert!(error, "{path:?}");
+    }
+    assert!(setup.person.asked().is_empty());
+    // A command shows them written out.
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "a\u{200e}b\u{2029}c", "d       e"]}}),
+    );
+    assert!(!error, "{result}");
+    let Action::RunCommand { command, .. } = &setup.person.asked()[0].action else {
+        panic!()
+    };
+    assert!(
+        command
+            .chars()
+            .all(|c| !c.is_control() && c != '\u{200e}' && c != '\u{2029}'),
+        "{command}"
+    );
+    assert!(
+        command.contains("\\u{200e}") && command.contains("<7 spaces>"),
+        "{command}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn network_and_device_paths_are_refused_before_any_file_is_touched() {
+    let setup = setup("winpaths");
+    let handle = ask(&setup);
+    setup.person.will_decide(&[Decision::Once; 6]);
+    for path in [
+        r"\\server\share\x.txt",
+        r"\\?\UNC\server\share\x.txt",
+        r"\\.\C:\x.txt",
+        r"\\?\GLOBALROOT\Device\x",
+        r"C:x.txt",
+        r"D:\elsewhere\x.txt",
+    ] {
+        let (result, error) = call(
+            &setup.tools,
+            "secret_use",
+            &json!({"handle": handle, "file": {"path": path}}),
+        );
+        assert!(error, "{path}: {result}");
+    }
+    // A verbatim disk path under the root is the same as the plain one.
+    let inside = format!(r"\\?\{}", setup.root.path().join("ok.txt").display());
+    let plain = setup.root.path().join("ok2.txt").display().to_string();
+    for path in [inside, plain] {
+        let (result, error) = call(
+            &setup.tools,
+            "secret_use",
+            &json!({"handle": handle, "file": {"path": path}}),
+        );
+        assert!(!error, "{path}: {result}");
+    }
+    assert!(setup.person.asked().len() == 2);
+}
+
+#[test]
+fn only_one_use_runs_at_a_time() {
+    let setup = setup("onceuse");
+    let handle = ask(&setup);
+    let (tools, inner) = (setup.tools.clone(), Arc::new(Mutex::new(None)));
+    let sink = Arc::clone(&inner);
+    let again = json!({"handle": handle, "env": {"name": "PW", "command": [SH, "second"]}});
+    *setup.person.while_deciding.lock().unwrap() = Some(Box::new(move || {
+        *sink.lock().unwrap() = Some(tools.call("secret_use", &again));
+    }));
+    setup.person.will_decide(&[Decision::Once]);
+    let (_, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "first"]}}),
+    );
+    assert!(!error);
+    let second = inner.lock().unwrap().take().unwrap();
+    assert!(
+        second.is_error && second.text.contains("still open"),
+        "{}",
+        second.text
+    );
+    assert_eq!(setup.runs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_session_that_ends_while_the_person_decides_gets_no_use() {
+    let setup = setup("endwhile");
+    let handle = ask(&setup);
+    let (secrets, hook_ran) = (Arc::clone(&setup.secrets), Arc::new(AtomicUsize::new(0)));
+    let counter = Arc::clone(&hook_ran);
+    *setup.person.while_deciding.lock().unwrap() = Some(Box::new(move || {
+        secrets.end_session("s1");
+        counter.fetch_add(1, Ordering::SeqCst);
+    }));
+    setup.person.will_decide(&[Decision::Once]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "x"]}}),
+    );
+    assert!(error, "{result}");
+    assert_eq!(hook_ran.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.runs.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_variable_on_the_denied_list_cannot_carry_a_secret_and_the_list_is_the_persons_to_edit() {
+    let mut settings = Settings::default();
+    settings.denied_variables.push("SSLKEYLOGFILE".into());
+    settings.denied_variables.push("MYAPP_*".into());
+    let setup = setup_with("variables2", settings, Person::new);
+    let handle = ask(&setup);
+    setup.person.will_decide(&[Decision::Once; 12]);
+    // The defaults, a name the person added, and a prefix they added; case does not matter.
+    for name in [
+        "PATH",
+        "ld_preload",
+        "DYLD_INSERT_LIBRARIES",
+        "sslkeylogfile",
+        "MYAPP_TOKEN_FILE",
+    ] {
+        let (_, error) = call(
+            &setup.tools,
+            "secret_use",
+            &json!({"handle": handle, "env": {"name": name, "command": [SH]}}),
+        );
+        assert!(error, "{name}");
+    }
+    assert!(setup.person.asked().is_empty());
+    // Not on the list: allowed (the list is not a catalogue).
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "HISTFILE", "command": [SH]}}),
+    );
+    assert!(!error, "{result}");
+    // Emptying the list is a looser setting and is reported.
+    let mut loose = Settings::default();
+    loose.denied_variables.clear();
+    assert!(
+        loose
+            .non_defaults()
+            .iter()
+            .any(|n| n.setting == "denied_variables")
+    );
+}
+
+#[test]
+fn the_plain_values_of_a_show_are_bounded() {
+    let mut settings = Settings::default();
+    settings.max_values_bytes = 32;
+    let setup = setup_with("valuesbound", settings, Person::new);
+    let handle = ask(&setup);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_show",
+        &json!({"message": "m", "schema": schema(), "values": {"user": "x".repeat(100)},
+                "secrets": {"password": {"handle": handle}}}),
+    );
+    assert!(error, "{result}");
+    assert_eq!(setup.person.requests.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_timeout_ends_everything_the_command_started() {
+    let dir = Dir::new("tree");
+    let pid_file = dir.path().join("pid");
+    let text = format!("sleep 60 & echo $! > {}; wait", pid_file.display());
+    let line = coqui_acp_secrets::CommandLine::Shell(text);
+    let settings = Settings::default();
+    let output = ProcessRunner
+        .run(&CommandSpec {
+            command: &line,
+            program: &system_shell(),
+            path: None,
+            cwd: dir.path(),
+            secret: None,
+            timeout: Duration::from_millis(1500),
+            max_output: 1024,
+            inherit_env: &settings.inherit_env,
+        })
+        .unwrap();
+    assert!(output.timed_out);
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid])
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the grandchild {pid} is still running");
+}
+
+#[test]
+fn a_value_copied_before_the_session_ended_is_not_used_after() {
+    use std::sync::OnceLock;
+    let keys = keys();
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let person = Person::new(&keys, &clock);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let slot: Arc<OnceLock<Arc<Secrets>>> = Arc::new(OnceLock::new());
+    let ender = Arc::clone(&slot);
+    let secrets = Arc::new(
+        builder(&keys, &clock)
+            .runner(Probe {
+                runs: Arc::clone(&runs),
+                seen: Arc::default(),
+                output: Box::new(chatty),
+            })
+            // The session ends just as the command is about to start, after the value was copied for it.
+            .observer(move |event| {
+                if matches!(event, Event::Ran { .. }) {
+                    ender.get().unwrap().end_session("s1");
+                }
+            })
+            .build(),
+    );
+    slot.set(Arc::clone(&secrets)).ok();
+    let root = Dir::new("lateend");
+    let tools = secrets
+        .open_session(
+            "s1",
+            SessionConfig::new(
+                Arc::clone(&person) as Arc<dyn Frontend>,
+                vec![root.path().to_owned()],
+            ),
+        )
+        .unwrap();
+    person.will_type(r#"{"user":"ana"}"#, &[("password", PASSWORD)]);
+    let (made, _) = call(
+        &tools,
+        "secret_request",
+        &json!({"message": "m", "schema": schema()}),
+    );
+    let handle = made["handles"]["password"].as_str().unwrap().to_owned();
+    person.will_decide(&[Decision::Once]);
+    let (result, error) = call(
+        &tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "x"]}}),
+    );
+    assert!(error, "{result}");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
 }

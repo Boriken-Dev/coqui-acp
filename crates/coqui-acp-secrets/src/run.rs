@@ -3,6 +3,7 @@
 use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -69,7 +70,7 @@ impl CommandLine {
     #[must_use]
     pub fn display(&self) -> String {
         match self {
-            Self::Shell(text) => format!("(shell) {}", escape(text, false)),
+            Self::Shell(text) => format!("(shell) {}", crate::text::escape(text, false)),
             Self::Argv(args) => args
                 .iter()
                 .map(|arg| {
@@ -80,7 +81,7 @@ impl CommandLine {
                     if plain {
                         arg.clone()
                     } else {
-                        format!("'{}'", escape(arg, true))
+                        format!("'{}'", crate::text::escape(arg, true))
                     }
                 })
                 .collect::<Vec<_>>()
@@ -89,29 +90,15 @@ impl CommandLine {
     }
 }
 
-fn escape(text: &str, quote: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\'' if quote => out.push_str("'\\''"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control()
-                || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
-            {
-                out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// What a [`Runner`] is asked to run.
 pub struct CommandSpec<'a> {
     /// The command.
     pub command: &'a CommandLine,
+    /// The program that is started: for an argument vector its resolved first element (on a search path that excludes the session's
+    /// roots), for shell text the shell, by full path. What the person approved.
+    pub program: &'a Path,
+    /// The `PATH` the command gets: the host's, without a relative entry or one under the session's roots. `None` gives none.
+    pub path: Option<&'a OsStr>,
     /// The directory it starts in: under the session's roots.
     pub cwd: &'a Path,
     /// The variable that holds the secret and the secret's bytes (valid UTF-8, no NUL), when the command is a use.
@@ -215,14 +202,13 @@ fn take(capture: &Arc<Mutex<Capture>>) -> (Zeroizing<Vec<u8>>, bool) {
 
 impl Runner for ProcessRunner {
     fn run(&self, spec: &CommandSpec<'_>) -> Result<CommandOutput, Error> {
-        let mut command = match spec.command {
+        let mut command = Command::new(spec.program);
+        match spec.command {
             CommandLine::Argv(args) => {
-                let mut command = Command::new(&args[0]);
                 command.args(&args[1..]);
-                command
             }
-            CommandLine::Shell(text) => shell(text),
-        };
+            CommandLine::Shell(text) => shell_args(&mut command, text),
+        }
         command
             .current_dir(spec.cwd)
             .env_clear()
@@ -230,18 +216,31 @@ impl Runner for ProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for name in spec.inherit_env {
+            if name.eq_ignore_ascii_case("PATH") {
+                continue;
+            }
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
         }
+        if let Some(path) = spec.path {
+            command.env("PATH", path);
+        }
+        // Windows would look in the current directory for a program before it looks on the path.
+        command.env("NoDefaultCurrentDirectoryInExePath", "1");
         if let Some((name, value)) = spec.secret {
             let text = core::str::from_utf8(value)
                 .map_err(|_| Error::Command("the secret is not text a variable can hold"))?;
             command.env(name, text);
         }
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = command
             .spawn()
             .map_err(|_| Error::Command("could not be started"))?;
+        drop(command);
+        #[cfg(windows)]
+        let job = contain(&child);
         let (out, out_thread) = drain(
             child
                 .stdout
@@ -260,12 +259,16 @@ impl Runner for ProcessRunner {
                 Ok(Some(status)) => break status.code(),
                 Ok(None) if started.elapsed() >= spec.timeout => {
                     timed_out = true;
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    end_tree(&mut child);
+                    #[cfg(windows)]
+                    drop(job);
                     break None;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(_) => return Err(Error::Command("could not be waited for")),
+                Err(_) => {
+                    end_tree(&mut child);
+                    return Err(Error::Command("could not be waited for"));
+                }
             }
         };
         // Something the command started may hold a pipe open for ever: give the readers a moment, then take what they have.
@@ -286,19 +289,59 @@ impl Runner for ProcessRunner {
     }
 }
 
+/// Ends the child and everything it started: on Unix its process group (it leads one), on Windows the job it was put in is closed
+/// by the caller, and the child itself is killed here.
+fn end_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Some(group) = i32::try_from(child.id())
+        .ok()
+        .filter(|pid| *pid > 1)
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Puts the child in a job object that ends everything in it when it is closed.
+#[cfg(windows)]
+fn contain(child: &std::process::Child) -> Option<win32job::Job> {
+    use std::os::windows::io::AsRawHandle;
+    let mut limits = win32job::ExtendedLimitInfo::new();
+    limits.limit_kill_on_job_close();
+    let job = win32job::Job::create_with_limit_info(&limits).ok()?;
+    job.assign_process(child.as_raw_handle() as isize).ok()?;
+    Some(job)
+}
+
+/// The shell the platform runs shell text with, by full path, so no program in the working directory takes its place.
+pub(crate) fn shell_program() -> Result<std::path::PathBuf, Error> {
+    #[cfg(unix)]
+    let shell = std::path::PathBuf::from("/bin/sh");
+    #[cfg(windows)]
+    let shell = {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        std::path::PathBuf::from(root)
+            .join("System32")
+            .join("cmd.exe")
+    };
+    if shell.is_file() {
+        Ok(shell)
+    } else {
+        Err(Error::Command("the platform's shell was not found"))
+    }
+}
+
 #[cfg(unix)]
-fn shell(text: &str) -> Command {
-    let mut command = Command::new("sh");
+fn shell_args(command: &mut Command, text: &str) {
     command.arg("-c").arg(text);
-    command
 }
 
 #[cfg(windows)]
-fn shell(text: &str) -> Command {
+fn shell_args(command: &mut Command, text: &str) {
     use std::os::windows::process::CommandExt;
-    let mut command = Command::new("cmd");
     command.arg("/C").raw_arg(text);
-    command
 }
 
 #[cfg(test)]

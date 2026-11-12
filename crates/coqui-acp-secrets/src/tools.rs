@@ -10,9 +10,10 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::files::shown;
+use crate::host::FOLDER_NOTICE;
 use crate::run::{CommandLine, CommandSpec};
 use crate::session::{Core, Inner};
-use crate::{Action, Approval, Error, Event};
+use crate::{Action, Approval, Error, Event, program};
 
 /// One tool the agent is offered, in the shape MCP's `tools/list` gives.
 #[derive(Clone, Debug, PartialEq)]
@@ -211,7 +212,7 @@ impl SessionTools {
     fn request(&self, args: &Value) -> Result<Value, Error> {
         let settings = &self.inner.settings;
         self.require(self.core.capability.request, "secret requests")?;
-        let ask = Ask::read(args, settings.max_message_bytes, false)?;
+        let ask = Ask::read(args, settings, false)?;
         let form = Form::parse_text(&ask.schema, &settings.limits)?;
         let secrets = form.fields.iter().filter(|field| field.secret).count();
         if secrets == 0 {
@@ -306,6 +307,8 @@ impl SessionTools {
             .as_object()
             .ok_or(Error::Arguments("the arguments are not an object"))?;
         let handle = string(map, "handle")?;
+        // One use at a time: the person is asked about one thing, and a command's output is scrubbed against one state.
+        let _busy = self.core.busy()?;
         let field = self.core.field_of(&handle, settings, self.inner.now())?;
         match (map.get("file"), map.get("env")) {
             (Some(file), None) => self.write_file(&handle, &field, file),
@@ -342,12 +345,13 @@ impl SessionTools {
                 session_id: self.core.id.clone(),
                 handle: Some(handle.to_owned()),
                 secret: field.to_owned(),
+                notice: None,
                 action: Action::WriteFile {
                     path: resolved.path.clone(),
                     mode,
                     mode_applied: cfg!(unix),
                     overwrite,
-                    readable_by_agent: resolved.in_roots,
+                    under_roots: resolved.in_roots,
                 },
             },
         )?;
@@ -356,6 +360,7 @@ impl SessionTools {
             return Err(Error::Path("the place changed after it was approved"));
         }
         let value = self.core.value_of(handle, settings, self.inner.now())?;
+        self.core.check_alive()?;
         self.core.places.write(&resolved, &value, mode, overwrite)?;
         self.inner.emit(&Event::Wrote {
             session_id: self.core.id.clone(),
@@ -364,7 +369,7 @@ impl SessionTools {
         Ok(json!({
             "status": "written",
             "path": shown(&resolved.path),
-            "readable_by_agent": resolved.in_roots,
+            "under_roots": resolved.in_roots,
         }))
     }
 
@@ -374,7 +379,7 @@ impl SessionTools {
             .as_object()
             .ok_or(Error::Arguments("env is not an object"))?;
         let variable = string(map, "name")?;
-        check_variable(&variable)?;
+        check_variable(&variable, &settings.denied_variables)?;
         let command = CommandLine::from_value(
             map.get("command")
                 .ok_or(Error::Arguments("env has no command"))?,
@@ -384,43 +389,58 @@ impl SessionTools {
             .core
             .places
             .directory(map.get("cwd").map(as_text).transpose()?)?;
+        let launch = program::plan(&command, &cwd, &self.core.places)?;
         self.inner.approve(
             &self.core,
             &Approval {
                 session_id: self.core.id.clone(),
                 handle: Some(handle.to_owned()),
                 secret: field.to_owned(),
+                notice: Some(FOLDER_NOTICE),
                 action: Action::RunCommand {
                     variable: variable.clone(),
                     command: command.display(),
+                    program: launch.program.clone(),
                     cwd: cwd.clone(),
                 },
             },
         )?;
         let value = self.core.value_of(handle, settings, self.inner.now())?;
-        // Output is asked for a secret's length beyond the limit, so a secret that straddles the limit is whole when it is scrubbed;
-        // the limit is applied to what is left.
         let scrubber = self.core.scrubber(settings);
         let spec = CommandSpec {
             command: &command,
+            program: &launch.program,
+            path: Some(&launch.path),
             cwd: &cwd,
             secret: Some((&variable, &value)),
             timeout: settings.command_timeout,
-            max_output: settings.max_output_bytes + scrubber.longest(),
+            max_output: settings.max_output_bytes,
             inherit_env: &settings.inherit_env,
         };
         self.inner.emit(&Event::Ran {
             session_id: self.core.id.clone(),
             command: command.display(),
         });
+        self.core.check_alive()?;
         let output = self.inner.runner.run(&spec)?;
-        // The output is scrubbed here as bytes (so a form that is not text on its own is found), and again as JSON by `call`.
+        // The runner cut the raw output at the limit, perhaps inside the secret: what could be the start of one is dropped before
+        // scrubbing, which cannot find a piece of a secret. The cut is made on the raw bytes, never on what scrubbing leaves.
+        let raw = |bytes: &[u8]| -> Vec<u8> {
+            let keep = if output.truncated {
+                bytes
+                    .len()
+                    .saturating_sub(scrubber.longest().saturating_sub(1))
+            } else {
+                bytes.len()
+            };
+            bytes[..keep].to_vec()
+        };
         let (stdout, cut_out) = clip(
-            scrubber.scrub_output(&output.stdout),
+            scrubber.scrub_output(&raw(&output.stdout)),
             settings.max_output_bytes,
         );
         let (stderr, cut_err) = clip(
-            scrubber.scrub_output(&output.stderr),
+            scrubber.scrub_output(&raw(&output.stderr)),
             settings.max_output_bytes,
         );
         Ok(json!({
@@ -435,7 +455,7 @@ impl SessionTools {
     fn show(&self, args: &Value) -> Result<Value, Error> {
         let settings = &self.inner.settings;
         self.require(self.core.capability.show, "secret shows")?;
-        let ask = Ask::read(args, settings.max_message_bytes, true)?;
+        let ask = Ask::read(args, settings, true)?;
         let form = Form::parse_text(&ask.schema, &settings.limits)?;
         let wanted: Vec<&str> = form
             .fields
@@ -453,6 +473,7 @@ impl SessionTools {
         for (name, source) in &sources {
             places.insert(name.as_str(), self.approve_source(name, source)?);
         }
+        self.core.check_alive()?;
         let mut values: BTreeMap<String, Zeroizing<String>> = BTreeMap::new();
         for (name, source) in &sources {
             let value = self.fetch(source, places[name.as_str()].as_ref())?;
@@ -524,8 +545,8 @@ impl SessionTools {
         &self,
         field: &str,
         source: &Source,
-    ) -> Result<Option<std::path::PathBuf>, Error> {
-        let (action, handle, cwd) = match source {
+    ) -> Result<Option<(std::path::PathBuf, program::Launch)>, Error> {
+        let (action, handle, cwd, notice) = match source {
             Source::Handle(handle) => {
                 self.core
                     .field_of(handle, &self.inner.settings, self.inner.now())?;
@@ -544,17 +565,20 @@ impl SessionTools {
             }
             Source::Env(name) => {
                 check_variable_name(name)?;
-                (Action::ShowEnv { name: name.clone() }, None, None)
+                (Action::ShowEnv { name: name.clone() }, None, None, None)
             }
             Source::Command { line, cwd } => {
                 let cwd = self.core.places.directory(cwd.as_deref())?;
+                let launch = program::plan(line, &cwd, &self.core.places)?;
                 (
                     Action::ShowCommand {
                         command: line.display(),
+                        program: launch.program.clone(),
                         cwd: cwd.clone(),
                     },
                     None,
-                    Some(cwd),
+                    Some((cwd, launch)),
+                    Some(FOLDER_NOTICE),
                 )
             }
         };
@@ -564,6 +588,7 @@ impl SessionTools {
                 session_id: self.core.id.clone(),
                 handle,
                 secret: field.to_owned(),
+                notice,
                 action,
             },
         )?;
@@ -574,7 +599,7 @@ impl SessionTools {
     fn fetch(
         &self,
         source: &Source,
-        cwd: Option<&std::path::PathBuf>,
+        cwd: Option<&(std::path::PathBuf, program::Launch)>,
     ) -> Result<Zeroizing<String>, Error> {
         let settings = &self.inner.settings;
         let bytes: Zeroizing<Vec<u8>> = match source {
@@ -589,13 +614,15 @@ impl SessionTools {
                     .into_bytes(),
             ),
             Source::Command { line, .. } => {
-                let cwd = cwd.ok_or(Error::Command("no directory"))?;
+                let (cwd, launch) = cwd.ok_or(Error::Command("no directory"))?;
                 self.inner.emit(&Event::Ran {
                     session_id: self.core.id.clone(),
                     command: line.display(),
                 });
                 let output = self.inner.runner.run(&CommandSpec {
                     command: line,
+                    program: &launch.program,
+                    path: Some(&launch.path),
                     cwd,
                     secret: None,
                     timeout: settings.command_timeout,
@@ -649,7 +676,8 @@ struct Ask {
 }
 
 impl Ask {
-    fn read(args: &Value, max_message: usize, show: bool) -> Result<Self, Error> {
+    fn read(args: &Value, settings: &crate::Settings, show: bool) -> Result<Self, Error> {
+        let max_message = settings.max_message_bytes;
         let map = args
             .as_object()
             .ok_or(Error::Arguments("the arguments are not an object"))?;
@@ -662,7 +690,15 @@ impl Ask {
         let values = if show {
             match map.get("values") {
                 None => "{}".to_owned(),
-                Some(Value::Object(values)) => Value::Object(values.clone()).to_string(),
+                Some(Value::Object(values)) => {
+                    let text = Value::Object(values.clone()).to_string();
+                    if text.len() > settings.max_values_bytes {
+                        return Err(Error::Limit(
+                            "the plain values are longer than the settings allow",
+                        ));
+                    }
+                    text
+                }
                 Some(_) => return Err(Error::Arguments("values is not an object")),
             }
         } else {
@@ -762,43 +798,19 @@ impl Source {
 }
 
 /// Names a secret may not be put in: ones that change how a program is found or started rather than what it reads.
-fn check_variable(name: &str) -> Result<(), Error> {
+fn check_variable(name: &str, denied: &[String]) -> Result<(), Error> {
     check_variable_name(name)?;
     let upper = name.to_ascii_uppercase();
-    let denied = [
-        "PATH",
-        "PATHEXT",
-        "COMSPEC",
-        "IFS",
-        "BASH_ENV",
-        "ENV",
-        "SHELLOPTS",
-        "PS4",
-        "PROMPT_COMMAND",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "PERL5OPT",
-        "PERL5LIB",
-        "RUBYOPT",
-        "RUBYLIB",
-        "PYTHONPATH",
-        "PYTHONSTARTUP",
-        "PYTHONHOME",
-        "JAVA_TOOL_OPTIONS",
-        "_JAVA_OPTIONS",
-        "CLASSPATH",
-        "GIT_SSH_COMMAND",
-        "GIT_EXEC_PATH",
-        "SYSTEMROOT",
-        "HOME",
-        "USERPROFILE",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
-    ];
-    if denied.contains(&upper.as_str()) || upper.starts_with("LD_") || upper.starts_with("DYLD_") {
+    // A pattern is a name, or a prefix with a trailing `*`; compared without regard to case.
+    let hit = denied.iter().any(|pattern| {
+        let pattern = pattern.to_ascii_uppercase();
+        pattern
+            .strip_suffix('*')
+            .map_or(upper == pattern, |prefix| upper.starts_with(prefix))
+    });
+    if hit {
         return Err(Error::Arguments(
-            "that variable changes how programs start and cannot carry a secret",
+            "that variable is on the settings' denied list: it changes how programs start and cannot carry a secret",
         ));
     }
     Ok(())
