@@ -87,6 +87,7 @@ coqui-acp-pi --mode accept_edits --effort low
 | Flag | Default | What |
 | --- | --- | --- |
 | `--executable` (`COQUI_ACP_PI_EXECUTABLE`) | `pi` | The Pi program; on Windows a bare `pi` is found in `PATH` as `pi.exe`, then `pi.cmd` (npm's shim) |
+| `--node`, `--script` (`COQUI_ACP_PI_NODE`, `COQUI_ACP_PI_SCRIPT`) | none | An absolute Node and Pi's `dist/bundle/cli.js`, run as `node script ...` instead of an `--executable` (a private install; no `PATH` lookup, no `.cmd` shim). Both or neither, not with `--executable`, and not inside a session's directory |
 | `--model`, `--effort` | Pi's | What every session starts with (`provider/id`, a thinking level) |
 | `--mode` | `manual` | The mode sessions start in and the loosest a client may choose: `manual`, `accept_edits` or `plan` |
 | `--allow-bypass` | off | Offers the Bypass mode: never ask |

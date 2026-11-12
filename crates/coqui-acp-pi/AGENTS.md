@@ -16,6 +16,8 @@ Pi's side is `pi --mode rpc`: JSON lines on standard input and output, commands 
 #[non_exhaustive]                                       // Clone, PartialEq; Debug shows env names only
 pub struct PiLaunch {
     pub executable: OsString,                  // "pi"; on Windows a bare "pi" is looked for in PATH as pi.exe, then pi.cmd (npm's shim); see program()
+    pub node: Option<PathBuf>,                 // with script: an absolute Node executable that runs Pi's CLI script, instead of executable
+    pub script: Option<PathBuf>,               // Pi's CLI script (dist/bundle/cli.js), absolute; see "Node and script" below
     pub cwd: PathBuf,                          // the process's working directory
     pub session: SessionStart,                 // New | Resume(id) | Load(id)
     pub model: Option<String>,                 // "provider/id" (--model)
@@ -166,6 +168,8 @@ A read outside the session's directories (`cwd`, the more directories, or `worki
 
 `auto` is never offered: Pi has no automatic reviewer to back it. What a client may choose is the start mode (`PiLaunch::mode`, Manual by default) and every stricter one in the order Plan, Manual, Accept edits, Bypass, and what `PiLaunch::modes` names besides; Bypass only with `allow_bypass`. A question offers `allow` (once), `reject`, and where it can be said exactly `allow_tool`, which is remembered for the rest of the session in every mode but Plan: a plain command by its program ("Always allow `git …` in this session: every `git` command, including ones that run other programs", so `git -c alias.x=!cmd x` is covered; a command the gate cut for its size is never remembered, nor answered from a remembered rule, and is shown as cut; a command with a separator, substitution, redirection, variable or an assignment before its first word offers nothing to remember), `edit` or `write` inside the directories ("Always allow `write` inside the working directories in this session"), any other tool by its name ("Always allow the tool `name` in this session"); never a tool that only reads. A cancelled answer ends the run; a question that comes after the person stopped the run is answered cancelled and not asked. Plan refuses without asking and tells the model why.
 
+**Node and script.** A host that keeps its own Node and Pi's `dist/bundle/cli.js` (a private install) sets `node` and `script` instead of an `executable` on `PATH`: the launch is `node [--require guard via NODE_OPTIONS] script --mode rpc ...`, with the same guard and `PATH` cleaning, on every system, and nothing is looked up and no `.cmd` shim is run. They are set together or not at all, and not with an `executable` other than `pi` (the default means unset); each must be an absolute path to an existing file, not on the network, not a `.cmd` or `.bat`, and not inside a directory of the session (the working directories and `cwd`, links followed and `..` resolved), else `command()` and every launch is `Error::Refused`. The provider's `program()` answers the node. Pi's own variables (`PI_SKIP_VERSION_CHECK=1`) go in `env`.
+
 ## Provider (`PiProvider`, id `pi`)
 
 ```rust
@@ -173,6 +177,8 @@ A read outside the session's directories (`cwd`, the more directories, or `worki
 pub fn PiProvider::new(settings: ProviderSettings) -> PiProvider     // also From<ProviderSettings>
 pub struct ProviderSettings {                                        // ToValue, FromValue, Schema, Default; every field defaults
     pub executable: String,              // "pi": a path, or a name looked up where the spawner runs it
+    pub node: Option<String>,            // None; with script, an absolute Node that runs Pi's script (program() answers it)
+    pub script: Option<String>,          // None; Pi's CLI script, absolute
     pub model: Option<String>, pub effort: Option<String>,
     pub mode: Option<Mode>,              // None: manual
     pub allow_bypass: bool,              // false
@@ -204,11 +210,11 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 
 ## Command line
 
-`coqui-acp-pi` serves `PiAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_PI_EXECUTABLE`, default `pi`), `--model`, `--effort`, `--mode`, `--allow-bypass`, `--ask-for-reads`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
+`coqui-acp-pi` serves `PiAgent` on standard input and output. Flags: `--executable` (`COQUI_ACP_PI_EXECUTABLE`, default `pi`), `--node` and `--script` (`COQUI_ACP_PI_NODE`, `COQUI_ACP_PI_SCRIPT`; each needs the other), `--model`, `--effort`, `--mode`, `--allow-bypass`, `--ask-for-reads`, `--max-acp-version` (1 or 2, default 2), `--max-sessions` (8), `--working-root` (repeated; a session's `cwd` and more directories must lie in one), `--allow-network-paths`. Notices and exits go to standard error. Exit status 0 when the client closes, 1 when reading it failed, 2 for a wrong invocation.
 
 ## Environment variables
 
-`COQUI_ACP_PI_EXECUTABLE`, as `--executable`. Pi reads its own (`PI_CODING_AGENT_DIR`, `ANTHROPIC_API_KEY` and others) from the environment the agent runs in, or `PiLaunch::env`.
+`COQUI_ACP_PI_EXECUTABLE`, as `--executable`; `COQUI_ACP_PI_NODE` and `COQUI_ACP_PI_SCRIPT`, as `--node` and `--script`. Pi reads its own (`PI_CODING_AGENT_DIR`, `ANTHROPIC_API_KEY` and others) from the environment the agent runs in, or `PiLaunch::env`.
 
 ## Gotchas
 
