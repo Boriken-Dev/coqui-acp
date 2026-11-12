@@ -165,7 +165,9 @@ fn a_v1_session_is_recorded_whole_and_round_trips_through_export() {
         .collect();
     assert_eq!(
         kinds,
-        ["prompt", "thought", "message", "call", "result", "plan", "end"]
+        [
+            "prompt", "thought", "message", "call", "result", "plan", "end"
+        ]
     );
     let call = conversation.call("t1").expect("the call");
     assert_eq!(call.raw_input, Some(json!({"command": "cargo test"})));
@@ -231,7 +233,10 @@ fn a_cancel_and_a_permission_are_recorded_in_their_turn() {
     );
     stop(&mut rec, 2, "cancelled");
     let doc = rec.finish().unwrap();
-    assert_eq!(bodies(&doc), ["prompt", "request", "answer", "cancel", "end"]);
+    assert_eq!(
+        bodies(&doc),
+        ["prompt", "request", "answer", "cancel", "end"]
+    );
     doc.check().expect("the order rules hold");
     assert_eq!(
         doc.lines[2].body,
@@ -274,7 +279,10 @@ fn another_sessions_updates_and_unknown_messages_are_not_recorded() {
         json!({"jsonrpc": "2.0", "method": "session/update",
             "params": {"sessionId": "someone-else", "update": chunk("agent_message_chunk", "no")}}),
     );
-    received(&mut rec, json!({"jsonrpc": "2.0", "method": "x/unknown", "params": {}}));
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "method": "x/unknown", "params": {}}),
+    );
     received(&mut rec, json!("not a message"));
     update(&mut rec, json!({"no": "sessionUpdate"}));
     stop(&mut rec, 2, "end_turn");
@@ -333,14 +341,20 @@ fn a_v2_session_is_recorded_as_the_agent_sent_it() {
             _ => None,
         })
         .collect();
-    assert_eq!(messages, ["I will list them."], "a v2 message replaces its earlier content");
+    assert_eq!(
+        messages,
+        ["I will list them."],
+        "a v2 message replaces its earlier content"
+    );
     assert!(
         conversation
             .items
             .iter()
             .any(|item| matches!(item, Item::Thought { text, .. } if text == "plan it"))
     );
-    let call = conversation.call("t1").expect("a v2 update announces the call");
+    let call = conversation
+        .call("t1")
+        .expect("a v2 update announces the call");
     assert!(call.announced);
     assert_eq!(call.name.as_deref(), Some("Bash"));
     assert_eq!(call.raw_output, Some(json!("a b")));
@@ -429,6 +443,10 @@ fn a_recording_stops_at_its_line_limit_and_says_so() {
     stop(&mut rec, 2, "end_turn");
     assert!(rec.truncated());
     let doc = rec.finish().unwrap();
-    assert!(doc.lines.len() <= 3, "the header counts as a line: {}", doc.lines.len());
+    assert!(
+        doc.lines.len() <= 3,
+        "the header counts as a line: {}",
+        doc.lines.len()
+    );
     doc.check().expect("what was kept is a valid history");
 }

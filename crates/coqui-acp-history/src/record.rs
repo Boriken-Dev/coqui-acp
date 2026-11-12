@@ -124,7 +124,9 @@ impl SessionRecorder {
             self.header.created_at.clone_from(&at);
         }
         let stamp = Stamp::at(at);
-        let id = object.get("id").filter(|id| id.is_string() || id.is_number());
+        let id = object
+            .get("id")
+            .filter(|id| id.is_string() || id.is_number());
         let id = id.map(Value::to_string);
         let method = object.get("method").and_then(Value::as_str);
         let params = object.get("params").unwrap_or(&Value::Null);
@@ -151,7 +153,10 @@ impl SessionRecorder {
     }
 
     fn belongs(&self, params: &Value) -> bool {
-        match (&self.session, params.get("sessionId").and_then(Value::as_str)) {
+        match (
+            &self.session,
+            params.get("sessionId").and_then(Value::as_str),
+        ) {
             (Some(ours), Some(theirs)) => ours == theirs,
             (None, Some(_)) => true,
             (_, None) => false,
@@ -329,10 +334,15 @@ impl SessionRecorder {
                 if let Some(session) = result.get("sessionId").and_then(Value::as_str) {
                     self.adopt(session);
                 }
-                if let Some(mode) = result.pointer("/modes/currentModeId").and_then(Value::as_str) {
+                if let Some(mode) = result
+                    .pointer("/modes/currentModeId")
+                    .and_then(Value::as_str)
+                {
                     self.header.mode = Some(mode.to_owned());
                 }
-                if let Some(model) = result.pointer("/models/currentModelId").and_then(Value::as_str)
+                if let Some(model) = result
+                    .pointer("/models/currentModelId")
+                    .and_then(Value::as_str)
                 {
                     self.header.model = Some(model.to_owned());
                 }
@@ -365,7 +375,10 @@ impl SessionRecorder {
                         .and_then(Stop::from_name)
                     {
                         Some(stop) => (stop, None),
-                        None => (Stop::Error, Some("the agent ended the turn without a stop reason".to_owned())),
+                        None => (
+                            Stop::Error,
+                            Some("the agent ended the turn without a stop reason".to_owned()),
+                        ),
                     }
                 }
                 (None, Some(error)) => {
@@ -408,7 +421,10 @@ impl SessionRecorder {
                     update.get("compactionId").and_then(Value::as_str),
                     update.pointer("/content/text").and_then(Value::as_str),
                 ) {
-                    self.compactions.entry(id.to_owned()).or_default().push_str(text);
+                    self.compactions
+                        .entry(id.to_owned())
+                        .or_default()
+                        .push_str(text);
                 }
             }
             _ => {}

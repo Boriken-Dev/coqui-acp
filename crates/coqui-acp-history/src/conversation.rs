@@ -447,9 +447,8 @@ impl Builder {
                 let Some(text) = update.pointer("/content/text").and_then(Value::as_str) else {
                     return;
                 };
-                let same_message = message_id.is_none()
-                    || self.last_id.is_none()
-                    || message_id == self.last_id;
+                let same_message =
+                    message_id.is_none() || self.last_id.is_none() || message_id == self.last_id;
                 match (chunk, self.items.last_mut()) {
                     ("agent_message_chunk", Some(Item::Message { text: kept, .. }))
                     | ("agent_thought_chunk", Some(Item::Thought { text: kept, .. }))
@@ -486,8 +485,10 @@ impl Builder {
                     .iter()
                     .filter_map(|block| block.get("text").and_then(Value::as_str))
                     .collect::<Vec<_>>()
-                    .join("
-");
+                    .join(
+                        "
+",
+                    );
                 let item = match whole {
                     "agent_message" => Item::Message { text, stamp },
                     "agent_thought" => Item::Thought { text, stamp },

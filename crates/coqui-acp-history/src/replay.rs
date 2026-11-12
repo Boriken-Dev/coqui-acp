@@ -34,8 +34,8 @@ use sha2::{Digest, Sha256};
 
 use crate::conversation::{Call, Conversation, Item};
 use crate::{
-    Document, HISTORY_CUT, ITEM_CUT, LossReport, NON_TEXT_OMITTED, REPLAYED_AS_PROMPT, SeedPoint,
-    SUMMARY_MISSING, THINKING, TOOL_AS_NOTE,
+    Document, HISTORY_CUT, ITEM_CUT, LossReport, NON_TEXT_OMITTED, REPLAYED_AS_PROMPT,
+    SUMMARY_MISSING, SeedPoint, THINKING, TOOL_AS_NOTE,
 };
 
 /// The most bytes of a replay by default: about eight thousand tokens.
@@ -165,7 +165,8 @@ impl Replay {
             text = wrap(&record, start as u64, max);
         }
         let kept = &entries[start..];
-        let cut_items = start as u64 + u64::from(kept_summary.is_none() && total_items > entries.len() as u64);
+        let cut_items =
+            start as u64 + u64::from(kept_summary.is_none() && total_items > entries.len() as u64);
         let carried = kept_summary.is_some() || !kept.is_empty();
 
         let mut replay = Self {
@@ -176,7 +177,10 @@ impl Replay {
             cut_items,
         };
         if cut_items > 0 {
-            let turns = entries[..start].iter().filter(|entry| entry.starts_turn).count();
+            let turns = entries[..start]
+                .iter()
+                .filter(|entry| entry.starts_turn)
+                .count();
             replay.report.add(
                 HISTORY_CUT,
                 cut_items,
@@ -451,10 +455,17 @@ fn plan_lines(plan: &[Value], cap_bytes: usize, cut: &mut u64) -> Vec<String> {
     let mut lines = vec!["[plan]".to_owned()];
     for entry in plan {
         let content = entry.get("content").and_then(Value::as_str).unwrap_or("");
-        let status = entry.get("status").and_then(Value::as_str).unwrap_or("pending");
+        let status = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
         let (content, was_cut) = cap(content, cap_bytes);
         *cut += u64::from(was_cut);
-        lines.extend(split(&format!("- [{}] {}", escape(status), escape(&content))));
+        lines.extend(split(&format!(
+            "- [{}] {}",
+            escape(status),
+            escape(&content)
+        )));
     }
     lines
 }
