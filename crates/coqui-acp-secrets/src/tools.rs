@@ -344,7 +344,8 @@ impl SessionTools {
             &Approval {
                 session_id: self.core.id.clone(),
                 handle: Some(handle.to_owned()),
-                secret: field.to_owned(),
+                secret: crate::text::escape(field, false),
+                raw: String::new(),
                 notice: None,
                 action: Action::WriteFile {
                     path: resolved.path.clone(),
@@ -395,12 +396,14 @@ impl SessionTools {
             &Approval {
                 session_id: self.core.id.clone(),
                 handle: Some(handle.to_owned()),
-                secret: field.to_owned(),
+                secret: crate::text::escape(field, false),
+                raw: format!("{command:?}"),
                 notice: Some(FOLDER_NOTICE),
                 action: Action::RunCommand {
                     variable: variable.clone(),
                     command: command.display(),
                     program: launch.program.clone(),
+                    target: launch.target.clone(),
                     cwd: cwd.clone(),
                 },
             },
@@ -423,13 +426,11 @@ impl SessionTools {
         });
         self.core.check_alive()?;
         let output = self.inner.runner.run(&spec)?;
-        // The runner cut the raw output at the limit, perhaps inside the secret: what could be the start of one is dropped before
-        // scrubbing, which cannot find a piece of a secret. The cut is made on the raw bytes, never on what scrubbing leaves.
+        // The runner cut the raw output at the limit, perhaps inside the secret: the cut is moved back to the start of anything that
+        // could be the beginning of a form of one, and what is kept is scrubbed.
         let raw = |bytes: &[u8]| -> Vec<u8> {
             let keep = if output.truncated {
-                bytes
-                    .len()
-                    .saturating_sub(scrubber.longest().saturating_sub(1))
+                scrubber.safe_cut(bytes)
             } else {
                 bytes.len()
             };
@@ -574,6 +575,7 @@ impl SessionTools {
                     Action::ShowCommand {
                         command: line.display(),
                         program: launch.program.clone(),
+                        target: launch.target.clone(),
                         cwd: cwd.clone(),
                     },
                     None,
@@ -587,7 +589,11 @@ impl SessionTools {
             &Approval {
                 session_id: self.core.id.clone(),
                 handle,
-                secret: field.to_owned(),
+                secret: crate::text::escape(field, false),
+                raw: match source {
+                    Source::Command { line, .. } => format!("{line:?}"),
+                    _ => String::new(),
+                },
                 notice,
                 action,
             },

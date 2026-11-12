@@ -189,6 +189,10 @@ impl Places {
         }
         let mut path = fs::canonicalize(near).map_err(|_| outside())?;
         path.extend(tail.iter().rev());
+        // The path is shown to the person as it is: a link that leads somewhere with a hidden character in its name is refused.
+        if crate::text::has_hidden(&path.to_string_lossy()) {
+            return Err(Error::Path("the resolved path holds a hidden character"));
+        }
         match self.classify(&path) {
             Some(in_roots) => Ok(Resolved { path, in_roots }),
             None => Err(outside()),

@@ -21,6 +21,27 @@ struct Pattern {
 }
 
 impl Pattern {
+    /// Where the longest proper prefix of this form that `head` ends with starts, if there is one.
+    fn partial_start(&self, head: &[u8]) -> Option<usize> {
+        let first = *self.bytes.first()?;
+        let longest = (self.bytes.len() - 1).min(head.len());
+        (head.len() - longest..head.len()).find(|&start| {
+            let tail = &head[start..];
+            let prefix = &self.bytes[..tail.len()];
+            let same_first = if self.ci {
+                head[start].eq_ignore_ascii_case(&first)
+            } else {
+                head[start] == first
+            };
+            same_first
+                && if self.ci {
+                    tail.eq_ignore_ascii_case(prefix)
+                } else {
+                    tail == prefix
+                }
+        })
+    }
+
     fn at(&self, input: &[u8], at: usize) -> bool {
         let Some(window) = input.get(at..at + self.bytes.len()) else {
             return false;
@@ -71,11 +92,37 @@ impl Scrubber {
         Self { patterns }
     }
 
-    /// The longest form looked for, in bytes.
-    pub(crate) fn longest(&self) -> usize {
-        self.patterns
-            .first()
-            .map_or(0, |pattern| pattern.bytes.len())
+    /// How much of `raw`, the output of a command that was cut where it stands, can be kept: the end is moved back to the start of
+    /// any piece that could be the beginning of a form of a secret, and again while what is then at the end is such a piece, so a
+    /// secret that straddles the cut leaves no byte of itself. A whole form that ends exactly at the cut is kept (and replaced).
+    pub(crate) fn safe_cut(&self, raw: &[u8]) -> usize {
+        let mut cut = raw.len();
+        loop {
+            let head = &raw[..cut];
+            let mut next = cut;
+            for pattern in &self.patterns {
+                if let Some(at) = pattern.partial_start(head) {
+                    next = next.min(at);
+                }
+            }
+            if self.patterns.iter().any(|p| p.wrap) {
+                let (squeezed, origin): (Vec<u8>, Vec<usize>) = head
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, byte)| !byte.is_ascii_whitespace())
+                    .map(|(at, byte)| (*byte, at))
+                    .unzip();
+                for pattern in self.patterns.iter().filter(|p| p.wrap) {
+                    if let Some(at) = pattern.partial_start(&squeezed) {
+                        next = next.min(origin[at]);
+                    }
+                }
+            }
+            if next == cut {
+                return cut;
+            }
+            cut = next;
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {

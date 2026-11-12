@@ -55,6 +55,8 @@ pub(crate) fn escape(text: &str, quote: bool) -> String {
         flush(&mut out, &mut spaces);
         match c {
             '\'' if quote => out.push_str("'\\''"),
+            '\\' => out.push_str("\\\\"),
+            '<' => out.push_str("\\<"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),

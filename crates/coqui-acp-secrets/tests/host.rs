@@ -1951,3 +1951,176 @@ fn a_value_copied_before_the_session_ended_is_not_used_after() {
     assert!(error, "{result}");
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 }
+
+/// The output is the secret over and over and the limit falls inside one of them: whatever is kept is whole occurrences, scrubbed.
+fn probe_cut(limit: usize) {
+    let mut settings = Settings::default();
+    settings.max_output_bytes = limit;
+    let setup = setup_out(
+        &format!("cut{limit}"),
+        settings,
+        Person::new,
+        Box::new(|value| value.repeat(10).into_bytes()),
+    );
+    let handle = ask(&setup);
+    setup.person.will_decide(&[Decision::Once]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "x"]}}),
+    );
+    assert!(!error, "{result}");
+    let stdout = result["stdout"].as_str().unwrap();
+    // Only whole occurrences were kept, each replaced by its handle (the result is then clipped, which can cut the last handle, and
+    // a handle is longer than the secret): what is there is a prefix of the handles, and holds no byte of a partial occurrence.
+    let expected = handle.repeat(limit / PASSWORD.len());
+    assert!(
+        !stdout.is_empty() && expected.starts_with(stdout),
+        "limit {limit}: {stdout}"
+    );
+    assert!(stdout.starts_with(handle.as_str()) || stdout.len() < handle.len());
+    assert!(
+        !stdout.contains("Tr0") && !stdout.contains(&PASSWORD[..3]),
+        "{stdout}"
+    );
+    assert_eq!(result["truncated"], true);
+}
+
+#[test]
+fn a_cut_inside_a_repeated_secret_leaves_only_whole_scrubbed_occurrences() {
+    probe_cut(59);
+    probe_cut(124);
+    probe_cut(PASSWORD.len() * 3);
+}
+
+#[test]
+fn two_commands_that_read_alike_are_not_one_allowance() {
+    // A backslash-n and a newline, four spaces and the text `<4 spaces>`, were shown alike and shared a "for the session".
+    let setup = setup("ambiguous");
+    let handle = ask(&setup);
+    let run = |arg: &str| {
+        call(
+            &setup.tools,
+            "secret_use",
+            &json!({"handle": handle, "env": {"name": "PW", "command": [SH, arg]}}),
+        )
+        .1
+    };
+    for (first, second) in [
+        ("a\\nb", "a\nb"),
+        ("x    y", "x<4 spaces>y"),
+        ("a\\u{200b}b", "a\u{200b}b"),
+    ] {
+        setup
+            .person
+            .will_decide(&[Decision::Session, Decision::Deny]);
+        let before = setup.person.asked().len();
+        assert!(!run(first));
+        assert!(
+            run(second),
+            "{second:?} was run on the allowance of {first:?}"
+        );
+        let asked = setup.person.asked();
+        assert_eq!(asked.len(), before + 2, "the second command was asked");
+        let shown = |a: &Approval| match &a.action {
+            Action::RunCommand { command, .. } => command.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(
+            shown(&asked[before]),
+            shown(&asked[before + 1]),
+            "{first:?} / {second:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hidden_character_in_a_field_name_is_written_out_in_the_approval() {
+    let setup = setup("fieldname");
+    let name = "pass\u{200b}word";
+    let schema = json!({"type": "object", "properties": {"user": {"type": "string"},
+        name: {"type": "string", "writeOnly": true}}, "required": ["user", name]});
+    setup
+        .person
+        .will_type(r#"{"user":"ana"}"#, &[(name, PASSWORD)]);
+    let (made, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": schema}),
+    );
+    assert!(!error, "{made}");
+    let handle = made["handles"][name].as_str().unwrap().to_owned();
+    setup.person.will_decide(&[Decision::Once]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "x"]}}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(setup.person.asked()[0].secret, "pass\\u{200b}word");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resolved_path_with_a_hidden_character_is_refused() {
+    // The agent's text has none, but a link it made inside the folder leads to a directory that does.
+    let setup = setup("hiddenresolved");
+    let handle = ask(&setup);
+    std::fs::create_dir(setup.root.path().join("real\u{200b}dir")).unwrap();
+    std::os::unix::fs::symlink(
+        setup.root.path().join("real\u{200b}dir"),
+        setup.root.path().join("door"),
+    )
+    .unwrap();
+    setup.person.will_decide(&[Decision::Once; 2]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "file": {"path": "door/token"}}),
+    );
+    assert!(error, "{result}");
+    let (result, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "PW", "command": [SH, "x"], "cwd": "door"}}),
+    );
+    assert!(error, "{result}");
+    assert!(setup.person.asked().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_background_process_does_not_outlive_a_command_that_exited() {
+    let dir = Dir::new("bg");
+    let pid_file = dir.path().join("pid");
+    // The shell exits at once; the sleep it started holds the secret in its environment.
+    let line = coqui_acp_secrets::CommandLine::Shell(format!(
+        "sleep 60 & echo $! > {}",
+        pid_file.display()
+    ));
+    let settings = Settings::default();
+    let output = ProcessRunner
+        .run(&CommandSpec {
+            command: &line,
+            program: &system_shell(),
+            path: None,
+            cwd: dir.path(),
+            secret: Some(("SECRET_TEST_VAR", b"s3cret")),
+            timeout: Duration::from_secs(30),
+            max_output: 1024,
+            inherit_env: &settings.inherit_env,
+        })
+        .unwrap();
+    assert_eq!(output.status, Some(0));
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid])
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the background process {pid} is still running");
+}

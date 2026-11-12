@@ -157,7 +157,8 @@ pub trait Runner: Send + Sync {
 }
 
 /// Runs the command as a child process of the host: the environment is cleared except [`CommandSpec::inherit_env`] and the one
-/// secret, standard input is closed, and a command past its timeout is killed. It kills the child only, not what the child started.
+/// secret, standard input is closed, and when the command ends, or runs past its timeout, everything it started is ended with it (a
+/// process group on Unix, a job object on Windows), so nothing it left behind keeps the secret in its environment.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProcessRunner;
 
@@ -256,7 +257,12 @@ impl Runner for ProcessRunner {
         let mut timed_out = false;
         let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break status.code(),
+                Ok(Some(status)) => {
+                    // The command is over; whatever it left running is ended, still with the secret in its environment.
+                    #[cfg(unix)]
+                    end_group(&child);
+                    break status.code();
+                }
                 Ok(None) if started.elapsed() >= spec.timeout => {
                     timed_out = true;
                     end_tree(&mut child);
@@ -289,10 +295,9 @@ impl Runner for ProcessRunner {
     }
 }
 
-/// Ends the child and everything it started: on Unix its process group (it leads one), on Windows the job it was put in is closed
-/// by the caller, and the child itself is killed here.
-fn end_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
+/// Ends the process group the child led.
+#[cfg(unix)]
+fn end_group(child: &std::process::Child) {
     if let Some(group) = i32::try_from(child.id())
         .ok()
         .filter(|pid| *pid > 1)
@@ -300,6 +305,13 @@ fn end_tree(child: &mut std::process::Child) {
     {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     }
+}
+
+/// Ends the child and everything it started: on Unix its process group (it leads one), on Windows the job it was put in is closed
+/// by the caller, and the child itself is killed here.
+fn end_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    end_group(child);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -341,7 +353,8 @@ fn shell_args(command: &mut Command, text: &str) {
 #[cfg(windows)]
 fn shell_args(command: &mut Command, text: &str) {
     use std::os::windows::process::CommandExt;
-    command.arg("/C").raw_arg(text);
+    // `/D`: no AutoRun command from the registry runs first, with the secret in its environment.
+    command.arg("/D").arg("/C").raw_arg(text);
 }
 
 #[cfg(test)]
@@ -372,5 +385,19 @@ mod tests {
             CommandLine::from_value(&long, 100),
             Err(Error::Limit(_))
         ));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn the_windows_shell_starts_without_autorun() {
+        let mut command = std::process::Command::new("cmd");
+        super::shell_args(&mut command, "echo hi");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["/D", "/C", "echo hi"]);
     }
 }

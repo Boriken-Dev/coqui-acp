@@ -37,9 +37,10 @@ pub trait Frontend: Send + Sync {
     /// [`Error::Frontend`].
     fn show_deliver(&self, deliver: &ShowDeliver) -> Result<ShowDone, Error>;
 
-    /// Puts an [`Approval`] to the person and returns their answer. It is asked for every use and every command-based show whatever
-    /// the harness's permission mode is, so an implementation must not answer it from that mode: Full access and Bypass do not
-    /// approve a secret's use.
+    /// Puts an [`Approval`] to the person and returns their answer, as a permission card does: allow once, allow for the session, or
+    /// no. It is asked in every mode except [`Mode::Bypass`], which [`Frontend::mode`] reports and which approves without asking, so
+    /// an implementation answers from the person, not from the mode. Show the whole approval: the command, the program by full path
+    /// and what it is a link to, the folder, and the notice that the folder's scripts, hooks and configuration belong to the agent.
     ///
     /// # Errors
     /// [`Error::Frontend`].
@@ -80,6 +81,8 @@ pub struct Approval {
     pub secret: String,
     /// What would be done with it.
     pub action: Action,
+    /// The command exactly as it was given, unescaped: what "for the session" is keyed on, so two commands that read alike are two.
+    pub(crate) raw: String,
     /// What the person must be told besides the action: for a command, [`FOLDER_NOTICE`]. Show it.
     pub notice: Option<&'static str>,
 }
@@ -111,6 +114,8 @@ pub enum Action {
         /// The program that will start, by full path: for shell text the shell. What the command names is resolved on a search path
         /// that leads nowhere under the session's roots; a program named by a path is shown as the file that path is.
         program: PathBuf,
+        /// What `program` is a link to, when that is another file: it is started under the name it was found by, never its target's.
+        target: Option<PathBuf>,
         /// Where it starts.
         cwd: PathBuf,
     },
@@ -120,6 +125,8 @@ pub enum Action {
         command: String,
         /// The program that will start, by full path.
         program: PathBuf,
+        /// What `program` is a link to, when that is another file.
+        target: Option<PathBuf>,
         /// Where it starts.
         cwd: PathBuf,
     },
@@ -134,9 +141,10 @@ impl Approval {
     /// What "allow this for the rest of the session" remembers: the exact action for the exact secret.
     pub(crate) fn key(&self) -> String {
         format!(
-            "{}\u{0}{}\u{0}{:?}",
+            "{}\u{0}{}\u{0}{}\u{0}{:?}",
             self.handle.as_deref().unwrap_or(""),
             self.secret,
+            self.raw,
             self.action
         )
     }
