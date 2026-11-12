@@ -23,6 +23,13 @@
 //!
 //! The quotation is the defence this crate can give; whether an agent honours it is the agent's.
 //! The report says the history was replayed, so a host can show a person that it was.
+//!
+//! # What reaches the model
+//!
+//! A replay carries tool inputs and outputs, and the person's and the agent's words, verbatim: a
+//! secret that a tool printed once is sent to whichever model reads the replay, which may not be
+//! the one that saw it first. [`Replay::of_redacted`] removes values and patterns from a copy of
+//! the history first; a caller that cannot rule secrets out should use it.
 
 use alloc::collections::BTreeSet;
 
@@ -34,8 +41,9 @@ use sha2::{Digest, Sha256};
 
 use crate::conversation::{Call, Conversation, Item};
 use crate::{
-    Document, HISTORY_CUT, ITEM_CUT, LossReport, NON_TEXT_OMITTED, REPLAYED_AS_PROMPT,
-    SUMMARY_MISSING, SeedPoint, THINKING, TOOL_AS_NOTE,
+    Document, HISTORY_CUT, HistoryError, ITEM_CUT, LossReport, NON_TEXT_OMITTED,
+    REPLAYED_AS_PROMPT, RedactionReport, Redactor, SUMMARY_MISSING, SeedPoint, THINKING,
+    TOOL_AS_NOTE,
 };
 
 /// The most bytes of a replay by default: about eight thousand tokens.
@@ -98,6 +106,7 @@ pub struct Replay {
     seeded_from: Option<SeedPoint>,
     kept_turns: u64,
     cut_items: u64,
+    redaction: Option<RedactionReport>,
 }
 
 impl Replay {
@@ -117,7 +126,7 @@ impl Replay {
         let item_cap = usize::try_from(settings.max_item_bytes).unwrap_or(usize::MAX);
         let summary = conversation.summary.as_ref().map(|boundary| {
             let mut entry = Entry::default();
-            let (text, cut) = cap(&boundary.summary, item_cap.saturating_mul(4));
+            let (text, cut) = esc_cap(&boundary.summary, item_cap.saturating_mul(4));
             entry.cut += u64::from(cut);
             entry.lines = lines_of("[summary of the turns before these]", &text);
             entry
@@ -129,45 +138,13 @@ impl Replay {
         let max = settings.max_bytes;
         // The most the sentences around the record can take, so the record's room is a floor.
         let fixed = wrap(&[], entries.len() as u64, max).len() as u64;
-        let mut room = max.saturating_sub(fixed);
-        let kept_summary = summary.filter(|entry| {
-            let fits = entry.bytes() <= room;
-            if fits {
-                room -= entry.bytes();
-            }
-            fits
-        });
-        let mut first = entries.len();
-        let mut used = 0;
-        while first > 0 && used + entries[first - 1].bytes() <= room {
-            first -= 1;
-            used += entries[first].bytes();
-        }
-        // Start at a turn when one is kept: a record that begins mid-turn lacks what was asked.
-        if let Some(turn) = (first..entries.len()).find(|&i| entries[i].starts_turn) {
-            first = turn;
-        }
-        let kept = &entries[first..];
-
-        let mut record: Vec<String> = Vec::new();
-        let lines = kept_summary
-            .iter()
-            .chain(kept.iter())
-            .flat_map(|entry| entry.lines.iter());
-        record.extend(lines.map(|line| line.to_string()));
-        let mut text = wrap(&record, first as u64, max);
-        // The digits of the counts in the sentences can differ from the estimate: shed the oldest
-        // entry rather than go over.
-        let mut start = first;
-        while text.len() as u64 > max && start < entries.len() {
-            record.drain(..entries[start].lines.len().min(record.len()));
-            start += 1;
-            text = wrap(&record, start as u64, max);
-        }
+        let fitted = fit(summary.as_ref(), &entries, max, fixed);
+        let start = fitted.start;
+        let kept_summary = summary.as_ref().filter(|_| fitted.with_summary);
         let kept = &entries[start..];
         let cut_items =
             start as u64 + u64::from(kept_summary.is_none() && total_items > entries.len() as u64);
-        let carried = kept_summary.is_some() || !kept.is_empty();
+        let carried = !fitted.record.is_empty() && fitted.text.len() as u64 <= max;
 
         let mut replay = Self {
             text: None,
@@ -175,6 +152,7 @@ impl Replay {
             seeded_from,
             kept_turns: kept.iter().filter(|entry| entry.starts_turn).count() as u64,
             cut_items,
+            redaction: None,
         };
         if cut_items > 0 {
             let turns = entries[..start]
@@ -189,9 +167,9 @@ impl Replay {
                 )),
             );
         }
-        if carried && !record.is_empty() {
+        if carried {
             let tally = |f: fn(&Entry) -> u64| -> u64 {
-                kept_summary.iter().chain(kept.iter()).map(f).sum()
+                kept_summary.iter().copied().chain(kept.iter()).map(f).sum()
             };
             replay.report.add(
                 THINKING,
@@ -221,9 +199,34 @@ impl Replay {
                     replay.kept_turns
                 )),
             );
-            replay.text = Some(text);
+            replay.text = Some(fitted.text);
         }
         replay
+    }
+
+    /// The replay of a copy of `doc` from which `redactor` removed its values and patterns first;
+    /// `doc` is not changed. Tool output and messages are otherwise replayed verbatim, secrets
+    /// included. [`Replay::redaction`] says what was removed.
+    ///
+    /// # Errors
+    ///
+    /// The redaction would leave a line the format refuses.
+    pub fn of_redacted(
+        doc: &Document,
+        settings: &ReplaySettings,
+        redactor: &mut Redactor,
+    ) -> Result<Self, HistoryError> {
+        let mut copy = doc.clone();
+        let removed = redactor.document(&mut copy)?;
+        let mut replay = Self::of(&copy, settings);
+        replay.redaction = Some(removed);
+        Ok(replay)
+    }
+
+    /// What the redactor removed, for a replay made by [`Replay::of_redacted`].
+    #[must_use]
+    pub fn redaction(&self) -> Option<&RedactionReport> {
+        self.redaction.as_ref()
     }
 
     /// The block's text, or `None` when there is nothing to replay: an empty history, or none
@@ -316,6 +319,61 @@ fn wrap(record: &[String], cut_items: u64, max: u64) -> String {
     text
 }
 
+/// What fits: where the kept entries start, whether the summary stays, and the block.
+struct Fitted {
+    start: usize,
+    with_summary: bool,
+    record: Vec<String>,
+    text: String,
+}
+
+/// The block of the summary and the newest entries that fit `max`. `fixed` estimates what the
+/// sentences around the record take; the block is measured as built, and the oldest entry is shed
+/// while it is over, then the summary.
+fn fit(summary: Option<&Entry>, entries: &[Entry], max: u64, fixed: u64) -> Fitted {
+    let mut room = max.saturating_sub(fixed);
+    let mut with_summary = summary.is_some_and(|entry| {
+        let fits = entry.bytes() <= room;
+        if fits {
+            room -= entry.bytes();
+        }
+        fits
+    });
+    let mut start = entries.len();
+    let mut used = 0;
+    while start > 0 && used + entries[start - 1].bytes() <= room {
+        start -= 1;
+        used += entries[start].bytes();
+    }
+    // Start at a turn when one is kept: a record that begins mid-turn lacks what was asked.
+    if let Some(turn) = (start..entries.len()).find(|&i| entries[i].starts_turn) {
+        start = turn;
+    }
+    loop {
+        let mut record: Vec<String> = Vec::new();
+        if let Some(summary) = summary.filter(|_| with_summary) {
+            record.extend(summary.lines.iter().cloned());
+        }
+        for entry in &entries[start..] {
+            record.extend(entry.lines.iter().cloned());
+        }
+        let text = wrap(&record, start as u64, max);
+        if text.len() as u64 <= max || (start >= entries.len() && !with_summary) {
+            return Fitted {
+                start,
+                with_summary,
+                record,
+                text,
+            };
+        }
+        if start < entries.len() {
+            start += 1;
+        } else {
+            with_summary = false;
+        }
+    }
+}
+
 fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
     let mut entries = Vec::new();
     let mut rendered: BTreeSet<&str> = BTreeSet::new();
@@ -332,7 +390,7 @@ fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
                 entry.lines = lines_of("[user, outside a prompt]", &text);
             }
             Item::Message { text, .. } => {
-                let (text, cut) = cap(text, cap_bytes);
+                let (text, cut) = esc_cap(text, cap_bytes);
                 entry.cut += u64::from(cut);
                 entry.lines = lines_of("[agent]", &text);
             }
@@ -358,9 +416,9 @@ fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
                 ..
             } => {
                 let line = if let Some(error) = error {
-                    let (error, cut) = cap(error, cap_bytes);
+                    let (error, cut) = esc_cap(error, cap_bytes);
                     entry.cut += u64::from(cut);
-                    format!("[turn failed: {}]", escape(&error))
+                    format!("[turn failed: {error}]")
                 } else if *closed_here {
                     "[turn left unfinished]".to_owned()
                 } else {
@@ -375,6 +433,7 @@ fn entries_of(conversation: &Conversation, cap_bytes: usize) -> Vec<Entry> {
     entries
 }
 
+/// The text of content blocks, escaped and cut by what it costs escaped.
 fn blocks_text(blocks: &[Value], cap_bytes: usize, entry: &mut Entry) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
@@ -382,21 +441,21 @@ fn blocks_text(blocks: &[Value], cap_bytes: usize, entry: &mut Entry) -> String 
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(text) = text(block.get("text")) {
-                    let (text, cut) = cap(&text, cap_bytes);
+                    let (text, cut) = esc_cap(&text, cap_bytes);
                     entry.cut += u64::from(cut);
                     parts.push(text);
                 }
             }
             Some("resource_link") => {
-                let name = text(block.get("name")).unwrap_or_default();
-                let uri = text(block.get("uri")).unwrap_or_default();
+                let name = escape(&text(block.get("name")).unwrap_or_default());
+                let uri = escape(&text(block.get("uri")).unwrap_or_default());
                 parts.push(format!("[attachment: {name} {uri}]"));
             }
             Some("resource") => {
-                let uri = text(block.pointer("/resource/uri")).unwrap_or_default();
+                let uri = escape(&text(block.pointer("/resource/uri")).unwrap_or_default());
                 match text(block.pointer("/resource/text")) {
                     Some(body) => {
-                        let (body, cut) = cap(&body, cap_bytes);
+                        let (body, cut) = esc_cap(&body, cap_bytes);
                         entry.cut += u64::from(cut);
                         parts.push(format!("[attachment: {uri}]\n{body}"));
                     }
@@ -428,10 +487,10 @@ fn call_lines(call: &Call, cap_bytes: usize, cut: &mut u64) -> Vec<String> {
     let status = call.status.as_deref().unwrap_or("unknown");
     let mut head = format!("[tool {} {}]", escape(name), escape(status));
     if let Some(input) = &call.raw_input {
-        let (input, was_cut) = cap(&input.to_string(), cap_bytes);
+        let (input, was_cut) = esc_cap(&input.to_string(), cap_bytes);
         *cut += u64::from(was_cut);
         head.push(' ');
-        head.push_str(&escape(&input));
+        head.push_str(&input);
     }
     let mut lines = split(&head);
     let output = call.output_text();
@@ -444,9 +503,9 @@ fn call_lines(call: &Call, cap_bytes: usize, cut: &mut u64) -> Vec<String> {
         output
     };
     if !output.is_empty() {
-        let (output, was_cut) = cap(&output, cap_bytes);
+        let (output, was_cut) = esc_cap(&output, cap_bytes);
         *cut += u64::from(was_cut);
-        lines.extend(split(&format!("-> {}", escape(&output))));
+        lines.extend(split(&format!("-> {output}")));
     }
     lines
 }
@@ -459,64 +518,134 @@ fn plan_lines(plan: &[Value], cap_bytes: usize, cut: &mut u64) -> Vec<String> {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("pending");
-        let (content, was_cut) = cap(content, cap_bytes);
+        let (content, was_cut) = esc_cap(content, cap_bytes);
         *cut += u64::from(was_cut);
-        lines.extend(split(&format!(
-            "- [{}] {}",
-            escape(status),
-            escape(&content)
-        )));
+        lines.extend(split(&format!("- [{}] {content}", escape(status))));
     }
     lines
 }
 
-/// `label` and `text` as quoted lines: the label on the first, the text escaped.
+/// `label` and the already escaped `text` as quoted lines.
 fn lines_of(label: &str, text: &str) -> Vec<String> {
-    split(&format!("{label} {}", escape(text)))
+    split(&format!("{label} {text}"))
 }
 
+/// The lines of `text`. A line after the first is indented, so only the code writes a line that
+/// starts with a label: whatever the history says on a later line cannot look like one.
 fn split(text: &str) -> Vec<String> {
-    text.split('\n').map(str::to_owned).collect()
+    let mut lines = text.split('\n').map(str::to_owned);
+    let mut out: Vec<String> = lines.next().into_iter().collect();
+    out.extend(lines.map(|line| format!("  {line}")));
+    out
 }
 
-/// `text` cut to at most `max` bytes on a character boundary, and whether it was cut.
-fn cap(text: &str, max: usize) -> (String, bool) {
-    if text.len() <= max {
-        return (text.to_owned(), false);
-    }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (
-        format!("{}... [cut: {} more bytes]", &text[..end], text.len() - end),
-        true,
-    )
-}
-
-/// Whether a character may not appear in the block as it is.
+/// Whether a character may not appear in the block as it is: a control character, anything that
+/// ends a line, and the characters that are invisible or reorder what is read (Unicode's format
+/// characters, the variation selectors, the tag block and the filler characters).
 fn hidden(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(
-            c,
-            '\u{200b}'..='\u{200f}'
-                | '\u{2028}'..='\u{202e}'
-                | '\u{2060}'..='\u{2069}'
-                | '\u{061c}'
-                | '\u{feff}'
+            u32::from(c),
+            0xAD | 0x61C | 0x6DD | 0x70F | 0x8E2 | 0x115F | 0x1160 | 0x180E | 0x3164 | 0xFEFF
+                | 0xFFA0
+                | 0x600..=0x605
+                | 0x890..=0x891
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x206F
+                | 0xFE00..=0xFE0F
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+                | 0xE0100..=0xE01EF
         )
 }
 
-/// `text` with every character that could end a line, move a terminal or reorder what is read
-/// written as `\u{..}`. A line feed and a tab stay.
+/// `c` as it appears in the block.
+fn shown(c: char, out: &mut String) {
+    if hidden(c) {
+        out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+    } else {
+        out.push(c);
+    }
+}
+
+/// `text` with every character that could end a line, move a terminal or hide or reorder what is
+/// read written as `\u{..}`. A line feed and a tab stay.
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if hidden(c) {
-            out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
-        } else {
-            out.push(c);
-        }
+        shown(c, &mut out);
     }
     out
+}
+
+/// `text` escaped and cut so that the escaped text is at most `max` bytes, and whether it was cut.
+/// What the block costs is the escaped size, so a text of characters that are written out cannot
+/// outgrow its limit.
+fn esc_cap(text: &str, max: usize) -> (String, bool) {
+    let mut out = String::with_capacity(text.len().min(max));
+    let mut piece = String::new();
+    for (at, c) in text.char_indices() {
+        piece.clear();
+        shown(c, &mut piece);
+        if out.len() + piece.len() > max {
+            out.push_str(&format!("... [cut: {} more bytes]", text.len() - at));
+            return (out, true);
+        }
+        out.push_str(&piece);
+    }
+    (out, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(text: &str, starts_turn: bool) -> Entry {
+        Entry {
+            lines: vec![text.to_owned()],
+            starts_turn,
+            ..Entry::default()
+        }
+    }
+
+    /// The estimate of the sentences is too small, so the first block is over: the oldest entry is
+    /// shed, not the summary's lines, until the block fits.
+    #[test]
+    fn a_block_over_the_budget_sheds_the_oldest_entry_and_keeps_the_summary() {
+        let summary = entry("[summary of the turns before these] the summary", false);
+        let entries: Vec<Entry> = (0..6)
+            .map(|n| entry(&format!("[user] entry {n} {}", "x".repeat(60)), true))
+            .collect();
+        let overhead = wrap(&[], 6, 0).len() as u64;
+        let room_for_summary_and_three = overhead + 20 + summary.bytes() + 3 * entries[0].bytes();
+        let fitted = fit(Some(&summary), &entries, room_for_summary_and_three, 0);
+        assert!(fitted.text.len() as u64 <= room_for_summary_and_three);
+        assert!(fitted.with_summary);
+        assert_eq!(fitted.start, 3, "the three oldest entries are shed");
+        assert!(fitted.record[0].starts_with("[summary of the turns before these]"));
+        assert!(fitted.record[1].contains("entry 3"));
+    }
+
+    #[test]
+    fn a_summary_alone_over_the_budget_is_dropped_last() {
+        let summary = entry(&format!("[summary] {}", "s".repeat(500)), false);
+        let entries = vec![entry("[user] hi", true)];
+        let budget = wrap(&[], 1, 0).len() as u64 + 40;
+        let fitted = fit(
+            Some(&summary),
+            &entries,
+            budget,
+            wrap(&[], 1, budget).len() as u64,
+        );
+        assert!(!fitted.with_summary);
+        assert!(fitted.text.len() as u64 <= budget);
+        assert_eq!(fitted.record, ["[user] hi"]);
+    }
 }
