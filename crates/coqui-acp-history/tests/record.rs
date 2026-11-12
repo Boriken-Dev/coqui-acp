@@ -450,3 +450,162 @@ fn a_recording_stops_at_its_line_limit_and_says_so() {
     );
     doc.check().expect("what was kept is a valid history");
 }
+
+fn nested(depth: usize) -> Value {
+    let mut value = json!("x");
+    for _ in 0..depth {
+        value = json!({"a": value});
+    }
+    value
+}
+
+#[test]
+fn an_update_the_writer_would_refuse_is_skipped_and_the_recording_still_finishes() {
+    let mut rec = recorder();
+    open(&mut rec, 1);
+    prompt(&mut rec, 2, "hi");
+    // Deeper than the writer's bounds, shallower than the parser's limit.
+    update(
+        &mut rec,
+        json!({"sessionUpdate": "tool_call_update", "toolCallId": "t", "rawOutput": nested(70)}),
+    );
+    let wide: Vec<Value> = (0..600_000).map(|n| json!(n)).collect();
+    update(
+        &mut rec,
+        json!({"sessionUpdate": "tool_call_update", "toolCallId": "t", "rawOutput": wide}),
+    );
+    update(&mut rec, chunk("agent_message_chunk", "kept"));
+    stop(&mut rec, 2, "end_turn");
+    assert_eq!(rec.skipped(), 2);
+    let doc = rec.finish().expect("what was recorded can be exported");
+    assert_eq!(bodies(&doc), ["prompt", "update", "end"]);
+    doc.to_string().expect("it writes");
+}
+
+#[test]
+fn a_header_value_the_format_refuses_is_dropped_not_fatal() {
+    let mut rec = recorder();
+    sent(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 0, "result": {"protocolVersion": 0,
+            "agentInfo": {"name": "x", "version": "1.\u{7}2"}}}),
+    );
+    sent(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "session/new",
+            "params": {"cwd": "relative/dir", "mcpServers": []}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s\u{7}1",
+            "modes": {"currentModeId": "m\u{1}", "availableModes": []},
+            "models": {"currentModelId": "mo\u{2}del"}}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s\u{7}1",
+            "update": {"sessionUpdate": "current_mode_update", "currentModeId": "x\u{3}"}}}),
+    );
+    let doc = rec
+        .finish()
+        .expect("a refused value is dropped, the recording stays");
+    assert_eq!(doc.header.origin.session_id, None);
+    assert_eq!(doc.header.origin.version, None);
+    assert_eq!(doc.header.mode, None);
+    assert_eq!(doc.header.model, None);
+    assert_eq!(doc.header.cwd, None);
+    assert_eq!(doc.header.acp_version, None);
+    // The session was still followed.
+    assert_eq!(bodies(&doc), ["update"]);
+}
+
+#[test]
+fn a_recording_stops_at_its_byte_limit_and_stays_importable() {
+    let mut rec = recorder().max_total_bytes(3000);
+    open(&mut rec, 1);
+    prompt(&mut rec, 2, "hi");
+    for _ in 0..40 {
+        update(&mut rec, chunk("agent_message_chunk", &"y".repeat(200)));
+    }
+    stop(&mut rec, 2, "end_turn");
+    assert!(rec.truncated());
+    let doc = rec.finish().unwrap();
+    let text = doc.to_string().unwrap();
+    assert!(text.len() <= 3000, "{} bytes", text.len());
+    text.parse::<Document>().expect("it reads back");
+}
+
+#[test]
+fn only_the_session_the_recorder_saw_opened_is_followed() {
+    let mut rec = recorder();
+    // Before any open, nothing is anyone's.
+    update(&mut rec, chunk("agent_message_chunk", "early"));
+    prompt(&mut rec, 9, "early prompt");
+    open(&mut rec, 1);
+    // A second open does not move it.
+    sent(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 7, "method": "session/new", "params": {"cwd": "/x", "mcpServers": []}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "id": 7, "result": {"sessionId": "other"}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "other", "update": chunk("agent_message_chunk", "no")}}),
+    );
+    update(&mut rec, chunk("agent_message_chunk", "yes"));
+    let doc = rec.finish().unwrap();
+    assert_eq!(bodies(&doc), ["update"]);
+    assert_eq!(doc.header.origin.session_id.as_deref(), Some(SESSION));
+}
+
+#[test]
+fn a_session_given_to_the_constructor_is_the_only_one_followed() {
+    let mut rec = recorder().session("fixed");
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": SESSION, "update": chunk("agent_message_chunk", "no")}}),
+    );
+    received(
+        &mut rec,
+        json!({"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "fixed", "update": chunk("agent_message_chunk", "yes")}}),
+    );
+    let doc = rec.finish().unwrap();
+    assert_eq!(bodies(&doc), ["update"]);
+    assert_eq!(doc.header.origin.session_id.as_deref(), Some("fixed"));
+}
+
+#[test]
+fn a_permission_asked_twice_for_one_call_is_recorded_once_and_answered_once() {
+    let mut rec = recorder();
+    open(&mut rec, 1);
+    prompt(&mut rec, 2, "go");
+    for id in [90, 91] {
+        received(
+            &mut rec,
+            json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission",
+                "params": {"sessionId": SESSION, "toolCall": {"toolCallId": "t9"},
+                    "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}}),
+        );
+    }
+    for id in [91, 90] {
+        sent(
+            &mut rec,
+            json!({"jsonrpc": "2.0", "id": id,
+                "result": {"outcome": {"outcome": "selected", "optionId": "allow"}}}),
+        );
+    }
+    stop(&mut rec, 2, "end_turn");
+    let doc = rec.finish().unwrap();
+    assert_eq!(bodies(&doc), ["prompt", "request", "answer", "end"]);
+    doc.check().unwrap();
+}

@@ -15,9 +15,10 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 
 use crate::conversation::{Recorder, Stamp, valid_time};
+use crate::strict;
 use crate::{
-    Body, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_LINES, Document, Header, HistoryError, Line, Origin,
-    Stop,
+    Body, Bounds, DEFAULT_DOCUMENT_MAX_TOTAL_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_LINES,
+    Document, Header, HistoryError, Line, Origin, Stop,
 };
 
 /// The longest error text kept for a failed turn, in bytes.
@@ -40,6 +41,10 @@ pub struct SessionRecorder {
     recorder: Recorder,
     max_line_bytes: u64,
     max_lines: u64,
+    max_total_bytes: u64,
+    /// Bytes of the lines kept, line feeds included.
+    bytes: u64,
+    /// The only session followed: the one given, else the one the first open the recorder saw names.
     session: Option<String>,
     /// Requests the client sent that are not answered, by request id.
     initializing: BTreeSet<String>,
@@ -49,8 +54,6 @@ pub struct SessionRecorder {
     prompt: Option<String>,
     /// The agent's permission requests not yet answered: request id to tool call id.
     asked: BTreeMap<String, String>,
-    /// Tool calls with a permission request waiting in the open turn.
-    waiting: BTreeSet<String>,
     /// Version 2 compaction summaries being told, by compaction id.
     compactions: BTreeMap<String, String>,
     skipped: u64,
@@ -67,13 +70,14 @@ impl SessionRecorder {
             recorder: Recorder::new(),
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             max_lines: DEFAULT_MAX_LINES,
+            max_total_bytes: DEFAULT_DOCUMENT_MAX_TOTAL_BYTES,
+            bytes: 0,
             session: None,
             initializing: BTreeSet::new(),
             opening: BTreeMap::new(),
             modes: BTreeMap::new(),
             prompt: None,
             asked: BTreeMap::new(),
-            waiting: BTreeSet::new(),
             compactions: BTreeMap::new(),
             skipped: 0,
             truncated: false,
@@ -85,6 +89,24 @@ impl SessionRecorder {
     #[must_use]
     pub fn max_line_bytes(mut self, bytes: u64) -> Self {
         self.max_line_bytes = bytes;
+        self
+    }
+
+    /// Follows the agent's session `id` and no other, without waiting for an open to name it.
+    #[must_use]
+    pub fn session(mut self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        self.header_set(|header| header.origin.session_id = Some(id.clone()));
+        self.session = Some(id);
+        self
+    }
+
+    /// Stops recording when the history would pass `bytes`, the header and line feeds included
+    /// (default [`DEFAULT_DOCUMENT_MAX_TOTAL_BYTES`], what a history read as a whole takes), so
+    /// that what was recorded can always be imported.
+    #[must_use]
+    pub fn max_total_bytes(mut self, bytes: u64) -> Self {
+        self.max_total_bytes = bytes;
         self
     }
 
@@ -102,7 +124,7 @@ impl SessionRecorder {
         self.skipped
     }
 
-    /// Whether recording stopped at the line limit: the history is cut short.
+    /// Whether recording stopped at the line or byte limit: the history is cut short.
     #[must_use]
     pub fn truncated(&self) -> bool {
         self.truncated
@@ -152,22 +174,39 @@ impl SessionRecorder {
         Ok(doc)
     }
 
+    /// Whether `params` name the session followed; before an open names one, nothing is.
     fn belongs(&self, params: &Value) -> bool {
         match (
             &self.session,
             params.get("sessionId").and_then(Value::as_str),
         ) {
             (Some(ours), Some(theirs)) => ours == theirs,
-            (None, Some(_)) => true,
-            (_, None) => false,
+            _ => false,
         }
     }
 
+    /// Follows `session`, which an open the recorder saw named, unless one is followed already.
     fn adopt(&mut self, session: &str) {
         if self.session.is_none() && !session.is_empty() {
             self.session = Some(session.to_owned());
-            self.header.origin.session_id = Some(session.to_owned());
+            let id = session.to_owned();
+            self.header_set(|header| header.origin.session_id = Some(id));
         }
+    }
+
+    /// Changes the header as `apply` says if the format still accepts it; a value it refuses is
+    /// dropped, as the agent chose it and the recording must stay importable.
+    fn header_set(&mut self, apply: impl FnOnce(&mut Header)) -> bool {
+        let mut candidate = self.header.clone();
+        apply(&mut candidate);
+        let accepted = candidate.to_line().is_ok_and(|line| {
+            strict::parse(&line, 1, &Bounds::default())
+                .is_ok_and(|value| Header::from_value(value).is_ok())
+        });
+        if accepted {
+            self.header = candidate;
+        }
+        accepted
     }
 
     /// Whether another line fits; counts the one it refuses.
@@ -183,15 +222,32 @@ impl SessionRecorder {
     /// Whether `line` is one the format accepts, as the reader would read it, and within the size
     /// limit; counts the one it refuses.
     fn fits(&mut self, line: &Line) -> bool {
-        let accepted = line.to_json().is_ok_and(|json| {
-            (json.len() as u64) <= self.max_line_bytes
-                && serde_json::from_str::<Value>(&json)
-                    .is_ok_and(|value| Line::from_value(value, 2).is_ok())
-        });
-        if !accepted {
-            self.skipped += 1;
+        if !self.room() {
+            return false;
         }
-        accepted
+        // The line as the writer would write it and the reader, under the default bounds, read it.
+        let size = line.to_json().ok().and_then(|json| {
+            let readable = (json.len() as u64) <= self.max_line_bytes
+                && strict::parse(&json, 2, &Bounds::default())
+                    .is_ok_and(|value| Line::from_value(value, 2).is_ok());
+            readable.then_some(json.len() as u64 + 1)
+        });
+        let Some(size) = size else {
+            self.skipped += 1;
+            return false;
+        };
+        let header = self
+            .header
+            .to_line()
+            .map_or(0, |line| line.len() as u64 + 1);
+        // Room for the header to grow with a later mode or model.
+        let slack = (self.max_total_bytes / 4).min(4096);
+        if header + slack + self.bytes + size > self.max_total_bytes {
+            self.truncated = true;
+            return false;
+        }
+        self.bytes += size;
+        true
     }
 
     fn sent(&mut self, method: &str, id: Option<String>, params: &Value, stamp: Stamp) {
@@ -218,7 +274,11 @@ impl SessionRecorder {
                 }
             }
             ("session/prompt", Some(id)) => self.prompted(id, params, stamp),
-            ("session/cancel", None) if self.belongs(params) && self.room() => {
+            ("session/cancel", None)
+                if self.belongs(params)
+                    && self.recorder.is_open()
+                    && self.fits(&Line::new(Body::Cancel)) =>
+            {
                 self.recorder.cancel(stamp);
             }
             _ => {}
@@ -232,15 +292,12 @@ impl SessionRecorder {
         let Some(blocks) = params.get("prompt").and_then(Value::as_array) else {
             return;
         };
-        if let Some(session) = params.get("sessionId").and_then(Value::as_str) {
-            self.adopt(session);
-        }
-        if !self.room() || !self.fits(&Line::prompt(blocks.clone())) {
+        if !self.fits(&Line::prompt(blocks.clone())) {
             return;
         }
         if self.recorder.is_open() {
             // The recorder ends the turn the agent never answered.
-            self.waiting.clear();
+            self.asked.clear();
         }
         self.recorder.prompt(blocks.clone(), stamp);
         self.prompt = Some(id);
@@ -268,7 +325,10 @@ impl SessionRecorder {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                if !self.recorder.is_open() || call_id.is_empty() || self.waiting.contains(&call_id)
+                // A call waits for one answer: a second request for it is not recorded.
+                if !self.recorder.is_open()
+                    || call_id.is_empty()
+                    || self.asked.values().any(|waiting| *waiting == call_id)
                 {
                     return;
                 }
@@ -276,12 +336,11 @@ impl SessionRecorder {
                     tool_call: tool_call.clone(),
                     options: options.clone(),
                 });
-                if !self.room() || !self.fits(&line) {
+                if !self.fits(&line) {
                     return;
                 }
                 self.recorder
                     .permission_request(tool_call.clone(), options.clone(), stamp);
-                self.waiting.insert(call_id.clone());
                 self.asked.insert(id, call_id);
             }
             _ => {}
@@ -293,9 +352,6 @@ impl SessionRecorder {
         let Some(call_id) = self.asked.remove(id) else {
             return;
         };
-        if !self.waiting.remove(&call_id) {
-            return;
-        }
         let outcome = object
             .get("result")
             .and_then(|result| result.get("outcome"))
@@ -306,7 +362,7 @@ impl SessionRecorder {
             tool_call_id: call_id.clone(),
             outcome: outcome.clone(),
         });
-        if !self.room() || !self.fits(&line) {
+        if !self.fits(&line) {
             // The request stays unanswered, which the format reads as cancelled.
             return;
         }
@@ -319,12 +375,13 @@ impl SessionRecorder {
         if self.initializing.remove(id) {
             if let Some(result) = result {
                 if let Some(version) = result.get("protocolVersion").and_then(Value::as_u64) {
-                    self.header.acp_version = Some(version);
+                    self.header_set(|header| header.acp_version = Some(version));
                 }
                 if let Some(version) = result.pointer("/agentInfo/version").and_then(Value::as_str)
                     && self.header.origin.version.is_none()
                 {
-                    self.header.origin.version = Some(version.to_owned());
+                    let version = version.to_owned();
+                    self.header_set(|header| header.origin.version = Some(version));
                 }
             }
             return;
@@ -338,22 +395,20 @@ impl SessionRecorder {
                     .pointer("/modes/currentModeId")
                     .and_then(Value::as_str)
                 {
-                    self.header.mode = Some(mode.to_owned());
+                    let mode = mode.to_owned();
+                    self.header_set(|header| header.mode = Some(mode));
                 }
                 if let Some(model) = result
                     .pointer("/models/currentModelId")
                     .and_then(Value::as_str)
                 {
-                    self.header.model = Some(model.to_owned());
+                    let model = model.to_owned();
+                    self.header_set(|header| header.model = Some(model));
                 }
                 if self.header.cwd.is_none()
                     && let Some(cwd) = cwd
                 {
-                    let mut candidate = self.header.clone();
-                    candidate.cwd = Some(cwd.clone());
-                    if candidate.to_line().is_ok() {
-                        self.header.cwd = Some(cwd);
-                    }
+                    self.header_set(|header| header.cwd = Some(cwd));
                 }
             }
             return;
@@ -390,9 +445,18 @@ impl SessionRecorder {
                 }
                 (None, None) => return,
             };
-            if self.recorder.is_open() && self.room() {
-                self.recorder.end_turn(stop, error, stamp);
-                self.waiting.clear();
+            if self.recorder.is_open() {
+                let mut end = Body::TurnEnd { stop, error };
+                if !self.fits(&Line::new(end.clone())) {
+                    // The agent's error text may be what the format refuses.
+                    end = Body::TurnEnd { stop, error: None };
+                    if !self.fits(&Line::new(end.clone())) {
+                        return;
+                    }
+                }
+                if let Body::TurnEnd { stop, error } = end {
+                    self.recorder.end_turn(stop, error, stamp);
+                }
                 self.asked.clear();
             }
         }
@@ -407,13 +471,14 @@ impl SessionRecorder {
         else {
             return;
         };
-        if !self.room() || !self.fits(&Line::update(update.clone())) {
+        if !self.fits(&Line::update(update.clone())) {
             return;
         }
         match kind {
             "current_mode_update" => {
                 if let Some(mode) = update.get("currentModeId").and_then(Value::as_str) {
-                    self.header.mode = Some(mode.to_owned());
+                    let mode = mode.to_owned();
+                    self.header_set(|header| header.mode = Some(mode));
                 }
             }
             "compaction_summary_chunk" => {
@@ -463,7 +528,7 @@ impl SessionRecorder {
             trigger: None,
             pre_tokens: None,
         });
-        if self.room() && self.fits(&line) {
+        if self.fits(&line) {
             self.recorder.compaction(summary, None, None, stamp);
         }
     }
