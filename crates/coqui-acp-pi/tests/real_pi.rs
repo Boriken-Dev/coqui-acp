@@ -446,3 +446,57 @@ fn a_real_pi_never_runs_an_extensionless_file_of_the_project_named_as_a_program(
     drop((session, events));
     assert!(ran.is_empty(), "a file of the project ran: {ran}");
 }
+
+/// Puts the process back in its directory when dropped.
+#[cfg(windows)]
+struct Back(PathBuf);
+
+#[cfg(windows)]
+impl Drop for Back {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+/// The host runs in the project (under `npm run`, an activated `.venv\Scripts`, direnv) with the project's `bin` on its
+/// `PATH`, and lists the models the way the provider does: from `.`. Pi works in a directory of its own for that, but the
+/// host's directory is still the project: nothing in `bin` may run.
+#[cfg(windows)]
+#[test]
+fn a_real_pi_listing_models_from_the_host_directory_never_runs_a_program_on_its_path_in_the_project()
+ {
+    let Some(world) = world("real-host-bin") else {
+        eprintln!("skipped: no real Pi named");
+        return;
+    };
+    let marker = plant(&world, &[], "");
+    let bin = world.project.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let body = format!(
+        "#!/usr/bin/env node\nrequire('fs').appendFileSync({:?}, process.argv[1] + '\\n');\n",
+        marker.to_string_lossy()
+    );
+    for name in ["npm.cmd", "git.bat"] {
+        std::fs::write(bin.join(name), &body).unwrap();
+    }
+    let mut launch = world.launch(Mode::Manual);
+    launch.env.remove(std::ffi::OsStr::new("PI_OFFLINE"));
+    unreachable(&mut launch);
+    let mut path = vec![bin];
+    path.extend(std::env::split_paths(
+        launch.env.get(std::ffi::OsStr::new("PATH")).unwrap(),
+    ));
+    launch
+        .env
+        .insert("PATH".into(), std::env::join_paths(path).unwrap());
+    launch.cwd = PathBuf::from(".");
+    let _back = Back(std::env::current_dir().unwrap());
+    std::env::set_current_dir(&world.project).unwrap();
+    let models = PiSession::read_models(&launch, &PlainSpawn, PiSettings::new());
+    let ran = ran(&marker);
+    assert!(
+        ran.is_empty(),
+        "a program on the project's bin ran while the models were listed: {ran}"
+    );
+    assert!(models.is_ok(), "{models:?}");
+}
