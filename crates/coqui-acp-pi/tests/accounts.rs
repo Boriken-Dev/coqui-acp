@@ -49,6 +49,16 @@ fn library() -> PathBuf {
     ))
 }
 
+/// Removes `dir` once the stand-in that ran in it has ended: Windows keeps a directory a process still uses.
+fn remove(dir: &Path) {
+    for _ in 0..100 {
+        if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("coqui-acp-pi-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -78,7 +88,7 @@ fn run_suite(kind: &str) -> String {
         .output()
         .expect("the test runs itself");
     let logged = std::fs::read_to_string(&log).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
     assert!(
         out.status.success(),
         "{kind}:\n{}\n{}",
@@ -163,8 +173,35 @@ fn provider() -> PiProvider {
     })
 }
 
-/// Starts a connection, opens a session on it and closes it, so that the stand-in has logged its start.
+/// The directories of the permission gates now in the temporary directory.
+fn gates() -> std::collections::BTreeSet<std::ffi::OsString> {
+    std::fs::read_dir(std::env::temp_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| {
+            name.to_string_lossy()
+                .strip_prefix("coqui-acp-pi-")
+                .is_some_and(|rest| rest.len() == 36 && rest.matches('-').count() == 4)
+        })
+        .collect()
+}
+
+/// Starts a connection, opens a session on it and closes it, so that the stand-in has logged its start. Returns once the
+/// session has ended and removed its gate's directory.
 fn start_and_close(provider: &PiProvider, request: StartRequest, dir: &Path) {
+    let before = gates();
+    start_and_close_inner(provider, request, dir);
+    for _ in 0..200 {
+        if gates().is_subset(&before) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn start_and_close_inner(provider: &PiProvider, request: StartRequest, dir: &Path) {
     let (sender, received) = mpsc::channel();
     let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().files(dir).into_object();
     let channel = provider
@@ -271,7 +308,7 @@ fn a_pi_key_goes_in_the_variable_named_by_its_setting() {
         .filter_map(|a| a.as_str())
         .collect();
     assert_eq!(&args[..2], ["--mode", "rpc"]);
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
 }
 
 /// A variable the Pi key setting does not list is refused, so a setting cannot name `PATH`.
@@ -295,7 +332,7 @@ fn a_pi_key_names_only_a_provider_variable() {
         panic!("a variable that is no provider's was taken");
     };
     assert_eq!(u32::from(error.status), 7, "{}", error.message());
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
 }
 
 /// A sign-in kept in `auth.json` is placed in Pi's directory, and the host's own provider keys do not reach Pi beside it.
@@ -332,7 +369,7 @@ fn a_sign_in_is_placed_in_pis_directory_and_the_hosts_keys_are_cleared() {
         std::fs::read_to_string(dir.join("auth.json")).expect("placed"),
         "{\"anthropic\": {\"type\": \"oauth\"}}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
 }
 
 /// Pi refreshes its own sign-in, so there is nothing for the provider to renew.
@@ -372,7 +409,7 @@ fn a_renewal_is_unsupported_for_both_kinds_and_checks_the_grant_first() {
         error.status,
         coqui_acp_api::guatiao::Status::GUATIAO_ERR_BAD_VALUE
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
 }
 
 /// The same for the variables the host's own process has, which only the spawner can remove.
@@ -392,7 +429,7 @@ fn an_account_removes_the_endpoint_variables_the_host_process_has() {
         .env("PI_INHERITED_DIR", &dir)
         .output()
         .expect("the test runs itself");
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
     assert!(
         out.status.success(),
         "{}\n{}",

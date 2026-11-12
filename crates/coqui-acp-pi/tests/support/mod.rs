@@ -191,13 +191,31 @@ pub struct Peer {
     /// The answers to permission requests, in order: an option kind to choose, or `cancel`.
     pub answers: VecDeque<String>,
     pub asked: Vec<Value>,
+    server: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Peer {
+    /// Ends the connection and waits for the server to drop its sessions, so that the directories they ran in (and the
+    /// gates' directories) can be removed: Windows keeps a directory a process still uses.
+    fn drop(&mut self) {
+        self.to_agent = Box::new(std::io::sink());
+        if let Some(server) = self.server.take() {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !server.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if server.is_finished() {
+                let _ = server.join();
+            }
+        }
+    }
 }
 
 impl Peer {
     pub fn serve(agent: coqui_acp_pi::PiAgent, settings: coqui_acp_pi::harness::Settings) -> Self {
         let (agent_reads, client_writes) = std::io::pipe().unwrap();
         let (client_reads, agent_writes) = std::io::pipe().unwrap();
-        std::thread::spawn(move || {
+        let server = std::thread::spawn(move || {
             let _ =
                 coqui_acp_pi::harness::serve(Arc::new(agent), settings, agent_reads, agent_writes);
         });
@@ -217,6 +235,7 @@ impl Peer {
             updates: Vec::new(),
             answers: VecDeque::new(),
             asked: Vec::new(),
+            server: Some(server),
         }
     }
 
