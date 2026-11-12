@@ -592,3 +592,59 @@ fn more_invisible_characters_are_written_out() {
         assert!(!text.contains(c), "{c:?} in the text");
     }
 }
+
+#[test]
+fn the_redaction_budget_is_spent_on_the_newest_items_first() {
+    let mut lines = Vec::new();
+    for n in 0..30 {
+        lines.extend(turn(
+            &format!("question {n} with some length to it"),
+            &format!("answer {n} with some length to it"),
+        ));
+    }
+    let mut settings = ReplaySettings::default();
+    settings.redact_max_bytes = 600;
+    let replay =
+        Replay::of_redacted(&doc(lines), &settings, &mut redacting(&["zzz"], &[])).unwrap();
+    let text = replay.text().expect("a replay");
+    assert!(text.contains("question 29 with some length"), "{text}");
+    assert!(text.contains("answer 29 with some length"), "{text}");
+}
+
+#[test]
+fn an_item_is_read_by_a_redactor_up_to_a_hard_bound_whatever_the_item_limit() {
+    let mut settings = ReplaySettings::default();
+    settings.max_item_bytes = 64 << 20;
+    settings.max_bytes = 64 << 20;
+    settings.redact_max_bytes = 64 << 20;
+    let big = "w".repeat(3 << 20);
+    let replay = Replay::of_redacted(
+        &doc(turn("go", &big)),
+        &settings,
+        &mut redacting(&["nothing-here"], &[]),
+    )
+    .unwrap();
+    let text = replay.text().expect("a replay");
+    assert!(text.len() < (1 << 20) + 4096, "{} bytes", text.len());
+    assert!(text.contains("[cut:"));
+    assert_eq!(replay.report().count(ITEM_CUT), 1);
+}
+
+#[test]
+fn a_secret_with_quotes_and_a_line_feed_in_a_tool_input_is_removed() {
+    let secret = "echo \"hunter2\"\nnext";
+    let lines = vec![
+        Line::text_prompt("go"),
+        Line::update(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "name": "Bash", "title": "x",
+                "kind": "execute", "status": "pending", "rawInput": {"command": secret}}),
+        ),
+        Line::update(
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+                "rawOutput": {"stdout": secret}}),
+        ),
+        end(),
+    ];
+    let text = redacted_text(lines, &mut redacting(&[secret], &[]));
+    assert!(!text.contains("hunter2"), "{text}");
+}

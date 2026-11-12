@@ -1,6 +1,8 @@
 //! Redaction: removing named values and patterns from a history, only when asked, and saying what
 //! was removed.
 
+use std::time::Instant;
+
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use serde_json::Value;
@@ -18,6 +20,9 @@ const OPTION_KEPT: [&str; 1] = ["optionId"];
 
 /// The largest compiled pattern, in bytes.
 const PATTERN_SIZE_LIMIT: usize = 1 << 20;
+
+/// A redaction ran out of the time it was given.
+struct Spent;
 
 /// Which list a rule came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -163,11 +168,21 @@ impl Redactor {
 
     /// `text` with every stretch a value or a pattern matches replaced, or `None` when none is.
     fn text(&mut self, text: &str) -> Option<String> {
+        self.text_until(text, None).unwrap_or(None)
+    }
+
+    /// As `text`, giving up with `Err` once `until` has passed, between matches and between rules.
+    fn text_until(&mut self, text: &str, until: Option<Instant>) -> Result<Option<String>, Spent> {
+        let late = || until.is_some_and(|until| Instant::now() >= until);
         let mut spans: Vec<(usize, usize)> = Vec::new();
         for (rule, value) in self.values.iter().enumerate() {
             let slot = self.value_slots[rule];
             let mut from = 0;
             while let Some(at) = text[from..].find(value.as_str()) {
+                if late() {
+                    self.forget();
+                    return Err(Spent);
+                }
                 let start = from + at;
                 spans.push((start, start + value.len()));
                 self.hits[slot] += 1;
@@ -177,13 +192,23 @@ impl Redactor {
         }
         for (rule, regex) in self.patterns.iter().enumerate() {
             let slot = self.pattern_slots[rule];
+            if late() {
+                self.hits.iter_mut().for_each(|hits| *hits = 0);
+                self.replaced = 0;
+                return Err(Spent);
+            }
             for found in regex.find_iter(text) {
                 spans.push((found.start(), found.end()));
                 self.hits[slot] += 1;
+                if late() {
+                    self.hits.iter_mut().for_each(|hits| *hits = 0);
+                    self.replaced = 0;
+                    return Err(Spent);
+                }
             }
         }
         if spans.is_empty() {
-            return None;
+            return Ok(None);
         }
         spans.sort_unstable();
         let mut out = String::with_capacity(text.len());
@@ -204,7 +229,24 @@ impl Redactor {
         out.push_str(&self.replacement);
         self.replaced += 1;
         out.push_str(&text[end..]);
-        Some(out)
+        Ok(Some(out))
+    }
+
+    /// `text` redacted, or `None` once `until` has passed. The removals are counted in the report
+    /// when `count` is set.
+    pub(crate) fn redact_until(
+        &mut self,
+        text: &str,
+        until: Instant,
+        count: bool,
+    ) -> Option<String> {
+        let out = self.text_until(text, Some(until)).ok()?;
+        if count {
+            self.settle();
+        } else {
+            self.forget();
+        }
+        Some(out.unwrap_or_else(|| text.to_owned()))
     }
 
     /// `text` with every stretch a value or a pattern matches replaced, the removals counted in
@@ -212,13 +254,6 @@ impl Redactor {
     pub fn redact_text(&mut self, text: &str) -> String {
         let out = self.text(text);
         self.settle();
-        out.unwrap_or_else(|| text.to_owned())
-    }
-
-    /// As [`Redactor::redact_text`], counting nothing.
-    pub(crate) fn redact_quiet(&mut self, text: &str) -> String {
-        let out = self.text(text);
-        self.forget();
         out.unwrap_or_else(|| text.to_owned())
     }
 
@@ -410,5 +445,27 @@ impl Redactor {
             document.lines = lines;
         }
         Ok(self.report.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_redaction_gives_up_when_its_time_has_passed_and_counts_nothing() {
+        let mut settings = RedactionSettings::default();
+        settings.values = vec!["secret".into()];
+        settings.patterns = vec!["s[a-z]+t".into()];
+        let mut redactor = Redactor::try_new(&settings).unwrap();
+        let text = "a secret here, and another secret";
+        assert_eq!(redactor.redact_until(text, Instant::now(), true), None);
+        assert_eq!(redactor.report().replaced, 0);
+        let later = Instant::now() + core::time::Duration::from_secs(60);
+        assert_eq!(
+            redactor.redact_until(text, later, true).as_deref(),
+            Some("a [redacted] here, and another [redacted]")
+        );
+        assert_eq!(redactor.report().replaced, 2);
     }
 }
