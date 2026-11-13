@@ -559,18 +559,23 @@ fn what_a_client_may_choose_can_be_narrowed_by_the_host() {
 }
 
 #[test]
-fn a_network_path_is_refused_unless_the_host_allows_it() {
+fn a_device_path_is_refused_and_a_share_is_a_directory_on_windows_only() {
     let mut client = Client::serve(Fake::new(Mode::Slow), Settings::new());
     let initialize = client.request("initialize", json!({"protocolVersion": 2}));
     client.answer(initialize);
-    for path in [
-        "\\\\host\\share\\w",
-        "//host/share/w",
-        "\\\\?\\C:\\w",
-        "\\\\.\\pipe\\x",
-    ] {
+    for path in ["\\\\?\\C:\\w", "\\\\.\\pipe\\x", "//./pipe/x"] {
         let new = client.request("session/new", json!({"cwd": path}));
         assert_eq!(client.answer(new)["error"]["code"], -32602, "{path}");
+    }
+    // A folder on a share is an ordinary working directory on Windows, and what it always was elsewhere: refused.
+    for path in ["\\\\host\\share\\w", "//host/share/w"] {
+        let new = client.request("session/new", json!({"cwd": path}));
+        let answer = client.answer(new);
+        if cfg!(windows) {
+            assert!(answer.get("result").is_some(), "{path}: {answer}");
+        } else {
+            assert_eq!(answer["error"]["code"], -32602, "{path}");
+        }
     }
 }
 

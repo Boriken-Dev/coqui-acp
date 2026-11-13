@@ -94,6 +94,45 @@ pub fn path_admitted(path: &Path, roots: &[PathBuf], network_paths: bool) -> Res
     Ok(())
 }
 
+/// Whether a working directory the person chose, a session's `cwd` or one of its additional directories, is taken: inside
+/// `roots` unless there are none, and in no device namespace.
+///
+/// On Windows a folder on a share (`\\server\share\work`) is an ordinary absolute path: held to the roots by its parts,
+/// without regard to case or which separator it is written with, with a `.` or `..` part refused, and not resolved first
+/// when there are no roots to compare it with. A path written as a local one whose links lead to a share is still refused
+/// unless `network_paths`, which also still covers what a harness takes from a request outside these two fields. Elsewhere
+/// the rule is [`path_admitted`]'s.
+///
+/// # Errors
+///
+/// The refusal.
+pub fn directory_admitted(
+    path: &Path,
+    roots: &[PathBuf],
+    network_paths: bool,
+) -> Result<(), String> {
+    if !cfg!(windows) {
+        return path_admitted(path, roots, network_paths);
+    }
+    if parse::device(path) {
+        return Err("a device path is not a directory".into());
+    }
+    if !parse::network(path) {
+        return path_admitted(path, roots, network_paths);
+    }
+    if parse::dotted(path) {
+        return Err("the directory has a . or .. part".into());
+    }
+    let text = path.to_string_lossy();
+    let roots: Vec<String> = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
+    coqui_acp_api::WorkingRoots::new(roots)
+        .admits(&text)
+        .map_err(|refusal| refusal.to_string())
+}
+
 /// The `_meta` key of a turn's answer, or of a version 2 `idle`, that says a quota refused the turn: a
 /// [`LimitHit`](coqui_acp_api::LimitHit) as JSON.
 pub use coqui_acp_api::LIMIT_META_KEY;
