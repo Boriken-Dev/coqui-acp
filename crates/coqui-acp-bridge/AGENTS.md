@@ -100,6 +100,7 @@ pub fn Arrival::serve<C: Channel + ?Sized>(&self, channel: &C, start: impl FnOnc
 
 ```rust
 pub fn Agent::spawn(program: &OsString, args: &[OsString], max_line: usize) -> io::Result<Agent>
+pub fn Agent::spawn_with(spawner: &dyn Spawner, program: &OsStr, args: &[OsString], max_line: usize) -> io::Result<Agent>
 pub const fn Agent::with_write_limit(self, limit: Duration) -> Agent   // default 30 s
 pub fn Agent::guarded(self, program: &OsStr, args: &[&str]) -> io::Result<Agent>
 pub fn Agent::pid(&self) -> u32
@@ -107,9 +108,23 @@ pub fn Agent::guard_pid(&self) -> Option<u32>
 pub fn Agent::try_status(&self) -> io::Result<Option<ExitStatus>>
 pub fn Agent::stop(&self) -> io::Result<ExitStatus>
 pub fn watch(agent: u32, from_bridge: impl Read)
+
+pub trait Spawner: Send + Sync { fn spawn(&self, program: &OsStr, args: &[OsString]) -> io::Result<Spawned>; }
+pub struct Spawned { pub process: Box<dyn Process>, pub input: Box<dyn Write + Send>, pub output: Box<dyn Read + Send> }
+pub trait Process: Send + Debug {   // id, peek, end_group, try_wait, kill, wait
+    fn id(&self) -> u32;
+    fn peek(&mut self) -> io::Result<Option<ExitStatus>>;
+    fn end_group(&mut self);
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<ExitStatus>;
+}
+pub struct Local;   // the Spawner `Agent::spawn` uses
 ```
 
 Standard error stays on this process's. `stop`, and dropping an `Agent`, end the process and what it started: its process group on Unix, its job object on Windows, where `spawn` fails if it cannot make one. `try_status` does not collect the process, so its id and its group's stay its own until `stop`. `guarded`, on Unix, starts `program args... PID`, which has to call `watch` with that id and its standard input: a pipe ending with nothing said ends that process group, as cleanup and not containment (see `--linger`). `stop` dismisses it after ending the group and before collecting the agent. On Windows `guarded` starts nothing and `guard_pid` is `None`. `watch` does nothing for an id of 0 or 1.
+
+A host that cannot wait on its own children (one inside an application whose process handling collects every child that ends, so `try_wait` reports no child) starts agents with `Agent::spawn_with` and a `Spawner` of its own; `Agent::spawn` is `spawn_with(&Local, ..)`, this process's own children as before. A `Spawner` starts `program args...` in a process group of its own with standard input and output piped and standard error inherited, and returns a `Process` that keeps what the trait says: `peek` sees an ended process and leaves it uncollected, `end_group` ends the process group (the job object on Windows) and does nothing for a process already collected, `try_wait` and `wait` collect. `stop` calls `end_group` once, before `try_wait`, `kill` and `wait`. `guarded` starts its helper as this process's own child, whatever the spawner.
 
 ## Gotchas
 
