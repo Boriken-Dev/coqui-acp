@@ -267,6 +267,9 @@ impl Fake {
         self.messages.push(user);
         let _ = images;
         let mut aborted = false;
+        if text == "die" {
+            std::process::exit(3);
+        }
         if text == "wait" {
             emit(
                 &json!({"type": "message_start", "message": {"role": "assistant", "content": [],

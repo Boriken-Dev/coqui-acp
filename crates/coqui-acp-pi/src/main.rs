@@ -84,7 +84,7 @@ fn settings_of(cli: &Cli) -> Settings {
     settings.max_sessions = cli.max_sessions;
     settings.working_roots.clone_from(&cli.working_roots);
     settings.network_paths = cli.allow_network_paths;
-    settings.on_notice = Some(Arc::new(|text: &str| eprintln!("coqui-acp-pi: {text}")));
+    settings.on_notice = Some(Arc::new(|_, text: &str| eprintln!("coqui-acp-pi: {text}")));
     settings
 }
 

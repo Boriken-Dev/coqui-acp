@@ -413,6 +413,7 @@ fn turn(fake: &mut Fake, message: &Value, lines: &mut impl Iterator<Item = Strin
     };
     let mut said: Option<String> = None;
     match text.as_str() {
+        "die" => std::process::exit(3),
         "wait" => {
             for line in lines {
                 let Ok(next) = serde_json::from_str::<Value>(&line) else {

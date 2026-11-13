@@ -198,6 +198,10 @@ fn nothing_is_held_and_each_requirement_is_refused_by_name() {
 struct Remote(Object<dyn ProcessSpawner>);
 
 impl ProcessSpawner for Remote {
+    fn notice(&self, notice: coqui_acp_api::HarnessNotice) -> Result<(), ProviderError> {
+        self.0.notice(notice)
+    }
+
     fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
         let mut info = self.0.describe()?;
         info.local = false;

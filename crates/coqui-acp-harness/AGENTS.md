@@ -43,6 +43,7 @@ Implement `Spawn` to run a harness elsewhere: in a container, over SSH, under a 
 ```rust
 pub struct LocalSpawner;                         // Clone, Debug, Default; #[must_use]
 pub const fn LocalSpawner::new() -> LocalSpawner // 1 MiB of each output stream held unread
+pub fn notices(self, hook: impl Fn(HarnessNotice) + Send + Sync + 'static) -> Self  // each notice its connection gives; none without one
 pub const fn buffer(self, bytes: usize) -> Self  // past it the program waits to write
 pub fn files(self, dir: impl Into<PathBuf>) -> Self  // serves the file methods in dir, which must exist
 impl coqui_acp_api::ProcessSpawner for LocalSpawner
@@ -61,7 +62,7 @@ impl Spawn for ThroughSpawner
 pub fn Serving::new(settings: Settings, max_message_bytes: usize) -> Serving       // Debug; #[must_use]
 pub fn Serving::open(self, spawner: Object<dyn ProcessSpawner>, sink: Object<dyn ChannelSink>,
     harness: impl FnOnce(Arc<dyn Spawn>) -> Result<Arc<dyn Harness>, ProviderError>) -> Result<Object<dyn Channel>, ProviderError>
-pub fn Serving::open_shared(self, spawner: Arc<Object<dyn ProcessSpawner>>, sink, harness) -> ...   // as open; the spawner is shared (see Accounts)
+pub fn Serving::open_shared(self, spawner: Arc<Object<dyn ProcessSpawner>>, sink, harness) -> ...   // as open; the spawner is shared (see Accounts). Unless `settings.on_notice` is set, each notice goes to `spawner.notice(HarnessNotice)`, the spawner held weakly
 pub fn Serving::ending(self, f: impl FnOnce() + Send + 'static) -> Serving       // runs once after serve returned, before the spawner is released
 pub fn shared(harness: impl Harness) -> Arc<dyn Harness>
 pub fn track(thread: JoinHandle<()>);  pub fn to_json(&guatiao::Value) -> Value        // track: threads_done waits for it
@@ -252,7 +253,7 @@ pub fn within_roots(path: &Path, roots: &[PathBuf]) -> bool                     
 pub fn path_admitted(path: &Path, roots: &[PathBuf], network_paths: bool) -> Result<(), String>   // for what a harness reads from a request besides its directories: a network or device path unless `network_paths`
 pub fn directory_admitted(path: &Path, roots: &[PathBuf], network_paths: bool) -> Result<(), String>   // a session's `cwd` or additional directory; on Windows a share (\\server\share\work) is an ordinary absolute path, a device path is refused
 pub struct EventSink;  pub fn send(&self, event: Event) -> bool     // Clone; waits while the queue is full; false once the session is gone
-pub type NoticeHook = Arc<dyn Fn(&str) + Send + Sync>;
+pub type NoticeHook = Arc<dyn Fn(NoticeKind, &str) + Send + Sync>;   // NoticeKind: Exited (how it ended, never what it last wrote) | Notice | Fault; one line, no client text
 pub use coqui_acp_api::LIMIT_META_KEY;     // "dev.boriken.coqui.acp/limit", a `LimitHit` as JSON
 pub const PLAN_ID: &str = "plan";
 ```
@@ -291,7 +292,7 @@ What each event becomes:
 | `Compaction` | nothing | `compaction_summary_chunk`, `compaction_update` |
 | `Exited` | the running turn fails | the same |
 
-`Settings` (`#[non_exhaustive]`, `new()` and `Default`; set its fields): `max_line` (64 MiB; a longer client line ends the connection), `max_sessions` (8), `max_requests` (64 at once), `max_prompt_bytes` (16 MiB), `max_version` (2), `cancel_grace` (10 s), `permission_timeout` (`None`: as long as the person takes), `max_tools` (4096 tool calls tracked per session for version 1; past it the oldest is forgotten, and a later report of it is a new `tool_call`), `max_queued_events` (4096 events queued for a client that has not read them; past it the harness's `EventSink::send` waits, so a client that does not read holds the harness back; the same many are kept of what a session says before its answer, and past it they are dropped and the client told how many), `max_open_questions` (64 open at once per session, each holding a thread; past it one is answered cancelled without being asked), `client_mcp_servers` (true), `working_roots` (empty: any; links followed; also on `OpenRequest`, whose `path_admitted` holds what a harness reads from the request's other parts to the same rule, and for a harness that finds a session by its id alone), `network_paths` (false: an MCP command, and what is read from a request besides its directories, may not be on a network path as written or where links lead; a session's directories are not held to it), `max_tool_content_bytes` (1 MiB) and `max_tool_content_items` (256) (version 1 sends a tool call's content whole each time; past them the rest is left out and the client told), `on_notice: Option<NoticeHook>` (called with each notice and each harness exit, for a host that logs them), `on_usage: Option<UsageHook>` (called with the connection's report, as `_coqui_acp/usage` answers it with no session, each time it changes, with no lock held; none), `account: Option<String>` (the host's id for the account, echoed into usage reports; none).
+`Settings` (`#[non_exhaustive]`, `new()` and `Default`; set its fields): `max_line` (64 MiB; a longer client line ends the connection), `max_sessions` (8), `max_requests` (64 at once), `max_prompt_bytes` (16 MiB), `max_version` (2), `cancel_grace` (10 s), `permission_timeout` (`None`: as long as the person takes), `max_tools` (4096 tool calls tracked per session for version 1; past it the oldest is forgotten, and a later report of it is a new `tool_call`), `max_queued_events` (4096 events queued for a client that has not read them; past it the harness's `EventSink::send` waits, so a client that does not read holds the harness back; the same many are kept of what a session says before its answer, and past it they are dropped and the client told how many), `max_open_questions` (64 open at once per session, each holding a thread; past it one is answered cancelled without being asked), `client_mcp_servers` (true), `working_roots` (empty: any; links followed; also on `OpenRequest`, whose `path_admitted` holds what a harness reads from the request's other parts to the same rule, and for a harness that finds a session by its id alone), `network_paths` (false: an MCP command, and what is read from a request besides its directories, may not be on a network path as written or where links lead; a session's directories are not held to it), `max_tool_content_bytes` (1 MiB) and `max_tool_content_items` (256) (version 1 sends a tool call's content whole each time; past them the rest is left out and the client told), `on_notice: Option<NoticeHook>` (called with each notice and each harness exit, for a host that logs them; `Serving` sets it to the spawner's `notice` when unset), `on_usage: Option<UsageHook>` (called with the connection's report, as `_coqui_acp/usage` answers it with no session, each time it changes, with no lock held; none), `account: Option<String>` (the host's id for the account, echoed into usage reports; none).
 
 ## Modes (`coqui_acp_harness::mode`)
 

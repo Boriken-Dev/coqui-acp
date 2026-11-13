@@ -50,6 +50,10 @@ fn refusal(status: Status, why: &str) -> ProviderError {
 }
 
 impl ProcessSpawner for Scripted {
+    fn notice(&self, _notice: coqui_acp_api::HarnessNotice) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
         let mut info = SpawnerInfo::new("test", "test", true);
         info.files = true;
@@ -163,6 +167,10 @@ impl Fs {
 struct Forward(Arc<Scripted>);
 
 impl ProcessSpawner for Forward {
+    fn notice(&self, notice: coqui_acp_api::HarnessNotice) -> Result<(), ProviderError> {
+        self.0.notice(notice)
+    }
+
     fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
         self.0.describe()
     }

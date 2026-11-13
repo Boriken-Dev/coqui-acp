@@ -264,6 +264,7 @@ fn agent() -> ! {
                 let Some(id) = id.clone() else { continue };
                 let text = text_of(&params["prompt"]);
                 match text.as_str() {
+                    "die" => std::process::exit(3),
                     "wait" => waiting.push((id, session.to_owned())),
                     "ask" => {
                         permissions += 1;

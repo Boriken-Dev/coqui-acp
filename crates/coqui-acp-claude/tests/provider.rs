@@ -9,7 +9,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use coqui_acp_api::contract::Contract;
@@ -17,7 +17,8 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{FromValue, Map, Status, ToValue, Value};
 use coqui_acp_api::{
     AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, CacheLifetime, Channel, ChannelSink,
-    NO_PROJECT_MCP, ProcessSpawner, READ_ONLY, Requirement, StartRequest,
+    HarnessNotice, NO_PROJECT_MCP, NoticeKind, ProcessSpawner, READ_ONLY, Requirement,
+    StartRequest,
 };
 use coqui_acp_claude::{ClaudeProvider, ProviderSettings, SettingSource};
 use coqui_acp_harness::{LocalSpawner, Mode};
@@ -172,8 +173,21 @@ fn connect_opened(
     mpsc::Receiver<serde_json::Value>,
     serde_json::Value,
 ) {
+    connect_through(provider, request, cwd, LocalSpawner::new().into_object())
+}
+
+/// [`connect_opened`] on `spawner`.
+fn connect_through(
+    provider: &ClaudeProvider,
+    request: StartRequest,
+    cwd: &Path,
+    spawner: Object<dyn ProcessSpawner>,
+) -> (
+    Object<dyn Channel>,
+    mpsc::Receiver<serde_json::Value>,
+    serde_json::Value,
+) {
     let (sender, received) = mpsc::channel();
-    let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().into_object();
     let channel = provider
         .start(
             request,
@@ -563,4 +577,77 @@ fn models_lists_the_recorded_models_with_versions_and_efforts_and_no_turn() {
     for model in &listing.models {
         assert_eq!(model.efforts, ["low", "medium", "high", "xhigh", "max"]);
     }
+}
+
+/// What the spawner was told, waited for until `done` holds of it.
+fn heard_until(
+    heard: &Arc<Mutex<Vec<HarnessNotice>>>,
+    done: impl Fn(&[HarnessNotice]) -> bool,
+) -> Vec<HarnessNotice> {
+    for _ in 0..600 {
+        let now = heard.lock().expect("the list").clone();
+        if done(&now) {
+            return now;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "the notices never came: {:?}",
+        heard.lock().expect("the list")
+    );
+}
+
+#[test]
+fn an_untested_version_and_an_exit_reach_the_spawner_as_notices() {
+    let dir = scratch("notices");
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let hearing = Arc::clone(&heard);
+    let spawner = LocalSpawner::new()
+        .notices(move |notice| hearing.lock().expect("the list").push(notice))
+        .into_object();
+    let request = StartRequest::builder()
+        .environment(
+            [
+                ("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()),
+                ("COQUI_ACP_FAKE_CLAUDE_VERSION", "9.9.9".to_owned()),
+            ]
+            .into_iter()
+            .collect::<coqui_acp_api::Environment>(),
+        )
+        .build();
+    let (channel, received, opened) = connect_through(&provider(), request, &dir, spawner);
+    let session = opened["result"]["sessionId"].as_str().expect("a session");
+    let version = heard_until(&heard, |all| {
+        all.iter().any(|n| n.kind == NoticeKind::Notice)
+    });
+    let text = &version
+        .iter()
+        .find(|n| n.kind == NoticeKind::Notice)
+        .expect("a version notice")
+        .text;
+    assert!(text.contains("9.9.9"), "{text}");
+    channel
+        .send(
+            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": {"sessionId": session, "prompt": [{"type": "text", "text": "die"}]}})
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("taken");
+    let all = heard_until(&heard, |all| {
+        all.iter().any(|n| n.kind == NoticeKind::Exited)
+    });
+    let exit = all
+        .iter()
+        .find(|n| n.kind == NoticeKind::Exited)
+        .expect("an exit");
+    assert!(
+        exit.text.contains("exited") && !exit.text.contains("last output"),
+        "{}",
+        exit.text
+    );
+    let _ = answer_to(&received, 3);
+    channel.close(0, "");
+    drop(channel);
+    let _ = std::fs::remove_dir_all(&dir);
 }

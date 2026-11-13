@@ -3,7 +3,7 @@
 //!
 //! Its lines have the shapes of the recordings in `tests/fixtures/2.1.318` (`init`, `assistant`, `result`,
 //! `rate_limit_event`, `control_request` `can_use_tool`, the control answers). A prompt's text decides the turn:
-//! `wait` ends only when it is interrupted; `ask` asks to use a tool, and says `echo: allowed`, `echo: refused` or, when
+//! `wait` ends only when it is interrupted; `die` exits with status 3; `ask` asks to use a tool, and says `echo: allowed`, `echo: refused` or, when
 //! the answer asks to interrupt, ends cancelled; `quota P` reports the five-hour window used P of 1000 beside its
 //! answer; `limit` hits the five-hour limit; any other text is answered `echo: TEXT`.
 //!
@@ -26,6 +26,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 const VERSION: &str = "2.1.318";
+
+/// The version it reports: `COQUI_ACP_FAKE_CLAUDE_VERSION` when set, so a test can run a version that was not tested.
+fn version() -> String {
+    std::env::var("COQUI_ACP_FAKE_CLAUDE_VERSION").unwrap_or_else(|_| VERSION.to_owned())
+}
 const MODEL: &str = "claude-standin";
 const TTL_VARIABLES: [&str; 2] = [
     "CLAUDE_CODE_PROMPT_CACHE_TTL",
@@ -78,7 +83,7 @@ impl Fake {
                 "supportedEffortLevels": ["low", "medium", "high"],
             }],
             "account": {"tokenSource": "none", "apiKeySource": "none", "apiProvider": "firstParty"},
-            "claude_code_version": VERSION,
+            "claude_code_version": version(),
             "current_permission_mode": self.mode,
             "session_state": "idle",
         })
@@ -107,7 +112,7 @@ impl Fake {
             "timestamp": "2026-11-10T00:00:00.000Z",
             "cwd": self.cwd.to_string_lossy(),
             "sessionId": self.session,
-            "version": VERSION,
+            "version": version(),
         }));
     }
 
@@ -203,7 +208,7 @@ fn project_directory(cwd: &Path) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("{VERSION} (Claude Code)");
+        println!("{} (Claude Code)", version());
         return;
     }
     let mut logs: Vec<std::path::PathBuf> = Vec::new();
@@ -334,7 +339,7 @@ fn turn(fake: &mut Fake, message: &Value, lines: &mut impl Iterator<Item = Strin
             "mcp_servers": [],
             "model": MODEL,
             "permissionMode": fake.mode,
-            "claude_code_version": VERSION,
+            "claude_code_version": version(),
             "uuid": uuid(),
         }));
     }
@@ -342,6 +347,7 @@ fn turn(fake: &mut Fake, message: &Value, lines: &mut impl Iterator<Item = Strin
         &json!({"type": "system", "subtype": "status", "status": "requesting", "session_id": fake.session, "uuid": uuid()}),
     );
     match text.as_str() {
+        "die" => std::process::exit(3),
         "wait" => {
             for line in lines {
                 let Ok(next) = serde_json::from_str::<Value>(&line) else {

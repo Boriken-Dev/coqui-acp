@@ -41,6 +41,10 @@ mod with_python {
     struct Unused;
 
     impl ProcessSpawner for Unused {
+        fn notice(&self, _notice: coqui_acp_api::HarnessNotice) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
         fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
             Ok(SpawnerInfo::new(
                 std::env::consts::OS,

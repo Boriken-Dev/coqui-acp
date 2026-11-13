@@ -13,13 +13,13 @@ use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo, AccountLoss, AccountRef,
     AccountRenewal, AcpHarnessVtable, Bucket, CacheLifetime, ChannelSinkVtable, ChannelVtable,
-    Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HistoryLoss,
-    ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo, LoginOutcome,
-    LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, ModelsRequest, NAMES,
-    NonDefault, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement,
-    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, SpawnSpec,
-    SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize, UsageQuery,
-    UsageReport, UsageSupport,
+    Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice,
+    HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo,
+    LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend,
+    ModelsRequest, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable,
+    RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery,
+    SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes,
+    TerminalSize, UsageQuery, UsageReport, UsageSupport,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -95,6 +95,8 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("ProcessExit", schema_of::<ProcessExit>()),
         ("LinkState", schema_of::<LinkState>()),
         ("ErrorOutput", schema_of::<ErrorOutput>()),
+        ("NoticeKind", schema_of::<NoticeKind>()),
+        ("HarnessNotice", schema_of::<HarnessNotice>()),
         ("UsageQuery", schema_of::<UsageQuery>()),
         ("UsageReport", schema_of::<UsageReport>()),
         ("Bucket", schema_of::<Bucket>()),
@@ -142,7 +144,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 44] = [
+    let pinned: [(&str, &[&str], &[&str]); 45] = [
         (
             "StartRequest",
             &[
@@ -279,6 +281,7 @@ fn every_models_keys_are_pinned() {
         ),
         ("ProcessExit", &["code", "running", "signal"], &["running"]),
         ("LinkState", &["drops", "up"], &["drops", "up"]),
+        ("HarnessNotice", &["kind", "text"], &["kind", "text"]),
         ("UsageQuery", &["account", "environment"], &[]),
         (
             "UsageReport",
@@ -462,7 +465,7 @@ fn every_models_keys_are_pinned() {
         ("LoginAnswer", &["secrets", "values"], &[]),
     ];
     let schemas = schemas();
-    assert_eq!(pinned.len(), 44);
+    assert_eq!(pinned.len(), 45);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()
@@ -500,6 +503,14 @@ fn every_models_keys_are_pinned() {
             .expect("described")
             .1["enum"],
         serde_json::json!(["default", "short", "long"])
+    );
+    assert_eq!(
+        schemas
+            .iter()
+            .find(|(n, _)| *n == "NoticeKind")
+            .expect("described")
+            .1["enum"],
+        serde_json::json!(["exited", "notice", "fault"])
     );
 }
 
@@ -635,7 +646,7 @@ fn the_kinds_hashes_are_pinned() {
 const HARNESS_HASH: u32 = 4111118208;
 const CHANNEL_HASH: u32 = 3787630980;
 const SINK_HASH: u32 = 4115266557;
-const SPAWNER_HASH: u32 = 4134697914;
+const SPAWNER_HASH: u32 = 4038904472;
 const PROCESS_HASH: u32 = 3306532587;
 const KEEPER_HASH: u32 = 708146915;
 const PROMPTER_HASH: u32 = 2606822037;
