@@ -228,6 +228,12 @@ pub struct Started {
     pub stderr: Box<dyn Read + Send>,
 }
 
+impl fmt::Debug for Started {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Started").finish_non_exhaustive()
+    }
+}
+
 /// What to start: the whole of the command's environment is `env`, its standard input is closed, and it leads a process group.
 pub struct Launch {
     /// The program, by full path.
@@ -315,17 +321,15 @@ fn environment(
     Ok(env)
 }
 
+/// A child of this process and its two output pipes.
+type OwnChild = (
+    std::process::Child,
+    Box<dyn Read + Send>,
+    Box<dyn Read + Send>,
+);
+
 /// Starts the command as a child of this process.
-fn start_own(
-    spec: &CommandSpec<'_>,
-) -> Result<
-    (
-        std::process::Child,
-        Box<dyn Read + Send>,
-        Box<dyn Read + Send>,
-    ),
-    Error,
-> {
+fn start_own(spec: &CommandSpec<'_>) -> Result<OwnChild, Error> {
     let mut command = Command::new(spec.program);
     match spec.command {
         CommandLine::Argv(args) => {
