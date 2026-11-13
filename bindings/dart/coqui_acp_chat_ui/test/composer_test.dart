@@ -1,4 +1,6 @@
 
+import 'dart:async';
+
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
 import 'package:flutter/material.dart';
@@ -68,6 +70,10 @@ Future<TextEditingController> pump(
   bool starting = false,
   VoidCallback? onStop,
   List<AgentCommandInfo> commands = const [],
+  List<ComposerAction> actions = const [],
+  String commandsTitle = 'Agent commands',
+  String actionsTitle = 'Host actions',
+  ComposerMentions? mentions,
   ComposerAttachments? attachments,
   ClipboardReader clipboard = const TextClipboard(),
   Future<List<PickedFile>> Function()? pickFiles,
@@ -98,6 +104,10 @@ Future<TextEditingController> pump(
       starting: starting,
       onStop: onStop,
       commands: commands,
+      actions: actions,
+      commandsTitle: commandsTitle,
+      actionsTitle: actionsTitle,
+      mentions: mentions,
       attachments: attachments,
       clipboard: clipboard,
       pickFiles: pickFiles,
@@ -112,6 +122,33 @@ Future<TextEditingController> pump(
     ),
   )));
   return controller;
+}
+
+/// A host's mention source over a fixed table, by query; [slow] queries answer only once [release]d.
+class _Mentions implements ComposerMentions {
+  _Mentions(this.table, {this.refuse, this.slow = const {}});
+  final Map<String, List<String>> table;
+  final String? refuse;
+  final Set<String> slow;
+  final asked = <String>[];
+  final picked = <String>[];
+  final _gates = <String, Completer<void>>{};
+
+  void release(String query) => (_gates[query] ??= Completer<void>()).complete();
+
+  @override
+  Future<List<MentionCandidate>> search(String query) async {
+    asked.add(query);
+    if (slow.contains(query)) await (_gates[query] ??= Completer<void>()).future;
+    return [for (final label in table[query] ?? const <String>[]) MentionCandidate(label: label, detail: 'in the folder')];
+  }
+
+  @override
+  String? pick(MentionCandidate candidate) {
+    if (refuse != null) return refuse;
+    picked.add(candidate.label);
+    return null;
+  }
 }
 
 void main() {
@@ -220,6 +257,117 @@ void main() {
     await tester.tap(find.byType(TextField));
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
     expect(controller.text, isEmpty);
+  });
+
+  group('the host\'s actions beside the agent\'s commands', () {
+    testWidgets('with actions, / lists two titled groups, and an action runs when chosen and sends nothing', (tester) async {
+      var ran = 0;
+      var sent = 0;
+      final controller = await pump(
+        tester,
+        onSend: () => sent++,
+        commands: const [AgentCommandInfo('compact', 'Make room')],
+        actions: [ComposerAction(name: 'settings', description: 'Open Settings', run: () => ran++)],
+        actionsTitle: 'Canoa actions',
+      );
+      await tester.enterText(find.byType(TextField), '/');
+      await tester.pump();
+      expect(find.text('Agent commands'), findsOneWidget);
+      expect(find.text('Canoa actions'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byKey(const Key('commands-group'))).dy,
+        lessThan(tester.getTopLeft(find.byKey(const Key('actions-group'))).dy),
+      );
+      expect(find.text('/compact'), findsOneWidget);
+      expect(find.text('/settings'), findsOneWidget);
+      await tester.tap(find.text('/settings'));
+      await tester.pump();
+      expect(ran, 1);
+      expect(sent, 0);
+      expect(controller.text, isEmpty, reason: 'the typed slash is taken back');
+    });
+
+    testWidgets('a group with no match has no title, and with no actions the list has none at all', (tester) async {
+      await pump(
+        tester,
+        commands: const [AgentCommandInfo('compact', '')],
+        actions: [ComposerAction(name: 'settings', description: '', run: () {})],
+      );
+      await tester.enterText(find.byType(TextField), '/se');
+      await tester.pump();
+      expect(find.byKey(const Key('commands-group')), findsNothing);
+      expect(find.byKey(const Key('actions-group')), findsOneWidget);
+      await pump(tester, commands: const [AgentCommandInfo('compact', '')]);
+      await tester.enterText(find.byType(TextField), '/');
+      await tester.pump();
+      expect(find.text('/compact'), findsOneWidget);
+      expect(find.text('Agent commands'), findsNothing);
+    });
+  });
+
+  group('@ mentions', () {
+    test('the @ being typed is found at the start or after a space, up to the caret', () {
+      expect(mentionAt('@sr', 3), (start: 0, query: 'sr'));
+      expect(mentionAt('read @src/a', 11), (start: 5, query: 'src/a'));
+      expect(mentionAt('read @src/a and', 11), (start: 5, query: 'src/a'));
+      expect(mentionAt('mail me@home', 12), isNull, reason: 'an @ inside a word is not a mention');
+      expect(mentionAt('read @a b', 9), isNull, reason: 'a space ends it');
+      expect(mentionAt('hello', 5), isNull);
+    });
+
+    testWidgets('an @ lists what the host offers; choosing one writes @label and tells the host', (tester) async {
+      final source = _Mentions({
+        '': ['README.md', 'src/main.dart'],
+        'ma': ['src/main.dart'],
+      });
+      final controller = await pump(tester, mentions: source);
+      await tester.enterText(find.byType(TextField), 'look at @ma');
+      await tester.pump();
+      await tester.pump();
+      expect(source.asked, ['ma']);
+      expect(find.byKey(const ValueKey('mention src/main.dart')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mention README.md')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('mention src/main.dart')));
+      await tester.pump();
+      expect(source.picked, ['src/main.dart']);
+      expect(controller.text, 'look at @src/main.dart ');
+      expect(find.byKey(const Key('mention-suggestions')), findsNothing, reason: 'the space ended the mention');
+    });
+
+    testWidgets('a choice the host refuses is said and leaves the text as it was', (tester) async {
+      final source = _Mentions({'': ['../secret']}, refuse: 'That is outside the folder.');
+      final controller = await pump(tester, mentions: source);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('mention ../secret')));
+      await tester.pump();
+      expect(find.text('That is outside the folder.'), findsOneWidget);
+      expect(controller.text, '@');
+    });
+
+    testWidgets('an answer to an older query does not replace the newer one', (tester) async {
+      final source = _Mentions({'a': ['slow.txt'], 'ab': ['fast.txt']}, slow: {'a'});
+      await pump(tester, mentions: source);
+      await tester.enterText(find.byType(TextField), '@a');
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '@ab');
+      await tester.pump();
+      await tester.pump();
+      source.release('a');
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('mention fast.txt')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mention slow.txt')), findsNothing);
+    });
+
+    testWidgets('with no source an @ stays text', (tester) async {
+      final controller = await pump(tester);
+      await tester.enterText(find.byType(TextField), '@x');
+      await tester.pump();
+      expect(find.byType(ListTile), findsNothing);
+      expect(controller.text, '@x');
+    });
   });
 
   group('attachments', () {

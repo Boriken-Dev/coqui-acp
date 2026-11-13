@@ -92,8 +92,8 @@ the model must never see, and a display of values the person chose to look at. T
 ## Composer
 
 `Composer({controller, onSend, focusNode, enabled, working, starting, onStop, commands, centred, hint, header, attachments, pickFiles,
-pickFolder, clipboard, pasteAsFile, before, after, trailing, plusItems, onShiftTab, recall})`: the field, `/` suggestions from the agent's
-commands, paste, the attachment chips, the `+` menu, and Send (Queue and Stop while `working`, a spinner while `starting`).
+pickFolder, clipboard, pasteAsFile, before, after, trailing, plusItems, onShiftTab, recall, actions, commandsTitle, actionsTitle,
+mentions})`: the field, `/` suggestions from the agent's commands (and the host's own `actions`), `@` mentions from the host, paste, the attachment chips, the `+` menu, and Send (Queue and Stop while `working`, a spinner while `starting`).
 `ComposerState.onKey` handles Shift+Tab (`onShiftTab`), Up in an empty message (`recall`: the last message sent, or null) and Ctrl+V (⌘V)
 itself, whatever `focusNode` it is given; `paste()` is public.
 
@@ -104,6 +104,15 @@ itself, whatever `focusNode` it is given; `paste()` is public.
   `addPaths`, `addImage`, `addText`, `addFolder`, `remove(key)`; each `add` answers problems to tell the person. The package adds the
   "Add files or images…", "Add a folder reference…" and "Paste from clipboard" entries when it is given one, using `pickFiles` and
   `pickFolder`. `ClipboardReader` (`image`, `files`, `text`) is the paste source; `TextClipboard` is the default.
+- `actions: List<ComposerAction>` (`name`, `description`, `run`): the host's own `/` entries. With any, `/` lists two groups under titles
+  (`commandsTitle`, default "Agent commands", and `actionsTitle`, default "Host actions"); choosing an action runs it, clears the typed
+  text and sends nothing. With none, the list is the agent's commands alone, untitled. `hint` is the placeholder, so a host changes it
+  whenever its state does.
+- `mentions: ComposerMentions` (the app implements it): `search(query) -> Future<List<MentionCandidate>>` and `pick(candidate) -> String?`
+  (a problem to tell the person, or null once taken). An `@` at the start or after whitespace, up to the caret, lists up to 8
+  candidates (`MentionCandidate({label, detail, folder, key})`); choosing one writes `@label ` in its place after `pick` accepts it, and a
+  refusal is shown and leaves the text. An answer to a query that has since changed is dropped. `mentionAt(text, caret)` finds the `@`.
+  The package never reads a file: what a mention is, and what it may name, is the host's.
 - `UsagePill({report, warnPermille, now})` and `UsageMenu`: an account's usage buckets (`UsageReport` of `coqui_acp_chat`); the words
   are in `usage_text.dart` (`pillText`, `bucketLine`, `headlineOf`, `levelOf`, `describeUsage`, `spanText`, ...).
 

@@ -59,6 +59,53 @@ final class ComposerChip {
 
 enum ChipKind { image, text, file, folder }
 
+/// What `@` can name: a file or folder the host knows, as the list shows it.
+final class MentionCandidate {
+  const MentionCandidate({required this.label, this.detail, this.folder = false, this.key});
+
+  /// What is written after the `@` when it is chosen, and what the list shows.
+  final String label;
+
+  /// A second line, such as the folder it is in.
+  final String? detail;
+  final bool folder;
+
+  /// What the host knows it by; [label] when null.
+  final Object? key;
+}
+
+/// What the composer asks of a host that lets the person name things with `@`.
+abstract interface class ComposerMentions {
+  /// What [query], the text typed after the `@`, names, best first. Nothing the person typed is a path to read: it only
+  /// narrows what the host chooses to offer.
+  Future<List<MentionCandidate>> search(String query);
+
+  /// Takes the choice of [candidate]. Answers why it cannot be taken, or null once it is; the text is then left as it was.
+  String? pick(MentionCandidate candidate);
+}
+
+/// An action of the host's own that `/` lists beside the agent's commands. Choosing it runs [run] at once; nothing is sent.
+final class ComposerAction {
+  const ComposerAction({required this.name, required this.description, required this.run});
+  final String name, description;
+  final VoidCallback run;
+}
+
+/// The `@` being typed at [caret] in [text]: where it starts and the query after it, or null when the caret is not in one.
+/// An `@` counts at the start or after whitespace, and the query ends at the first whitespace.
+({int start, String query})? mentionAt(String text, int caret) {
+  if (caret < 0 || caret > text.length) return null;
+  final space = RegExp(r'\s');
+  for (var i = caret - 1; i >= 0; i--) {
+    if (text.codeUnitAt(i) == 0x40) {
+      if (i > 0 && !space.hasMatch(text[i - 1])) return null;
+      return (start: i, query: text.substring(i + 1, caret));
+    }
+    if (space.hasMatch(text[i])) return null;
+  }
+  return null;
+}
+
 /// What the composer asks of a host that takes attachments. Each `add` answers a problem to tell the person, or nothing.
 abstract interface class ComposerAttachments {
   /// Whether anything can be added now.
@@ -140,6 +187,10 @@ class Composer extends StatefulWidget {
     this.starting = false,
     this.onStop,
     this.commands = const [],
+    this.actions = const [],
+    this.commandsTitle = 'Agent commands',
+    this.actionsTitle = 'Host actions',
+    this.mentions,
     this.centred = false,
     this.hint = 'Message agent',
     this.header,
@@ -178,6 +229,14 @@ class Composer extends StatefulWidget {
 
   /// The agent's `/` commands.
   final List<AgentCommandInfo> commands;
+
+  /// The host's own `/` actions. With any, the list has two groups, titled [commandsTitle] and [actionsTitle]; with none it is
+  /// the agent's commands alone, untitled.
+  final List<ComposerAction> actions;
+  final String commandsTitle, actionsTitle;
+
+  /// What an `@` in the message names; null leaves `@` as text.
+  final ComposerMentions? mentions;
 
   /// Whether it is the middle of a new session's empty view rather than docked under a conversation.
   final bool centred;
@@ -221,6 +280,22 @@ class ComposerState extends State<Composer> {
     if (folder == null || !mounted) return;
     final problem = widget.attachments?.addFolder(folder);
     if (problem != null) _say(problem);
+  }
+
+  /// Chooses [candidate] for the `@` that starts at [start] and runs to [end]: the host takes it, and the text becomes `@label `.
+  void _pickMention(MentionCandidate candidate, int start, int end) {
+    final problem = widget.mentions?.pick(candidate);
+    if (problem != null) {
+      _say(problem);
+      return;
+    }
+    final text = widget.controller.text;
+    if (start < 0 || end > text.length || start > end) return;
+    final inserted = '@${candidate.label} ';
+    widget.controller.value = TextEditingValue(
+      text: text.replaceRange(start, end, inserted),
+      selection: TextSelection.collapsed(offset: start + inserted.length),
+    );
   }
 
   /// What the clipboard holds: an image becomes an image attachment, copied files file attachments, and text stays text unless it
@@ -319,14 +394,34 @@ class ComposerState extends State<Composer> {
     return Column(mainAxisSize: MainAxisSize.min, children: [
       ValueListenableBuilder<TextEditingValue>(
         valueListenable: widget.controller,
-        builder: (context, value, _) => CommandSuggestions(
-          commands: widget.commands,
-          typed: value.text,
-          onPick: (command) {
-            final text = '/${command.name} ';
-            widget.controller.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
-          },
-        ),
+        builder: (context, value, _) {
+          final caret = value.selection.isValid ? value.selection.baseOffset : value.text.length;
+          final mention = widget.mentions == null ? null : mentionAt(value.text, caret);
+          return Column(mainAxisSize: MainAxisSize.min, children: [
+            CommandSuggestions(
+              commands: widget.commands,
+              actions: widget.actions,
+              commandsTitle: widget.commandsTitle,
+              actionsTitle: widget.actionsTitle,
+              typed: value.text,
+              onPick: (command) {
+                final text = '/${command.name} ';
+                widget.controller.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
+              },
+              onRun: (action) {
+                widget.controller.value = const TextEditingValue();
+                action.run();
+              },
+            ),
+            if (mention != null)
+              MentionSuggestions(
+                key: const Key('mention-suggestions'),
+                source: widget.mentions!,
+                query: mention.query,
+                onPick: (candidate) => _pickMention(candidate, mention.start, caret),
+              ),
+          ]);
+        },
       ),
       const SizedBox(height: 4),
       box,
@@ -483,29 +578,54 @@ class _Controls extends StatelessWidget {
   }
 }
 
-/// The agent's commands matching what is being typed. Nothing runs until the person sends it.
+/// The agent's commands, and the host's own actions, matching what is being typed. Nothing is sent until the person sends it; an
+/// action runs when chosen.
 class CommandSuggestions extends StatelessWidget {
-  const CommandSuggestions({super.key, required this.commands, required this.typed, required this.onPick});
+  const CommandSuggestions({
+    super.key,
+    required this.commands,
+    required this.typed,
+    required this.onPick,
+    this.actions = const [],
+    this.onRun,
+    this.commandsTitle = 'Agent commands',
+    this.actionsTitle = 'Host actions',
+  });
 
+  /// The most each group lists.
   static const int shown = 6;
 
   final List<AgentCommandInfo> commands;
+  final List<ComposerAction> actions;
+  final String commandsTitle, actionsTitle;
   final String typed;
   final void Function(AgentCommandInfo command) onPick;
+  final void Function(ComposerAction action)? onRun;
 
   @override
   Widget build(BuildContext context) {
     if (!typed.startsWith('/') || typed.contains(' ')) return const SizedBox.shrink();
     final wanted = typed.substring(1).toLowerCase();
     final found = commands.where((command) => command.name.toLowerCase().startsWith(wanted)).take(shown).toList();
-    if (found.isEmpty) return const SizedBox.shrink();
+    final foundActions = actions.where((action) => action.name.toLowerCase().startsWith(wanted)).take(shown).toList();
+    if (found.isEmpty && foundActions.isEmpty) return const SizedBox.shrink();
     final look = context.chatLook;
+    final titled = actions.isNotEmpty;
+    Widget title(String text, Key key) => Padding(
+      key: key,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: look.muted)),
+      ),
+    );
     return Material(
       color: look.composer,
       borderRadius: BorderRadius.circular(look.radius / 2),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (titled && found.isNotEmpty) title(commandsTitle, const Key('commands-group')),
           for (final command in found)
             ListTile(
               dense: true,
@@ -513,6 +633,86 @@ class CommandSuggestions extends StatelessWidget {
               title: Text('/${command.name}', style: TextStyle(fontFamily: look.codeFont)),
               subtitle: command.description.isEmpty ? null : Text(command.description, maxLines: 1, overflow: TextOverflow.ellipsis),
               onTap: () => onPick(command),
+            ),
+          if (foundActions.isNotEmpty) title(actionsTitle, const Key('actions-group')),
+          for (final action in foundActions)
+            ListTile(
+              key: ValueKey('action ${action.name}'),
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              title: Text('/${action.name}', style: TextStyle(fontFamily: look.codeFont)),
+              subtitle: action.description.isEmpty ? null : Text(action.description, maxLines: 1, overflow: TextOverflow.ellipsis),
+              onTap: () => onRun?.call(action),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// What the host's [ComposerMentions] offers for the `@` being typed: the files and folders matching [query], each with where it
+/// is. Choosing one goes to [onPick]. A search that is still out when the query changes is ignored.
+class MentionSuggestions extends StatefulWidget {
+  const MentionSuggestions({super.key, required this.source, required this.query, required this.onPick});
+
+  /// The most the list shows.
+  static const int shown = 8;
+
+  final ComposerMentions source;
+  final String query;
+  final void Function(MentionCandidate candidate) onPick;
+
+  @override
+  State<MentionSuggestions> createState() => _MentionSuggestionsState();
+}
+
+class _MentionSuggestionsState extends State<MentionSuggestions> {
+  List<MentionCandidate> _found = const [];
+  var _asked = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _search();
+  }
+
+  @override
+  void didUpdateWidget(MentionSuggestions old) {
+    super.didUpdateWidget(old);
+    if (old.query != widget.query || old.source != widget.source) _search();
+  }
+
+  Future<void> _search() async {
+    final mine = ++_asked;
+    List<MentionCandidate> found;
+    try {
+      found = await widget.source.search(widget.query);
+    } on Object {
+      found = const [];
+    }
+    if (!mounted || mine != _asked) return;
+    setState(() => _found = found.take(MentionSuggestions.shown).toList());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_found.isEmpty) return const SizedBox.shrink();
+    final look = context.chatLook;
+    return Material(
+      color: look.composer,
+      borderRadius: BorderRadius.circular(look.radius / 2),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final candidate in _found)
+            ListTile(
+              key: ValueKey('mention ${candidate.label}'),
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              leading: Icon(candidate.folder ? Icons.folder_outlined : Icons.description_outlined, size: 18, color: look.muted),
+              title: Text(candidate.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontFamily: look.codeFont)),
+              subtitle: candidate.detail == null ? null : Text(candidate.detail!, maxLines: 1, overflow: TextOverflow.ellipsis),
+              onTap: () => widget.onPick(candidate),
             ),
         ],
       ),

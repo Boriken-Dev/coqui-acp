@@ -8,7 +8,7 @@ draw with. It builds for the web (JavaScript and WebAssembly) and for desktop. N
   ("Edited calc.js, ran a command +1 −1"), *Normal* also folds a finished turn into "Worked for 1m 29s". A tool call that failed or
   waits is never folded. The agent's plan is a live checklist at the end.
 - **Cards**: permission (the agent's own answers, plus slots for the app's), question (a form from the agent's schema), the prompt queue.
-- **Composer**: `/` commands, paste (an image, files, a long text as an attachment), attachment chips, a `+` menu, Send, Queue and Stop,
+- **Composer**: `/` commands and the host's own actions, `@` mentions, paste (an image, files, a long text as an attachment), attachment chips, a `+` menu, Send, Queue and Stop,
   and slots for what is the app's: a source or mode chooser, a header, items in the `+` menu.
 - **ChatLook**: semantic tokens (`bg`, `surface`, `raised`, `text`, `muted`, `accent`, `border`, `success`, `warning`, `danger`, sizes,
   `density`, `codeFont`) that default from the Material `ColorScheme`; an app's look is a preset.
