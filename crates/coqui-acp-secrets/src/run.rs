@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -201,78 +201,220 @@ fn take(capture: &Arc<Mutex<Capture>>) -> (Zeroizing<Vec<u8>>, bool) {
         })
 }
 
+/// A command that has been started, as far as [`ProcessRunner`] needs it: whether it has ended, and its end with everything it
+/// started.
+pub trait Process: Send {
+    /// How it stands: `None` while it runs, else its exit code (`None` for a signal's end).
+    ///
+    /// # Errors
+    /// The system could not say.
+    fn try_wait(&mut self) -> io::Result<Option<Option<i32>>>;
+
+    /// Ends what the command left running, once it has ended: the process group it led, which is still its own while the
+    /// command is not collected.
+    fn end_group_after_exit(&mut self);
+
+    /// Ends the command and everything it started, and collects it.
+    fn end(&mut self);
+}
+
+/// What a [`Starter`] gives back: the process and its two output pipes.
+pub struct Started {
+    /// The process.
+    pub process: Box<dyn Process>,
+    /// Its standard output.
+    pub stdout: Box<dyn Read + Send>,
+    /// Its standard error.
+    pub stderr: Box<dyn Read + Send>,
+}
+
+/// What to start: the whole of the command's environment is `env`, its standard input is closed, and it leads a process group.
+pub struct Launch {
+    /// The program, by full path.
+    pub program: std::path::PathBuf,
+    /// Its arguments.
+    pub args: Vec<std::ffi::OsString>,
+    /// The directory it starts in.
+    pub cwd: std::path::PathBuf,
+    /// Its whole environment, nothing else inherited. Holds the secret: not to be logged.
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+/// Starts what [`ProcessRunner`] runs, in place of this process's own child, once [`set_starter`] has named one: for a host that
+/// cannot wait on its own children, as one inside an application whose process handling collects every child that ends cannot.
+/// It starts the process in a group of its own with standard input closed and both outputs piped, and keeps it uncollected until
+/// [`Process::try_wait`] says it ended and [`Process::end`] or the end of the group has been done. Used on Unix only.
+pub trait Starter: Send + Sync {
+    /// Starts `launch`.
+    ///
+    /// # Errors
+    /// The process could not be started.
+    fn start(&self, launch: &Launch) -> io::Result<Started>;
+}
+
+static STARTER: Mutex<Option<Arc<dyn Starter>>> = Mutex::new(None);
+
+/// Has [`ProcessRunner`] start commands through `starter` from now on.
+pub fn set_starter(starter: Arc<dyn Starter>) {
+    *STARTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(starter);
+}
+
+impl fmt::Debug for Launch {
+    /// Without its environment, which holds the secret.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Launch")
+            .field("program", &self.program)
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A child of this process.
+struct Own(std::process::Child);
+
+impl Process for Own {
+    fn try_wait(&mut self) -> io::Result<Option<Option<i32>>> {
+        Ok(self.0.try_wait()?.map(|status| status.code()))
+    }
+
+    fn end_group_after_exit(&mut self) {
+        #[cfg(unix)]
+        end_group(&self.0);
+    }
+
+    fn end(&mut self) {
+        end_tree(&mut self.0);
+    }
+}
+
+/// The environment a command is given: the variables its spec lets through, its path, and its secret.
+fn environment(
+    spec: &CommandSpec<'_>,
+) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, Error> {
+    let mut env = Vec::new();
+    for name in spec.inherit_env {
+        if name.eq_ignore_ascii_case("PATH") {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(name) {
+            env.push((name.into(), value));
+        }
+    }
+    if let Some(path) = spec.path {
+        env.push(("PATH".into(), path.to_owned()));
+    }
+    // Windows would look in the current directory for a program before it looks on the path.
+    env.push(("NoDefaultCurrentDirectoryInExePath".into(), "1".into()));
+    if let Some((name, value)) = spec.secret {
+        let text = core::str::from_utf8(value)
+            .map_err(|_| Error::Command("the secret is not text a variable can hold"))?;
+        env.push((name.into(), text.into()));
+    }
+    Ok(env)
+}
+
+/// Starts the command as a child of this process.
+fn start_own(
+    spec: &CommandSpec<'_>,
+) -> Result<
+    (
+        std::process::Child,
+        Box<dyn Read + Send>,
+        Box<dyn Read + Send>,
+    ),
+    Error,
+> {
+    let mut command = Command::new(spec.program);
+    match spec.command {
+        CommandLine::Argv(args) => {
+            command.args(&args[1..]);
+        }
+        CommandLine::Shell(text) => shell_args(&mut command, text),
+    }
+    command
+        .current_dir(spec.cwd)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.envs(environment(spec)?);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
+        .spawn()
+        .map_err(|_| Error::Command("could not be started"))?;
+    drop(command);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(Error::Command("no output pipe"))?;
+    let stderr = child.stderr.take().ok_or(Error::Command("no error pipe"))?;
+    Ok((child, Box::new(stdout), Box::new(stderr)))
+}
+
 impl Runner for ProcessRunner {
     fn run(&self, spec: &CommandSpec<'_>) -> Result<CommandOutput, Error> {
-        let mut command = Command::new(spec.program);
-        match spec.command {
-            CommandLine::Argv(args) => {
-                command.args(&args[1..]);
-            }
-            CommandLine::Shell(text) => shell_args(&mut command, text),
-        }
-        command
-            .current_dir(spec.cwd)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for name in spec.inherit_env {
-            if name.eq_ignore_ascii_case("PATH") {
-                continue;
-            }
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        if let Some(path) = spec.path {
-            command.env("PATH", path);
-        }
-        // Windows would look in the current directory for a program before it looks on the path.
-        command.env("NoDefaultCurrentDirectoryInExePath", "1");
-        if let Some((name, value)) = spec.secret {
-            let text = core::str::from_utf8(value)
-                .map_err(|_| Error::Command("the secret is not text a variable can hold"))?;
-            command.env(name, text);
-        }
         #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command
-            .spawn()
-            .map_err(|_| Error::Command("could not be started"))?;
-        drop(command);
+        let named = STARTER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        #[cfg(not(unix))]
+        let named: Option<Arc<dyn Starter>> = None;
         #[cfg(windows)]
-        let job = contain(&child);
-        let (out, out_thread) = drain(
-            child
-                .stdout
-                .take()
-                .ok_or(Error::Command("no output pipe"))?,
-            spec.max_output,
-        );
-        let (err, err_thread) = drain(
-            child.stderr.take().ok_or(Error::Command("no error pipe"))?,
-            spec.max_output,
-        );
+        let mut job = None;
+        let Started {
+            mut process,
+            stdout,
+            stderr,
+        } = if let Some(starter) = named {
+            let args: Vec<std::ffi::OsString> = match spec.command {
+                CommandLine::Argv(args) => args[1..].iter().map(Into::into).collect(),
+                CommandLine::Shell(text) => vec!["-c".into(), text.into()],
+            };
+            starter
+                .start(&Launch {
+                    program: spec.program.to_path_buf(),
+                    args,
+                    cwd: spec.cwd.to_path_buf(),
+                    env: environment(spec)?,
+                })
+                .map_err(|_| Error::Command("could not be started"))?
+        } else {
+            let (child, stdout, stderr) = start_own(spec)?;
+            #[cfg(windows)]
+            {
+                job = contain(&child);
+            }
+            Started {
+                process: Box::new(Own(child)),
+                stdout,
+                stderr,
+            }
+        };
+        let (out, out_thread) = drain(stdout, spec.max_output);
+        let (err, err_thread) = drain(stderr, spec.max_output);
         let started = Instant::now();
         let mut timed_out = false;
         let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
+            match process.try_wait() {
+                Ok(Some(code)) => {
                     // The command is over; whatever it left running is ended, still with the secret in its environment.
-                    #[cfg(unix)]
-                    end_group(&child);
-                    break status.code();
+                    process.end_group_after_exit();
+                    break code;
                 }
                 Ok(None) if started.elapsed() >= spec.timeout => {
                     timed_out = true;
-                    end_tree(&mut child);
+                    process.end();
                     #[cfg(windows)]
-                    drop(job);
+                    drop(job.take());
                     break None;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(_) => {
-                    end_tree(&mut child);
+                    process.end();
                     return Err(Error::Command("could not be waited for"));
                 }
             }

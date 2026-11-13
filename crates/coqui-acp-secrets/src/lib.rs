@@ -19,7 +19,10 @@ mod tools;
 
 pub use error::Error;
 pub use host::{Action, Approval, Decision, Event, FOLDER_NOTICE, Frontend, Mode};
-pub use run::{CommandLine, CommandOutput, CommandSpec, ProcessRunner, Runner};
+pub use run::{
+    CommandLine, CommandOutput, CommandSpec, Launch, Process, ProcessRunner, Runner, Started,
+    Starter, set_starter,
+};
 pub use session::{Secrets, SecretsBuilder, SessionConfig};
 pub use settings::{NonDefault, Settings};
 pub use tools::{SessionTools, ToolDefinition, ToolResult};
