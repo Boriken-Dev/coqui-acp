@@ -530,6 +530,33 @@ String? describeToolInput(Object? raw, ChatLimits limits) {
       : boundedHead(lines.join('\n'), limits.describedInput);
 }
 
+/// The change an edit would make, for a card that shows it: the diff in [toolCall]'s content, else the old and new strings of an
+/// edit's input. Null when the request carries neither.
+ToolDiff? describeToolDiff(
+  Map<String, dynamic>? toolCall,
+  Object? rawInput,
+  ChatLimits limits,
+) {
+  final content = toolCall?['content'];
+  if (content is List) {
+    for (final item in content) {
+      if (item is Map && item['type'] == 'diff') {
+        if (_toolBlock(item, limits) case final ToolDiff diff) return diff;
+      }
+    }
+  }
+  if (rawInput is Map &&
+      rawInput['old_string'] is String &&
+      rawInput['new_string'] is String) {
+    return ToolDiff(
+      path: shortText(rawInput['file_path'] ?? rawInput['path'], limits) ?? '',
+      oldText: boundedHead(rawInput['old_string'] as String, limits.toolText),
+      newText: boundedHead(rawInput['new_string'] as String, limits.toolText),
+    );
+  }
+  return null;
+}
+
 int? _whole(Object? value) =>
     value is num &&
         value.isFinite &&

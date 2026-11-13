@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:coqui_acp/coqui_acp.dart';
 
 import 'connection.dart';
+import 'content.dart' show ToolDiff;
 import 'limits.dart';
 import 'link.dart';
 import 'session.dart';
@@ -44,6 +45,8 @@ final class SharedPermission {
     required this.title,
     this.kind,
     this.detail,
+    this.reason,
+    this.diff,
     this.options = const [],
     this.forPerson = false,
     this.bypassPassed = false,
@@ -55,7 +58,8 @@ final class SharedPermission {
   final int id;
   final String title;
   final String? kind;
-  final String? detail;
+  final String? detail, reason;
+  final ToolDiff? diff;
   final List<AcpPermissionOption> options;
   final bool forPerson, bypassPassed;
   final String? toolCallId;
@@ -66,6 +70,8 @@ final class SharedPermission {
     title: q.title,
     kind: q.kind,
     detail: q.detail,
+    reason: q.reason,
+    diff: q.diff,
     options: q.options,
     forPerson: q.forPerson,
     bypassPassed: q.bypassPassed,
@@ -78,6 +84,13 @@ final class SharedPermission {
     'title': title,
     'kind': ?kind,
     'detail': ?detail,
+    'reason': ?reason,
+    if (diff case final change?)
+      'diff': {
+        'path': change.path,
+        'oldText': ?change.oldText,
+        'newText': change.newText,
+      },
     'options': [
       for (final o in options)
         {'id': o.optionId, 'name': o.name, 'kind': o.kind},
@@ -95,6 +108,16 @@ final class SharedPermission {
       title: _string(m['title']) ?? 'A tool',
       kind: _string(m['kind']),
       detail: _string(m['detail']),
+      reason: _string(m['reason']),
+      diff: switch (m['diff']) {
+        final Map<dynamic, dynamic> change when change['newText'] is String =>
+          ToolDiff(
+            path: _string(change['path']) ?? '',
+            oldText: _string(change['oldText']),
+            newText: change['newText'] as String,
+          ),
+        _ => null,
+      },
       options: [
         for (final o in _list(m['options'] ?? const []))
           AcpPermissionOption(
@@ -984,6 +1007,8 @@ final class ChatSessionView {
         title: p.title,
         kind: p.kind,
         detail: p.detail,
+        reason: p.reason,
+        diff: p.diff,
         options: p.options,
         bypassPassed: p.bypassPassed,
         forPerson: p.forPerson,

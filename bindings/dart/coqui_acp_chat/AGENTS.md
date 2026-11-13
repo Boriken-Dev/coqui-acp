@@ -55,7 +55,8 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
   answer, takes its id from the acknowledgement or its echo, and a prompt that is refused leaves nothing behind (a v1 prompt the agent fails before it said anything too; one it echoed in v2 stays). Queued while a turn
   runs, another message is being handed over, or the conversation is being opened (sent after the kept mode is back; held if it did not open); throws `StateError` past `queued`. `steer(text)` goes first, even past `queued`, and with a turn running
   cancels the turn. `steerQueued`, `sendQueued([m])`, `editQueued`, `removeQueued([m])`, `cancel({from})`.
-- **Requests**: `PermissionQuestion` (`title`, `kind`, `detail`, `options` in the agent's order, `forPerson`, `toolCallId`,
+- **Requests**: `PermissionQuestion` (`title`, `kind`, `detail` what it would run or touch, `reason` why the agent says it needs it, `diff` the
+  change an edit would make as a `ToolDiff` (`describeToolDiff`), `options` in the agent's order, `forPerson`, `toolCallId`,
   `outcome`), `AgentQuestion`. `answerPermission(allow:, by:)`, `choosePermission(option, by:)`, `cancelPermission`,
   `settle(question, decision, by:)`, `answerQuestion`, `settleQuestion`: each returns whether **it** settled the request (the first
   answer wins; `outcome` is `Settled`: `how` answered/cancelled/withdrawn, `by`, `at`, `answer`). A request whose connection ended

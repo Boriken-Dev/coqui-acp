@@ -132,6 +132,8 @@ final class PermissionQuestion {
     this.title,
     this.kind, {
     this.detail,
+    this.reason,
+    this.diff,
     this.options = const [],
     this.bypassPassed = false,
     this.forPerson = false,
@@ -150,6 +152,12 @@ final class PermissionQuestion {
 
   /// What it would run or touch, when the agent said.
   final String? detail;
+
+  /// Why the agent says it needs this, when it said (v2's `description`).
+  final String? reason;
+
+  /// The change an edit would make, when the request carries one.
+  final ToolDiff? diff;
 
   /// The answers the agent offers, in its order.
   final List<AcpPermissionOption> options;
@@ -1212,10 +1220,9 @@ class ChatSession extends ChatNotifier {
       _nextRequest++,
       title,
       shortText(request.kind, limits),
-      detail: [
-        ?shortText(request.description, limits),
-        ?describeToolInput(request.rawInput, limits),
-      ].join('\n').trim(),
+      detail: describeToolInput(request.rawInput, limits)?.trim(),
+      reason: shortText(request.description, limits),
+      diff: describeToolDiff(request.toolCall, request.rawInput, limits),
       options: List.unmodifiable(request.options),
       bypassPassed: _bypass,
       forPerson: forPerson,

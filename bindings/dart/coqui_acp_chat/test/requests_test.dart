@@ -84,7 +84,7 @@ void main() {
     );
 
     test(
-      'what it would do shows with all of its input, and the agent\'s reason first',
+      'what it would do shows with all of its input, and the agent\'s reason apart from it',
       () {
         final (:store, :session, :agent) = started();
         store.askPermission(
@@ -103,9 +103,65 @@ void main() {
           ),
           agent,
         );
+        final waiting = session.pendingPermissions.single;
         expect(
-          session.pendingPermissions.single.detail,
-          'To list the files\nls -la\ncwd: /work/demo\ntimeout: 30\nenv: {"A":"1"}',
+          waiting.detail,
+          'ls -la\ncwd: /work/demo\ntimeout: 30\nenv: {"A":"1"}',
+        );
+        expect(waiting.reason, 'To list the files');
+        expect(waiting.diff, isNull);
+        store.dispose();
+      },
+    );
+
+    test(
+      'an edit carries its change: the tool call\'s diff, else the old and new strings of its input',
+      () {
+        final (:store, :session, :agent) = started();
+        store.askPermission(
+          AcpPermissionRequest(
+            sessionId: 's1',
+            toolCallId: 't1',
+            title: 'Edit a.txt',
+            kind: 'edit',
+            toolCall: {
+              'toolCallId': 't1',
+              'content': [
+                {
+                  'type': 'diff',
+                  'path': 'a.txt',
+                  'oldText': 'one',
+                  'newText': 'two',
+                },
+              ],
+            },
+            options: const [allowOnce],
+          ),
+          agent,
+        );
+        store.askPermission(
+          AcpPermissionRequest(
+            sessionId: 's1',
+            toolCallId: 't2',
+            title: 'Edit b.txt',
+            kind: 'edit',
+            rawInput: {
+              'file_path': 'b.txt',
+              'old_string': 'a - b',
+              'new_string': 'a + b',
+            },
+            options: const [allowOnce],
+          ),
+          agent,
+        );
+        final [first, second] = session.pendingPermissions;
+        expect(
+          (first.diff?.path, first.diff?.oldText, first.diff?.newText),
+          ('a.txt', 'one', 'two'),
+        );
+        expect(
+          (second.diff?.path, second.diff?.oldText, second.diff?.newText),
+          ('b.txt', 'a - b', 'a + b'),
         );
         store.dispose();
       },

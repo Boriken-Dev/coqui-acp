@@ -198,6 +198,34 @@ void main() {
     },
   );
 
+  test('a view is told the reason and the change a request carries', () async {
+    f = Fixture();
+    feed(f.session, state('running'));
+    f.store.askPermission(
+      AcpPermissionRequest(
+        sessionId: 's1',
+        toolCallId: 't1',
+        title: 'Edit a.txt',
+        kind: 'edit',
+        description: 'Path is outside the working directory',
+        rawInput: const {
+          'file_path': 'a.txt',
+          'old_string': 'a - b',
+          'new_string': 'a + b',
+        },
+        options: const [allowOnce],
+      ),
+      f.agent,
+    );
+    final popped = await f.open('win');
+    final seen = popped.session.pendingPermissions.single;
+    expect(seen.reason, 'Path is outside the working directory');
+    expect(
+      (seen.diff?.path, seen.diff?.oldText, seen.diff?.newText),
+      ('a.txt', 'a - b', 'a + b'),
+    );
+  });
+
   test(
     'an answer in a view settles the owner and the other view, who see who answered',
     () async {
