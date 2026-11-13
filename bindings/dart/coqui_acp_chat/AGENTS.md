@@ -79,7 +79,7 @@ Not exported by the main library, because the wire a session hub would carry the
 provisional: `ChatSessionHub` on `ChatSession` adds `replay() -> List<AcpSessionUpdate>` (messages with `sentBy` and times, tool
 calls, terminals, compactions, turns with their times and outcomes, plan, commands, options and the v1 mode, usage, title and
 whether the person named it), `applyReplay(updates)` (applies them as history, not news), and `settleElsewhere(question, by:,
-optionId:)` (`by` must be attached). Requests still waiting are not carried: read `pendingPermissions`. `chatClientMetaKey`.
+optionId:)` (`by` must be attached). Requests still waiting are not carried: read `pendingPermissions`. `chatClientMetaKey`, `chatAtMetaKey` (an update's time) and `chatNamesMetaKey`.
 
 **Views** (the same import): one conversation shown in another place, such as a window popped out of the one that holds it. One
 copy owns it and talks to the agent; each view shows a read-only copy that follows it and asks through it, so there is one model and

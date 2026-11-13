@@ -7,6 +7,13 @@ part of 'session.dart';
 /// The `_meta` key under which an update names the client a message was sent from.
 const String chatClientMetaKey = _clientMetaKey;
 
+/// The `_meta` key under which an update says when it happened, as an ISO 8601 time in UTC, which a conversation rebuilt from a
+/// replay believes.
+const String chatAtMetaKey = _atMetaKey;
+
+/// The `_meta` key of a `session_info_update` that says the person named the conversation (false: the agent may not rename it).
+const String chatNamesMetaKey = _namesMetaKey;
+
 /// Replay, and requests settled elsewhere. Experimental.
 extension ChatSessionHub on ChatSession {
   /// Records that [question] was settled by client [by], which must be attached, with the option [optionId], or cancelled when it

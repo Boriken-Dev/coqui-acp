@@ -5,5 +5,5 @@
 library;
 
 export 'src/link.dart';
-export 'src/session.dart' show ChatSessionHub, chatClientMetaKey;
+export 'src/session.dart' show ChatSessionHub, chatAtMetaKey, chatClientMetaKey, chatNamesMetaKey;
 export 'src/share.dart';
