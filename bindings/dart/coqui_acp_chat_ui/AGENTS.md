@@ -67,9 +67,10 @@ and `selection` (`SelectableTranscriptState.copyAll()`).
 ## Composer
 
 `Composer({controller, onSend, focusNode, enabled, working, starting, onStop, commands, centred, hint, header, attachments, pickFiles,
-pickFolder, clipboard, pasteAsFile, before, after, trailing, plusItems, onShiftTab})`: the field, `/` suggestions from the agent's
+pickFolder, clipboard, pasteAsFile, before, after, trailing, plusItems, onShiftTab, recall})`: the field, `/` suggestions from the agent's
 commands, paste, the attachment chips, the `+` menu, and Send (Queue and Stop while `working`, a spinner while `starting`).
-`ComposerState.onKey` handles Shift+Tab (`onShiftTab`) and Ctrl+V (⌘V) itself; `paste()` is public.
+`ComposerState.onKey` handles Shift+Tab (`onShiftTab`), Up in an empty message (`recall`: the last message sent, or null) and Ctrl+V (⌘V)
+itself, whatever `focusNode` it is given; `paste()` is public.
 
 - Slots: `header` above the message; `before` and `after` the `+` at the row's left; `trailing` beside Send; `plusItems` at the top of the
   `+` menu. A source picker, a mode or model chooser, an overlays control go there; `ComposerPill({label, icon, danger, status, enabled})` is
