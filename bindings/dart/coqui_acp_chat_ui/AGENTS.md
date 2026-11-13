@@ -64,6 +64,31 @@ and `selection` (`SelectableTranscriptState.copyAll()`).
 - `BypassBanner({onLeave})`, `UsageFooter({text})`, `PlanPanel({entries})` (the plan folded to a line, for an app that keeps it above
   the composer).
 
+## Secret prompts
+
+The two cards of the secret-prompt extension (`docs/secrets.md` of coqui-acp, `package:coqui_acp/secret.dart`): a form for values some of which
+the model must never see, and a display of values the person chose to look at. The app supplies the identity; the cards do the sealing.
+
+- `SecretCardEnvironment({prover, verifier, expected, host, now})`: `prover` is this frontend's `AcpSecretProver` (its key stays wherever the app
+  keeps it: the library takes functions), `verifier` an `AcpSecretVerifier` whose `own` is that identity and that knows the host, `expected` the
+  host's `AcpIdentityId` (a request from any other identity is refused though the verifier knows it), `host` what the app calls itself, `now` a
+  clock in Unix seconds for tests.
+- `SecretRequestCard({request: AcpSecretRequestParams, environment, onReply, agent, more})`: checks the receiver's key binding and the digest of
+  what is asked before it draws anything (a request that fails shows no fields and offers only Cancel); then one row per question in Settings'
+  grammar (title, words, control): text, number, choice, choices, switch. A secret field (the schema's `writeOnly` or `x-sensitive`, never its
+  `format` or name) is masked as typed, cannot be selected, has no context menu, no suggestions and no autofill. Send sealed seals each secret value to
+  the host's per-request key, binds the whole answer, clears the fields and calls `onReply(AcpSecretAccepted)` once; Decline and Cancel call it with
+  `AcpSecretDeclined` and `AcpSecretCancelled`. **`onReply` is the card's only output**: the app sends that to the host, and nothing else carries a
+  value. A new `request` object starts a new form; typed text is wiped when the card leaves.
+- `SecretShowCard({open: AcpSecretShowOpen, environment, deliver: ValueListenable<AcpSecretShowDeliver?>, onReady, onDone, agent, more, copy})`: asks
+  first (Show, Decline, Cancel; nothing is opened before the person says so). Show makes the per-request key bound to this identity and calls
+  `onReady(AcpSecretShowOpened.ready(...))`; when the host's second step reaches `deliver` the card refuses it unless its session and request id are
+  this card's, opens it (the sender must be `expected`) and draws each value masked, with Show/Hide and Copy per secret field. Copy writes the clipboard
+  only when pressed (`copy` replaces the system's for a test). `onDone(true)` on Done, `onDone(false)` on Cancel or a refusal; leaving the card
+  overwrites the opened values and the private key.
+- `SecretRequestEntry` and `SecretShowEntry` are `ChatEntryData` (role notice; `text` is the message, never a value), and
+  `secretRenderers(environment)` is the `ChatRenderers` that draws them as the cards, merged like any other: `mine.merge(secretRenderers(env))`.
+
 ## Composer
 
 `Composer({controller, onSend, focusNode, enabled, working, starting, onStop, commands, centred, hint, header, attachments, pickFiles,
