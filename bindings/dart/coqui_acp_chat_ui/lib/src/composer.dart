@@ -86,10 +86,13 @@ abstract interface class ComposerAttachments {
 
 /// A compact control in the row under the message.
 class ComposerPill extends StatelessWidget {
-  const ComposerPill({super.key, required this.label, this.icon, this.danger = false, this.status = false, this.enabled = true, this.maxWidth = 180});
+  const ComposerPill({super.key, required this.label, this.icon, this.leading, this.danger = false, this.status = false, this.enabled = true, this.maxWidth = 180});
 
   final String label;
   final IconData? icon;
+
+  /// A widget drawn where [icon] would be, in the same size and colour: an app's own mark for a source or an agent.
+  final Widget? leading;
 
   /// [danger] is for what is wrong; [status] for what is on, never the colour of an error.
   final bool danger, status, enabled;
@@ -105,6 +108,10 @@ class ComposerPill extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         if (icon != null) ...[Icon(icon, size: 16, color: color ?? look.muted), const SizedBox(width: 4)],
+        if (leading != null) ...[
+          IconTheme(data: IconThemeData(size: 16, color: color ?? look.muted), child: leading!),
+          const SizedBox(width: 4),
+        ],
         Flexible(
           child: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: maxWidth),

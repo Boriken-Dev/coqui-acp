@@ -73,8 +73,8 @@ commands, paste, the attachment chips, the `+` menu, and Send (Queue and Stop wh
 itself, whatever `focusNode` it is given; `paste()` is public.
 
 - Slots: `header` above the message; `before` and `after` the `+` at the row's left; `trailing` beside Send; `plusItems` at the top of the
-  `+` menu. A source picker, a mode or model chooser, an overlays control go there; `ComposerPill({label, icon, danger, status, enabled})` is
-  the control's look. A source mark the app draws (its own icon widget) is part of the app's widget in a slot.
+  `+` menu. A source picker, a mode or model chooser, an overlays control go there; `ComposerPill({label, icon, leading, danger, status, enabled})` is
+  the control's look; `leading` takes the app's own mark (a source's or an agent's logo) where the icon would go, drawn at the pill's size and colour.
 - `ComposerAttachments` (the app implements it): `canAttach`, `chips: List<ComposerChip>`, `addFiles(List<PickedFile>)`,
   `addPaths`, `addImage`, `addText`, `addFolder`, `remove(key)`; each `add` answers problems to tell the person. The package adds the
   "Add files or images…", "Add a folder reference…" and "Paste from clipboard" entries when it is given one, using `pickFiles` and

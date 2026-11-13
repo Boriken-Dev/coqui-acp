@@ -309,6 +309,12 @@ void main() {
     });
   });
 
+  testWidgets('a pill draws a mark of the host where an icon would go, in its size and colour', (tester) async {
+    await tester.pumpWidget(host(ComposerPill(label: 'Claude', leading: Builder(builder: (context) => Icon(Icons.star, size: IconTheme.of(context).size)))));
+    expect(find.text('Claude'), findsOneWidget);
+    expect(tester.widget<Icon>(find.byIcon(Icons.star)).size, 16);
+  });
+
   group('usage', () {
     const report = UsageReport(
       supported: true,
