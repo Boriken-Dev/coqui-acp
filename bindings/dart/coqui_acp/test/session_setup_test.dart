@@ -214,6 +214,66 @@ void main() {
   );
 
   test(
+    'a folder on a share is absolute, a device path and a bare server are not',
+    () async {
+      final agent = Agent(claudeV1);
+      final client = await agent.connected(maxVersion: 1);
+      for (final folder in [
+        r'\\server\share\work',
+        r'\\server\share',
+        '//server/share/work',
+        r'\\server\\share\work',
+      ]) {
+        await client.openSession(
+          cwd: folder,
+          setup: AcpSessionSetup(additionalDirectories: [folder]),
+        );
+        expect(agent.last('session/new')['params']['cwd'], folder);
+        expect(agent.last('session/new')['params']['additionalDirectories'], [
+          folder,
+        ]);
+      }
+      for (final folder in [
+        r'\\.\pipe\x',
+        r'\\?\Volume{1}\x',
+        r'\\?\UNC\server\share',
+        '//./pipe/x',
+        r'\\server',
+        r'\\server\',
+        r'\\\share\x',
+        r'\work',
+        'relative',
+      ]) {
+        expect(
+          () => client.openSession(cwd: folder),
+          throwsArgumentError,
+          reason: folder,
+        );
+        expect(
+          () => client.openSession(
+            cwd: '/w',
+            setup: AcpSessionSetup(additionalDirectories: [folder]),
+          ),
+          throwsArgumentError,
+          reason: folder,
+        );
+      }
+      // A program on a share is not a folder the person chose: an MCP command stays an ordinary absolute path.
+      expect(
+        () => client.openSession(
+          cwd: '/w',
+          setup: const AcpSessionSetup(
+            mcpServers: [
+              AcpMcpStdio(name: 'x', command: r'\\server\share\tool.exe'),
+            ],
+          ),
+        ),
+        throwsArgumentError,
+      );
+    },
+  );
+
+  test(
     'a relative command or directory, or two servers of one name, are refused',
     () async {
       final agent = Agent(claudeV1);

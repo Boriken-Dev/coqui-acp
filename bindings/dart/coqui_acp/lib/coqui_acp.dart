@@ -1148,7 +1148,7 @@ final class AcpClient {
       throw const AcpFailure('This agent does not take more directories');
     }
     for (final directory in setup.additionalDirectories) {
-      _checkAbsolute(directory, 'additionalDirectories');
+      _checkFolder(directory, 'additionalDirectories');
     }
     return {
       'mcpServers': servers,
@@ -1278,7 +1278,22 @@ final class AcpClient {
     }
   }
 
-  void _checkCwd(String cwd) => _checkAbsolute(cwd, 'cwd');
+  void _checkCwd(String cwd) => _checkFolder(cwd, 'cwd');
+
+  /// A folder the person chose: absolute as [_checkAbsolute] says, or on a share (`\\server\share\work`, or with `/`). A device
+  /// path (`\\.\pipe\x`, `\\?\Volume{...}`) and a server with no share are not folders.
+  void _checkFolder(String path, String name) {
+    if (RegExp(r'^[\\/]{2}').hasMatch(path)) {
+      final server = RegExp(
+        r'^[\\/]{2}([^\\/]+)[\\/]+[^\\/]+',
+      ).firstMatch(path)?.group(1);
+      if (server == null || server == '.' || server == '?') {
+        throw ArgumentError.value(path, name, 'Must be an absolute path');
+      }
+      return;
+    }
+    _checkAbsolute(path, name);
+  }
 
   void _checkAbsolute(String path, String name) {
     if (!(path.startsWith('/') || RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(path))) {
