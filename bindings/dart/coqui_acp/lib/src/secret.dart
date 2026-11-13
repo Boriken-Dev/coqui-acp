@@ -34,6 +34,10 @@ const acpBindingEcdsa = 'ecdsa-p256-sha256';
 /// The binding method for an X25519 identity: HMAC-SHA-256 under a key derived from the two static keys' Diffie-Hellman.
 const acpBindingDh = 'x25519-hmac-sha256';
 
+/// The binding method for the in-process link only: HMAC-SHA-256 under a key derived from the link's own secret. The secret never
+/// travels, so only the two ends of that link can make one. It is never offered on a link that has a relay.
+const acpBindingLink = 'link-hmac-sha256';
+
 /// How long a receiver's binding lasts by default: well under the 5 minutes a collector accepts, so it still verifies at a peer whose
 /// clock is behind by the default skew.
 const acpSecretDefaultLifetime = Duration(seconds: 240);
@@ -861,10 +865,10 @@ final class AcpSecretBinding {
     required this.proof,
   });
 
-  /// [acpBindingEcdsa] or [acpBindingDh].
+  /// [acpBindingEcdsa], [acpBindingDh] or [acpBindingLink].
   final String method;
 
-  /// The holder's `SubjectPublicKeyInfo`.
+  /// The holder's `SubjectPublicKeyInfo` (for [acpBindingLink], its role's 32-byte tag).
   final Uint8List key;
 
   /// When it ends, in Unix seconds.
@@ -1137,6 +1141,10 @@ final _p256SpkiPrefix = _unhex(
 );
 final _x25519SpkiPrefix = _unhex('302a300506032b656e032100');
 final _dhLabel = ascii.encode('dev.boriken.coqui.acp/secret/v1 dh');
+final _linkMacLabel = ascii.encode('dev.boriken.coqui.acp/secret/v1 link mac');
+final _linkRoleLabel = ascii.encode(
+  'dev.boriken.coqui.acp/secret/v1 link role',
+);
 
 Uint8List _bigBytes(BigInt value) {
   final out = Uint8List(32);
@@ -1198,6 +1206,52 @@ Future<Uint8List> _dhMacKey(
   return key;
 }
 
+/// Which end of the in-process link a party is: the host that runs the agent, or the application in the same process.
+enum AcpLinkRole {
+  host,
+  app;
+
+  AcpLinkRole get other => this == host ? app : host;
+}
+
+/// What the two ends of the in-process link derive from the secret they share: the MAC key and each role's public tag, which names the
+/// role as an identity (the SHA-256 of the 32-byte tag). The tags and the key come from one HKDF-SHA-256 extraction under different
+/// labels, so a tag shows nothing of the key. The secret is minted by the host, held in memory, and sent over no wire and to no agent;
+/// this library only derives from it and does not keep it.
+final class AcpLinkKey {
+  AcpLinkKey._(this._mac, this._host, this._app);
+
+  /// Derives the link's keys from its [secret], at least 16 bytes.
+  static Future<AcpLinkKey> derive(List<int> secret) async {
+    if (secret.length < 16) {
+      throw _fail(AcpSecretFailure.key, 'a link secret is at least 16 bytes');
+    }
+    final prk = await hpke.hmacSha256(Uint8List(32), secret);
+    final key = AcpLinkKey._(
+      await hpke.expandOne(prk, _linkMacLabel, 32),
+      await hpke.expandOne(prk, [
+        ..._linkRoleLabel,
+        ...ascii.encode('host'),
+      ], 32),
+      await hpke.expandOne(prk, [
+        ..._linkRoleLabel,
+        ...ascii.encode('app'),
+      ], 32),
+    );
+    prk.fillRange(0, prk.length, 0);
+    return key;
+  }
+
+  final Uint8List _mac;
+  final Uint8List _host;
+  final Uint8List _app;
+
+  Uint8List _tag(AcpLinkRole role) => role == AcpLinkRole.host ? _host : _app;
+
+  /// The identity of a role on this link, which a verifier for that role is built for.
+  AcpIdentityId identity(AcpLinkRole role) => AcpIdentityId.of(_tag(role));
+}
+
 /// Signs a message with an identity's P-256 key: the 64-byte IEEE P1363 signature (ECDSA, SHA-256), deterministic or randomized, with
 /// `s` high or low. The key can stay in a platform key store or in WebCrypto.
 typedef AcpSecretSigner = Future<Uint8List> Function(Uint8List message);
@@ -1216,7 +1270,8 @@ final class AcpSecretProver {
        _sign = sign,
        _agree = null,
        _collector = null,
-       _audience = null {
+       _audience = null,
+       _link = null {
     _p256PointOfSpki(spki);
   }
 
@@ -1229,9 +1284,19 @@ final class AcpSecretProver {
        _sign = null,
        _agree = agree,
        _collector = _x25519OfSpki(collectorSpki),
-       _audience = AcpIdentityId.of(collectorSpki) {
+       _audience = AcpIdentityId.of(collectorSpki),
+       _link = null {
     _x25519OfSpki(spki);
   }
+
+  /// The [role] end of the in-process link whose secret [link] was derived from, binding for the other end only.
+  AcpSecretProver.linked(AcpLinkKey link, AcpLinkRole role)
+    : spki = Uint8List.fromList(link._tag(role)),
+      _sign = null,
+      _agree = null,
+      _collector = null,
+      _audience = link.identity(role.other),
+      _link = link._mac;
 
   /// The identity's public key as `SubjectPublicKeyInfo`.
   final Uint8List spki;
@@ -1239,6 +1304,7 @@ final class AcpSecretProver {
   final AcpSecretAgreement? _agree;
   final Uint8List? _collector;
   final AcpIdentityId? _audience;
+  final Uint8List? _link;
 
   /// The identity's id.
   AcpIdentityId get id => AcpIdentityId.of(spki);
@@ -1263,6 +1329,16 @@ final class AcpSecretProver {
       expires,
       audience,
     );
+    if (_link != null) {
+      if (audience != _audience) throw _fail(AcpSecretFailure.wrongAudience);
+      return AcpSecretBinding(
+        method: acpBindingLink,
+        key: spki,
+        expires: expires,
+        audience: audience,
+        proof: await hpke.hmacSha256(_link, statement),
+      );
+    }
     if (_sign != null) {
       final signature = await _sign(statement);
       if (signature.length != 64) {
@@ -1297,22 +1373,46 @@ final class AcpSecretProver {
   }
 }
 
-/// The collector's side: the identities it knows by pairing or pinning, its own id, and its key agreement when it takes
-/// [acpBindingDh].
+/// The collector's side: the identities it knows by pairing or pinning, its own id, its key agreement when it takes [acpBindingDh], and
+/// the link's key when it is an end of the in-process link and takes [acpBindingLink].
 final class AcpSecretVerifier {
   /// A verifier that is [own], knows [known], and accepts a binding only if it was made for [own]. [agreementSpki] and [agree] are
-  /// its own X25519 identity, which must be [own]; without them [acpBindingDh] is refused.
+  /// its own X25519 identity, which must be [own]; without them [acpBindingDh] is refused. [link] and [linkRole] make it the
+  /// [linkRole] end of the in-process link, which knows the other end and takes [acpBindingLink] from it; give them only on the
+  /// in-process link: a link with a relay never takes the method.
   AcpSecretVerifier({
     required this.own,
     Iterable<AcpIdentityId> known = const [],
     List<int>? agreementSpki,
     AcpSecretAgreement? agree,
+    AcpLinkKey? link,
+    AcpLinkRole? linkRole,
     this.maxLifetime = const Duration(minutes: 5),
     this.skew = const Duration(seconds: 30),
     this.limits = const AcpSecretLimits(),
-  }) : _known = {for (final id in known) id.toString()},
+  }) : _known = {
+         for (final id in known) id.toString(),
+         if (link != null && linkRole != null)
+           link.identity(linkRole.other).toString(),
+       },
        _agree = agree,
+       _linkMac = link?._mac,
+       _linkPeer = link == null || linkRole == null
+           ? null
+           : Uint8List.fromList(link._tag(linkRole.other)),
        _public = agreementSpki == null ? null : _x25519OfSpki(agreementSpki) {
+    if ((link == null) != (linkRole == null)) {
+      throw _fail(
+        AcpSecretFailure.key,
+        'a link needs both its key and its role',
+      );
+    }
+    if (link != null && link.identity(linkRole!) != own) {
+      throw _fail(
+        AcpSecretFailure.key,
+        "the link is not this verifier's identity",
+      );
+    }
     if ((agreementSpki == null) != (agree == null)) {
       throw _fail(
         AcpSecretFailure.key,
@@ -1332,6 +1432,8 @@ final class AcpSecretVerifier {
   final Set<String> _known;
   final AcpSecretAgreement? _agree;
   final Uint8List? _public;
+  final Uint8List? _linkMac;
+  final Uint8List? _linkPeer;
 
   /// The longest a binding may last from now.
   final Duration maxLifetime;
@@ -1362,14 +1464,20 @@ final class AcpSecretVerifier {
   ) async {
     final ecdsa = switch (binding.method) {
       acpBindingEcdsa => true,
-      acpBindingDh => false,
+      acpBindingDh || acpBindingLink => false,
       _ => throw _fail(
         AcpSecretFailure.unsupported,
         'a binding method this side does not have',
       ),
     };
     final point = ecdsa ? _p256PointOfSpki(binding.key) : null;
-    if (!ecdsa) _x25519OfSpki(binding.key);
+    if (binding.method == acpBindingLink) {
+      if (binding.key.length != 32) {
+        throw _fail(AcpSecretFailure.key, 'a link tag is 32 bytes');
+      }
+    } else if (!ecdsa) {
+      _x25519OfSpki(binding.key);
+    }
     final holder = AcpIdentityId.of(binding.key);
     if (!_known.contains(holder.toString())) {
       throw _fail(AcpSecretFailure.unknownIdentity);
@@ -1399,6 +1507,20 @@ final class AcpSecretVerifier {
       final verifier = pc.ECDSASigner(pc.SHA256Digest())
         ..init(false, pc.PublicKeyParameter(pc.ECPublicKey(point!, _p256)));
       if (!verifier.verifySignature(signed, pc.ECSignature(r, s))) {
+        throw _fail(AcpSecretFailure.badProof);
+      }
+    } else if (binding.method == acpBindingLink) {
+      if (_linkMac == null) {
+        throw _fail(
+          AcpSecretFailure.unsupported,
+          'this collector is not an end of the in-process link',
+        );
+      }
+      if (!_sameBytes(binding.key, _linkPeer!)) {
+        throw _fail(AcpSecretFailure.unknownIdentity);
+      }
+      final tag = await hpke.hmacSha256(_linkMac, signed);
+      if (!_sameBytes(tag, binding.proof)) {
         throw _fail(AcpSecretFailure.badProof);
       }
     } else {

@@ -7,6 +7,8 @@ library;
 export 'src/secret.dart'
     show
         AcpIdentityId,
+        AcpLinkKey,
+        AcpLinkRole,
         AcpOpened,
         AcpSealed,
         AcpSecretAccepted,
@@ -36,6 +38,7 @@ export 'src/secret.dart'
         AcpSecretsCapability,
         acpBindingDh,
         acpBindingEcdsa,
+        acpBindingLink,
         acpSecretDefaultLifetime,
         acpSecretRequestMethod,
         acpSecretShowDeliverMethod,

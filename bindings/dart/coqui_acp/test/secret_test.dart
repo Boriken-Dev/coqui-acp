@@ -60,6 +60,13 @@ Future<(AcpSecretProver, AcpSecretProver)> proversOf(
   if (base['kind'] == 'ecdsa') {
     return (ecdsaP256Prover(receiver), ecdsaP256Prover(sender));
   }
+  if (base['kind'] == 'link') {
+    final link = await AcpLinkKey.derive(receiver);
+    return (
+      AcpSecretProver.linked(link, AcpLinkRole.host),
+      AcpSecretProver.linked(link, AcpLinkRole.app),
+    );
+  }
   return (
     await x25519Prover(receiver, await x25519Spki(sender)),
     await x25519Prover(sender, await x25519Spki(receiver)),
@@ -74,7 +81,23 @@ Future<AcpSecretVerifier> verifierOf(
   bool noAgreement = false,
   int? maxLifetime,
   int? skew,
+  String? otherSecret,
+  bool receiver = false,
 }) async {
+  if (kind == 'link') {
+    final link = await AcpLinkKey.derive(unhex(otherSecret ?? private));
+    final role = receiver ? AcpLinkRole.host : AcpLinkRole.app;
+    final peer = link.identity(role.other);
+    final linked = trusts != null && own == null && !noAgreement;
+    return AcpSecretVerifier(
+      own: own ?? link.identity(role),
+      known: [if (trusts != null && !linked) peer],
+      link: linked ? link : null,
+      linkRole: linked ? role : null,
+      maxLifetime: Duration(seconds: maxLifetime ?? 300),
+      skew: Duration(seconds: skew ?? 30),
+    );
+  }
   final secret = unhex(private);
   final spki = kind == 'ecdsa'
       ? ecdsaP256Spki(secret)
@@ -117,6 +140,7 @@ Future<AcpIdentityId> verifyCase(
     noAgreement: change['no_agreement'] == true,
     maxLifetime: change['max_lifetime'] as int?,
     skew: change['skew'] as int?,
+    otherSecret: change['other_secret'] as String?,
   );
   var recipient = AcpSecretRecipient.fromJson(base['recipient']);
   var key = recipient.key;
@@ -183,6 +207,8 @@ Future<void> openCase(
     kind,
     base['receiver_private'] as String,
     trusts: change['trusted'] == false ? null : idS,
+    otherSecret: change['other_secret'] as String?,
+    receiver: true,
   );
   final sealed = <String, AcpSealed>{
     for (final field in base['fields'] as List)
@@ -365,6 +391,11 @@ void main() {
       final (proverR, proverS) = await proversOf(base);
       expect(proverR.id.toString(), base['receiver_id']);
       expect(proverS.id.toString(), base['sender_id']);
+      final link = base['link'] as Map<String, dynamic>?;
+      if (link != null) {
+        expect(hex(proverR.spki), link['host_tag'], reason: name);
+        expect(hex(proverS.spki), link['app_tag'], reason: name);
+      }
       final receiver = await hooks.secretReceiverFromIkm(
         method,
         context,
@@ -717,6 +748,131 @@ void main() {
         await expectRefusal(() => collector.seal('k', 'x'), 'seal');
       },
     );
+  });
+
+  group('the in-process link', () {
+    final secret = unhex(
+      'a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00',
+    );
+
+    test('a short secret is refused and each end is its own role', () async {
+      await expectRefusal(() => AcpLinkKey.derive(Uint8List(15)), 'key');
+      final link = await AcpLinkKey.derive(secret);
+      expect(
+        link.identity(AcpLinkRole.host),
+        isNot(link.identity(AcpLinkRole.app)),
+      );
+      expect(
+        () => AcpSecretVerifier(
+          own: link.identity(AcpLinkRole.host),
+          link: link,
+          linkRole: AcpLinkRole.app,
+        ),
+        throwsA(isA<AcpSecretException>()),
+      );
+    });
+
+    test('a request end to end, sealed and opened by the host', () async {
+      final link = await AcpLinkKey.derive(secret);
+      final host = AcpSecretProver.linked(link, AcpLinkRole.host);
+      final app = AcpSecretProver.linked(link, AcpLinkRole.app);
+      final context = AcpSecretContext(
+        sessionId: 's1',
+        requestId: 'r1',
+        message: 'login',
+        schema: jsonEncode({
+          'type': 'object',
+          'properties': {
+            'password': {'type': 'string', 'writeOnly': true},
+          },
+          'required': ['password'],
+        }),
+      );
+      final receiver = await AcpSecretReceiver.create(
+        AcpSecretMethod.request,
+        context,
+        host,
+        app.id,
+        now,
+      );
+      final collector =
+          await AcpSecretVerifier(
+            own: app.id,
+            link: link,
+            linkRole: AcpLinkRole.app,
+          ).collector(
+            host.id,
+            AcpSecretMethod.request,
+            context,
+            receiver.recipient,
+            now,
+          );
+      final sealed = {'password': await collector.seal('password', 'hunter2')};
+      final auth = await collector.authenticate(app, '{}', sealed, now);
+      final opened = await receiver.openValues(
+        AcpSecretVerifier(own: host.id, link: link, linkRole: AcpLinkRole.host),
+        app.id,
+        '{}',
+        sealed,
+        auth,
+        now,
+      );
+      expect(utf8.decode(opened.secrets['password']!.bytes), 'hunter2');
+    });
+
+    test('a binding under another link is refused at either end', () async {
+      final link = await AcpLinkKey.derive(secret);
+      final other = await AcpLinkKey.derive(Uint8List(32)..[0] = 9);
+      final host = AcpSecretProver.linked(link, AcpLinkRole.host);
+      final context = AcpSecretContext(
+        sessionId: 's1',
+        requestId: 'r1',
+        message: 'login',
+        schema: jsonEncode({
+          'type': 'object',
+          'properties': {
+            'password': {'type': 'string', 'writeOnly': true},
+          },
+        }),
+      );
+      final receiver = await AcpSecretReceiver.create(
+        AcpSecretMethod.request,
+        context,
+        host,
+        link.identity(AcpLinkRole.app),
+        now,
+      );
+      await expectRefusal(
+        () =>
+            AcpSecretVerifier(
+              own: other.identity(AcpLinkRole.app),
+              link: other,
+              linkRole: AcpLinkRole.app,
+            ).collector(
+              host.id,
+              AcpSecretMethod.request,
+              context,
+              receiver.recipient,
+              now,
+            ),
+        'unknown_identity',
+      );
+      // A verifier that knows the host by its id but holds no link takes no link binding.
+      await expectRefusal(
+        () =>
+            AcpSecretVerifier(
+              own: link.identity(AcpLinkRole.app),
+              known: [host.id],
+            ).collector(
+              host.id,
+              AcpSecretMethod.request,
+              context,
+              receiver.recipient,
+              now,
+            ),
+        'unsupported',
+      );
+    });
   });
 
   test('a request end to end, and the receiver opens once', () async {
