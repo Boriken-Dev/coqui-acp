@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod account;
+pub mod batch;
 #[cfg(feature = "contract")]
 #[cfg_attr(docsrs, doc(cfg(feature = "contract")))]
 pub mod contract;

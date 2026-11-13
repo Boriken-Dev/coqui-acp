@@ -201,8 +201,15 @@ impl Program {
                 "this spawner keeps standard error apart",
             ));
         }
-        let mut command = Command::new(&spec.program);
-        command.args(&spec.args);
+        let args: alloc::vec::Vec<std::ffi::OsString> =
+            spec.args.iter().map(std::ffi::OsString::from).collect();
+        let (program, args) = match &spec.cwd {
+            Some(cwd) => crate::batch::start_in(spec.program.as_ref(), &args, Path::new(cwd))
+                .map_err(|error| refuse(Status::GUATIAO_ERR_UNSUPPORTED, &error.to_string()))?,
+            None => (std::ffi::OsString::from(&spec.program), args),
+        };
+        let mut command = Command::new(program);
+        command.args(args);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
