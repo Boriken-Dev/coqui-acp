@@ -64,8 +64,11 @@ void main() {
       PermissionCard(
         agent: 'Claude',
         title: 'Edit src/calc.js',
+        reason: 'Path is outside allowed working directories',
         detail: 'return a + b;',
+        answerHints: const {'reject_once': 'Ctrl+Shift+R', 'allow_once': 'Ctrl+Shift+A'},
         options: const [
+          AcpPermissionOption(optionId: 'a', name: 'Always allow', kind: 'allow_always'),
           AcpPermissionOption(optionId: 'y', name: 'Yes', kind: 'allow_once'),
           AcpPermissionOption(optionId: 'n', name: 'No', kind: 'reject_once'),
         ],
@@ -81,6 +84,32 @@ void main() {
     ])));
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/cards.png'));
   });
+
+  for (final (label, size) in [('phone', const Size(390, 844)), ('desktop', const Size(900, 640))]) {
+    testWidgets('a permission card for an edit, at $label width', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: theme(),
+        home: Scaffold(body: Align(alignment: Alignment.bottomCenter, child: PermissionCard(
+          agent: 'Claude',
+          title: 'Edit src/calc.js',
+          reason: 'Path is outside allowed working directories',
+          diff: const ToolDiff(path: 'src/calc.js', oldText: 'export function addNumbers(a, b) {\n  return a - b;\n}', newText: 'export function addNumbers(a, b) {\n  return a + b;\n}'),
+          answerHints: const {'reject_once': 'Ctrl+Shift+R', 'allow_once': 'Ctrl+Shift+A'},
+          options: const [
+            AcpPermissionOption(optionId: 'a', name: 'Always allow', kind: 'allow_always'),
+            AcpPermissionOption(optionId: 'y', name: 'Allow once', kind: 'allow_once'),
+            AcpPermissionOption(optionId: 'n', name: 'No', kind: 'reject_once'),
+          ],
+          onChoose: (_) {},
+        ))),
+      ));
+      await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/permission_card_$label.png'));
+    });
+  }
 
   testWidgets('the composer with slots, chips and suggestions', (tester) async {
     await _size(tester);

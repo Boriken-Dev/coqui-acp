@@ -4,7 +4,7 @@
 /// See the package's `AGENTS.md` for the whole API.
 library;
 
-export 'src/cards.dart' show BypassBanner, PermissionCard, PermissionChoice, QuestionCard, QueuedLine, QueuePanel, UsageFooter, maxQuestionText, shortLine;
+export 'src/cards.dart' show BypassBanner, PermissionCard, QuestionCard, QueuedLine, QueuePanel, UsageFooter, maxQuestionText, shortLine;
 export 'src/changes.dart' show ChangeLine, ChangesPane, FileChange, changesOf;
 export 'src/composer.dart';
 export 'src/content.dart' show AgentMarkdown, CompactionView, CopyButton, MessageBox, Thought, TranscriptEntry, conversationText, plainMarkdown;

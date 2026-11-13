@@ -18,16 +18,144 @@ void main() {
       option('always', 'allow_always', 'Yes, and do not ask again'),
       option('no', 'reject_once', 'No'),
     ];
+    const diff = ToolDiff(path: 'src/calc.js', oldText: 'return a - b;', newText: 'return a + b;');
 
-    testWidgets('lists the agent\'s answers refusals first, once before always, and answers with the one pressed', (tester) async {
+    Future<void> openMenu(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('permission-more')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+
+    testWidgets('a chip says it needs the person, above a question made from the tool\'s title', (tester) async {
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit calc.js', options: options, onChoose: (_) {})));
+      expect(find.descendant(of: find.byKey(const Key('needs-input')), matching: find.text('Needs your input')), findsOneWidget);
+      final question = find.text('Allow Claude to edit calc.js?');
+      expect(question, findsOneWidget);
+      expect(tester.getTopLeft(find.byKey(const Key('needs-input'))).dy, lessThan(tester.getTopLeft(question).dy));
+    });
+
+    testWidgets('a title that is not a request is the tool\'s name', (tester) async {
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Bash', options: options, onChoose: (_) {})));
+      expect(find.text('Allow Claude to use Bash?'), findsOneWidget);
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: '', options: options, onChoose: (_) {})));
+      expect(find.text('Allow Claude to use a tool?'), findsOneWidget);
+    });
+
+    testWidgets('the agent\'s reason is the line under the question, and without one there is no line', (tester) async {
+      await tester.pumpWidget(host(PermissionCard(
+        agent: 'Claude',
+        title: 'Edit calc.js',
+        reason: 'Path is outside allowed working directories',
+        options: options,
+        onChoose: (_) {},
+      )));
+      final reason = find.text('Path is outside allowed working directories');
+      expect(tester.getTopLeft(reason).dy, greaterThan(tester.getBottomLeft(find.text('Allow Claude to edit calc.js?')).dy - 1));
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit calc.js', options: options, onChoose: (_) {})));
+      expect(reason, findsNothing);
+    });
+
+    testWidgets('an edit shows its diff inline, across the card\'s width', (tester) async {
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit calc.js', diff: diff, options: options, onChoose: (_) {})));
+      final shown = find.byType(DiffView);
+      expect(find.descendant(of: shown, matching: find.textContaining('return a + b;')), findsOneWidget);
+      expect(find.descendant(of: shown, matching: find.textContaining('return a - b;')), findsOneWidget);
+      expect(find.text('src/calc.js'), findsOneWidget);
+      expect(tester.getSize(shown).width, greaterThan(tester.getSize(find.byKey(const Key('permission-card'))).width - 60));
+    });
+
+    testWidgets('a command shows inline, across the card\'s width, and a diff takes its place when there is one', (tester) async {
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Run npm test', detail: 'npm test -- --run', options: options, onChoose: (_) {})));
+      final command = find.byKey(const Key('permission-detail'));
+      expect(find.descendant(of: command, matching: find.text('npm test -- --run')), findsOneWidget);
+      expect(tester.getSize(command).width, greaterThan(tester.getSize(find.byKey(const Key('permission-card'))).width - 40));
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit', detail: 'src/calc.js', diff: diff, options: options, onChoose: (_) {})));
+      expect(find.byType(DiffView), findsOneWidget);
+      expect(find.text('src/calc.js'), findsOneWidget, reason: 'the path above the diff, not the text as well');
+    });
+
+    testWidgets('Deny and a split primary: the agent\'s always, with the one-time answer in its menu, the one pressed answering', (tester) async {
+      final chosen = <String>[];
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit calc.js', options: options, onChoose: (each) => chosen.add(each.optionId))));
+      expect(find.byKey(const Key('permission-deny')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('permission-primary')), matching: find.text('Yes, and do not ask again')), findsOneWidget);
+      expect(find.text('Yes'), findsNothing, reason: 'in the menu until that is open');
+      await openMenu(tester);
+      await tester.tap(find.text('Yes'));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('permission-primary')));
+      await tester.tap(find.byKey(const Key('permission-deny')));
+      expect(chosen, ['allow', 'always', 'no']);
+    });
+
+    testWidgets('the menu holds the one-time answer first, what the card does not know, then the refusals for good', (tester) async {
+      await tester.pumpWidget(host(PermissionCard(
+        agent: 'Claude',
+        title: 'Edit calc.js',
+        options: [
+          option('never', 'reject_always', 'No, never'),
+          option('v', '_vendor', 'Keep planning'),
+          ...options,
+        ],
+        onChoose: (_) {},
+      )));
+      await openMenu(tester);
+      final order = [for (final kind in ['allow_once', '_vendor', 'reject_always']) tester.getTopLeft(find.byKey(Key('answer-$kind'))).dy];
+      expect(order, [...order]..sort());
+      expect(find.text('Keep planning'), findsOneWidget);
+    });
+
+    testWidgets('with no always on offer the primary allows once, and there is no menu or sentence about always', (tester) async {
       AcpPermissionOption? chosen;
-      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit calc.js', options: options, onChoose: (each) => chosen = each)));
-      final names = [for (final each in tester.widgetList<PermissionChoice>(find.byType(PermissionChoice))) each.option.name];
-      expect(names, ['No', 'Yes', 'Yes, and do not ask again']);
-      expect(find.text('Claude wants to use a tool'), findsOneWidget);
-      expect(find.text('Edit calc.js'), findsOneWidget);
-      await tester.tap(find.widgetWithText(PermissionChoice, 'Yes'));
+      await tester.pumpWidget(host(PermissionCard(
+        agent: 'Claude',
+        title: 'Edit calc.js',
+        options: [options[0], options[2]],
+        onChoose: (each) => chosen = each,
+      )));
+      expect(find.byKey(const Key('permission-more')), findsNothing);
+      expect(find.textContaining('An "always" answer'), findsNothing);
+      await tester.tap(find.descendant(of: find.byKey(const Key('permission-primary')), matching: find.text('Yes')));
       expect(chosen?.optionId, 'allow');
+    });
+
+    testWidgets('an option with no name is named by its kind, and one of a kind the card does not know is a button of its own', (tester) async {
+      await tester.pumpWidget(host(PermissionCard(
+        agent: 'Claude',
+        title: 'Edit calc.js',
+        options: const [
+          AcpPermissionOption(optionId: 'a', name: '', kind: 'allow_once'),
+          AcpPermissionOption(optionId: 'r', name: '', kind: 'reject_once'),
+        ],
+        onChoose: (_) {},
+      )));
+      expect(find.descendant(of: find.byKey(const Key('permission-primary')), matching: find.text('Allow once')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('permission-deny')), matching: find.text('Deny')), findsOneWidget);
+      await tester.pumpWidget(host(PermissionCard(
+        agent: 'Claude',
+        title: 'Edit calc.js',
+        options: [option('v', '_vendor', 'Keep planning'), options[2]],
+        onChoose: (_) {},
+      )));
+      expect(find.byKey(const Key('permission-primary')), findsNothing);
+      expect(find.widgetWithText(OutlinedButton, 'Keep planning'), findsOneWidget);
+    });
+
+    testWidgets('the key hints a host gives show on Deny and in the menu, on a card wide enough for a keyboard', (tester) async {
+      const hints = {'reject_once': 'Ctrl+Shift+R', 'allow_once': 'Ctrl+Shift+A'};
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit calc.js', options: options, onChoose: (_) {}, answerHints: hints)));
+      expect(find.descendant(of: find.byKey(const Key('permission-deny')), matching: find.text('Ctrl+Shift+R')), findsOneWidget);
+      await openMenu(tester);
+      expect(find.descendant(of: find.byKey(const Key('answer-allow_once')), matching: find.text('Ctrl+Shift+A')), findsOneWidget);
+      await tester.tapAt(const Offset(2, 2));
+      await tester.pump();
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpAndSettle();
+      expect(find.text('Ctrl+Shift+R'), findsNothing, reason: 'a phone has no such keys');
+      await tester.pumpWidget(host(PermissionCard(agent: 'Claude', title: 'Edit calc.js', options: options, onChoose: (_) {})));
+      expect(find.textContaining('Ctrl'), findsNothing, reason: 'none given, none said');
     });
 
     testWidgets('names the host in what an always answer does, and a host may say it its own way', (tester) async {

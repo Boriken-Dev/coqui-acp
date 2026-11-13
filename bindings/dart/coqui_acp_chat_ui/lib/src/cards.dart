@@ -3,56 +3,48 @@ import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'diff.dart';
 import 'look.dart';
+import 'tools.dart' show DiffView;
 
 const ChatLimits _limits = ChatLimits();
 
 /// [value] as one short line for a person, or null: what an agent called something, with nothing in it that could hide the rest.
 String? shortLine(Object? value) => shortText(value, _limits);
 
-/// Where an option goes among the answers: refusals first, then what the chat does not know, then what allows; once before always.
-int _rank(AcpPermissionOption option) => switch (option.kind) {
-  'reject_once' => 0,
-  'reject_always' => 1,
-  'allow_once' => 3,
-  'allow_always' => 4,
-  _ => 2,
+/// The verbs a tool's title may start with, which the question keeps: "Edit calc.js" asks "Allow Claude to edit calc.js?".
+const Set<String> _verbs = {
+  'edit', 'write', 'read', 'run', 'delete', 'remove', 'create', 'fetch', 'search', 'move', 'rename', 'copy', 'open', 'list',
+  'update', 'install', 'execute', 'call', 'use', 'access', 'change', 'modify', 'patch', 'download', 'upload', 'send', 'view',
 };
+
+/// The question a permission card asks: the tool's own title as a request when it opens with a verb, else the tool's name.
+String permissionQuestion(String agent, String title) {
+  final text = title.trim();
+  final word = text.split(RegExp(r'\s+')).first.toLowerCase();
+  if (text.isNotEmpty && _verbs.contains(word)) return 'Allow $agent to ${text[0].toLowerCase()}${text.substring(1)}?';
+  return text.isEmpty ? 'Allow $agent to use a tool?' : 'Allow $agent to use $text?';
+}
 
 /// The words for an option the agent sent without a name.
 String _kindLabel(AcpPermissionOption option) => switch (option.kind) {
   'allow_once' => 'Allow once',
   'allow_always' => 'Allow always',
-  'reject_once' => 'Refuse once',
-  'reject_always' => 'Refuse always',
+  'reject_once' => 'Deny',
+  'reject_always' => 'Never allow',
   _ => shortLine(option.kind) ?? shortLine(option.optionId) ?? 'An answer',
 };
 
-/// One of the agent's answers, under the agent's own name for it.
-class PermissionChoice extends StatelessWidget {
-  const PermissionChoice({super.key, required this.option, required this.onPressed});
+/// An answer under the agent's own name for it.
+String _answerName(AcpPermissionOption option) => shortLine(option.name) ?? _kindLabel(option);
 
-  final AcpPermissionOption option;
-  final VoidCallback onPressed;
-
-  String get label => shortLine(option.name) ?? _kindLabel(option);
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Text(label, maxLines: 2, overflow: TextOverflow.ellipsis);
-    return switch (option.kind) {
-      'allow_once' => FilledButton(onPressed: onPressed, child: text),
-      'allow_always' => FilledButton.tonal(onPressed: onPressed, child: text),
-      'reject_once' || 'reject_always' => TextButton(onPressed: onPressed, child: text),
-      _ => OutlinedButton(onPressed: onPressed, child: text),
-    };
-  }
-}
-
-/// What an agent is waiting on, with the answers it offers. It stays until the person answers.
+/// What an agent is waiting on, laid out as the person decides it: a chip saying it needs them, the question ("Allow Claude to edit
+/// calc.js?") with the agent's [reason] under it, what it would do inline at the card's width (an edit's [diff], else [detail]), a
+/// sentence on what an "always" answer does, then Deny beside a split primary button. The primary is the agent's "always" where it
+/// offers one, else its allow-once; the other answers the agent offers are in its menu. It stays until the person answers.
 ///
 /// A host adds to it without a fork: [notes] are lines under the question (what a remembered rule would do), [extraAnswers] are
-/// buttons beside the agent's own (an "Always allow here" that the host answers itself).
+/// buttons beside the answers (an "Always allow here" that the host answers itself), [answerHints] the keys that answer for it.
 class PermissionCard extends StatelessWidget {
   const PermissionCard({
     super.key,
@@ -60,26 +52,40 @@ class PermissionCard extends StatelessWidget {
     required this.title,
     required this.options,
     required this.onChoose,
+    this.reason,
     this.detail,
+    this.diff,
     this.bypassPassed = false,
     this.forPerson = false,
     this.more = 0,
     this.onCancel,
     this.notes = const [],
     this.extraAnswers = const [],
+    this.answerHints = const {},
     this.host = 'This app',
     this.rememberedBy,
   });
 
-  /// Narrower than this, the answers go under the question rather than beside it, which would leave its text a thin column.
-  static const double besideFrom = 560;
+  /// Narrower than this the key hints stay out: they belong to a keyboard.
+  static const double hintsFrom = 560;
+
+  /// The most height what the tool would do takes before it scrolls.
+  static const double shown = 260;
 
   /// The agent's name, as it gave it.
   final String agent;
+
+  /// What the tool is called: the question is made from it.
   final String title;
 
-  /// What it would run or touch, when the agent said.
+  /// Why the agent says it needs this, when it said.
+  final String? reason;
+
+  /// What it would run or touch, when the agent said, as text.
   final String? detail;
+
+  /// The change an edit would make, shown instead of [detail] when there is one.
+  final ToolDiff? diff;
   final List<AcpPermissionOption> options;
 
   /// Whether Bypass was on and left this to the person, and whether it is a question or a plan, which Bypass never answers.
@@ -94,6 +100,10 @@ class PermissionCard extends StatelessWidget {
   final List<Widget> notes;
   final List<Widget> extraAnswers;
 
+  /// The key that answers an option of a kind, by kind (`reject_once`, `allow_once`), as the host writes it ("Ctrl+Shift+R"); shown
+  /// on a card wide enough for a keyboard. The host binds the keys: the card only says them.
+  final Map<String, String> answerHints;
+
   /// What the chat calls itself in the card's sentences: "Notes cannot see or undo what [agent] keeps."
   final String host;
 
@@ -102,122 +112,246 @@ class PermissionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final small = Theme.of(context).textTheme.labelSmall;
-    final ordered = [...options]..sort((a, b) => _rank(a) - _rank(b));
-    final remembers = ordered.any((option) => option.kind.endsWith('_always'));
+    final theme = Theme.of(context);
+    final small = theme.textTheme.labelSmall;
+    final look = context.chatLook;
     final name = shortLine(agent) ?? 'The agent';
-    final asked = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('$name wants to use a tool', style: Theme.of(context).textTheme.labelMedium),
-        Text(title),
-        if (detail?.isNotEmpty ?? false) _ToApprove(detail: detail!),
-        if (remembers)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              rememberedBy ?? 'An "always" answer is remembered by $name, not by $host: $host cannot see or undo what it keeps.',
-              style: small,
-            ),
-          ),
-        for (final note in notes) Padding(padding: const EdgeInsets.only(top: 4), child: note),
-        if (bypassPassed)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              forPerson
-                  ? 'Bypass leaves a question or a plan to you, so this one is yours to answer.'
-                  : 'Bypass answers only a request that offers to allow, so this one is yours to answer.',
-              style: small?.copyWith(fontWeight: FontWeight.w600),
-            ),
-          ),
-        if (ordered.isEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text('The agent offered no answer $host can give.', style: small),
-          ),
-        if (more > 0) Text('$more more after this', style: small),
-      ],
-    );
-    final answers = Wrap(
-      spacing: 8,
-      runSpacing: 4,
-      alignment: WrapAlignment.end,
-      children: [
-        for (final option in ordered) PermissionChoice(option: option, onPressed: () => onChoose(option)),
-        ...extraAnswers,
-        if (ordered.isEmpty && onCancel != null) TextButton(onPressed: onCancel, child: const Text('Cancel the request')),
-      ],
-    );
+    final deny = options.where((option) => option.kind == 'reject_once').firstOrNull;
+    final always = options.where((option) => option.kind == 'allow_always').firstOrNull;
+    final once = options.where((option) => option.kind == 'allow_once').firstOrNull;
+    final primary = always ?? once;
+    // One-time first, then what the card does not know, then the refusals for good.
+    int rank(AcpPermissionOption option) => switch (option.kind) { 'allow_once' => 0, 'reject_always' => 2, _ => 1 };
+    final menu = [
+      for (final option in options)
+        if (option != deny && option != primary) option,
+    ]..sort((a, b) => rank(a) - rank(b));
+    final remembers = options.any((option) => option.kind.endsWith('_always'));
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: LayoutBuilder(builder: (context, constraints) {
-            final beside = constraints.maxWidth >= besideFrom && ordered.length + extraAnswers.length <= 2;
-            final top = Row(
-              crossAxisAlignment: beside ? CrossAxisAlignment.center : CrossAxisAlignment.start,
-              children: [
-                const Icon(Icons.shield_outlined),
-                const SizedBox(width: 12),
-                Expanded(child: asked),
-                if (beside) answers,
-              ],
-            );
-            if (beside) return top;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [top, const SizedBox(height: 8), Align(alignment: Alignment.centerRight, child: answers)],
-            );
-          }),
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Container(
+              key: const Key('needs-input'),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              decoration: BoxDecoration(color: look.accent.withValues(alpha: 0.16), borderRadius: BorderRadius.circular(99)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.circle, size: 8, color: look.accent),
+                const SizedBox(width: 6),
+                Text('Needs your input', style: theme.textTheme.labelMedium?.copyWith(color: look.accent, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ),
+          Card(
+            key: const Key('permission-card'),
+            margin: EdgeInsets.zero,
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: LayoutBuilder(builder: (context, constraints) {
+                final hints = constraints.maxWidth >= hintsFrom;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(permissionQuestion(name, title), style: theme.textTheme.titleMedium),
+                    if (reason?.isNotEmpty ?? false)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(reason!, style: theme.textTheme.bodySmall?.copyWith(color: look.muted)),
+                      ),
+                    if (diff != null || (detail?.isNotEmpty ?? false))
+                      Padding(padding: const EdgeInsets.only(top: 10), child: _ToApprove(diff: diff, detail: detail)),
+                    if (remembers)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: Text(
+                          rememberedBy ?? 'An "always" answer is remembered by $name, not by $host: $host cannot see or undo what it keeps.',
+                          style: small,
+                        ),
+                      ),
+                    for (final note in notes) Padding(padding: const EdgeInsets.only(top: 4), child: note),
+                    if (bypassPassed)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          forPerson
+                              ? 'Bypass leaves a question or a plan to you, so this one is yours to answer.'
+                              : 'Bypass answers only a request that offers to allow, so this one is yours to answer.',
+                          style: small?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    if (options.isEmpty)
+                      Padding(padding: const EdgeInsets.only(top: 4), child: Text('The agent offered no answer $host can give.', style: small)),
+                    if (more > 0) Padding(padding: const EdgeInsets.only(top: 4), child: Text('$more more after this', style: small)),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.end,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        if (deny != null)
+                          TextButton(
+                            key: const Key('permission-deny'),
+                            onPressed: () => onChoose(deny),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              const Text('Deny'),
+                              if (hints && answerHints['reject_once'] != null) ...[const SizedBox(width: 8), _Hint(answerHints['reject_once']!)],
+                            ]),
+                          ),
+                        ...extraAnswers,
+                        if (primary != null)
+                          _Split(primary: primary, menu: menu, hints: hints ? answerHints : const {}, onChoose: onChoose)
+                        else
+                          for (final option in menu)
+                            OutlinedButton(
+                              key: Key('answer-${option.kind}'),
+                              onPressed: () => onChoose(option),
+                              child: Text(_answerName(option), maxLines: 2, overflow: TextOverflow.ellipsis),
+                            ),
+                        if (options.isEmpty && onCancel != null) TextButton(onPressed: onCancel, child: const Text('Cancel the request')),
+                      ],
+                    ),
+                  ],
+                );
+              }),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-/// What a tool would do, in a box of a fixed height. Whether it holds more than the box shows is measured at the width it has, so a
-/// short edit spread over a few lines is not called long, and a long one is.
-class _ToApprove extends StatelessWidget {
-  const _ToApprove({required this.detail});
+/// A key hint, as a small cap beside what it answers.
+class _Hint extends StatelessWidget {
+  const _Hint(this.text);
 
-  final String detail;
-
-  static const double shown = 120;
+  final String text;
 
   @override
   Widget build(BuildContext context) {
-    final style = TextStyle(fontFamily: context.chatLook.codeFont, fontSize: 12);
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: LayoutBuilder(builder: (context, constraints) {
-        final painter = TextPainter(
-          text: TextSpan(text: detail, style: DefaultTextStyle.of(context).style.merge(style)),
-          textDirection: Directionality.of(context),
-          textScaler: MediaQuery.textScalerOf(context),
-        )..layout(maxWidth: constraints.maxWidth);
-        final long = painter.height > shown;
-        painter.dispose();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: shown),
-              child: SingleChildScrollView(child: SelectableText(detail, style: style)),
-            ),
-            if (long)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  'This is long. Scroll to read all of it before you answer.',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
+    final look = context.chatLook;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(border: Border.all(color: look.border), borderRadius: BorderRadius.circular(4)),
+      child: Text(text, style: Theme.of(context).textTheme.labelSmall?.copyWith(color: look.muted)),
+    );
+  }
+}
+
+/// The primary answer, with the others in a menu beside it.
+class _Split extends StatelessWidget {
+  const _Split({required this.primary, required this.menu, required this.hints, required this.onChoose});
+
+  final AcpPermissionOption primary;
+  final List<AcpPermissionOption> menu;
+  final Map<String, String> hints;
+  final ValueChanged<AcpPermissionOption> onChoose;
+
+  @override
+  Widget build(BuildContext context) {
+    final onePiece = menu.isEmpty;
+    const round = Radius.circular(20);
+    final left = RoundedRectangleBorder(
+      borderRadius: onePiece ? BorderRadius.circular(20) : const BorderRadius.horizontal(left: round, right: Radius.circular(4)),
+    );
+    final look = context.chatLook;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Flexible(
+        child: FilledButton(
+          key: const Key('permission-primary'),
+          style: FilledButton.styleFrom(shape: left),
+          onPressed: () => onChoose(primary),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Flexible(child: Text(_answerName(primary), maxLines: 2, overflow: TextOverflow.ellipsis)),
+            if (hints[primary.kind] != null) ...[const SizedBox(width: 8), _Hint(hints[primary.kind]!)],
+          ]),
+        ),
+      ),
+      if (!onePiece) ...[
+        const SizedBox(width: 2),
+        MenuAnchor(
+          menuChildren: [
+            for (final option in menu)
+              MenuItemButton(
+                key: Key('answer-${option.kind}'),
+                onPressed: () => onChoose(option),
+                trailingIcon: hints[option.kind] == null
+                    ? null
+                    : Padding(padding: const EdgeInsets.only(left: 12), child: Text(hints[option.kind]!, style: TextStyle(color: look.muted, fontSize: 12))),
+                child: Text(_answerName(option)),
               ),
           ],
-        );
-      }),
-    );
+          builder: (context, controller, _) => FilledButton(
+            key: const Key('permission-more'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(40, 40),
+              padding: EdgeInsets.zero,
+              shape: const RoundedRectangleBorder(borderRadius: BorderRadius.horizontal(left: Radius.circular(4), right: round)),
+            ),
+            onPressed: () => controller.isOpen ? controller.close() : controller.open(),
+            child: const Icon(Icons.arrow_drop_down),
+          ),
+        ),
+      ],
+    ]);
+  }
+}
+
+/// What a tool would do, across the card: an edit as a diff, else the command or input as text. It scrolls past [PermissionCard.shown],
+/// and a text that does not fit says so, measured at the width it has, so a short one spread over a few lines is not called long.
+class _ToApprove extends StatelessWidget {
+  const _ToApprove({this.diff, this.detail});
+
+  final ToolDiff? diff;
+  final String? detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final look = context.chatLook;
+    final mono = TextStyle(fontFamily: look.codeFont, fontSize: 12.5);
+    final change = diff;
+    return LayoutBuilder(builder: (context, constraints) {
+      final Widget body;
+      var long = false;
+      if (change != null) {
+        body = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          if (change.path.isNotEmpty)
+            Padding(padding: const EdgeInsets.only(bottom: 4), child: SelectableText(change.path, style: mono.copyWith(color: look.muted))),
+          SizedBox(width: double.infinity, child: DiffView(lines: withContext(diffLines(change.oldText, change.newText)))),
+        ]);
+      } else {
+        body = SelectableText(detail!, style: mono);
+        final painter = TextPainter(
+          text: TextSpan(text: detail, style: DefaultTextStyle.of(context).style.merge(mono)),
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: constraints.maxWidth - 22);
+        long = painter.height > PermissionCard.shown - 22;
+        painter.dispose();
+      }
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Container(
+          key: const Key('permission-detail'),
+          width: double.infinity,
+          decoration: BoxDecoration(color: look.code, borderRadius: BorderRadius.circular(8), border: Border.all(color: look.border)),
+          constraints: const BoxConstraints(maxHeight: PermissionCard.shown),
+          padding: const EdgeInsets.all(10),
+          child: SingleChildScrollView(child: body),
+        ),
+        if (long)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'This is long. Scroll to read all of it before you answer.',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600),
+            ),
+          ),
+      ]);
+    });
   }
 }
 

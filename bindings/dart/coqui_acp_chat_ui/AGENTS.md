@@ -53,10 +53,16 @@ and `selection` (`SelectableTranscriptState.copyAll()`).
 
 ## Cards and the queue
 
-- `PermissionCard({agent, title, options, onChoose, detail, bypassPassed, forPerson, more, onCancel, notes, extraAnswers, host,
-  rememberedBy})` and `PermissionChoice({option, onPressed})`: the agent's answers by its own names, refusals first, once before always.
-  `notes` are lines under the question and `extraAnswers` buttons beside the agent's (an app's own "Always allow here"). `host` names the
-  app in the card's sentences. Everything the agent wrote is cleaned of control and direction characters.
+- `PermissionCard({agent, title, options, onChoose, reason, detail, diff, bypassPassed, forPerson, more, onCancel, notes, extraAnswers,
+  answerHints, host, rememberedBy})`: a "Needs your input" chip, the question made from `title` ("Allow Claude to edit calc.js?"; a title
+  that does not open with a verb is "Allow Claude to use Bash?") with `reason` under it, what it would do inline at the card's width (a
+  `ToolDiff` `diff`, else the text `detail`; it scrolls past a height), a sentence on what an "always" answer does, then Deny beside a split
+  primary: the agent's `allow_always` where it offers one, else its `allow_once`, with every other answer in the menu (once first, the
+  refusals for good last). Answers go by the agent's own names. `notes` are lines under the question and `extraAnswers` buttons before the
+  answers (an app's own "Always allow here"). `answerHints` maps an option kind (`reject_once`, `allow_once`) to the key the app binds for it
+  ("Ctrl+Shift+R"), shown on a card 560 px or wider; the card binds nothing. `host` names the app in the card's sentences. Everything the
+  agent wrote is cleaned of control and direction characters. Keys for tests: `permission-card`, `needs-input`, `permission-detail`,
+  `permission-deny`, `permission-primary`, `permission-more`, `answer-<kind>`.
 - `QuestionCard({request: AcpElicitation, agent, onAnswer, more, host})`: a form from the question's schema; a new `request` object
   starts a new form.
 - `QueuePanel({lines: List<QueuedLine>, onEdit, onRemove, onClear, held, working, onSendNext, dialog})`: messages waiting for the turn
