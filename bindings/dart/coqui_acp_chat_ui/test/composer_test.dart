@@ -73,6 +73,7 @@ Future<TextEditingController> pump(
   Future<List<PickedFile>> Function()? pickFiles,
   Future<String?> Function()? pickFolder,
   VoidCallback? onShiftTab,
+  String? Function()? recall,
   Widget? header,
   List<Widget> before = const [],
   List<Widget> after = const [],
@@ -102,6 +103,7 @@ Future<TextEditingController> pump(
       pickFiles: pickFiles,
       pickFolder: pickFolder,
       onShiftTab: onShiftTab,
+      recall: recall,
       header: header,
       before: before,
       after: after,
@@ -197,6 +199,27 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.tab);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     expect(pressed, 1);
+  });
+
+  testWidgets('Up in an empty message brings back the last one sent, and moves the cursor anywhere else', (tester) async {
+    final controller = await pump(tester, recall: () => 'what I said before');
+    await tester.tap(find.byType(TextField));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(controller.text, 'what I said before');
+    expect(controller.selection, const TextSelection.collapsed(offset: 18));
+    controller.text = 'second line';
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(controller.text, 'second line');
+  });
+
+  testWidgets('Up in an empty message with nothing sent leaves it empty', (tester) async {
+    final controller = await pump(tester, recall: () => null);
+    await tester.tap(find.byType(TextField));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, isEmpty);
   });
 
   group('attachments', () {

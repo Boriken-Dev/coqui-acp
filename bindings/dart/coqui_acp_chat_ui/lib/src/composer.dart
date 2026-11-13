@@ -146,6 +146,7 @@ class Composer extends StatefulWidget {
     this.trailing = const [],
     this.plusItems = const [],
     this.onShiftTab,
+    this.recall,
   });
 
   /// The most characters a paste puts in the text; a longer one goes as an attachment of its own.
@@ -184,6 +185,10 @@ class Composer extends StatefulWidget {
 
   /// What Shift+Tab does in the field, usually putting the conversation in its next mode; null leaves the key alone.
   final VoidCallback? onShiftTab;
+
+  /// The last message the person sent here, or null: Up in an empty message brings it back, and anywhere else moves the cursor as
+  /// usual.
+  final String? Function()? recall;
 
   @override
   State<Composer> createState() => ComposerState();
@@ -245,7 +250,8 @@ class ComposerState extends State<Composer> {
     );
   }
 
-  /// Shift+Tab goes to [Composer.onShiftTab]; Ctrl+V, or ⌘V on a Mac, pastes through [paste]; every other key goes on as usual.
+  /// Shift+Tab goes to [Composer.onShiftTab], Up in an empty message brings back [Composer.recall], and Ctrl+V (⌘V on a Mac)
+  /// pastes through [paste]; every other key goes on as usual.
   KeyEventResult onKey(FocusNode node, KeyEvent event) {
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.tab &&
@@ -255,6 +261,13 @@ class ComposerState extends State<Composer> {
         widget.onShiftTab != null) {
       widget.onShiftTab!();
       return KeyEventResult.handled;
+    }
+    if ((event is KeyDownEvent || event is KeyRepeatEvent) && event.logicalKey == LogicalKeyboardKey.arrowUp && widget.controller.text.isEmpty) {
+      final last = widget.recall?.call();
+      if (last != null && last.isNotEmpty) {
+        widget.controller.value = TextEditingValue(text: last, selection: TextSelection.collapsed(offset: last.length));
+        return KeyEventResult.handled;
+      }
     }
     if (event is! KeyDownEvent || event.logicalKey != LogicalKeyboardKey.keyV || !widget.enabled) return KeyEventResult.ignored;
     final keys = HardwareKeyboard.instance;
