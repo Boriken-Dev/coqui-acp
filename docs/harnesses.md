@@ -10,7 +10,8 @@ Each runs the installed command line over the protocol it already speaks on stan
 
 `coqui-acp-harness` holds what they share: starting the process and ending it with everything it started, reading its lines within
 bounds, events in no protocol's terms, and the ACP agent itself. A version not tested runs, with a warning: a notice in ACP version
-2, and a line on standard error.
+2, a line on standard error, and a notice to the host through the spawner (`ProcessSpawner::notice`), which is also how it
+hears that a harness ended mid-session.
 
 ## What a session takes
 
