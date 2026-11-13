@@ -15,7 +15,7 @@ prompts, the queue, answers.
 - **The prompt queue**: messages written during a turn go when it ends, held (not dropped) after a stop or a failure; **steer**
   puts one ahead and ends the turn.
 - **Several attached clients**: each prompt is stamped with the client that sent it, **the first answer to a request wins** and the
-  others see it settled. (`replay()` for a client that attaches late is experimental, in `package:coqui_acp_chat/experimental.dart`.)
+  others see it settled. (`replay()` for a client that attaches late, and views of one conversation in another window or page, `ChatSessionShare` and `ChatSessionView`, are experimental, in `package:coqui_acp_chat/experimental.dart`.)
 - **Turns** with their start, end, duration and outcome.
 - **Every limit is a setting** (`ChatLimits`) with a default, taking any value from 0 up.
 

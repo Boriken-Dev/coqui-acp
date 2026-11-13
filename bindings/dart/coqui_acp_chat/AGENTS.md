@@ -81,6 +81,28 @@ calls, terminals, compactions, turns with their times and outcomes, plan, comman
 whether the person named it), `applyReplay(updates)` (applies them as history, not news), and `settleElsewhere(question, by:,
 optionId:)` (`by` must be attached). Requests still waiting are not carried: read `pendingPermissions`. `chatClientMetaKey`.
 
+**Views** (the same import): one conversation shown in another place, such as a window popped out of the one that holds it. One
+copy owns it and talks to the agent; each view shows a read-only copy that follows it and asks through it, so there is one model and
+the first answer to a request settles it for everyone.
+
+- `ChatViewLink`: a channel of JSON maps (`messages`, `send`, `close`, `isClosed`); implement it over a platform channel, a
+  `BroadcastChannel` or a pipe. `MemoryViewLink.pair({wire: true})` is two ends in memory that carry JSON only.
+- Owner: `ChatSessionShare.of(session, {minInterval: 80 ms})` (or `ChatSessionShare(SharedChat)` for a conversation kept some other
+  way: `snapshot() -> ChatSnapshot`, `listen`, `attachClient`, `detachClient`, `send`, `cancel`, `settlePermission`, `settleQuestion`).
+  `serve(link)` takes a link whose far end is a `ChatSessionView.attach`; `views`, `events` (`ChatViewEvent`: a window came or went),
+  `flush()`, `close()` (every view is told, and ends). Each view is sent the whole conversation as `replay()` makes it plus what waits
+  and what was settled, after each change, at most once per interval (longer when building it takes long) and never twice the same.
+- View: `await ChatSessionView.attach(link, clientId:, name:, limits:, timeout:)` throws `StateError` when refused (client id in
+  use, wire version, bypass as an id) or unanswered. `session` is a `ChatSession` that mirrors the owner (messages, turns, queue,
+  clients, `pendingPermissions` under the owner's ids, `settledPermissions` with who answered); do not call its `send` or `cancel`.
+  `send(text)` (completes when the owner took it, throws when it could not; text only, no attachments yet), `cancel()`,
+  `choosePermission(question, option|null)`, `answerQuestion`, `detach()` (dock back: the owner goes on as it was), `isOpen`,
+  `done` (the owner's reason, or null).
+- `ChatSnapshot` (`toJson`/`fromJson`, wire `chatViewWireVersion` 1) is what a state carries; `ChatSessionHub.resetFromReplay`,
+  `adoptPermission` and `adoptQuestion` are what a view builds its copy with.
+- Not yet: attachments from a view, steering, choosing a mode or option from a view, and a state that carries only what changed
+  (each state is the whole conversation).
+
 ## Content types and parsers
 
 `ToolCall` (`id`, `title`, `kind`, `status: ToolStatus` pending/running/done/failed/cancelled/stopped, `blocks`, `locations`,

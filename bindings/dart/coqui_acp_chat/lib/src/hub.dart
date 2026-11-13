@@ -186,4 +186,96 @@ extension ChatSessionHub on ChatSession {
       _replaying = false;
     }
   }
+
+  /// Makes this conversation what another's [replay] says, in place: what it held of the agent's word goes, [updates] are applied
+  /// as history, and listeners are told once when it is done. The requests waiting, the clients and the connection stay. This is
+  /// what a view that only shows another client's conversation does each time that one changes; [queue] and [queueHeld] are what
+  /// the other holds beside the agent's word.
+  void resetFromReplay(
+    Iterable<AcpSessionUpdate> updates, {
+    List<({String text, String? from})> queue = const [],
+    String? queueHeld,
+  }) {
+    _quiet = true;
+    try {
+      _messages.clear();
+      _toolEntries.clear();
+      _compactions.clear();
+      _terminals.clear();
+      _attachmentsNamed.clear();
+      _unacked.clear();
+      _turns.clear();
+      _nextTurn = 1;
+      _plan = const [];
+      _commands = const [];
+      _options = const [];
+      _usage = const SessionUsage();
+      _title = 'New conversation';
+      _agentNames = true;
+      if (_status == ChatStatus.working) _status = ChatStatus.connected;
+      applyReplay(updates);
+      _queue
+        ..clear()
+        ..addAll([
+          for (final held in queue.take(limits.queued))
+            QueuedMessage._(held.text, const [], from: held.from),
+        ]);
+      _queueHeld = queueHeld;
+    } finally {
+      _quiet = false;
+    }
+    notifyListeners();
+  }
+
+  /// Puts a permission request another client's conversation holds waiting to this one's person, under the id it has there, and
+  /// answers it as [settleElsewhere] or [settle] say when that one settles it. Nothing is asked of an agent: this conversation is
+  /// a view. Returns null past [ChatLimits.pendingPermissions] or when [id] is waiting already.
+  PermissionQuestion? adoptPermission({
+    required int id,
+    required String title,
+    String? kind,
+    String? detail,
+    List<AcpPermissionOption> options = const [],
+    bool bypassPassed = false,
+    bool forPerson = false,
+    String? toolCallId,
+    DateTime? askedAt,
+  }) {
+    if (_pendingPermissions.any((q) => q.id == id) ||
+        _pendingPermissions.length >= limits.pendingPermissions) {
+      return null;
+    }
+    final question = PermissionQuestion._(
+      id,
+      shortText(title, limits) ?? 'A tool',
+      shortText(kind, limits),
+      detail: detail,
+      options: List.unmodifiable(options),
+      bypassPassed: bypassPassed,
+      forPerson: forPerson,
+      toolCallId: idText(toolCallId, limits),
+      askedAt: askedAt ?? _now(),
+    );
+    _pendingPermissions.add(question);
+    _needs(AttentionKind.permission);
+    notifyListeners();
+    return question;
+  }
+
+  /// [adoptPermission] for an agent's question.
+  AgentQuestion? adoptQuestion({
+    required int id,
+    required AcpElicitation request,
+    DateTime? askedAt,
+  }) {
+    if (_pendingQuestions.any((q) => q.id == id) ||
+        _pendingQuestions.length >= limits.pendingQuestions) {
+      return null;
+    }
+    final question = AgentQuestion._(id, request, askedAt ?? _now());
+    _pendingQuestions.add(question);
+    _needs(AttentionKind.question);
+    notifyListeners();
+    return question;
+  }
 }

@@ -389,6 +389,9 @@ class ChatSession extends ChatNotifier {
   final List<ChatTurn> _v1Awaiting = [];
   bool _replaying = false;
 
+  /// Whether a change is being made in pieces that listeners should hear of once, when it is done.
+  bool _quiet = false;
+
   /// Whether a message is being handed to the agent.
   bool _delivering = false;
 
@@ -496,6 +499,7 @@ class ChatSession extends ChatNotifier {
 
   @override
   void notifyListeners() {
+    if (_quiet) return;
     try {
       super.notifyListeners();
     } finally {
