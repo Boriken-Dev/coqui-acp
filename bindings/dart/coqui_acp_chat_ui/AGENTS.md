@@ -107,7 +107,7 @@ itself, whatever `focusNode` it is given; `paste()` is public.
 - `actions: List<ComposerAction>` (`name`, `description`, `run`): the host's own `/` entries. With any, `/` lists two groups under titles
   (`commandsTitle`, default "Agent commands", and `actionsTitle`, default "Host actions"); choosing an action runs it, clears the typed
   text and sends nothing. With none, the list is the agent's commands alone, untitled. `hint` is the placeholder, so a host changes it
-  whenever its state does.
+  whenever its state does; it is kept to one line and ends in an ellipsis when the field is narrower.
 - `mentions: ComposerMentions` (the app implements it): `search(query) -> Future<List<MentionCandidate>>` and `pick(candidate) -> String?`
   (a problem to tell the person, or null once taken). An `@` at the start or after whitespace, up to the caret, lists up to 8
   candidates (`MentionCandidate({label, detail, folder, key})`); choosing one writes `@label ` in its place after `pick` accepts it, and a

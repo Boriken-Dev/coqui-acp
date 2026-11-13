@@ -259,6 +259,17 @@ void main() {
     expect(controller.text, isEmpty);
   });
 
+  testWidgets('a placeholder longer than the field stays on one line', (tester) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+    tester.view.physicalSize = const Size(320, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    const hint = 'A placeholder that is far too long to fit the width of a phone in one line of text';
+    await tester.pumpWidget(host(Align(alignment: Alignment.bottomCenter, child: Composer(controller: controller, onSend: () {}, hint: hint))));
+    expect(tester.getSize(find.text(hint)).height, lessThan(30));
+  });
+
   group('the host\'s actions beside the agent\'s commands', () {
     testWidgets('with actions, / lists two titled groups, and an action runs when chosen and sends nothing', (tester) async {
       var ran = 0;

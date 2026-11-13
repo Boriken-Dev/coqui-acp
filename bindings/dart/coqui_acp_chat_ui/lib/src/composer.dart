@@ -375,6 +375,7 @@ class ComposerState extends State<Composer> {
       onSubmitted: (_) => widget.onSend(),
       decoration: InputDecoration(
         hintText: widget.hint,
+        hintMaxLines: 1,
         border: InputBorder.none,
         isDense: true,
         contentPadding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
