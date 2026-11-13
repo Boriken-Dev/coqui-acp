@@ -262,7 +262,7 @@ const int maxQuestionText = 4000;
 final _hidden = RegExp(r'[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]');
 
 /// An agent's text as plain data: line breaks kept, nothing that could reorder or hide what surrounds it.
-String _plain(String text) {
+String plainText(String text) {
   final clean = text.replaceAll('\r\n', '\n').replaceAll(_hidden, ' ');
   return clean.length > maxQuestionText ? '${clean.substring(0, maxQuestionText)}\n…' : clean;
 }
@@ -374,7 +374,7 @@ class _QuestionCardState extends State<QuestionCard> {
 
   Widget _field(AcpField field) {
     final title = shortLine(field.title) ?? shortLine(field.name) ?? 'A question';
-    final description = field.description == null ? null : _plain(field.description!);
+    final description = field.description == null ? null : plainText(field.description!);
     final label = '$title${field.required ? ' *' : ''}';
     void set(Object? value) => setState(() => value == null ? _values.remove(field.name) : _values[field.name] = value);
     final key = ValueKey('question-${field.name}');
@@ -468,8 +468,8 @@ class _QuestionCardState extends State<QuestionCard> {
                 Expanded(child: Text('${shortLine(widget.agent) ?? 'The agent'} asks', style: theme.textTheme.labelMedium)),
               ]),
               if (request.title != null) Text(shortLine(request.title) ?? '', style: theme.textTheme.titleSmall),
-              SelectableText(_plain(request.message)),
-              if (request.description != null) Text(_plain(request.description!), style: theme.textTheme.bodySmall),
+              SelectableText(plainText(request.message)),
+              if (request.description != null) Text(plainText(request.description!), style: theme.textTheme.bodySmall),
               for (final field in request.fields) Padding(padding: const EdgeInsets.only(top: 8), child: _field(field)),
               if (problem != null)
                 Padding(
@@ -502,7 +502,7 @@ class _Described extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => description == null ? child : Tooltip(message: _plain(description!), child: child);
+  Widget build(BuildContext context) => description == null ? child : Tooltip(message: plainText(description!), child: child);
 }
 
 class _Labelled extends StatelessWidget {

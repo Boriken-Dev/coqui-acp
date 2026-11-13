@@ -14,6 +14,7 @@ export 'src/fold.dart' show BurstSummary, foldTranscript, spanLabel, summarizeBu
 export 'src/folded.dart' show FoldLine, PlanChecklist, PlanPanel, SummaryText, ToolBurst, TranscriptItemView, TurnWork;
 export 'src/look.dart';
 export 'src/renderers.dart';
+export 'src/secret_cards.dart' show SecretCardEnvironment, SecretRequestCard, SecretRequestEntry, SecretShowCard, SecretShowEntry, secretRenderers;
 export 'src/tools.dart' show CodeBox, DiffView, TerminalBlock, ToolBlockView, ToolCard, ToolEntry, toolIcon;
 export 'src/transcript.dart' show ChatTranscript, ChatTranscriptState, SelectableTranscript, SelectableTranscriptState;
 export 'src/usage_text.dart';
