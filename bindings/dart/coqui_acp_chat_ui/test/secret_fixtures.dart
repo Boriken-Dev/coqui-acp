@@ -60,10 +60,18 @@ Finder button(String label) => find.widgetWithText(FilledButton, label);
 /// What went to the clipboard, which no card of a request may touch.
 final clipboard = <String>[];
 
+/// What the mocked clipboard holds now.
+String? clip;
+
 void watchClipboard() {
   clipboard.clear();
+  clip = null;
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
-    if (call.method == 'Clipboard.setData') clipboard.add((call.arguments as Map)['text'] as String);
+    if (call.method == 'Clipboard.setData') {
+      clip = (call.arguments as Map)['text'] as String;
+      clipboard.add(clip!);
+    }
+    if (call.method == 'Clipboard.getData') return clip == null ? null : {'text': clip};
     return null;
   });
   addTearDown(() => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));

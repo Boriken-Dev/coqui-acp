@@ -112,7 +112,7 @@ class _SecretFrame extends StatelessWidget {
 
 /// A row of a form in Settings' grammar: the title, the words under it, and the control, with a rule between rows.
 class _Row extends StatelessWidget {
-  const _Row({required this.title, this.description, this.control, this.trailing});
+  const _Row({required this.title, this.description, this.control, this.trailing, this.tag});
 
   final String title;
   final String? description;
@@ -123,6 +123,9 @@ class _Row extends StatelessWidget {
   /// Beside the title (a switch or a drop-down).
   final Widget? trailing;
 
+  /// Where the answer goes, in words: a row of a form says whether it is sealed or the agent sees it.
+  final String? tag;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -130,10 +133,11 @@ class _Row extends StatelessWidget {
       const Divider(height: 1),
       ListTile(
         title: Text(title),
-        subtitle: description == null && control == null
+        subtitle: description == null && control == null && tag == null
             ? null
             : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 if (description != null) Text(description!, style: theme.textTheme.bodySmall),
+                if (tag != null) Text(tag!, key: const ValueKey('where-it-goes'), style: theme.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600)),
                 if (control != null) Padding(padding: const EdgeInsets.only(top: 6), child: control),
               ]),
         trailing: trailing,
@@ -255,9 +259,17 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     super.dispose();
   }
 
+  /// Answers once. The form is replaced by a final state, so no field is left to undo into or to edit, and the controllers go once
+  /// the fields have left the tree.
   void _reply(AcpSecretRequestReply reply) {
     if (_replied) return;
     _replied = true;
+    if (mounted) {
+      setState(() {});
+      WidgetsBinding.instance.addPostFrameCallback((_) => _wipe());
+    } else {
+      _wipe();
+    }
     widget.onReply(reply);
   }
 
@@ -346,13 +358,11 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         if (typed[each.field.name] case final text?) sealed[each.field.name] = await collector.seal(each.field.name, text);
       }
       final auth = await collector.authenticate(widget.environment.prover, plain, sealed, widget.environment.seconds);
-      // Nothing typed stays once it is sealed.
-      for (final controller in _texts.values) {
-        controller.clear();
-      }
+      // A request that replaced this one while the seal ran is not answered with this answer.
+      if (!mounted || !identical(collector, _collector)) return;
       _reply(AcpSecretAccepted(plain, sealed, auth));
     } on Object {
-      if (mounted) {
+      if (mounted && identical(collector, _collector)) {
         setState(() {
           _busy = false;
           _failed = 'The answer could not be sealed, so nothing was sent. Try again, or cancel.';
@@ -366,6 +376,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     return _Row(
       title: _label(field),
       description: _description(field),
+      tag: 'Sealed: only the host can read it',
       control: TextField(
         key: ValueKey('secret-${field.name}'),
         controller: _texts[field.name],
@@ -384,6 +395,8 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     );
   }
 
+  static const _seen = 'The agent sees this';
+
   Widget _plainField(AcpField field) {
     void set(Object? value) => setState(() => value == null ? _values.remove(field.name) : _values[field.name] = value);
     final key = ValueKey('question-${field.name}');
@@ -391,12 +404,14 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       case AcpTextField():
         return _Row(
           title: _label(field),
+          tag: _seen,
           description: _description(field),
           control: TextField(key: key, controller: _texts[field.name], decoration: const InputDecoration(isDense: true, border: OutlineInputBorder()), onChanged: (_) => setState(() {})),
         );
       case AcpNumberField(:final integer):
         return _Row(
           title: _label(field),
+          tag: _seen,
           description: _description(field),
           control: TextField(
             key: key,
@@ -411,13 +426,17 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         return SwitchListTile(
           key: key,
           title: Text(_label(field)),
-          subtitle: _description(field) == null ? null : Text(_description(field)!),
+          subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            if (_description(field) != null) Text(_description(field)!),
+            Text(_seen, key: const ValueKey('where-it-goes'), style: Theme.of(context).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600)),
+          ]),
           value: _values[field.name] == true,
           onChanged: set,
         );
       case AcpChoiceField(:final options):
         return _Row(
           title: _label(field),
+          tag: _seen,
           description: _description(field),
           trailing: DropdownButton<String>(
             key: key,
@@ -431,6 +450,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         final chosen = [...(_values[field.name] as List<String>?) ?? const <String>[]];
         return _Row(
           title: _label(field),
+          tag: _seen,
           description: _description(field),
           control: Wrap(spacing: 6, runSpacing: 4, children: [
             for (final option in options)
@@ -447,7 +467,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
           ]),
         );
       case AcpUnsupportedField(:final type):
-        return _Row(title: _label(field), description: 'A question of a kind ${widget.environment.host} cannot show (${shortLine(type) ?? 'no type'}), so it is left unanswered.');
+        return _Row(title: _label(field), tag: _seen, description: 'A question of a kind ${widget.environment.host} cannot show (${shortLine(type) ?? 'no type'}), so it is left unanswered.');
     }
   }
 
@@ -455,19 +475,22 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   Widget build(BuildContext context) {
     final request = widget.request;
     final collector = _collector;
-    const note = 'Your answer is sealed on this device for the host that runs the agent. It is never sent to the agent, and it is not kept in the conversation.';
-    if (_refused) {
+    const note = 'Only the fields marked Sealed are sealed on this device for the host and kept from the agent. A field marked The agent '
+        'sees this is given to the agent as you type it, whatever its title says.';
+    if (_refused || _replied) {
       return _SecretFrame(
         cardKey: const Key('secret-request-card'),
         agent: widget.agent,
         verb: 'asks for a secret',
         title: null,
         message: plainText(request.context.message),
-        note: 'This request cannot be verified as coming from the host this app is paired with, or its form breaks a rule, so nothing can be '
-            'entered. The agent is told only that you were not asked.',
+        note: _replied
+            ? 'Answered. The form was cleared.'
+            : 'This request cannot be verified as coming from the host this app is paired with, or its form breaks a rule, so nothing can be '
+                  'entered. The agent is told only that you were not asked.',
         rows: const [],
         more: widget.more,
-        actions: [TextButton(onPressed: () => _reply(const AcpSecretCancelled()), child: const Text('Cancel'))],
+        actions: _replied ? const [] : [TextButton(onPressed: () => _reply(const AcpSecretCancelled()), child: const Text('Cancel'))],
       );
     }
     final form = collector?.form;
@@ -553,11 +576,19 @@ class _SecretShowCardState extends State<SecretShowCard> {
   bool _readied = false;
   bool _finished = false;
   bool _opening = false;
+  bool _looking = false;
+  String? _copiedValue;
 
   @override
   void initState() {
     super.initState();
     widget.deliver.addListener(_delivered);
+    _parse();
+  }
+
+  void _parse() {
+    _form = null;
+    _stage = _ShowStage.asking;
     try {
       _form = AcpSecretForm.parseText(widget.open.context.schema, widget.environment.verifier.limits);
     } on AcpSecretException {
@@ -572,13 +603,35 @@ class _SecretShowCardState extends State<SecretShowCard> {
       oldWidget.deliver.removeListener(_delivered);
       widget.deliver.addListener(_delivered);
     }
+    // Another show reuses this state as a new one: nothing of the first is kept, and what it was waiting on is not answered by this.
+    if (!identical(oldWidget.open, widget.open)) {
+      _forget();
+      _receiver = null;
+      _readied = _finished = _opening = _looking = false;
+      _copied = null;
+      _parse();
+    }
   }
 
   @override
   void dispose() {
     widget.deliver.removeListener(_delivered);
     _forget();
+    unawaited(_clearClipboard());
     super.dispose();
+  }
+
+  /// Best effort: a value this card copied is taken off the clipboard if it is still what the clipboard holds.
+  Future<void> _clearClipboard() async {
+    final value = _copiedValue;
+    _copiedValue = null;
+    if (value == null) return;
+    try {
+      final now = await Clipboard.getData(Clipboard.kTextPlain);
+      if (now?.text == value) await Clipboard.setData(const ClipboardData(text: ''));
+    } on Object {
+      // No clipboard to clear.
+    }
   }
 
   /// Overwrites the opened values and the private key.
@@ -587,6 +640,7 @@ class _SecretShowCardState extends State<SecretShowCard> {
     for (final secret in _opened?.secrets.values ?? const <AcpSecretValue>[]) {
       secret.clear();
     }
+    _receiver = null;
     _opened = null;
     _revealed.clear();
   }
@@ -604,17 +658,21 @@ class _SecretShowCardState extends State<SecretShowCard> {
   }
 
   Future<void> _look() async {
+    // Set before the await: a second press while the key is made makes no second key.
+    if (_looking || _stage != _ShowStage.asking) return;
+    _looking = true;
     final environment = widget.environment;
+    final open = widget.open;
     try {
       final receiver = await AcpSecretReceiver.create(
         AcpSecretMethod.show,
-        widget.open.context,
+        open.context,
         environment.prover,
         environment.expected,
         environment.seconds,
         limits: environment.verifier.limits,
       );
-      if (!mounted) {
+      if (!mounted || !identical(open, widget.open)) {
         receiver.clear();
         return;
       }
@@ -626,26 +684,30 @@ class _SecretShowCardState extends State<SecretShowCard> {
       // The host may have answered before the card listened.
       _delivered();
     } on Object {
-      if (mounted) setState(() => _stage = _ShowStage.refused);
+      if (mounted && identical(open, widget.open)) setState(() => _stage = _ShowStage.refused);
     }
   }
 
   Future<void> _delivered() async {
     final deliver = widget.deliver.value;
     final receiver = _receiver;
-    final context = widget.open.context;
+    final open = widget.open;
+    final context = open.context;
     if (deliver == null || receiver == null || _stage != _ShowStage.waiting || _opening) return;
     _opening = true;
     // A deliver for another request is not this card's, and nothing is opened for it.
     if (deliver.requestId != context.requestId || deliver.sessionId != context.sessionId) {
-      setState(() => _stage = _ShowStage.refused);
+      setState(() {
+        _forget();
+        _stage = _ShowStage.refused;
+      });
       _done(false);
       return;
     }
     final environment = widget.environment;
     try {
       final opened = await receiver.openValues(environment.verifier, environment.expected, context.values ?? '{}', deliver.sealed, deliver.auth, environment.seconds);
-      if (!mounted) {
+      if (!mounted || !identical(open, widget.open) || !identical(receiver, _receiver)) {
         for (final secret in opened.secrets.values) {
           secret.clear();
         }
@@ -656,7 +718,12 @@ class _SecretShowCardState extends State<SecretShowCard> {
         _stage = _ShowStage.shown;
       });
     } on Object {
-      if (mounted) setState(() => _stage = _ShowStage.refused);
+      if (mounted) {
+        setState(() {
+          _forget();
+          _stage = _ShowStage.refused;
+        });
+      }
       _done(false);
     }
   }
@@ -668,10 +735,12 @@ class _SecretShowCardState extends State<SecretShowCard> {
       _forget();
       _stage = _ShowStage.closed;
     });
+    unawaited(_clearClipboard());
   }
 
   Future<void> _copy(String name, String text) async {
     await (widget.copy ?? (text) => Clipboard.setData(ClipboardData(text: text)))(text);
+    _copiedValue = text;
     if (mounted) setState(() => _copied = name);
   }
 
@@ -741,7 +810,7 @@ class _SecretShowCardState extends State<SecretShowCard> {
       case _ShowStage.waiting:
         note = 'Waiting for the values from the host.';
         children.add(const Padding(padding: EdgeInsets.all(16), child: LinearProgressIndicator()));
-        actions = [TextButton(onPressed: () => _done(false), child: const Text('Cancel'))];
+        actions = [TextButton(onPressed: () => _close(false), child: const Text('Cancel'))];
       case _ShowStage.shown:
         note = 'The values are masked until you show them and are cleared when you close this. Copy puts one on the clipboard, which other apps can read.';
         if (form != null) children.addAll([for (final each in form.fields) _value(each)]);
@@ -825,8 +894,8 @@ final class SecretShowEntry implements ChatEntryData {
 ChatRenderers secretRenderers(SecretCardEnvironment environment) => ChatRenderers(
   entry: [
     (context, entry) => switch (entry) {
-      SecretRequestEntry() => SecretRequestCard(key: ValueKey('secret-${entry.request.context.requestId}'), request: entry.request, environment: environment, onReply: entry.onReply, agent: entry.agent),
-      SecretShowEntry() => SecretShowCard(key: ValueKey('secret-${entry.open.context.requestId}'), open: entry.open, environment: environment, deliver: entry.deliver, onReady: entry.onReady, onDone: entry.onDone, agent: entry.agent),
+      SecretRequestEntry() => SecretRequestCard(key: ValueKey('secret-${entry.request.context.sessionId}-${entry.request.context.requestId}'), request: entry.request, environment: environment, onReply: entry.onReply, agent: entry.agent),
+      SecretShowEntry() => SecretShowCard(key: ValueKey('secret-${entry.open.context.sessionId}-${entry.open.context.requestId}'), open: entry.open, environment: environment, deliver: entry.deliver, onReady: entry.onReady, onDone: entry.onDone, agent: entry.agent),
       _ => null,
     },
   ],

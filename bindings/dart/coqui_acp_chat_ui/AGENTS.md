@@ -75,9 +75,9 @@ the model must never see, and a display of values the person chose to look at. T
   clock in Unix seconds for tests.
 - `SecretRequestCard({request: AcpSecretRequestParams, environment, onReply, agent, more})`: checks the receiver's key binding and the digest of
   what is asked before it draws anything (a request that fails shows no fields and offers only Cancel); then one row per question in Settings'
-  grammar (title, words, control): text, number, choice, choices, switch. A secret field (the schema's `writeOnly` or `x-sensitive`, never its
+  grammar (title, words, control): text, number, choice, choices, switch, each tagged "Sealed: only the host can read it" or "The agent sees this" (plain answers go to the agent, whatever the title says). A secret field (the schema's `writeOnly` or `x-sensitive`, never its
   `format` or name) is masked as typed, cannot be selected, has no context menu, no suggestions and no autofill. Send sealed seals each secret value to
-  the host's per-request key, binds the whole answer, clears the fields and calls `onReply(AcpSecretAccepted)` once; Decline and Cancel call it with
+  the host's per-request key, binds the whole answer, replaces the form with a final state (the fields and their undo history gone) and calls `onReply(AcpSecretAccepted)` once; Decline and Cancel call it with
   `AcpSecretDeclined` and `AcpSecretCancelled`. **`onReply` is the card's only output**: the app sends that to the host, and nothing else carries a
   value. A new `request` object starts a new form; typed text is wiped when the card leaves.
 - `SecretShowCard({open: AcpSecretShowOpen, environment, deliver: ValueListenable<AcpSecretShowDeliver?>, onReady, onDone, agent, more, copy})`: asks

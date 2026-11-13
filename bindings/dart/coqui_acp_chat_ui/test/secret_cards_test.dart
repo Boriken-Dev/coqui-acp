@@ -1,8 +1,10 @@
 // The secret-prompt cards: the form from a request's schema, a show of sealed values, and the two walls between a secret and the rest of
 // the app: nothing typed is echoed, copied or kept, and the only thing a request hands out is the sealed answer.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:coqui_acp/secret.dart';
+import 'package:coqui_acp/secret_unprotected.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -22,7 +24,10 @@ void main() {
       expect(find.text('Claude asks for a secret'), findsOneWidget);
       expect(find.text('Registry login'), findsOneWidget);
       expect(find.text('The deploy needs your registry login'), findsOneWidget);
-      expect(find.textContaining('never sent to the agent'), findsOneWidget);
+      expect(find.textContaining('Only the fields marked Sealed'), findsOneWidget);
+      // Each row says where its answer goes, whatever the agent titled it: a plain field called Password is still seen by the agent.
+      expect(find.text('Sealed: only the host can read it'), findsNWidgets(2));
+      expect(find.text('The agent sees this'), findsNWidgets(3));
       expect(find.text('User name *'), findsOneWidget);
       expect(find.text('Your account on the registry'), findsOneWidget);
       expect(find.text('Password *'), findsOneWidget);
@@ -113,17 +118,18 @@ void main() {
       expect(opened.secrets['pin']!.text, '4321');
       expect(opened.plain['user'], 'ana');
       expect(clipboard, isEmpty);
-      // Nothing typed stays in the form.
-      expect(tester.widget<TextField>(find.byKey(const ValueKey('secret-password'))).controller!.text, isEmpty);
-      expect(tester.widget<TextField>(find.byKey(const ValueKey('secret-pin'))).controller!.text, isEmpty);
+      // The form is gone, with its controllers and their undo history: nothing typed is left to restore.
+      expect(find.byWidgetPredicate((widget) => widget is EditableText && !widget.readOnly), findsNothing);
+      expect(find.text('Answered. The form was cleared.'), findsOneWidget);
     });
 
-    testWidgets('the values go only to the host\'s channel: the one callback gets the sealed answer, and the card has no other way out', (tester) async {
+    testWidgets('the one callback gets the sealed answer, and the platform channel (clipboard, system calls) sees none of the typed value', (tester) async {
       bigScreen(tester);
       watchClipboard();
       final (params, receiver) = await tester.runAsync(asked) as (AcpSecretRequestParams, AcpSecretReceiver);
       final out = <Object?>[];
-      // Every channel the card could write to: its reply, and the platform's clipboard and text-input channels (watched above).
+      // What the card could write to besides its reply: the platform channel, watched here (the text-input channel carries a field's
+      // own text to the keyboard and is not watched).
       final platform = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
         platform.add('${call.method} ${call.arguments}');
@@ -280,7 +286,7 @@ void main() {
       expect(find.byKey(const ValueKey('masked-key')), findsOneWidget);
     });
 
-    testWidgets('leaving the card clears it: the value is in no widget afterwards', (tester) async {
+    testWidgets('leaving the card leaves the value in no widget (the overwrite of its bytes is not observable from outside)', (tester) async {
       bigScreen(tester);
       final deliver = ValueNotifier<AcpSecretShowDeliver?>(null);
       final readied = <AcpSecretShowOpened>[];
@@ -326,6 +332,159 @@ void main() {
       await settle(tester);
       expect(done, [false]);
       expect(find.textContaining('cannot be verified'), findsOneWidget);
+    });
+  });
+
+  group('contracts of the cards', () {
+    const showSchema = '{"type":"object","properties":{"label":{"type":"string","title":"Label"},"key":{"type":"string","title":"API key","writeOnly":true}}}';
+    AcpSecretShowOpen opening(String id) =>
+        AcpSecretShowOpen(context: AcpSecretContext(sessionId: 's1', requestId: id, message: 'Your new API key', schema: showSchema, values: '{"label":"ci"}'));
+    Future<AcpSecretShowDeliver> deliveredFor(AcpSecretShowOpened ready, AcpSecretShowOpen open) async {
+      final collector = await hostChecks().collector(frontend.id, AcpSecretMethod.show, open.context, ready.recipient!, now);
+      final sealed = {'key': await collector.seal('key', token)};
+      return AcpSecretShowDeliver(sessionId: 's1', requestId: open.context.requestId, sealed: sealed, auth: await collector.authenticate(hostProver, open.context.values!, sealed, now));
+    }
+
+    testWidgets('Cancel while waiting closes the card and drops the key: a later delivery shows nothing', (tester) async {
+      bigScreen(tester);
+      final deliver = ValueNotifier<AcpSecretShowDeliver?>(null);
+      final readied = <AcpSecretShowOpened>[];
+      final done = <bool>[];
+      final open = opening('c1');
+      await tester.pumpWidget(host(SecretShowCard(open: open, environment: environment(), deliver: deliver, onReady: readied.add, onDone: done.add)));
+      await settle(tester);
+      await tester.tap(find.text('Show'));
+      await settle(tester);
+      await tester.tap(find.text('Cancel'));
+      await tester.pump();
+      expect(done, [false]);
+      expect(find.text('Closed. The values were cleared from this device.'), findsOneWidget);
+      deliver.value = await tester.runAsync(() => deliveredFor(readied.single, open));
+      await settle(tester);
+      expect(find.byKey(const ValueKey('masked-key')), findsNothing);
+      expect(find.byKey(const ValueKey('reveal-key')), findsNothing);
+      expect(done, [false]);
+    });
+
+    for (final button in ['Cancel', 'Decline', 'Send sealed']) {
+      testWidgets('after $button the form is gone: no field holds anything or can be edited or undone', (tester) async {
+        bigScreen(tester);
+        final (params, _) = await tester.runAsync(asked) as (AcpSecretRequestParams, AcpSecretReceiver);
+        final replies = <AcpSecretRequestReply>[];
+        await tester.pumpWidget(host(SecretRequestCard(request: params, environment: environment(), onReply: replies.add)));
+        await settle(tester);
+        await type(tester, 'question-user', 'ana');
+        await type(tester, 'secret-password', password);
+        await tester.tap(find.widgetWithText(button == 'Send sealed' ? FilledButton : TextButton, button));
+        await settle(tester);
+        expect(replies, hasLength(1));
+        expect(find.byWidgetPredicate((widget) => widget is EditableText && !widget.readOnly), findsNothing);
+        expect(find.byType(TextField), findsNothing);
+        // Nothing to undo into.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+        expect(find.byWidgetPredicate((widget) => widget is EditableText && !widget.readOnly), findsNothing);
+      });
+    }
+
+    testWidgets('Show pressed twice makes one key: the host\'s value sealed to the key it was given opens', (tester) async {
+      bigScreen(tester);
+      final deliver = ValueNotifier<AcpSecretShowDeliver?>(null);
+      final readied = <AcpSecretShowOpened>[];
+      final open = opening('d1');
+      await tester.pumpWidget(host(SecretShowCard(open: open, environment: environment(), deliver: deliver, onReady: readied.add, onDone: (_) {})));
+      await settle(tester);
+      await tester.tap(find.text('Show'));
+      await tester.tap(find.text('Show'), warnIfMissed: false);
+      await settle(tester);
+      expect(readied, hasLength(1));
+      deliver.value = await tester.runAsync(() => deliveredFor(readied.single, open));
+      await settle(tester);
+      expect(find.byKey(const ValueKey('masked-key')), findsOneWidget);
+    });
+
+    testWidgets('a seal in flight when another request replaces the card is not sent as the new request\'s answer', (tester) async {
+      bigScreen(tester);
+      final (first, _) = await tester.runAsync(() => asked(id: 'e1')) as (AcpSecretRequestParams, AcpSecretReceiver);
+      final (second, _) = await tester.runAsync(() => asked(id: 'e2')) as (AcpSecretRequestParams, AcpSecretReceiver);
+      // The frontend's signer waits on a gate, so the answer is still being made when the card is reused.
+      final gate = Completer<void>();
+      final inner = ecdsaP256Signer(frontendKey);
+      final slow = AcpSecretProver.signing(spki: ecdsaP256Spki(frontendKey), sign: (message) async {
+        await gate.future;
+        return inner(message);
+      });
+      final slowEnvironment = SecretCardEnvironment(prover: slow, verifier: frontendChecks(), expected: hostProver.id, host: 'Canoa', now: () => now);
+      final replies = <AcpSecretRequestReply>[];
+      Widget card(AcpSecretRequestParams request) => host(SecretRequestCard(request: request, environment: slowEnvironment, onReply: replies.add));
+      await tester.pumpWidget(card(first));
+      await settle(tester);
+      await type(tester, 'question-user', 'ana');
+      await type(tester, 'secret-password', password);
+      await tester.tap(find.text('Send sealed'));
+      await settle(tester);
+      await tester.pumpWidget(card(second));
+      await settle(tester);
+      gate.complete();
+      await settle(tester);
+      expect(replies, isEmpty);
+      // The new request is a fresh form, with nothing carried over.
+      expect(tester.widget<TextField>(find.byKey(const ValueKey('secret-password'))).controller!.text, isEmpty);
+    });
+
+    testWidgets('another show on the same card starts over: asking again, its own key', (tester) async {
+      bigScreen(tester);
+      final deliver = ValueNotifier<AcpSecretShowDeliver?>(null);
+      final readied = <AcpSecretShowOpened>[];
+      Widget card(AcpSecretShowOpen open) => host(SecretShowCard(open: open, environment: environment(), deliver: deliver, onReady: readied.add, onDone: (_) {}));
+      await tester.pumpWidget(card(opening('f1')));
+      await settle(tester);
+      await tester.tap(find.text('Show'));
+      await settle(tester);
+      expect(find.text('Waiting for the values from the host.'), findsOneWidget);
+      await tester.pumpWidget(card(opening('f2')));
+      await settle(tester);
+      expect(find.text('Waiting for the values from the host.'), findsNothing);
+      expect(find.text('Show'), findsOneWidget);
+      await tester.tap(find.text('Show'));
+      await settle(tester);
+      expect(readied, hasLength(2));
+      expect(readied.last.recipient!.key, isNot(readied.first.recipient!.key));
+    });
+
+    testWidgets('the cards the registry draws are keyed by session and request id', (tester) async {
+      bigScreen(tester);
+      final (params, _) = await tester.runAsync(asked) as (AcpSecretRequestParams, AcpSecretReceiver);
+      final entry = SecretRequestEntry(request: params, onReply: (_) {}, at: t0);
+      await tester.pumpWidget(host(ChatTranscript(entries: [entry], renderers: secretRenderers(environment()))));
+      await settle(tester);
+      expect(find.byKey(const ValueKey('secret-s1-r1')), findsOneWidget);
+    });
+
+    testWidgets('Done takes a copied value off the clipboard, and leaves another thing there alone', (tester) async {
+      bigScreen(tester);
+      for (final other in [false, true]) {
+        watchClipboard();
+        final deliver = ValueNotifier<AcpSecretShowDeliver?>(null);
+        final readied = <AcpSecretShowOpened>[];
+        final open = opening(other ? 'g2' : 'g1');
+        await tester.pumpWidget(host(SecretShowCard(open: open, environment: environment(), deliver: deliver, onReady: readied.add, onDone: (_) {})));
+        await settle(tester);
+        await tester.tap(find.text('Show'));
+        await settle(tester);
+        deliver.value = await tester.runAsync(() => deliveredFor(readied.single, open));
+        await settle(tester);
+        await tester.tap(find.byKey(const ValueKey('copy-key')));
+        await settle(tester);
+        expect(clip, token);
+        if (other) clip = 'something else';
+        await tester.tap(find.text('Done'));
+        await settle(tester);
+        expect(clip, other ? 'something else' : '');
+        await tester.pumpWidget(host(const SizedBox()));
+      }
     });
   });
 
