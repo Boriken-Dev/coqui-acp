@@ -189,8 +189,11 @@ abstract interface class PermissionPolicy {
   Future<void> prepare(AcpPermissionRequest request);
 
   /// How [request] is put, read after [prepare] with the conversation as it is then: whether it is the person's alone, and what
-  /// the host wants kept with it.
-  PermissionReview review(AcpPermissionRequest request);
+  /// the host wants kept with it. [forPerson] says it is already, by what it asks (a question or a plan).
+  PermissionReview review(
+    AcpPermissionRequest request, {
+    required bool forPerson,
+  });
 
   /// The host's own answer to [request], asked when Bypass did not answer it; null leaves it to the person.
   PermissionAnswer? answer(
@@ -623,6 +626,21 @@ class ChatSession extends ChatNotifier {
   void addMessage(MessageRole role, String text, {DateTime? at}) {
     _add(_entry(role, text, at: at));
     _trim();
+    notifyListeners();
+  }
+
+  /// Takes out the messages [where] names, such as a host's copy of what was said that it puts another in place of.
+  void removeMessages(bool Function(ChatMessage message) where) {
+    final gone = _messages.where(where).toList();
+    if (gone.isEmpty) return;
+    for (final message in gone) {
+      if (message.tool != null) _toolEntries.remove(message.tool!.id);
+      if (message.compaction != null) {
+        _compactions.remove(message.compaction!.id);
+      }
+      _unacked.remove(message);
+    }
+    _messages.removeWhere(gone.contains);
     notifyListeners();
   }
 
@@ -1338,7 +1356,11 @@ class ChatSession extends ChatNotifier {
           waiter.complete(
             _askEpoch != epoch
                 ? const AcpCancel()
-                : _ask(request, policy.review(request), policy),
+                : _ask(
+                    request,
+                    policy.review(request, forPerson: _isForPerson(request)),
+                    policy,
+                  ),
           );
         }
       } on Object catch (error, stack) {

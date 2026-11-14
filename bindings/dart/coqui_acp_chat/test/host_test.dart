@@ -57,9 +57,15 @@ final class _Policy implements PermissionPolicy {
   }
 
   @override
-  PermissionReview review(AcpPermissionRequest request) {
+  PermissionReview review(
+    AcpPermissionRequest request, {
+    required bool forPerson,
+  }) {
     reviewed.add(request.toolCallId);
-    return onReview(request);
+    final review = onReview(request);
+    return forPerson && !review.forPerson
+        ? PermissionReview(forPerson: true, hostData: review.hostData)
+        : review;
   }
 
   @override
@@ -429,6 +435,18 @@ void main() {
         expect(session.title, 'Named');
       },
     );
+
+    test('messages the host put there can be taken out again', () {
+      final session = ChatSession(id: 'x');
+      session
+        ..addMessage(MessageRole.user, 'a')
+        ..addMessage(MessageRole.agent, 'b')
+        ..addMessage(MessageRole.notice, 'c');
+      session.removeMessages(
+        (m) => m.role == MessageRole.user || m.role == MessageRole.agent,
+      );
+      expect(session.messages.map((m) => m.text), ['c']);
+    });
 
     test(
       'Bypass can be preset without a word, and choices waiting can be taken back',
