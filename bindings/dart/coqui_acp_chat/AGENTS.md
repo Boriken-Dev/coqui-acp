@@ -65,7 +65,7 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
 - **Modes and options**: `choose(option, value) -> Future<bool refused>` (held while a turn runs or the conversation opens),
   `holdChoice`, `setBypass(on)`, `chooseMode(ModeEntry)`, `cycleMode()`, `leaveBypass()`, `canChangeMode`. Mode changes run one at a
   time in the order asked; presses go on from `targetMode`; a mode the agent refused is in `refusedModes` and cycling skips it; nothing
-  changes while `opening`: `chooseMode`, `cycleMode`, `leaveBypass` and `setBypass` do nothing then, so the kept mode holds. `modeEntries(option)`, `nextMode`, `modeOrder`, `isBypassMode`, `bypassAnswer`, `ownBypass`.
+  changes while `opening`: `chooseMode`, `cycleMode` and `setBypass` do nothing then, so the kept mode holds (`leaveBypass` still leaves the chat's own Bypass, which only makes requests asked, and the ledger hears of it once it is open). `modeEntries(option)`, `nextMode`, `modeOrder`, `isBypassMode`, `bypassAnswer`, `ownBypass`.
 - **Reopening**: `reopen(open, {keptMode, keptBypass}) -> Future<AcpOpenedSession>`: when the agent sends the conversation it
   replaces what is held (nothing twice); when it only resumes, what is held stays; history is not news; open tool lines become
   `stopped`; the kept mode and Bypass are put back before anything is sent. A second `reopen` while one is under way throws

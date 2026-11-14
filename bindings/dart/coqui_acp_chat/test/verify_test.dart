@@ -118,7 +118,7 @@ void main() {
     });
 
     test(
-      'changes no mode: choosing, cycling, leaving Bypass and setting it do nothing, and the kept mode holds',
+      'changes no mode: choosing, cycling, leaving Bypass of the agent and setting Bypass do nothing, and the kept mode holds',
       () async {
         final s = started();
         s.session.applyOpened(

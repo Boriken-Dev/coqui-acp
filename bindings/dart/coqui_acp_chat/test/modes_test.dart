@@ -209,6 +209,29 @@ void main() {
     store.dispose();
   });
 
+  test(
+    'Bypass the chat provides can be left while it opens, and the ledger is told once it is open',
+    () async {
+      final (:store, :session, :agent) = _moded();
+      final kept = <(String?, bool)>[];
+      session.onModeKept = (mode, bypass) => kept.add((mode, bypass));
+      await session.reopen(
+        () async {
+          await session.leaveBypass();
+          expect(session.bypass, isFalse);
+          expect(kept, isEmpty, reason: 'not while it opens');
+          return _modes();
+        },
+        keptBypass: true,
+        keptMode: 'auto',
+      );
+      expect(session.bypass, isFalse, reason: 'leaving it was not undone');
+      expect(agent.modes, ['auto']);
+      expect(kept, [('auto', false)]);
+      store.dispose();
+    },
+  );
+
   test('a choice made while it opens waits and goes when it is open', () async {
     final (:store, :session, :agent) = _moded();
     await session.reopen(() async {

@@ -1744,36 +1744,30 @@ class ChatSession extends ChatNotifier {
     });
   }
 
-  /// Takes the conversation out of Bypass. The chat's own sat on the agent's mode, which holds again; an agent's own goes to Manual,
-  /// or the first mode it has that asks.
-  Future<void> leaveBypass() => !canChangeMode
-      ? Future.value()
-      : _inMode(() async {
-          if (_bypass) {
-            _bypass = false;
-            _note('Bypass is off. Requests are asked again.');
-            _keepMode();
-            notifyListeners();
-            return;
-          }
-          final entries = [
-            for (final entry in modeEntries(
-              modeOptionIn(_options),
-              label: modeLabel,
-            ))
-              if (!entry.bypass && entry.selectable) entry,
-          ];
-          if (entries.isEmpty) return;
-          final preferred =
-              entries
-                  .where(
-                    (entry) =>
-                        const {'manual', 'default'}.contains(entry.value),
-                  )
-                  .firstOrNull ??
-              entries.first;
-          await _chooseMode(preferred);
-        });
+  /// Takes the conversation out of Bypass. The chat's own sat on the agent's mode, which holds again, and can be left even while
+  /// the conversation is opened again, since requests are then only asked; an agent's own goes to Manual, or the first mode it has
+  /// that asks, which waits until the conversation is open.
+  Future<void> leaveBypass() => _inMode(() async {
+    if (_bypass) {
+      _bypass = false;
+      _note('Bypass is off. Requests are asked again.');
+      _keepMode();
+      notifyListeners();
+      return;
+    }
+    if (!canChangeMode) return;
+    final entries = [
+      for (final entry in modeEntries(modeOptionIn(_options), label: modeLabel))
+        if (!entry.bypass && entry.selectable) entry,
+    ];
+    if (entries.isEmpty) return;
+    final preferred =
+        entries
+            .where((entry) => const {'manual', 'default'}.contains(entry.value))
+            .firstOrNull ??
+        entries.first;
+    await _chooseMode(preferred);
+  });
 
   /// Tells [onModeKept] the mode that was set and whether Bypass is on, to put both back when the conversation is opened again.
   /// The agent's starting default was set by nobody and is not kept.
