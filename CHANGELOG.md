@@ -103,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- `coqui-acp`: a session ended by `Event::Failed` (a refused tool that ran, an event backlog) or dropped without `close` now tells the agent to stop before `on_close` runs: the drop waits, no longer than the close grace, for the agent to take `session/cancel`, and the session is marked closing before the failure is delivered, so a reader that drops it on `Failed` no longer queues a close ahead of the cancel. The agent receives one `_coqui/flush` request after the cancel and may answer it with method-not-found.
+- `coqui-acp`: a session ended by `Event::Failed` (a refused tool that ran, an event backlog) or dropped without `close` now tells the agent to stop before `on_close` runs: the drop waits, no longer than the new setting `Builder::abort_wait` (5 s by default, whatever the close grace; `on_close` runs anyway when it passes), for the agent to take `session/cancel`, and the session is marked closing before the failure is delivered, so a reader that drops it on `Failed` no longer queues a close ahead of the cancel. The agent receives one `_coqui/flush` request after the cancel and may answer it with method-not-found.
 
 ### Changed
 

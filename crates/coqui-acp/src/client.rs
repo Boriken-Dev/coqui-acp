@@ -90,6 +90,7 @@ pub struct Builder {
     initialize_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
     close_grace: Option<Duration>,
+    abort_wait: Duration,
     max_pending_events: usize,
     text_flush: usize,
     max_tool_kinds: usize,
@@ -138,6 +139,7 @@ impl Client {
             initialize_timeout: Some(Duration::from_secs(20)),
             request_timeout: Some(Duration::from_secs(30)),
             close_grace: Some(Duration::from_secs(2)),
+            abort_wait: Duration::from_secs(5),
             max_pending_events: 100_000,
             text_flush: TEXT_FLUSH,
             max_tool_kinds: TOOL_KINDS,
@@ -276,6 +278,13 @@ impl Builder {
         self
     }
 
+    /// How long ending a session without closing it (dropping it, or after [`Event::Failed`]) waits for the agent to take its
+    /// `session/cancel`; once it passes, `on_close` runs anyway. Default 5 s, whatever the close grace.
+    pub const fn abort_wait(mut self, limit: Duration) -> Self {
+        self.abort_wait = limit;
+        self
+    }
+
     /// Events held for a slow reader, past which the session ends with [`Event::Failed`]. Default 100000.
     pub const fn max_pending_events(mut self, events: usize) -> Self {
         self.max_pending_events = events;
@@ -376,6 +385,7 @@ impl Builder {
             ),
         });
         let close_grace = self.close_grace;
+        let abort_wait = self.abort_wait;
         let worker = shared.clone();
         let (finished_tx, finished) = mpsc::channel::<()>();
         let thread = std::thread::Builder::new()
@@ -441,6 +451,7 @@ impl Builder {
             commands: commands_tx,
             on_close: Mutex::new(on_close),
             close_grace,
+            abort_wait,
             thread: Mutex::new(Some(thread)),
             finished: Mutex::new(finished),
         };
@@ -1340,7 +1351,7 @@ async fn main_task(
                     let _ = cx.send_notification(message);
                     // The connection ends with this task and may drop the queued notification. The agent answers a request sent
                     // after it only once it has read the notification, so wait for that, no longer than the close grace.
-                    let _ = call(&cx, "_coqui/flush", json!({}), options.close_grace).await;
+                    let _ = call(&cx, "_coqui/flush", json!({}), Some(options.abort_wait)).await;
                 }
                 break;
             }
@@ -1357,6 +1368,7 @@ pub struct Session {
     commands: async_mpsc::UnboundedSender<Command>,
     on_close: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     close_grace: Option<Duration>,
+    abort_wait: Duration,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     finished: Mutex<mpsc::Receiver<()>>,
 }
@@ -1460,17 +1472,10 @@ impl Session {
     }
 
     /// Waits for the connection's thread to end, which it does after telling the agent to stop, so `on_close` (which may end the
-    /// agent's process) never runs ahead of the `session/cancel`. Bounded by the close grace plus the time the cancel's flush takes.
+    /// agent's process) never runs ahead of the `session/cancel`. Bounded by the abort wait, after which `on_close` runs anyway.
     fn await_abort(&self) {
         let finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
-        match self.close_grace {
-            Some(limit) => {
-                let _ = finished.recv_timeout(limit.saturating_add(Duration::from_secs(1)));
-            }
-            None => {
-                let _ = finished.recv();
-            }
-        }
+        let _ = finished.recv_timeout(self.abort_wait);
     }
 
     fn release(&self) {

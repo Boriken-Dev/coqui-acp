@@ -1650,3 +1650,37 @@ fn a_session_dropped_on_failed_still_tells_the_agent_to_stop() {
         "the agent should be told to stop"
     );
 }
+
+#[test]
+fn dropping_a_session_whose_agent_is_hung_returns_within_the_abort_wait() {
+    let killed = Arc::new(AtomicBool::new(false));
+    let (transport, _messages) = agent_with(|method, _, agent| match method {
+        "session/prompt" => runs_a_refused_tool(method, agent),
+        "_coqui/flush" | "session/close" => {
+            thread::sleep(Duration::from_secs(30));
+            plain(method)
+        }
+        other => plain(other),
+    });
+    let session = Client::builder("/w")
+        .prompt("go")
+        .refuse_kinds(["execute"])
+        .close_grace(None)
+        .abort_wait(Duration::from_millis(300))
+        .on_close({
+            let killed = killed.clone();
+            move || killed.store(true, Ordering::SeqCst)
+        })
+        .connect(transport)
+        .unwrap();
+    let events = events_until(&session, 2);
+    assert!(matches!(&events[1], Event::Failed(_)), "{events:?}");
+    let started = Instant::now();
+    drop(session);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(killed.load(Ordering::SeqCst), "on_close runs anyway");
+}
