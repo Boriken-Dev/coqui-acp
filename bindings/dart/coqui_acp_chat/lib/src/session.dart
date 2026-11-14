@@ -502,6 +502,11 @@ class ChatSession extends ChatNotifier {
 
   /// Whether the agent may name the conversation, which it may until the person has ([rename]).
   bool get agentNames => _agentNames;
+  set agentNames(bool value) {
+    if (_agentNames == value) return;
+    _agentNames = value;
+    notifyListeners();
+  }
 
   ChatStatus get status => _status;
 

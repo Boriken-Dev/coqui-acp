@@ -433,6 +433,17 @@ void main() {
           'title': 'Named',
         });
         expect(session.title, 'Named');
+        session.rename('Mine');
+        session.agentNames = true;
+        feed(session, {
+          'sessionUpdate': 'session_info_update',
+          'title': 'Again',
+        });
+        expect(
+          session.title,
+          'Again',
+          reason: 'the host let the agent name it again',
+        );
       },
     );
 
