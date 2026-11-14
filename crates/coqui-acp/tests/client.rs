@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1515,5 +1516,137 @@ fn bounded_by(limits: &Value, exchange: Exchange) {
         sessions.incomplete.as_deref(),
         Some("the sessions limit was reached"),
         "one session past the limit was left out"
+    );
+}
+
+/// A transport whose writer is busy with a `session/cancel` line for `delay` without blocking the connection, and drops that line if
+/// `killed` is set by then, as the pipe of an agent whose process `on_close` ended does.
+fn slow_cancel_agent(
+    answer: impl Fn(&str, &Value, &Agent) -> Option<Value> + Send + 'static,
+    delay: Duration,
+    killed: Arc<AtomicBool>,
+) -> (
+    impl coqui_acp::sdk::ConnectTo<coqui_acp::sdk::Client> + 'static,
+    Receiver<Value>,
+) {
+    let (to_agent, from_client) = async_mpsc::unbounded::<String>();
+    let (to_client, from_agent) = async_mpsc::unbounded::<io::Result<String>>();
+    let outgoing = to_agent
+        .sink_map_err((|error| io::Error::other(error)) as fn(_) -> _)
+        .with(move |line: String| {
+            let killed = killed.clone();
+            async move {
+                if line.contains("session/cancel") {
+                    let (fire, fired) = futures::channel::oneshot::channel::<()>();
+                    thread::spawn(move || {
+                        thread::sleep(delay);
+                        let _ = fire.send(());
+                    });
+                    let _ = fired.await;
+                    if killed.load(Ordering::SeqCst) {
+                        return Err(io::ErrorKind::BrokenPipe.into());
+                    }
+                }
+                Ok::<_, io::Error>(line)
+            }
+        });
+    let mut agent = Agent {
+        from_client,
+        to_client,
+        next_id: 1000,
+    };
+    let (seen, messages): (Sender<Value>, Receiver<Value>) = mpsc::channel();
+    thread::spawn(move || {
+        while let Some(message) = agent.read() {
+            let _ = seen.send(message.clone());
+            let Some(method) = message.get("method").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(id) = message.get("id") {
+                match answer(method, &message["params"], &agent) {
+                    Some(result) => agent.reply(id, &result),
+                    None => agent.fail(id, &json!({"code": -32601, "message": "no such method"})),
+                }
+            }
+        }
+    });
+    (coqui_acp::sdk::Lines::new(outgoing, from_agent), messages)
+}
+
+fn runs_a_refused_tool(method: &str, agent: &Agent) -> Option<Value> {
+    if method == "session/prompt" {
+        agent.notify("session/update", &json!({"sessionId": "s1", "update": {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "kind": "execute", "status": "in_progress"}}));
+        return None;
+    }
+    plain(method)
+}
+
+fn cancel_arrives(messages: &Receiver<Value>) -> bool {
+    let until = Instant::now() + WAIT;
+    while Instant::now() < until {
+        if messages
+            .recv_timeout(Duration::from_millis(50))
+            .is_ok_and(|m| m["method"] == "session/cancel")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn an_abort_tells_the_agent_to_stop_though_the_writer_is_slow() {
+    let killed = Arc::new(AtomicBool::new(false));
+    let (transport, messages) = slow_cancel_agent(
+        |method, _, agent| runs_a_refused_tool(method, agent),
+        Duration::from_millis(300),
+        killed.clone(),
+    );
+    let session = Client::builder("/w")
+        .prompt("go")
+        .refuse_kinds(["execute"])
+        .close_on_drop(false)
+        .on_close({
+            let killed = killed.clone();
+            move || killed.store(true, Ordering::SeqCst)
+        })
+        .connect(transport)
+        .unwrap();
+    let events = events_until(&session, 2);
+    assert!(matches!(&events[1], Event::Failed(_)), "{events:?}");
+    drop(session);
+    assert!(
+        cancel_arrives(&messages),
+        "the agent should be told to stop"
+    );
+}
+
+#[test]
+fn a_session_dropped_on_failed_still_tells_the_agent_to_stop() {
+    let killed = Arc::new(AtomicBool::new(false));
+    let (transport, messages) = slow_cancel_agent(
+        |method, _, agent| runs_a_refused_tool(method, agent),
+        Duration::from_millis(100),
+        killed.clone(),
+    );
+    let session = Client::builder("/w")
+        .prompt("go")
+        .refuse_kinds(["execute"])
+        .on_close({
+            let killed = killed.clone();
+            move || killed.store(true, Ordering::SeqCst)
+        })
+        .connect(transport)
+        .unwrap();
+    loop {
+        match session.next_event(WAIT) {
+            Some(Event::Failed(_)) | None => break,
+            Some(_) => {}
+        }
+    }
+    drop(session);
+    assert!(
+        cancel_arrives(&messages),
+        "the agent should be told to stop"
     );
 }
