@@ -1772,7 +1772,8 @@ class ChatSession extends ChatNotifier {
   /// Tells [onModeKept] the mode that was set and whether Bypass is on, to put both back when the conversation is opened again.
   /// The agent's starting default was set by nobody and is not kept.
   void _keepMode() {
-    if (_connection == null || _opening) return;
+    // A conversation whose connection was lost still has its mode kept: the person was told it changed.
+    if (sessionId == null || _opening) return;
     onModeKept?.call(_chosenMode, _bypass);
   }
 

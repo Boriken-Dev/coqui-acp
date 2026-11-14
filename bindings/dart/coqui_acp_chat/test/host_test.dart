@@ -395,6 +395,27 @@ void main() {
       },
     );
 
+    test(
+      'a mode left or chosen with no connection is still told to onModeKept',
+      () async {
+        final (:store, :session, :agent) = started();
+        _offer(session);
+        session.setBypass(true);
+        final kept = <(String?, bool)>[];
+        session.onModeKept = (mode, bypass) => kept.add((mode, bypass));
+        session.detach();
+        await session.leaveBypass();
+        expect(session.bypass, isFalse);
+        expect(
+          kept,
+          [(null, false)],
+          reason:
+              'the person was told Bypass is off, so a reopen must not put it back',
+        );
+        store.dispose();
+      },
+    );
+
     test('modeLabel words the modes the conversation cycles to', () async {
       final (:store, :session, :agent) = started();
       _offer(session, [
