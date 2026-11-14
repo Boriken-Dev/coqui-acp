@@ -276,13 +276,17 @@ final class ModeEntry {
   bool get bypass => isBypassMode(value, label);
 }
 
-/// The modes [option] offers, and Bypass beside them when none of them asks for nothing.
-List<ModeEntry> modeEntries(ConfigOption? option) {
+/// The modes [option] offers, and Bypass beside them when none of them asks for nothing. [label] words a mode for a person where
+/// the agent's own name for it is not what to show.
+List<ModeEntry> modeEntries(
+  ConfigOption? option, {
+  String Function(Choice choice)? label,
+}) {
   final entries = [
     for (final choice in option?.choices ?? const <Choice>[])
       ModeEntry(
         choice.value,
-        choice.label,
+        label?.call(choice) ?? choice.label,
         selectable: choice.value != 'custom',
       ),
   ];

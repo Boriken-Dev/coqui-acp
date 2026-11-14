@@ -138,6 +138,7 @@ final class PermissionQuestion {
     this.bypassPassed = false,
     this.forPerson = false,
     this.toolCallId,
+    this.hostData,
     required this.askedAt,
   });
 
@@ -168,6 +169,9 @@ final class PermissionQuestion {
   /// Whether it is a question or a plan for the person, which Bypass never answers.
   final bool forPerson;
 
+  /// What the host's [PermissionPolicy] attached to it, which the model does not read.
+  final Object? hostData;
+
   final Completer<AcpDecision> _answer = Completer();
   Settled<AcpDecision>? _outcome;
 
@@ -175,6 +179,54 @@ final class PermissionQuestion {
   Settled<AcpDecision>? get outcome => _outcome;
 
   bool get isOpen => _outcome == null;
+}
+
+/// What a host decides about a permission request before a person is asked, given to a conversation as
+/// [ChatSession.permissionPolicy]. With one, requests are decided one after another in the order they came.
+abstract interface class PermissionPolicy {
+  /// Awaited, in the order the requests came, before [review]: a host reads here what its rules need. A conversation that is
+  /// stopped, closed or whose connection ended meanwhile answers the request cancelled and decides nothing.
+  Future<void> prepare(AcpPermissionRequest request);
+
+  /// How [request] is put, read after [prepare] with the conversation as it is then: whether it is the person's alone, and what
+  /// the host wants kept with it.
+  PermissionReview review(AcpPermissionRequest request);
+
+  /// The host's own answer to [request], asked when Bypass did not answer it; null leaves it to the person.
+  PermissionAnswer? answer(
+    AcpPermissionRequest request,
+    PermissionReview review,
+  );
+}
+
+/// How a host has [PermissionPolicy.review] a request put.
+final class PermissionReview {
+  const PermissionReview({
+    this.forPerson = false,
+    this.label = '',
+    this.ownCall = true,
+    this.hostData,
+  });
+
+  /// Whether it is the person's alone, as a plan is: Bypass never answers it, and neither does [PermissionPolicy.answer].
+  final bool forPerson;
+
+  /// Words said after the request's title in what is noted of it (` for a task`).
+  final String label;
+
+  /// Whether the tool call it asks about is this conversation's own, so its line shows before the card; false for another
+  /// thread's.
+  final bool ownCall;
+
+  /// Kept on the [PermissionQuestion] as [PermissionQuestion.hostData].
+  final Object? hostData;
+}
+
+/// The host's own answer to a request, and what is noted in the conversation of it.
+final class PermissionAnswer {
+  const PermissionAnswer(this.decision, this.note);
+  final AcpDecision decision;
+  final String note;
 }
 
 /// An agent's question, waiting on the person. Nothing answers it for them; Bypass is for permission requests only.
@@ -341,6 +393,38 @@ class ChatSession extends ChatNotifier {
 
   /// Whether Bypass answers only with an answer that allows once, where an agent offers both that and one that allows always.
   bool bypassOnceOnly = false;
+
+  /// What the host decides about a request before the person is asked; see [PermissionPolicy].
+  PermissionPolicy? permissionPolicy;
+
+  /// Told, as it settles, of each permission request: who answered it and how is in [PermissionQuestion.outcome].
+  void Function(PermissionQuestion question)? onPermissionSettled;
+
+  /// Told, before a prompt is handed to the agent and after the choices made earlier are sent, of its text and what goes with it.
+  void Function(String text, List<AcpAttachment> attachments)? onPrompt;
+
+  /// Told when the agent took a choice a person made, such as the model: its role and the value.
+  void Function(OptionRole role, String value)? onChoice;
+
+  /// Told after the agent's options change by an update.
+  void Function()? onOptions;
+
+  /// Told when the agent names the conversation, with the name.
+  void Function(String title)? onTitle;
+
+  /// Told when the agent changed its own mode, with the mode it was in and the one it is in.
+  void Function(String before, String now)? onAgentMode;
+
+  /// Whether a mode the agent moved to by itself counts as the conversation's chosen mode, kept for it to be put back when it is
+  /// opened again. Off, it is shown and nothing more.
+  bool agentModeIsChosen = true;
+
+  /// Words a mode for a person where the agent's own name is not what to show, in the notes and menus the conversation makes.
+  String Function(Choice choice)? modeLabel;
+
+  int _askEpoch = 0;
+  Future<void> _askTail = Future.value();
+  final List<Completer<AcpDecision>> _askWaiters = [];
 
   String _title;
   bool _agentNames;
@@ -526,6 +610,42 @@ class ChatSession extends ChatNotifier {
     if (_replaying) return;
     onAttention?.call(kind);
     _emit(AttentionEvent(kind));
+  }
+
+  /// Puts a notice in the conversation, which is the chat's word and not the agent's.
+  void note(String text) {
+    _note(text);
+    _trim();
+    notifyListeners();
+  }
+
+  /// Puts a message the host holds in the conversation, such as what a kept copy of it says, at [at] when it is given.
+  void addMessage(MessageRole role, String text, {DateTime? at}) {
+    _add(_entry(role, text, at: at));
+    _trim();
+    notifyListeners();
+  }
+
+  /// Changes the conversation's name to [name] without ending the agent's naming of it, as a name made from the first message.
+  void retitle(String name) {
+    final shown = shortText(name, limits);
+    if (shown == null) return;
+    _title = shown;
+    notifyListeners();
+  }
+
+  /// Puts Bypass on or off silently, before an agent is there to be told or to say: a draft that starts in it.
+  void presetBypass(bool on) {
+    if (_bypass == on) return;
+    _bypass = on;
+    notifyListeners();
+  }
+
+  /// Takes back the choices still waiting that [where] names, or all of them.
+  void dropChoices({bool Function(PendingChoice choice)? where}) {
+    final before = _pending.length;
+    _pending.removeWhere((_, choice) => where?.call(choice) ?? true);
+    if (_pending.length != before) notifyListeners();
   }
 
   /// Sets the person's name for the conversation, which the agent then no longer replaces.
@@ -899,11 +1019,12 @@ class ChatSession extends ChatNotifier {
     ToolCall? tool,
     Compaction? compaction,
     String? sentBy,
+    DateTime? at,
   }) => ChatMessage._(
     role,
     limits,
     text,
-    _now(),
+    at ?? _now(),
     messageId: messageId,
     tool: tool,
     compaction: compaction,
@@ -1067,6 +1188,7 @@ class ChatSession extends ChatNotifier {
           _replaying ? update.raw['modes'] : null,
         );
         _agentChangedMode(before);
+        onOptions?.call();
       case Rendering.choices:
         if (update.raw['currentModeId'] case final String mode) {
           final before = modeOptionIn(_options)?.current;
@@ -1074,10 +1196,14 @@ class ChatSession extends ChatNotifier {
             if (option.isMode) _setCurrent(option.id, mode);
           }
           _agentChangedMode(before);
+          onOptions?.call();
         }
       case Rendering.title:
         final title = shortText(update.raw['title'], limits);
-        if (title != null && _agentNames) _title = title;
+        if (title != null && _agentNames) {
+          _title = title;
+          onTitle?.call(title);
+        }
         final meta = update.raw['_meta'];
         if (_replaying && meta is Map && meta[_namesMetaKey] == false) {
           _agentNames = false;
@@ -1192,17 +1318,67 @@ class ChatSession extends ChatNotifier {
   /// Puts a permission request to the person. Bypass answers one that offers an allow; one past [ChatLimits.pendingPermissions]
   /// is cancelled. The first answer to it, from whichever client, is the one the agent gets.
   Future<AcpDecision> askPermission(AcpPermissionRequest request) {
+    final policy = permissionPolicy;
+    if (policy == null) return _ask(request, const PermissionReview(), null);
+    // Each request waits for the one before it, so one that needs the host's rules read again cannot be passed by one that does
+    // not.
+    final epoch = _askEpoch;
+    final prior = _askTail;
+    final gate = Completer<void>();
+    final waiter = Completer<AcpDecision>();
+    _askTail = gate.future;
+    _askWaiters.add(waiter);
+    unawaited(() async {
+      try {
+        await prior;
+        await policy.prepare(request);
+        // Stop, closing the conversation or a connection that ended while this waited: nothing is answered but cancelled, and
+        // what the mode, Bypass and the waiting cards are now is read after this point, not before it.
+        if (!waiter.isCompleted) {
+          waiter.complete(
+            _askEpoch != epoch
+                ? const AcpCancel()
+                : _ask(request, policy.review(request), policy),
+          );
+        }
+      } on Object catch (error, stack) {
+        if (!waiter.isCompleted) waiter.completeError(error, stack);
+      } finally {
+        _askWaiters.remove(waiter);
+        gate.complete();
+      }
+    }());
+    return waiter.future;
+  }
+
+  /// Ends what the conversation had in hand: a request still waiting on its policy is answered cancelled now, and one that is not
+  /// told so by the time it is decided finds it so by the count.
+  void _cancelWaiters() {
+    _askEpoch++;
+    for (final waiter in [..._askWaiters]) {
+      if (!waiter.isCompleted) waiter.complete(const AcpCancel());
+    }
+    _askWaiters.clear();
+  }
+
+  Future<AcpDecision> _ask(
+    AcpPermissionRequest request,
+    PermissionReview review,
+    PermissionPolicy? policy,
+  ) {
     final title =
         shortText(request.title, limits) ??
         shortText(request.kind, limits) ??
         'A tool';
-    final forPerson = _isForPerson(request);
+    final forPerson = _isForPerson(request) || review.forPerson;
     if (_bypass && !forPerson) {
       final allow = bypassAnswer(request.options, onceOnly: bypassOnceOnly);
       if (allow != null) {
-        if (request.toolCall != null) _applyTool(request.toolCall!);
+        if (request.toolCall != null && review.ownCall) {
+          _applyTool(request.toolCall!);
+        }
         _note(
-          'Bypass allowed: $title (${shortText(allow.name, limits) ?? allow.kind}).',
+          'Bypass allowed: $title${review.label} (${shortText(allow.name, limits) ?? allow.kind}).',
         );
         _trim();
         notifyListeners();
@@ -1218,7 +1394,16 @@ class ChatSession extends ChatNotifier {
       return Future.value(const AcpCancel());
     }
     // ACP has the tool call applied before the prompt shows, so the conversation shows what is being asked about.
-    if (request.toolCall != null) _applyTool(request.toolCall!);
+    if (request.toolCall != null && review.ownCall) {
+      _applyTool(request.toolCall!);
+    }
+    final decided = forPerson ? null : policy?.answer(request, review);
+    if (decided != null) {
+      _note(decided.note);
+      _trim();
+      notifyListeners();
+      return Future.value(decided.decision);
+    }
     final question = PermissionQuestion._(
       _nextRequest++,
       title,
@@ -1230,6 +1415,7 @@ class ChatSession extends ChatNotifier {
       bypassPassed: _bypass,
       forPerson: forPerson,
       toolCallId: idText(request.toolCall?['toolCallId'], limits),
+      hostData: review.hostData,
       askedAt: _now(),
     );
     _pendingPermissions.add(question);
@@ -1273,6 +1459,7 @@ class ChatSession extends ChatNotifier {
         _settledPermissions.length - limits.settledRequests,
       );
     }
+    onPermissionSettled?.call(question);
     _emit(PermissionSettledEvent(question));
   }
 
@@ -1360,6 +1547,7 @@ class ChatSession extends ChatNotifier {
   /// the requests go, the tool line each was about is marked stopped, and the agent, if it is still there to hear, is told each
   /// was cancelled, so it never waits for an answer nobody can give.
   void _withdraw() {
+    _cancelWaiters();
     for (final question in [..._pendingPermissions]) {
       if (question.toolCallId case final id?) _toolEntries[id]?.tool?.stop();
       const answer = AcpCancel();
@@ -1381,6 +1569,7 @@ class ChatSession extends ChatNotifier {
 
   /// Answers everything still waiting: its permission requests with [answer], and its questions cancelled.
   void _endWaiting(AcpDecision answer) {
+    _cancelWaiters();
     for (final question in [..._pendingPermissions]) {
       _settle(
         question,
@@ -1519,7 +1708,7 @@ class ChatSession extends ChatNotifier {
   /// shows, and a mode the agent refused is skipped.
   Future<void> cycleMode() {
     if (!canChangeMode) return Future.value();
-    final entries = modeEntries(modeOptionIn(_options));
+    final entries = modeEntries(modeOptionIn(_options), label: modeLabel);
     final next = nextMode(entries, _targetMode ?? mode, skip: _refusedModes);
     if (next == null) return Future.value();
     _targetMode = next.value;
@@ -1541,7 +1730,10 @@ class ChatSession extends ChatNotifier {
             return;
           }
           final entries = [
-            for (final entry in modeEntries(modeOptionIn(_options)))
+            for (final entry in modeEntries(
+              modeOptionIn(_options),
+              label: modeLabel,
+            ))
               if (!entry.bypass && entry.selectable) entry,
           ];
           if (entries.isEmpty) return;
@@ -1569,6 +1761,8 @@ class ChatSession extends ChatNotifier {
     if (before == null || now == null || now == before || now == 'custom') {
       return;
     }
+    onAgentMode?.call(before, now);
+    if (!agentModeIsChosen) return;
     _chosenMode = now;
     _keepMode();
   }
@@ -1588,7 +1782,7 @@ class ChatSession extends ChatNotifier {
       notifyListeners();
       return false;
     }
-    if (_status == ChatStatus.working || _opening) {
+    if (_status == ChatStatus.working || _opening || _connection == null) {
       _pending[option.id] = PendingChoice(
         option.id,
         roleOf(option),
@@ -1599,7 +1793,12 @@ class ChatSession extends ChatNotifier {
       return false;
     }
     _pending.remove(option.id);
-    return _set(option, value);
+    final refused = await _set(option, value);
+    if (_options.where((each) => each.id == option.id).firstOrNull?.current ==
+        value) {
+      onChoice?.call(roleOf(option), value);
+    }
+    return refused;
   }
 
   /// Sets one of the agent's choices. It stays as it was unless the agent agrees; a refusal is said in the conversation, with the
@@ -1680,6 +1879,7 @@ class ChatSession extends ChatNotifier {
           _options.where((each) => each.id == option.id).firstOrNull?.current ==
           choice.value;
       if (took && choice.role == OptionRole.mode) _chosenMode = choice.value;
+      if (took && choice.byPerson) onChoice?.call(choice.role, choice.value);
     }
     _keepMode();
     notifyListeners();
@@ -1908,6 +2108,7 @@ class ChatSession extends ChatNotifier {
     String? from,
   ) async {
     await _applyPending();
+    onPrompt?.call(text, attachments);
     final names = [for (final item in attachments) item.name];
     final v1 = connection.protocolVersion == 1;
     ChatTurn? mine;
