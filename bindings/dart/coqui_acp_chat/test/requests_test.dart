@@ -223,6 +223,28 @@ void main() {
     );
 
     test(
+      'with bypassOnceOnly answers an allow once, and leaves a request that offers only an always allow to the person',
+      () async {
+        final (:store, :session, :agent) = started();
+        session.bypassOnceOnly = true;
+        session.setBypass(true);
+        final once = await store.askPermission(request(1), agent);
+        expect(
+          once,
+          isA<AcpSelect>().having((s) => s.optionId, 'id', 'allow-once'),
+        );
+        store.askPermission(request(2, options: _alwaysOnly), agent);
+        expect(session.pendingPermissions.map((q) => q.toolCallId), ['t2']);
+        expect(
+          session.pendingPermissions.single.bypassPassed,
+          isTrue,
+          reason: 'it was left to them while Bypass was on',
+        );
+        store.dispose();
+      },
+    );
+
+    test(
       'answers the requests already waiting when it is chosen, except one with no allow, and says who',
       () async {
         final (:store, :session, :agent) = started();

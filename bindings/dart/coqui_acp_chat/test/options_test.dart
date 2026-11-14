@@ -210,7 +210,60 @@ void main() {
       'allow-once',
     );
     expect(bypassAnswer(const [rejectOnce]), isNull);
+    expect(
+      bypassAnswer(const [rejectOnce, allowAlways])!.optionId,
+      'allow-always',
+    );
+    expect(
+      bypassAnswer(const [rejectOnce, allowAlways], onceOnly: true),
+      isNull,
+    );
+    expect(
+      bypassAnswer(const [allowAlways, allowOnce], onceOnly: true)!.optionId,
+      'allow-once',
+    );
   });
+
+  test(
+    'a pending choice keeps who made it, and a host keeps it as JSON',
+    () async {
+      final (:store, :session, :agent) = started();
+      _offering(session);
+      await session.send('go');
+      feed(session, state('running'));
+      final model = optionIn(session.options, OptionRole.model)!;
+      await session.choose(model, 'b');
+      final held = session.pendingChoices['model']!;
+      expect(held.byPerson, isTrue, reason: 'a person chose it');
+      expect(PendingChoice.fromJson(held.toJson())!.byPerson, isTrue);
+      expect(PendingChoice.fromJson(held.toJson())!.value, 'b');
+      const defaulted = PendingChoice('model', OptionRole.model, 'a');
+      expect(defaulted.byPerson, isFalse);
+      expect(defaulted.toJson().containsKey('byPerson'), isFalse);
+      expect(PendingChoice.fromJson(defaulted.toJson())!.byPerson, isFalse);
+      expect(
+        PendingChoice.fromJson({'id': 'm', 'role': 'nope', 'value': 'x'}),
+        isNull,
+      );
+      expect(PendingChoice.fromJson('x'), isNull);
+      store.dispose();
+    },
+  );
+
+  test(
+    'an option keeps the short name of what taking no choice stands for',
+    () {
+      final option = ConfigOption(
+        id: 'model',
+        label: 'Model',
+        current: 'a',
+        choices: const [Choice('a', 'A')],
+        defaultLabel: 'Default (Opus 5.5)',
+        defaultName: 'Opus 5.5',
+      );
+      expect(option.withCurrent('a').defaultName, 'Opus 5.5');
+    },
+  );
 
   test(
     'options that are not ACP\'s shape are skipped, and what is kept is bounded',

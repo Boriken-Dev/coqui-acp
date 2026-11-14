@@ -339,6 +339,9 @@ class ChatSession extends ChatNotifier {
   /// conversation is being opened again.
   void Function(String? mode, bool bypass)? onModeKept;
 
+  /// Whether Bypass answers only with an answer that allows once, where an agent offers both that and one that allows always.
+  bool bypassOnceOnly = false;
+
   String _title;
   bool _agentNames;
   ChatStatus _status = ChatStatus.disconnected;
@@ -1195,7 +1198,7 @@ class ChatSession extends ChatNotifier {
         'A tool';
     final forPerson = _isForPerson(request);
     if (_bypass && !forPerson) {
-      final allow = bypassAnswer(request.options);
+      final allow = bypassAnswer(request.options, onceOnly: bypassOnceOnly);
       if (allow != null) {
         if (request.toolCall != null) _applyTool(request.toolCall!);
         _note(
@@ -1441,7 +1444,9 @@ class ChatSession extends ChatNotifier {
 
   void _answerWaiting() {
     for (final question in [..._pendingPermissions]) {
-      final allow = question.forPerson ? null : bypassAnswer(question.options);
+      final allow = question.forPerson
+          ? null
+          : bypassAnswer(question.options, onceOnly: bypassOnceOnly);
       if (allow == null) continue;
       settle(question, AcpSelect(allow.optionId), by: bypassClient);
       _note(
@@ -1584,7 +1589,12 @@ class ChatSession extends ChatNotifier {
       return false;
     }
     if (_status == ChatStatus.working || _opening) {
-      _pending[option.id] = PendingChoice(option.id, roleOf(option), value);
+      _pending[option.id] = PendingChoice(
+        option.id,
+        roleOf(option),
+        value,
+        byPerson: true,
+      );
       notifyListeners();
       return false;
     }

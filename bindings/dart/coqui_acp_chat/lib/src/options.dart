@@ -20,6 +20,7 @@ final class ConfigOption {
     this.isMode = false,
     this.category,
     this.defaultLabel,
+    this.defaultName,
   }) : choices = List.unmodifiable(choices);
   final String id;
   final String label;
@@ -31,6 +32,9 @@ final class ConfigOption {
 
   /// What taking no choice stands for, such as `Default (Opus 5.5)`, when a provider says.
   final String? defaultLabel;
+
+  /// What taking no choice stands for, short, as a control reads it (`Opus 5.5`), when a provider says.
+  final String? defaultName;
 
   /// Set with `session/set_mode` rather than `session/set_config_option`.
   final bool isMode;
@@ -44,6 +48,7 @@ final class ConfigOption {
     isMode: isMode,
     category: category,
     defaultLabel: defaultLabel,
+    defaultName: defaultName,
   );
 
   /// This option as the update that carries it.
@@ -173,13 +178,42 @@ ConfigOption? optionIn(List<ConfigOption> options, OptionRole role) =>
 ConfigOption? modeOptionIn(List<ConfigOption> options) =>
     optionIn(options, OptionRole.mode);
 
-/// A choice made while a turn runs: it goes to the agent before the next prompt, to the option of the same id, else to one in the
-/// same [role] that offers [value].
+/// A choice made before the agent can take it: while a turn runs, or before it starts. It goes to the agent before the next
+/// prompt, to the option of the same id, else to one in the same [role] that offers [value].
 final class PendingChoice {
-  const PendingChoice(this.id, this.role, this.value);
+  const PendingChoice(this.id, this.role, this.value, {this.byPerson = false});
   final String id;
   final OptionRole role;
   final String value;
+
+  /// Whether a person chose it, rather than its being a default a host put there.
+  final bool byPerson;
+
+  /// This choice as a host keeps it between runs, which [fromJson] reads back.
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'role': role.name,
+    'value': value,
+    if (byPerson) 'byPerson': true,
+  };
+
+  /// The choice [toJson] wrote; null for anything else.
+  static PendingChoice? fromJson(Object? json) {
+    if (json is! Map || json['id'] is! String || json['value'] is! String) {
+      return null;
+    }
+    final role = OptionRole.values
+        .where((role) => role.name == json['role'])
+        .firstOrNull;
+    return role == null
+        ? null
+        : PendingChoice(
+            json['id'] as String,
+            role,
+            json['value'] as String,
+            byPerson: json['byPerson'] == true,
+          );
+  }
 }
 
 /// The ids an agent may give a mode that asks for nothing: the Rust translators' own, and the names Claude Code and others use.
@@ -200,11 +234,16 @@ bool isBypassMode(String value, [String? label]) =>
 /// The id of the bypass a chat provides itself, by answering requests, for an agent that has no mode that asks for nothing.
 const String ownBypass = 'bypass';
 
-/// The option a request in bypass is answered with: the first that allows once, else the first that allows always. Null when it
-/// offers neither: that request is the person's.
-AcpPermissionOption? bypassAnswer(List<AcpPermissionOption> options) =>
+/// The option a request in bypass is answered with: the first that allows once, else the first that allows always unless
+/// [onceOnly]. Null when it offers neither: that request is the person's.
+AcpPermissionOption? bypassAnswer(
+  List<AcpPermissionOption> options, {
+  bool onceOnly = false,
+}) =>
     options.where((option) => option.kind == 'allow_once').firstOrNull ??
-    options.where((option) => option.kind == 'allow_always').firstOrNull;
+    (onceOnly
+        ? null
+        : options.where((option) => option.kind == 'allow_always').firstOrNull);
 
 /// The mode ids the Rust translators (`coqui_acp_harness::mode`) offer, in the order a client cycles them.
 const List<String> modeOrder = [
