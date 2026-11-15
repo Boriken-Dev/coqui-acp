@@ -647,3 +647,28 @@ fn a_failed_reading_forgets_the_port_so_the_other_is_tried_next() {
         "the other port answers"
     );
 }
+
+#[test]
+fn a_port_found_once_is_read_again_without_listing_and_forgotten_when_it_stops_answering() {
+    let _only = one_at_a_time();
+    let mut quota = AgyQuota::new(patient());
+    assert!(
+        quota.read_remembered(&acp_models()).is_none(),
+        "no port has been found yet"
+    );
+    let server = Server::plain("200 OK", answer(|_| {}), true);
+    let first = quota.read(&me(), &acp_models()).unwrap();
+    // No process is named: the answer can only come from the port that was found.
+    let again = quota
+        .read_remembered(&acp_models())
+        .expect("the remembered port answers");
+    assert_eq!(again.len(), first.len());
+    assert_eq!(server.accepted(), 2);
+    drop(server);
+    assert!(quota.read_remembered(&acp_models()).is_none());
+    assert!(
+        quota.read_remembered(&acp_models()).is_none(),
+        "the port that failed is forgotten, not tried again"
+    );
+    assert_eq!(quota.read(&me(), &[]), Err(ReadError::NoPort));
+}

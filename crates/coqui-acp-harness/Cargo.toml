@@ -20,7 +20,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 # `antigravity`: the quota Antigravity (`agy`) reports on its own loopback port, as usage buckets.
-antigravity = ["dep:serde", "dep:time", "dep:ureq"]
+antigravity = ["dep:serde", "dep:time", "dep:ureq", "dep:windows-sys"]
 # The acp_harness kind's spawner on this machine, and Spawn through any host's spawner.
 kind = ["dep:guatiao-serde", "dep:coqui-acp-history"]
 
@@ -41,6 +41,8 @@ rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 win32job.workspace = true
+# The TCP table, for the Antigravity quota reader; its one `unsafe` module.
+windows-sys = { version = "0.61.2", optional = true, default-features = false, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 coqui-acp = { path = "../coqui-acp" }
