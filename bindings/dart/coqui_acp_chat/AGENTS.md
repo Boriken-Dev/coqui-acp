@@ -45,6 +45,7 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
   `duration(now)`), `currentTurn`, `queue`, `queueHeld`, `pendingPermissions`, `pendingQuestions`, `settledPermissions`,
   `settledQuestions`, `pendingChoices`, `bypass`, `mode`, `underlyingMode`, `inBypass`, `chosenMode`, `targetMode`, `refusedModes`,
   `opening`, `isReplaying`, `clients`, `connection`.
+- **Children**: `children` (`ChatChild`: `id`, `order`, `parentToolCallId`, `title`, `task`, `state` (`ChildState`: `starting`, `working`, `completed`, `failed`, `cancelled`; null until reported), `result`, `model`, `usage` (`ChildUsage`: `totalTokens`, `toolUses`, `durationMs`), `updates`, `reportsProgress`), `child(id)`. An update whose `_meta[childMetaKey]` (`dev.boriken.coqui.acp/child`) has an `id` is the child's: a `tool_call_update` of the parent's own call id is a report and changes the child (never the parent's tool line); any other joins `child.updates` and never the conversation's messages. A child with no updates shows its task and result only (`reportsProgress` false). Bounds: `ChatLimits.children`, `childUpdates`.
 - **Input**: `apply(AcpSessionUpdate)` (a connection's updates arrive by themselves), `applyOpened(AcpOpenedSession)`,
   `attach(connection)` / `detach()`, `rename(name)`.
 - **Turns**: a turn starts at a v1 prompt or a v2 `running` state and ends on idle, an end event, the answer to a v1 prompt, or the
@@ -125,7 +126,7 @@ the first answer to a request settles it for everyone.
 `entries` 5000, `messageText` 2 MiB, `pendingPermissions` 64, `pendingQuestions` 16, `settledRequests` 32, `queued` 20, `clients` 16,
 `turns` 1000, `toolText` 256 KiB, `terminalOutput` 256 KiB (kept from its end), `planEntries` 200, `commands` 500, `configOptions` 32,
 `choices` 200, `toolBlocks` 64, `locations` 64, `shortText` 512, `terminals` 256 (one still running is never dropped), `describedInput`
-4000, `hostNotices` 4, `listShapes` 8, `shapeDepth` 8, `titleLength` 60, `usageBuckets` 64, `handOverSeconds` 60 (0: no bound; a v2 agent that does not acknowledge a prompt in time fails `send`, and the queue behind it is held). A request past `pendingPermissions` or
+4000, `hostNotices` 4, `listShapes` 8, `shapeDepth` 8, `titleLength` 60, `usageBuckets` 64, `children` 256, `childUpdates` 1000, `handOverSeconds` 60 (0: no bound; a v2 agent that does not acknowledge a prompt in time fails `send`, and the queue behind it is held). A request past `pendingPermissions` or
 `pendingQuestions` is answered cancelled and a notice says so; the names of what went with messages are remembered up to `entries`.
 
 ## Gotchas

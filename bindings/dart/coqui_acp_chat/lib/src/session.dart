@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import 'package:coqui_acp/coqui_acp.dart';
 
+import 'children.dart';
 import 'connection.dart';
 import 'content.dart';
 import 'limits.dart';
@@ -434,6 +435,7 @@ class ChatSession extends ChatNotifier {
   ChatStatus _status = ChatStatus.disconnected;
   final List<ChatMessage> _messages = [];
   final Map<String, ChatMessage> _toolEntries = {};
+  late final ChildRegistry _childRegistry = ChildRegistry(limits);
   final Map<String, ChatMessage> _compactions = {};
   final Map<String, TerminalView> _terminals = {};
   final Set<String> _attachmentsNamed = {};
@@ -1171,8 +1173,21 @@ class ChatSession extends ChatNotifier {
     }
   }
 
+  /// The child agents (subagents) the agent named, in the order it first did, each with the state, task and result it reported and
+  /// its own updates where it reports them. A child's updates are kept apart from this conversation's messages and tool calls.
+  List<ChatChild> get children => _childRegistry.all;
+
+  /// The child agent called [id], or null.
+  ChatChild? child(String id) => _childRegistry[id];
+
   void _apply(AcpSessionUpdate update) {
     _applied++;
+    final childMark = childMarkOf(update.raw);
+    if (childMark != null) {
+      _childRegistry.apply(update, childMark);
+      notifyListeners();
+      return;
+    }
     final rendering = renderingOf(update, limits);
     recorder?.record(update, rendering, limits);
     switch (rendering) {

@@ -5,6 +5,7 @@
 /// serve a conversation to other clients is in `experimental.dart`.
 library;
 
+export 'src/children.dart';
 export 'src/connection.dart';
 export 'src/content.dart';
 export 'src/limits.dart';

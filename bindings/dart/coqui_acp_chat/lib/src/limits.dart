@@ -27,6 +27,8 @@ final class ChatLimits {
     this.titleLength = 60,
     this.usageBuckets = 64,
     this.handOverSeconds = 60,
+    this.children = 256,
+    this.childUpdates = 1000,
   }) : assert(
          entries >= 0 &&
              messageText >= 0 &&
@@ -52,7 +54,9 @@ final class ChatLimits {
              shapeDepth >= 0 &&
              titleLength >= 0 &&
              usageBuckets >= 0 &&
-             handOverSeconds >= 0,
+             handOverSeconds >= 0 &&
+             children >= 0 &&
+             childUpdates >= 0,
        );
 
   /// The most entries (messages, tool lines, compactions) a conversation keeps; the oldest go first. Default 5000.
@@ -130,4 +134,10 @@ final class ChatLimits {
   /// How long a v2 agent has to acknowledge a prompt before the message is taken as not handed over and `send` fails. 0 waits
   /// without bound. Default 60.
   final int handOverSeconds;
+
+  /// The most child agents (subagents) one conversation keeps; the oldest ended one goes first. Default 256.
+  final int children;
+
+  /// The most of its own updates one child agent keeps, the oldest dropped. Default 1000.
+  final int childUpdates;
 }
