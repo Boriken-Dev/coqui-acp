@@ -260,6 +260,7 @@ pub struct EventSink;  pub fn send(&self, event: Event) -> bool     // Clone; wa
 pub type NoticeHook = Arc<dyn Fn(NoticeKind, &str) + Send + Sync>;   // NoticeKind: Exited (how it ended, never what it last wrote) | Notice | Fault; one line, no client text
 pub use coqui_acp_api::LIMIT_META_KEY;     // "dev.boriken.coqui.acp/limit", a `LimitHit` as JSON
 pub const CHILD_META_KEY: &str;            // "dev.boriken.coqui.acp/child": {id, parentToolCallId} on a child's own update; a report adds title, task, state (starting|working|completed|failed|cancelled), result, model, usage {totalTokens, toolUses, durationMs}, each only when known
+pub fn updates_of(events: &[Event], version: u8) -> Vec<serde_json::Value>;   // the session/update payloads a connection would send for these events, in order; for tests
 pub const PLAN_ID: &str = "plan";
 ```
 
