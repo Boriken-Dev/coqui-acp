@@ -210,6 +210,8 @@ pub fn read_diagnostics(reader: impl Read, max_line: u64, tail: &Mutex<Tail>)   
 | `Notice { severity: Severity, title }` | something for the person outside the conversation |
 | `Compaction { id, summary: Option<String> }` | the conversation was compacted |
 | `Denied(Vec<String>)` | tools the harness refused by its own rules this turn |
+| `Child(Child)` | a child agent (subagent) announced or changed: `Child { id, parent_tool_call, title, task, state: Option<ChildState>, result, model, usage: Option<ChildUsage> }` (`#[non_exhaustive]`, `Child::new(id)`; a field left `None` is unchanged); `ChildState` is `Starting`, `Working`, `Completed`, `Failed`, `Cancelled`; `ChildUsage { total_tokens, tool_uses, duration_ms }`. Becomes a `tool_call_update` of `parent_tool_call` carrying only `_meta[CHILD_META_KEY]` |
+| `InChild { child, parent_tool_call, event }` | an event of a child's own, told as `event` is with `_meta[CHILD_META_KEY] = {id, parentToolCallId}` added to each update |
 | `TurnEnd(TurnEnd)` | `Stopped { stop, result }`, `Failed(String)` or `Limited(LimitHit)` (`coqui_acp_api::usage::LimitHit`: `bucket`, `resets_at`, `retry_after`, `source`, `text`, `observed_at`; 0 is stamped) |
 | `Output(String)` | a line that was not protocol |
 | `Exited(String)` | the harness ended, how, and what it wrote last |
@@ -257,6 +259,7 @@ pub fn directory_admitted(path: &Path, roots: &[PathBuf], network_paths: bool) -
 pub struct EventSink;  pub fn send(&self, event: Event) -> bool     // Clone; waits while the queue is full; false once the session is gone
 pub type NoticeHook = Arc<dyn Fn(NoticeKind, &str) + Send + Sync>;   // NoticeKind: Exited (how it ended, never what it last wrote) | Notice | Fault; one line, no client text
 pub use coqui_acp_api::LIMIT_META_KEY;     // "dev.boriken.coqui.acp/limit", a `LimitHit` as JSON
+pub const CHILD_META_KEY: &str;            // "dev.boriken.coqui.acp/child": {id, parentToolCallId} on a child's own update; a report adds title, task, state (starting|working|completed|failed|cancelled), result, model, usage {totalTokens, toolUses, durationMs}, each only when known
 pub const PLAN_ID: &str = "plan";
 ```
 

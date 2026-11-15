@@ -137,6 +137,12 @@ pub fn directory_admitted(
 /// [`LimitHit`](coqui_acp_api::LimitHit) as JSON.
 pub use coqui_acp_api::LIMIT_META_KEY;
 
+/// The `_meta` key of a `session/update` that belongs to a child agent (a subagent) or reports one:
+/// `{id, parentToolCallId}`, and on a report of the child itself also `title`, `task`, `state` (`starting`, `working`,
+/// `completed`, `failed` or `cancelled`), `result`, `model` and `usage` (`totalTokens`, `toolUses`, `durationMs`),
+/// each only when known. A client that does not know the key shows the update as the parent's.
+pub const CHILD_META_KEY: &str = "dev.boriken.coqui.acp/child";
+
 /// The id of the plan of a session in version 2, where plans have ids; a harness has one plan per session.
 pub const PLAN_ID: &str = "plan";
 
