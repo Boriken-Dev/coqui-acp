@@ -993,3 +993,108 @@ fn a_used_up_window_in_a_read_names_the_limit_error_that_follows_without_a_reset
     assert_eq!(limit.bucket.as_deref(), Some("codex:five_hour"));
     assert_eq!(limit.resets_at, Some(1_794_248_766));
 }
+
+// Not recorded: the shapes below follow `CollabAgentToolCallThreadItem` and `SubAgentActivityThreadItem` of the
+// app-server schema (Codex 0.164.0); no stand-in for the model makes Codex write them.
+
+fn collab_item(tool: &str, status: &str, receivers: Value, states: Value) -> Value {
+    json!({"type": "collabAgentToolCall", "id": "call-1", "tool": tool, "status": status,
+        "senderThreadId": "main", "receiverThreadIds": receivers, "prompt": "Count the files\nin detail",
+        "model": "gpt-x", "agentsStates": states})
+}
+
+fn children_of(events: &[Event]) -> Vec<&coqui_acp_codex::harness::event::Child> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Child(child) => Some(child),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn spawning_two_subagents_names_each_by_its_thread_and_a_wait_gives_their_results() {
+    use coqui_acp_codex::harness::event::ChildState;
+    let mut lines = Vec::new();
+    for (call, thread) in [("call-1", "thread-a"), ("call-2", "thread-b")] {
+        let mut item = collab_item("spawnAgent", "inProgress", json!([thread]), json!({}));
+        item["id"] = json!(call);
+        lines.push(json!({"method": "item/started", "params": {"item": item}}));
+        let mut done = collab_item(
+            "spawnAgent",
+            "completed",
+            json!([thread]),
+            json!({thread: {"status": "running", "message": null}}),
+        );
+        done["id"] = json!(call);
+        lines.push(json!({"method": "item/completed", "params": {"item": done}}));
+    }
+    let mut wait = collab_item(
+        "wait",
+        "completed",
+        json!(["thread-a", "thread-b"]),
+        json!({"thread-a": {"status": "completed", "message": "alpha"},
+               "thread-b": {"status": "errored", "message": "beta broke"}}),
+    );
+    wait["id"] = json!("call-3");
+    lines.push(json!({"method": "item/completed", "params": {"item": wait}}));
+    let events = events_of(&lines);
+    let children = children_of(&events);
+    let state_of = |thread: &str| {
+        children
+            .iter()
+            .rev()
+            .find(|child| child.id == thread)
+            .and_then(|child| child.state)
+    };
+    assert_eq!(state_of("thread-a"), Some(ChildState::Completed));
+    assert_eq!(state_of("thread-b"), Some(ChildState::Failed));
+    let first = children
+        .iter()
+        .find(|child| child.id == "thread-a")
+        .unwrap();
+    assert_eq!(first.state, Some(ChildState::Starting));
+    assert_eq!(first.parent_tool_call.as_deref(), Some("call-1"));
+    assert_eq!(first.title.as_deref(), Some("Count the files"));
+    assert_eq!(first.model.as_deref(), Some("gpt-x"));
+    assert!(first.task.as_deref().unwrap().contains("in detail"));
+    let results: Vec<_> = children
+        .iter()
+        .filter_map(|child| child.result.as_deref())
+        .collect();
+    assert_eq!(results, vec!["alpha", "beta broke"]);
+}
+
+#[test]
+fn a_spawn_that_was_accepted_is_not_a_completed_child() {
+    use coqui_acp_codex::harness::event::ChildState;
+    let done = collab_item("spawnAgent", "completed", json!(["thread-a"]), json!({}));
+    let events = events_of(&[json!({"method": "item/completed", "params": {"item": done}})]);
+    let children = children_of(&events);
+    assert_eq!(children.len(), 1);
+    assert_ne!(children[0].state, Some(ChildState::Completed));
+    assert_eq!(children[0].state, None);
+}
+
+#[test]
+fn history_rebuilds_a_spawned_child_and_an_activity_names_one() {
+    use coqui_acp_codex::harness::event::ChildState;
+    let (mut parser, _) = parser();
+    let done = collab_item(
+        "spawnAgent",
+        "completed",
+        json!(["thread-a"]),
+        json!({"thread-a": {"status": "completed", "message": "alpha"}}),
+    );
+    let activity = json!({"type": "subAgentActivity", "id": "act-1", "agentThreadId": "thread-b",
+        "agentPath": "root/reviewer", "kind": "started", "model": "gpt-y"});
+    let events = parser.history(&json!({"items": [done, activity]}));
+    let children = children_of(&events);
+    assert!(children.iter().any(|c| c.id == "thread-a"
+        && c.state == Some(ChildState::Completed)
+        && c.result.as_deref() == Some("alpha")));
+    assert!(children.iter().any(|c| c.id == "thread-b"
+        && c.state == Some(ChildState::Working)
+        && c.title.as_deref() == Some("root/reviewer")));
+}
