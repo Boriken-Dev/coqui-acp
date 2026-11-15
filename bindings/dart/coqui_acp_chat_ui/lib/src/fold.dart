@@ -13,15 +13,21 @@ bool _foldable(ToolCall call) => switch (call.status) {
 
 bool _isWork(ChatEntryData entry) => entry.role == MessageRole.tool || entry.role == MessageRole.thought;
 
-/// [entries] as a transcript lays them out at [density]. [working] says whether the last turn is still going, which keeps it from
-/// folding.
+/// [entries] as a transcript lays them out at [density]. [working] says whether the last turn is still going. [turns] are the
+/// conversation's turns by id, which give a folded turn its true duration; without one the duration is the entries' own span.
 ///
 /// - [ChatDensity.verbose]: every entry as it is.
 /// - [ChatDensity.thinking]: a run of finished tool calls becomes a [BurstItem]; a failed one, or one still going, stays an entry.
 /// - [ChatDensity.normal]: also, thoughts are left out, and a finished turn's work, from its first tool call or thought to its
 ///   last, becomes a [WorkItem] unless one of its tool calls failed or is still waiting. What the agent said after its last piece
-///   of work, its answer, stays outside.
-List<TranscriptItem> foldTranscript(List<ChatEntryData> entries, {required ChatDensity density, bool working = false}) {
+///   of work, its answer, stays outside. A turn still going folds its work so far into a [WorkItem] with [WorkItem.running] set,
+///   thoughts kept, up to the first call that waits, runs or failed, which stays whole after it.
+List<TranscriptItem> foldTranscript(
+  List<ChatEntryData> entries, {
+  required ChatDensity density,
+  bool working = false,
+  List<TurnSpan> turns = const [],
+}) {
   if (density == ChatDensity.verbose) return [for (final entry in entries) EntryItem(entry)];
   final items = <TranscriptItem>[];
   var start = 0;
@@ -33,13 +39,26 @@ List<TranscriptItem> foldTranscript(List<ChatEntryData> entries, {required ChatD
     }
     final turn = entries.sublist(start, end);
     final last = end >= entries.length;
-    items.addAll(_foldTurn(turn, density, finished: !(last && working)));
+    items.addAll(_foldTurn(turn, density, finished: !(last && working), turns: turns));
     start = end;
   }
   return items;
 }
 
-List<TranscriptItem> _foldTurn(List<ChatEntryData> turn, ChatDensity density, {required bool finished}) {
+/// The id of the turn [turn]'s entries belong to, when one of them says.
+int? _turnIdOf(List<ChatEntryData> turn) {
+  for (final entry in turn) {
+    final id = switch (entry) {
+      ModelEntry(:final message) => message.turn,
+      ChatEntry(:final turn) => turn,
+      _ => null,
+    };
+    if (id != null) return id;
+  }
+  return null;
+}
+
+List<TranscriptItem> _foldTurn(List<ChatEntryData> turn, ChatDensity density, {required bool finished, required List<TurnSpan> turns}) {
   final normal = density == ChatDensity.normal;
   final hasHead = turn.first.role == MessageRole.user;
   final head = hasHead ? turn.first : null;
@@ -47,19 +66,52 @@ List<TranscriptItem> _foldTurn(List<ChatEntryData> turn, ChatDensity density, {r
   final out = <TranscriptItem>[?head == null ? null : EntryItem(head)];
   final first = rest.indexWhere(_isWork);
   final lastAt = rest.lastIndexWhere(_isWork);
+  final id = _turnIdOf(turn);
+  final span = id == null ? null : turns.where((t) => t.id == id).firstOrNull;
   if (normal && finished && first >= 0) {
     final range = rest.sublist(first, lastAt + 1);
     final calls = [for (final entry in range) ?entry.tool];
-    if (calls.isNotEmpty && calls.every(_foldable)) {
+    if (calls.every(_foldable)) {
+      final ended = span?.endedAt;
+      final duration = ended == null ? _span(head?.at ?? range.first.at, range.last.at) : _span(span!.startedAt, ended);
       out
         ..addAll(_foldRun(rest.sublist(0, first), hideThoughts: true))
-        ..add(WorkItem(_foldRun(range, hideThoughts: false), _span(head?.at ?? range.first.at, range.last.at)))
+        ..add(WorkItem(_foldRun(range, hideThoughts: false), duration, turn: id))
         ..addAll(_foldRun(rest.sublist(lastAt + 1), hideThoughts: true));
+      return out;
+    }
+  }
+  if (normal && !finished && first >= 0) {
+    // Up to the first call that is not done with; what comes after it is drawn as it is.
+    var stop = first;
+    while (stop < rest.length) {
+      final tool = rest[stop].tool;
+      if (rest[stop].role == MessageRole.tool && tool != null && !_foldable(tool)) break;
+      stop++;
+    }
+    final range = rest.sublist(first, stop).takeWhileEnd(_isWork);
+    final end = first + range.length;
+    if (range.isNotEmpty) {
+      out
+        ..addAll(_foldRun(rest.sublist(0, first), hideThoughts: true))
+        ..add(WorkItem(_foldRun(range, hideThoughts: false), Duration.zero, turn: id, running: true))
+        ..addAll(_foldRun(rest.sublist(end), hideThoughts: true));
       return out;
     }
   }
   out.addAll(_foldRun(rest, hideThoughts: normal));
   return out;
+}
+
+extension on List<ChatEntryData> {
+  /// This list without the trailing entries that are not [keep]: what the agent said after its last piece of work is not work.
+  List<ChatEntryData> takeWhileEnd(bool Function(ChatEntryData) keep) {
+    var end = length;
+    while (end > 0 && !keep(this[end - 1])) {
+      end--;
+    }
+    return sublist(0, end);
+  }
 }
 
 Duration _span(DateTime from, DateTime to) {

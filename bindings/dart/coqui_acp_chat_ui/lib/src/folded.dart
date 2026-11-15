@@ -18,7 +18,9 @@ class TranscriptItemView extends StatelessWidget {
   Widget build(BuildContext context) => switch (item) {
     EntryItem(:final entry) => TranscriptEntry(entry: entry),
     BurstItem(:final tools) => _Placed(child: ToolBurst(tools: tools)),
-    WorkItem(:final items, :final duration) => _Placed(child: TurnWork(items: items, duration: duration)),
+    WorkItem(:final items, :final duration, :final turn, :final running) => _Placed(
+      child: TurnWork(items: items, duration: duration, turn: turn, running: running),
+    ),
   };
 }
 
@@ -125,13 +127,17 @@ class ToolBurst extends StatelessWidget {
   }
 }
 
-/// The work of a finished turn as "Worked for 1m 29s", which opens into what the agent did. A host's [ChatRenderers.work] draws
-/// the line itself.
+/// The work of a finished turn as "Worked for 1m 29s", which opens into what the agent did; while the turn [running], "Working"
+/// and what it has done so far. A host's [ChatRenderers.work] draws the line of a finished turn itself.
 class TurnWork extends StatelessWidget {
-  const TurnWork({super.key, required this.items, required this.duration});
+  const TurnWork({super.key, required this.items, required this.duration, this.turn, this.running = false});
 
   final List<TranscriptItem> items;
   final Duration duration;
+
+  /// The turn's id, which keys the line so that it stays open or closed when the turn ends.
+  final int? turn;
+  final bool running;
 
   @override
   Widget build(BuildContext context) {
@@ -140,11 +146,11 @@ class TurnWork extends StatelessWidget {
     final inside = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       for (final item in items) TranscriptItemView(item: item),
     ]);
-    final own = ChatScope.renderersOf(context).work;
+    final own = running ? null : ChatScope.renderersOf(context).work;
     if (own != null) return own(context, duration, summary, inside);
     return FoldLine(
-      key: ValueKey('work ${tools.first.id}'),
-      label: SummaryText(summary: summary, prefix: 'Worked for ${spanLabel(duration)}'),
+      key: ValueKey(turn != null ? 'work turn $turn' : 'work ${tools.firstOrNull?.id ?? items.length}'),
+      label: SummaryText(summary: summary, prefix: running ? 'Working' : 'Worked for ${spanLabel(duration)}'),
       children: inside,
     );
   }

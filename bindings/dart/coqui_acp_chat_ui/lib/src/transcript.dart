@@ -12,6 +12,7 @@ import 'fold.dart';
 import 'folded.dart';
 import 'look.dart';
 import 'renderers.dart';
+import 'working.dart';
 
 /// A conversation: its entries laid out at the look's [ChatDensity], the agent's plan as a checklist at the end while it has one,
 /// one selection over all of it, and the end kept in view as entries arrive until the person scrolls away, with a button back.
@@ -29,6 +30,9 @@ class ChatTranscript extends StatefulWidget {
     this.density,
     this.controller,
     this.narrow = false,
+    this.turns = const [],
+    this.agentName,
+    this.clock = DateTime.now,
   });
 
   /// In order, oldest first.
@@ -48,6 +52,15 @@ class ChatTranscript extends StatefulWidget {
 
   /// A phone's width: less space at the sides.
   final bool narrow;
+
+  /// When the turns started and ended: a folded turn says how long it ran, and the working row counts from the running one's start.
+  final List<TurnSpan> turns;
+
+  /// Who the working row says is starting, as in "Starting Claude…".
+  final String? agentName;
+
+  /// The time the working row counts to.
+  final DateTime Function() clock;
 
   @override
   State<ChatTranscript> createState() => ChatTranscriptState();
@@ -85,6 +98,25 @@ class ChatTranscriptState extends State<ChatTranscript> {
     return false;
   }
 
+  Widget _workingRow() {
+    final running = widget.turns.where((turn) => turn.endedAt == null).lastOrNull;
+    // The running turn's entries are those after the person's last message.
+    final at = widget.entries.lastIndexWhere((entry) => entry.role == MessageRole.user);
+    final turn = at < 0 ? widget.entries : widget.entries.sublist(at + 1);
+    final since = at < 0 ? null : widget.entries[at].at;
+    final look = context.chatLook;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: look.messageWidth),
+        child: Padding(
+          padding: EdgeInsets.only(bottom: look.gap, top: 2),
+          child: WorkingRow(headline: workingHeadline(turn, agent: widget.agentName), startedAt: running?.startedAt ?? since, clock: widget.clock),
+        ),
+      ),
+    );
+  }
+
   void _toEnd() {
     if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
   }
@@ -108,8 +140,9 @@ class ChatTranscriptState extends State<ChatTranscript> {
   Widget build(BuildContext context) {
     final look = context.chatLook;
     final density = widget.density ?? look.density;
-    final items = foldTranscript(widget.entries, density: density, working: widget.working);
-    final count = items.length + (widget.plan.isEmpty ? 0 : 1);
+    final items = foldTranscript(widget.entries, density: density, working: widget.working, turns: widget.turns);
+    final planAt = widget.plan.isEmpty ? -1 : items.length;
+    final count = items.length + (widget.plan.isEmpty ? 0 : 1) + (widget.working ? 1 : 0);
     return ChatScope(
       renderers: widget.renderers,
       terminals: widget.terminals,
@@ -127,6 +160,7 @@ class ChatTranscriptState extends State<ChatTranscript> {
                 itemCount: count,
                 itemBuilder: (context, index) {
                   if (index < items.length) return TranscriptItemView(item: items[index]);
+                  if (index != planAt) return _workingRow();
                   return Align(
                     alignment: Alignment.centerLeft,
                     child: ConstrainedBox(

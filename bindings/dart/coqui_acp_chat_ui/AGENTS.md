@@ -23,7 +23,7 @@ modes, a browser panel) enters through a slot, never a fork.
 
 ## ChatTranscript
 
-`ChatTranscript({entries, terminals, plan, working, renderers, density, controller, narrow})`: the conversation as a list, one
+`ChatTranscript({entries, terminals, plan, working, renderers, density, controller, narrow, turns, agentName, clock})`: the conversation as a list, one
 selection over all of it (Ctrl+A, Ctrl+C and the menu give the whole text, built or not), the end followed as entries arrive until the
 person scrolls away, a "Jump to latest" button. Its state (`ChatTranscriptState`, by a `GlobalKey`) has `jumpToLatest()`, `following`
 and `selection` (`SelectableTranscriptState.copyAll()`).
@@ -33,11 +33,20 @@ and `selection` (`SelectableTranscriptState.copyAll()`).
   checklist (`Plan: n of m`, a step done, the one running, those to come).
 - `density` (null: the look's): **verbose** shows every entry as it is; **thinking** folds each run of finished tool calls into one
   line ("Edited calc.js, ran a command +1 −1") that opens into their cards, and keeps thoughts; **normal** also hides thoughts and
-  folds a finished turn, from its first piece of work to its last, into "Worked for 1m 29s", which opens into what the agent did;
-  what it said after its last piece of work stays. A tool call that failed, waits or runs is never folded, and a turn holding one does
-  not fold. `working` keeps the last turn from folding. The duration is from the person's message to the last tool call or thought.
-- `foldTranscript(entries, {density, working}) -> List<TranscriptItem>` (`EntryItem`, `BurstItem`, `WorkItem`) is the folding alone;
-  `summarizeBurst(tools) -> ({text, added, removed})` and `spanLabel(duration)` are its words.
+  folds a finished turn, from its first piece of work (a thought alone counts) to its last, into "Worked for 1m 29s · Edited calc.js,
+  ran a command", which opens into what the agent did; what it said after its last piece of work stays. A tool call that failed,
+  waits or runs is never folded, and a finished turn holding one does not fold. While the last turn runs (`working`), its work so far
+  is a "Working · …" block, thoughts kept, up to the first call that is not done with; that call and what follows are drawn as they
+  are, and the block keeps its open or closed state when the turn ends.
+- `turns: List<TurnSpan>` (`TurnSpan({id, startedAt, endedAt})`, `TurnSpan.of(ChatTurn)`): the duration of "Worked for" is the turn's
+  start to its end, matched by the turn id of a `ModelEntry`'s message (or `ChatEntry(turn:)`); without one it is the entries' own
+  span, from the person's message to the last piece of work. The running turn's start is what the working row counts from.
+- `working` also adds a last row (`WorkingRow`, `ActivityMark`): a pulsing dot (still under `MediaQuery.disableAnimationsOf`), a
+  headline from the newest entry (`workingHeadline(entries, agent:)`: "Starting Claude…", "Thinking…", "Running cargo test…",
+  "Editing calc.js…", "Responding…") and the time since the turn began, ticked by a one-second timer inside that row only. `agentName`
+  names who is starting; `clock` (default `DateTime.now`) is the time it counts to.
+- `foldTranscript(entries, {density, working, turns}) -> List<TranscriptItem>` (`EntryItem`, `BurstItem`, `WorkItem(items, duration,
+  {turn, running})`) is the folding alone; `summarizeBurst(tools) -> ({text, added, removed})` and `spanLabel(duration)` are its words.
 
 ## Renderers
 
@@ -48,7 +57,7 @@ and `selection` (`SelectableTranscriptState.copyAll()`).
   content goes (a chart, a page, a delegation card, an A2UI surface).
 - `tool: Map<String, Widget Function(BuildContext, ToolCall)>`: a card for a tool `kind`.
 - `block: List<Widget? Function(BuildContext, ToolCall, ToolBlock)>`: one piece of a tool call's content.
-- `burst`, `work`: the line a burst of finished tool calls, or a finished turn's work, folds into (`summary`, and the `cards` or `items`
+- `burst`, `work`: the line a burst of finished tool calls, or a finished turn's work (not the running turn's), folds into (`summary`, and the `cards` or `items`
   that open under it); `plan`: the plan.
 
 ## Cards and the queue

@@ -85,6 +85,36 @@ void main() {
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/cards.png'));
   });
 
+  for (final (label, size) in [('phone', const Size(390, 700)), ('desktop', const Size(900, 640))]) {
+    testWidgets('a turn at work: the live block opened and the working row, at $label width', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final running = [
+        for (final e in [user('Fix addNumbers', 0), thought('It subtracts', 2), toolEntry(tool('t1', kind: 'edit', title: 'Edit calc.js', content: [diff('src/calc.js', 'a - b', 'a + b')], locations: [{'path': 'src/calc.js', 'line': 2}]), 5), toolEntry(tool('t2', kind: 'execute', title: 'cargo test', status: 'in_progress'), 40)])
+          ChatEntry(e.role, e.text, at: e.at, tool: e.tool, turn: 1),
+      ];
+      // Still, as the system asks, so that the picture is the same every time.
+      await tester.pumpWidget(MediaQuery(
+        data: const MediaQueryData(disableAnimations: true),
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: theme(),
+          home: Scaffold(body: ChatTranscript(
+            entries: running,
+            working: true,
+            narrow: label == 'phone',
+            turns: [TurnSpan(id: 1, startedAt: t0)],
+            clock: () => t0.add(const Duration(seconds: 84)),
+          )),
+        ),
+      ));
+      await tester.tap(find.textContaining('Working · '));
+      await tester.pump();
+      await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/working_$label.png'));
+    });
+  }
+
   for (final (label, size) in [('phone', const Size(390, 844)), ('desktop', const Size(900, 640))]) {
     testWidgets('a permission card for an edit, at $label width', (tester) async {
       tester.view.physicalSize = size;

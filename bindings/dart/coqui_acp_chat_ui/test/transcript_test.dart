@@ -13,12 +13,15 @@ Widget transcript(
   List<PlanEntry> plan = const [],
   bool working = false,
   Map<String, TerminalView> terminals = const {},
+  List<TurnSpan> turns = const [],
+  DateTime Function()? clock,
+  String? agentName,
   Key? key,
 }) => host(
   SizedBox(
     width: 900,
     height: 700,
-    child: ChatTranscript(key: key, entries: entries, density: density, renderers: renderers, plan: plan, working: working, terminals: terminals),
+    child: ChatTranscript(key: key, entries: entries, density: density, renderers: renderers, plan: plan, working: working, terminals: terminals, turns: turns, clock: clock ?? DateTime.now, agentName: agentName),
   ),
 );
 
@@ -71,6 +74,86 @@ void main() {
     expect(find.byType(ToolBurst), findsOneWidget);
     expect(find.byType(ToolCard), findsOneWidget);
     expect(find.text('exit 1: boom'), findsOneWidget, reason: 'a failure opens by itself');
+  });
+
+  group('while the agent works', () {
+    String headline(WidgetTester tester) =>
+        tester.widget<Text>(find.descendant(of: find.byKey(const Key('working-row')), matching: find.byType(Text)).first).data!;
+
+    testWidgets('the last row says what the newest entry is doing, and for how long', (tester) async {
+      var now = t0.add(const Duration(seconds: 5));
+      final turns = [TurnSpan(id: 1, startedAt: t0)];
+      Future<void> show(List<ChatEntryData> entries) =>
+          tester.pumpWidget(transcript(entries, working: true, turns: turns, clock: () => now, agentName: 'Claude'));
+
+      await show([user('go', 0)]);
+      expect(headline(tester), 'Starting Claude…');
+      expect(find.text('5s'), findsOneWidget);
+      await show([user('go', 0), thought('hm', 1)]);
+      expect(headline(tester), 'Thinking…');
+      await show([user('go', 0), toolEntry(tool('a', kind: 'execute', title: 'cargo test', status: 'in_progress'), 1)]);
+      expect(headline(tester), 'Running cargo test…');
+      await show([user('go', 0), toolEntry(tool('a', kind: 'edit', title: 'Edit', status: 'in_progress', content: [diff('src/calc.js', 'a', 'b')]), 1)]);
+      expect(headline(tester), 'Editing calc.js…');
+      await show([user('go', 0), toolEntry(tool('a', kind: 'read'), 1), agent('Here', 2)]);
+      expect(headline(tester), 'Responding…');
+
+      now = t0.add(const Duration(seconds: 84));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('1m 24s'), findsOneWidget);
+    });
+
+    testWidgets('there is no row when the agent is idle', (tester) async {
+      await tester.pumpWidget(transcript(worked()));
+      expect(find.byKey(const Key('working-row')), findsNothing);
+    });
+
+    testWidgets('each second rebuilds the row alone, not the conversation', (tester) async {
+      var drawn = 0;
+      final renderers = ChatRenderers(entry: [
+        (context, entry) {
+          if (entry.role == MessageRole.notice) drawn++;
+          return null;
+        },
+      ]);
+      var now = t0;
+      final entries = [user('go', 0), ChatEntry(MessageRole.notice, 'n', at: t0), thought('hm', 1)];
+      await tester.pumpWidget(transcript(entries, working: true, renderers: renderers, turns: [TurnSpan(id: 1, startedAt: t0)], clock: () => now));
+      final before = drawn;
+      expect(before, greaterThan(0));
+      for (var i = 1; i <= 3; i++) {
+        now = t0.add(Duration(seconds: i));
+        await tester.pump(const Duration(seconds: 1));
+      }
+      expect(find.text('3s'), findsOneWidget);
+      expect(drawn, before);
+    });
+
+    testWidgets('the mark pulses, and stands still when the system asks for no animation', (tester) async {
+      await tester.pumpWidget(transcript([user('go', 0)], working: true));
+      expect(tester.binding.transientCallbackCount, greaterThan(0));
+      await tester.pumpWidget(MediaQuery(data: const MediaQueryData(disableAnimations: true), child: transcript([user('go', 0)], working: true)));
+      await tester.pump();
+      expect(tester.binding.transientCallbackCount, 0);
+    });
+
+    testWidgets('the running work is a block that opens, and keeps its state when the turn ends', (tester) async {
+      ChatEntry mine(ChatEntry e) => ChatEntry(e.role, e.text, at: e.at, tool: e.tool, turn: 1);
+      final entries = [
+        for (final e in [user('go', 0), thought('hm', 1), toolEntry(tool('a', kind: 'read', locations: [{'path': 'a.dart'}]), 2)]) mine(e),
+      ];
+      await tester.pumpWidget(transcript(entries, working: true, turns: [TurnSpan(id: 1, startedAt: t0)]));
+      expect(find.textContaining('Working · '), findsOneWidget);
+      expect(find.text('Thinking'), findsNothing);
+      await tester.tap(find.textContaining('Working · '));
+      await tester.pump();
+      expect(find.text('Thinking'), findsOneWidget, reason: 'the running block keeps the thoughts');
+
+      final done = [...entries, mine(agent('Done', 30))];
+      await tester.pumpWidget(transcript(done, turns: [TurnSpan(id: 1, startedAt: t0, endedAt: t0.add(const Duration(seconds: 30)))]));
+      expect(find.textContaining('Worked for 30s'), findsOneWidget);
+      expect(find.text('Thinking'), findsOneWidget, reason: 'the same line, still open');
+    });
   });
 
   testWidgets('a turn still running keeps its tool that waits as a card', (tester) async {

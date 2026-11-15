@@ -12,6 +12,7 @@ export 'src/diff.dart' show DiffKind, DiffLine, diffLines, patchLines, withConte
 export 'src/entry.dart';
 export 'src/fold.dart' show BurstSummary, foldTranscript, spanLabel, summarizeBurst;
 export 'src/folded.dart' show FoldLine, PlanChecklist, PlanPanel, SummaryText, ToolBurst, TranscriptItemView, TurnWork;
+export 'src/working.dart' show ActivityMark, WorkingRow, workingHeadline;
 export 'src/look.dart';
 export 'src/renderers.dart';
 export 'src/secret_cards.dart' show SecretCardEnvironment, SecretRequestCard, SecretRequestEntry, SecretShowCard, SecretShowEntry, secretRenderers;

@@ -33,8 +33,46 @@ void main() {
       expect(work.tools.map((call) => call.id), ['t1', 't2']);
     });
 
-    test('a turn still running does not fold, and shows no thoughts at Normal', () {
-      expect(shape(foldTranscript(worked().sublist(0, 4), density: ChatDensity.normal, working: true)), 'user burst2');
+    test('a turn still running folds its work so far into a live block that keeps the thoughts', () {
+      final items = foldTranscript(worked().sublist(0, 4), density: ChatDensity.normal, working: true);
+      expect(shape(items), 'user work[thought burst2]');
+      expect((items[1] as WorkItem).running, isTrue);
+    });
+
+    test('a running turn leaves a call that runs whole after the live block, and what the agent said after the work outside', () {
+      final entries = [
+        user('go', 0),
+        thought('hm', 1),
+        toolEntry(tool('a', kind: 'read'), 2),
+        toolEntry(tool('b', kind: 'execute', status: 'in_progress'), 3),
+      ];
+      expect(shape(foldTranscript(entries, density: ChatDensity.normal, working: true)), 'user work[thought burst1] tool');
+      final talking = [user('go', 0), toolEntry(tool('a', kind: 'read'), 2), agent('Looking', 3)];
+      expect(shape(foldTranscript(talking, density: ChatDensity.normal, working: true)), 'user work[burst1] agent');
+    });
+
+    test('a running turn with no work yet has no block, and Thinking shows its work as it is', () {
+      expect(shape(foldTranscript([user('go', 0)], density: ChatDensity.normal, working: true)), 'user');
+      expect(shape(foldTranscript(worked().sublist(0, 4), density: ChatDensity.thinking, working: true)), 'user thought burst2');
+    });
+
+    test('a turn of thoughts alone folds when it ends', () {
+      final entries = [user('hm', 0), thought('thinking', 1), agent('Nothing to do.', 9)];
+      expect(shape(foldTranscript(entries, density: ChatDensity.normal)), 'user work[thought] agent');
+    });
+
+    test('the duration is the turn itself, from its start to its end', () {
+      // One call a second in, the turn took 45 s: the entries alone would have said 1 s.
+      final entries = [
+        ChatEntry(MessageRole.user, 'go', at: t0, turn: 7),
+        ChatEntry(MessageRole.tool, 'A tool', at: t0.add(const Duration(seconds: 1)), tool: tool('a', kind: 'execute'), turn: 7),
+        ChatEntry(MessageRole.agent, 'ok', at: t0.add(const Duration(seconds: 45)), turn: 7),
+      ];
+      final turns = [TurnSpan(id: 7, startedAt: t0, endedAt: t0.add(const Duration(seconds: 45)))];
+      final work = foldTranscript(entries, density: ChatDensity.normal, turns: turns)[1] as WorkItem;
+      expect(work.duration, const Duration(seconds: 45));
+      expect(work.turn, 7);
+      expect((foldTranscript(entries, density: ChatDensity.normal)[1] as WorkItem).duration, const Duration(seconds: 1), reason: 'with no span, the entries own');
     });
 
     test('a failed call stays whole, and keeps its turn from folding', () {

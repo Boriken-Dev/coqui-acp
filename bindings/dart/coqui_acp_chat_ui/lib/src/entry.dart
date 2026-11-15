@@ -16,7 +16,7 @@ abstract interface class ChatEntryData {
 
 /// A plain [ChatEntryData].
 final class ChatEntry implements ChatEntryData {
-  const ChatEntry(this.role, this.text, {required this.at, this.tool, this.compaction});
+  const ChatEntry(this.role, this.text, {required this.at, this.tool, this.compaction, this.turn});
 
   @override
   final MessageRole role;
@@ -28,6 +28,9 @@ final class ChatEntry implements ChatEntryData {
   final ToolCall? tool;
   @override
   final Compaction? compaction;
+
+  /// The [TurnSpan.id] of the turn this belongs to, when the host knows it.
+  final int? turn;
 }
 
 /// A [ChatMessage] of the model, read as an entry.
@@ -72,12 +75,19 @@ final class BurstItem extends TranscriptItem {
 
 /// The work of a turn that ended: its tool calls, thoughts and what the agent said between them, drawn as one line that opens.
 final class WorkItem extends TranscriptItem {
-  const WorkItem(this.items, this.duration);
+  const WorkItem(this.items, this.duration, {this.turn, this.running = false});
 
   final List<TranscriptItem> items;
 
-  /// From the person's message to the last piece of work.
+  /// How long the turn ran, from when it started to when it ended; with no turn to say, from the person's message to the last
+  /// piece of work. Zero while [running].
   final Duration duration;
+
+  /// The id of the turn, when known; the line keeps its open or closed state across the turn's end by it.
+  final int? turn;
+
+  /// Whether the turn is still going, so that this is its work so far.
+  final bool running;
 
   /// The tool calls inside, in order.
   List<ToolCall> get tools => [
@@ -88,4 +98,18 @@ final class WorkItem extends TranscriptItem {
         WorkItem() => item.tools,
       },
   ];
+}
+
+/// When a turn of the conversation started and ended, from `ChatTurn`; [ChatTranscript.turns] and [foldTranscript] read it.
+final class TurnSpan {
+  const TurnSpan({required this.id, required this.startedAt, this.endedAt});
+
+  /// A `ChatTurn` of the model as a span.
+  TurnSpan.of(ChatTurn turn) : this(id: turn.id, startedAt: turn.startedAt, endedAt: turn.endedAt);
+
+  final int id;
+  final DateTime startedAt;
+
+  /// Null while the turn runs.
+  final DateTime? endedAt;
 }
