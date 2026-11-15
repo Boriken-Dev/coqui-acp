@@ -2055,14 +2055,27 @@ fn grant_mode(peer: &str, protocol: &str, revoke: bool) -> Result<ExitCode, Stri
     Ok(ExitCode::SUCCESS)
 }
 
+/// What this program is registered as; the library names no host.
+const COMPANION_NAME: &str = "dev.boriken.coqui_acp_bridge";
+
 fn companion_mode(action: &CompanionAction) -> Result<ExitCode, String> {
     match action {
         CompanionAction::Install { extensions } => {
-            for written in companion::install(extensions).map_err(|error| error.to_string())? {
+            let program = std::env::current_exe().map_err(|error| error.to_string())?;
+            let registration = companion::Registration::new(
+                COMPANION_NAME,
+                "Finds Agent Client Protocol agents on this machine and the local network",
+                program,
+            )
+            .map_err(|error| error.to_string())?
+            .extensions(extensions.iter().cloned());
+            for written in companion::install(&registration).map_err(|error| error.to_string())? {
                 println!("{written}");
             }
         }
-        CompanionAction::Uninstall => companion::uninstall().map_err(|error| error.to_string())?,
+        CompanionAction::Uninstall => {
+            companion::uninstall(COMPANION_NAME, None, &[]).map_err(|error| error.to_string())?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

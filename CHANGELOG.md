@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `coqui-acp-bridge`: `companion install` registers the host `dev.boriken.coqui_acp_bridge` through coqui-agentic-peer's `Registration`, which no longer has a name of its own.
+
 ### Added
 
 - `bindings/dart/coqui_acp_chat_ui`: a conversation shows that its agent is working and says for how long it worked. `ChatTranscript` ends with a working row while `working` (`WorkingRow`, `ActivityMark`, `workingHeadline`; `agentName`, `clock`): a mark that pulses, or stands still when the system asks for no animation, what the newest entry is doing, and the time since the turn began, ticked inside that row alone. At Normal density a running turn's work so far is a "Working" block that keeps the thoughts, and a finished turn folds into "Worked for" even when its work was thoughts alone, for the turn's own start-to-end time when `turns` (`TurnSpan`, `TurnSpan.of`, `ChatEntry(turn:)`) gives it, keyed by the turn so the line stays open or closed as the turn ends. `WorkItem` gains `turn` and `running`; `TurnWork` gains `turn` and `running`.
