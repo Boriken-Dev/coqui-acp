@@ -1,6 +1,9 @@
 // Child agents (subagents) built from the updates an agent marks with the child key. The updates are the wire shape
 // `coqui-acp-harness` writes for a child report (a `tool_call_update` of the parent's call carrying only the marker) and
 // for a child's own update (the same update with the marker added).
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:test/test.dart';
 
@@ -172,4 +175,56 @@ void main() {
       expect(session.messages.where((m) => m.tool != null), hasLength(1));
     },
   );
+
+  // The updates a client receives for Claude Code's recorded subagent turns; coqui-acp-claude's tests regenerate the file from the
+  // recordings and fail when it differs.
+  group('the recorded Claude Code subagents', () {
+    final recorded =
+        jsonDecode(
+              File(
+                'test/fixtures/claude_subagent_updates.json',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+    ChatSession replay(String name) {
+      final session = fresh();
+      for (final update in recorded[name] as List) {
+        feed(session, (update as Map).cast<String, Object?>());
+      }
+      return session;
+    }
+
+    test(
+      'two concurrent children are two named children that both completed',
+      () {
+        final session = replay('subagents');
+        expect(session.children.map((c) => (c.title, c.state)), [
+          ('Alpha count', ChildState.completed),
+          ('Beta count', ChildState.completed),
+        ]);
+        expect(
+          session.children.every(
+            (c) => c.result != null && c.usage?.totalTokens != null,
+          ),
+          isTrue,
+        );
+        expect(session.children.map((c) => c.reportsProgress), [false, false]);
+      },
+    );
+
+    test(
+      'a child that used a tool keeps that call to itself and the parent shows only its own',
+      () {
+        final session = replay('subagent_tool');
+        final child = session.children.single;
+        expect(child.state, ChildState.completed);
+        expect(child.reportsProgress, isTrue);
+        expect(child.usage!.toolUses, 1);
+        expect(
+          session.messages.where((m) => m.tool != null).map((m) => m.tool!.id),
+          [child.parentToolCallId],
+        );
+      },
+    );
+  });
 }

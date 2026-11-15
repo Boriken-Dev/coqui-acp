@@ -126,8 +126,9 @@ final class ChildRegistry {
     final child = _child(mark);
     if (child == null) return;
     if (!isChildReport(update.raw, mark)) {
-      if (child._updates.length >= limits.childUpdates)
+      if (child._updates.length >= limits.childUpdates) {
         child._updates.removeAt(0);
+      }
       child._updates.add(update);
       return;
     }

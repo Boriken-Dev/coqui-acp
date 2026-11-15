@@ -1689,6 +1689,30 @@ fn a_background_agent_launch_is_not_a_completion() {
     );
 }
 
+/// The updates a client receives for the recorded subagents turn, which the chat package's tests read. `COQUI_ACP_WRITE_FIXTURES=1`
+/// rewrites the file; otherwise a difference fails, so the Dart fixture cannot drift from the recording.
+#[test]
+fn the_chat_packages_child_fixture_is_what_the_recording_becomes() {
+    let mut recordings = serde_json::Map::new();
+    for name in ["subagents", "subagent_tool"] {
+        let events = events_of(&recorded_in("2.1.311", name));
+        let mut updates = coqui_acp_claude::harness::acp::updates_of(&events, 2);
+        updates.retain(|update| update["sessionUpdate"] != "state_update");
+        recordings.insert(name.to_string(), Value::Array(updates));
+    }
+    let text = serde_json::to_string_pretty(&recordings).unwrap()
+        + "
+";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bindings/dart/coqui_acp_chat/test/fixtures/claude_subagent_updates.json");
+    if std::env::var_os("COQUI_ACP_WRITE_FIXTURES").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &text).unwrap();
+    }
+    let held = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(held.replace("\r\n", "\n"), text);
+}
+
 #[test]
 fn history_rebuilds_the_same_children_and_keeps_a_sidechain_out_of_the_parents_story() {
     use coqui_acp_claude::harness::event::ChildState;

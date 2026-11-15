@@ -23,6 +23,17 @@ mod shape;
 mod usage;
 
 pub use connection::serve;
+
+/// The `session/update` payloads of `events` in ACP `version` (1 or 2), as a connection sends them, in order. For a test that
+/// checks what a client receives from a harness's recorded output.
+#[must_use]
+pub fn updates_of(events: &[crate::event::Event], version: u8) -> Vec<serde_json::Value> {
+    let mut shapes = shape::Shapes::new(version, usize::MAX);
+    events
+        .iter()
+        .flat_map(|event| shapes.updates(event))
+        .collect()
+}
 pub use usage::UsageTracker;
 #[cfg(feature = "antigravity")]
 pub(crate) use usage::now;
