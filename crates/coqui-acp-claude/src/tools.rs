@@ -17,7 +17,7 @@ fn text<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(Value::as_str)
 }
 
-fn cut(text: &str, max_title: usize) -> String {
+pub(crate) fn cut(text: &str, max_title: usize) -> String {
     let first = text.lines().next().unwrap_or_default();
     let cut = coqui_acp_harness::lines::cut(first, max_title);
     if cut.len() < text.len() {

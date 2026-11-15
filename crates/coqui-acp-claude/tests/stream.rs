@@ -1544,3 +1544,176 @@ fn a_version_is_the_words_and_short_numbers_of_the_id_up_to_a_date() {
     assert_eq!(version_of("claude-standin"), None);
     assert_eq!(version_of(""), None);
 }
+
+// Recorded: Claude Code 2.1.311 on Windows, a real model asked to run subagents.
+
+fn recorded_in(version: &str, name: &str) -> Vec<Value> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(version)
+        .join(format!("{name}.stdout"));
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn children_of(events: &[Event]) -> Vec<&coqui_acp_claude::harness::event::Child> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Child(child) => Some(child),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn two_concurrent_subagents_become_two_named_children_that_each_complete() {
+    use coqui_acp_claude::harness::event::ChildState;
+    let events = events_of(&recorded_in("2.1.311", "subagents"));
+    let children = children_of(&events);
+    let mut ids: Vec<&str> = children.iter().map(|child| child.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        2,
+        "one child per Agent call, however many reports"
+    );
+    for id in &ids {
+        let own: Vec<_> = children.iter().filter(|child| child.id == *id).collect();
+        assert_eq!(own[0].state, Some(ChildState::Starting));
+        assert!(
+            own.iter()
+                .any(|child| child.state == Some(ChildState::Working))
+        );
+        let last = own.last().unwrap();
+        assert_eq!(last.state, Some(ChildState::Completed));
+        assert_eq!(last.parent_tool_call.as_deref(), Some(*id));
+        assert!(
+            own.iter()
+                .any(|child| child.title.as_deref().is_some_and(|t| t.ends_with("count")))
+        );
+        assert!(own.iter().any(|child| child.task.is_some()));
+        assert!(
+            own.iter()
+                .any(|child| child.result.as_deref().is_some_and(|r| !r.is_empty()))
+        );
+        let usage = own
+            .iter()
+            .find_map(|child| child.usage.as_ref())
+            .expect("usage from the notification");
+        assert!(usage.total_tokens.unwrap() > 10_000);
+        assert!(usage.duration_ms.is_some());
+    }
+}
+
+#[test]
+fn a_subagents_own_tool_call_is_marked_as_the_childs_and_progress_names_the_call() {
+    use coqui_acp_claude::harness::event::ChildState;
+    let events = events_of(&recorded_in("2.1.311", "subagent_tool"));
+    let inside: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::InChild {
+                child,
+                parent_tool_call,
+                event,
+            } => Some((child, parent_tool_call, event)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        inside
+            .iter()
+            .any(|(_, _, event)| matches!(***event, Event::Tool(_))),
+        "the Glob call"
+    );
+    let parent = children_of(&events)[0].id.clone();
+    assert!(
+        inside
+            .iter()
+            .all(|(child, parent_call, _)| child.as_str() == parent
+                && parent_call.as_deref() == Some(parent.as_str()))
+    );
+    // The child's tool call is not a call of the parent's turn.
+    let tools: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Tool(call) => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools, vec![parent.as_str(); tools.len()]);
+    let progress = children_of(&events)
+        .into_iter()
+        .filter(|child| child.state == Some(ChildState::Working) && child.usage.is_some())
+        .count();
+    assert_eq!(progress, 1);
+}
+
+#[test]
+fn a_background_agent_launch_is_not_a_completion() {
+    let mut lines = recorded_in("2.1.311", "subagents");
+    // The foreground return, as a background launch writes it.
+    for line in &mut lines {
+        if let Some(blocks) = line
+            .pointer_mut("/message/content")
+            .and_then(Value::as_array_mut)
+        {
+            for block in blocks {
+                if block["type"] == "tool_result" {
+                    block["content"] =
+                        json!([{"type": "text", "text": "Async agent launched successfully."}]);
+                }
+            }
+        }
+        if line["type"] == "system" && line["subtype"] == "task_notification" {
+            *line = json!({"type": "system", "subtype": "task_started", "task_id": "t0", "tool_use_id": "none"});
+        }
+        if line["type"] == "system" && line["subtype"] == "task_updated" {
+            line["patch"]["status"] = json!("running");
+        }
+    }
+    let events = events_of(&lines);
+    assert!(!children_of(&events).is_empty());
+    assert!(
+        children_of(&events)
+            .iter()
+            .all(|child| child.state
+                != Some(coqui_acp_claude::harness::event::ChildState::Completed)),
+        "launched is not done"
+    );
+}
+
+#[test]
+fn history_rebuilds_the_same_children_and_keeps_a_sidechain_out_of_the_parents_story() {
+    use coqui_acp_claude::harness::event::ChildState;
+    let (mut parser, _) = parser();
+    let lines = recorded_in("2.1.311", "subagents");
+    let events: Vec<Event> = lines.iter().flat_map(|line| parser.history(line)).collect();
+    let live = events_of(&lines);
+    let ids = |events: &[Event]| {
+        let mut ids: Vec<String> = children_of(events)
+            .iter()
+            .map(|child| child.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    assert_eq!(ids(&events), ids(&live));
+    assert_eq!(ids(&events).len(), 2);
+    let done = children_of(&events)
+        .into_iter()
+        .filter(|child| child.state == Some(ChildState::Completed) && child.result.is_some())
+        .count();
+    assert_eq!(done, 2);
+
+    let stray = json!({"type": "assistant", "isSidechain": true, "message": {"role": "assistant",
+        "content": [{"type": "text", "text": "inside"}]}});
+    assert!(parser.history(&stray).is_empty());
+}

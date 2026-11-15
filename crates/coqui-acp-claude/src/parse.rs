@@ -1,6 +1,7 @@
 //! Claude Code's stream-json output as events.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -10,8 +11,9 @@ use std::io;
 
 use coqui_acp_api::usage::LimitHit;
 use coqui_acp_harness::event::{
-    Command, Content, Event, OptionKind, Outcome, PermissionOption, PermissionRequest, PlanEntry,
-    PlanStatus, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolStatus, TurnEnd,
+    Child, ChildState, ChildUsage, Command, Content, Event, OptionKind, Outcome, PermissionOption,
+    PermissionRequest, PlanEntry, PlanStatus, Responder, Severity, Stop, Terminal, ToolCall,
+    ToolContent, ToolStatus, TurnEnd,
 };
 use serde_json::{Map, Value, json};
 
@@ -38,6 +40,9 @@ pub struct ParserLimits {
     pub max_streamed: usize,
     /// The entries of the plan the Task tools keep, the oldest dropped past it. Default 1024.
     pub max_tasks: usize,
+    /// The longest task or result text a subagent's report carries, in bytes; a longer one is cut, on a character
+    /// boundary. Default 16384.
+    pub max_child_text_bytes: usize,
 }
 
 impl ParserLimits {
@@ -48,6 +53,7 @@ impl ParserLimits {
             max_title_bytes: 256,
             max_streamed: 64,
             max_tasks: 1024,
+            max_child_text_bytes: 16 * 1024,
         }
     }
 }
@@ -93,6 +99,10 @@ pub struct Parser {
     limits: ParserLimits,
     /// The Task tools' list, by task id, for the plan they make.
     tasks: Vec<(String, PlanEntry)>,
+    /// The subagent (the tool call that started it) each background task id belongs to, for the reports that name only the task.
+    child_tasks: BTreeMap<String, String>,
+    /// The subagents whose final report came, so a later hand-back does not replace their result.
+    child_done: BTreeSet<String>,
     answers: Vec<ControlAnswer>,
     version: Option<String>,
     session: Option<String>,
@@ -139,6 +149,8 @@ impl Parser {
             ended_by_error: false,
             limits: ParserLimits::new(),
             tasks: Vec::new(),
+            child_tasks: BTreeMap::new(),
+            child_done: BTreeSet::new(),
             answers: Vec::new(),
             version: None,
             session: None,
@@ -244,9 +256,17 @@ impl Parser {
             "control_response" => self.control_response(value),
             "control_request" => events.extend(self.control_request(value)),
             "system" => events.extend(self.system(value)),
+            // A subagent's partial message here would be taken for the parent's; its whole message comes later.
+            "stream_event" if parent_of(value).is_some() => {}
             "stream_event" => events.extend(self.stream_event(value)),
-            "assistant" => events.extend(self.assistant(value, false)),
-            "user" => events.extend(self.user(value, false)),
+            "assistant" => {
+                let said = self.assistant(value, false);
+                events.extend(in_child(parent_of(value), said));
+            }
+            "user" => {
+                let said = self.user(value, false);
+                events.extend(in_child(parent_of(value), said));
+            }
             "result" => events.extend(self.result(value)),
             "error" => events.extend(self.error_line(value)),
             "rate_limit_event" => {
@@ -293,10 +313,17 @@ impl Parser {
 
     /// The events of one line of a session's transcript, as history: the person's messages are told too.
     pub fn history(&mut self, value: &Value) -> Vec<Event> {
-        match value.get("type").and_then(Value::as_str).unwrap_or("") {
+        let sidechain = value.get("isSidechain").and_then(Value::as_bool) == Some(true);
+        let told = match value.get("type").and_then(Value::as_str).unwrap_or("") {
             "assistant" => self.assistant(value, true),
             "user" => self.user(value, true),
             _ => Vec::new(),
+        };
+        match parent_of(value) {
+            Some(parent) => in_child(Some(parent), told),
+            // A subagent's line that does not say whose it is would read as the parent's.
+            None if sidechain => Vec::new(),
+            None => told,
         }
     }
 
@@ -482,6 +509,9 @@ impl Parser {
                     .map(|id| vec![Event::Compaction { id, summary: None }])
                     .unwrap_or_default()
             }
+            "task_started" | "task_progress" | "task_updated" | "task_notification" => {
+                self.background_task(value)
+            }
             "informational" | "notification" => value
                 .get("content")
                 .or_else(|| value.get("message"))
@@ -594,7 +624,9 @@ impl Parser {
             .or_else(|| value.get("uuid").and_then(Value::as_str))
             .unwrap_or("message")
             .to_string();
-        if let Some(usage) = message.and_then(|message| message.get("usage")) {
+        if parent_of(value).is_none()
+            && let Some(usage) = message.and_then(|message| message.get("usage"))
+        {
             self.context_used = limits::context_used(usage).or(self.context_used);
         }
         let streamed = !history
@@ -678,6 +710,20 @@ impl Parser {
         }
         let call = tools::describe(id, name, &input, self.limits.max_title_bytes);
         let mut events = vec![Event::Tool(call)];
+        if matches!(name, "Task" | "Agent") {
+            let mut child = Child::new(id);
+            child.parent_tool_call = Some(id.to_string());
+            child.title = input
+                .get("description")
+                .and_then(Value::as_str)
+                .map(|text| tools::cut(text, self.limits.max_title_bytes));
+            child.task = input
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(|text| self.child_text(text));
+            child.state = Some(ChildState::Starting);
+            events.push(Event::Child(child));
+        }
         if tools::TERMINAL_TOOLS.contains(&name) {
             let mut terminal = Terminal::new(id);
             terminal.command = input
@@ -797,6 +843,11 @@ impl Parser {
         });
         // What the model was given back, as it was given.
         call.output = block.get("content").cloned();
+        let handed_back = if matches!(name.as_str(), "Task" | "Agent") {
+            self.child_handed_back(id, failed, &text)
+        } else {
+            None
+        };
         if tools::TERMINAL_TOOLS.contains(&name.as_str()) {
             let mut terminal = Terminal::new(id);
             let output = match result.filter(|result| result.is_object()) {
@@ -838,8 +889,101 @@ impl Parser {
                 content: ToolContent::Text(text),
             });
         }
+        events.extend(handed_back);
         events.push(Event::Tool(call));
         events
+    }
+
+    /// The report of a finished Task or Agent call. One launched in the background returns at once and reports its end
+    /// later, so its return is no end; and a result the task's own report already gave is kept.
+    fn child_handed_back(&mut self, id: &str, failed: bool, text: &str) -> Option<Event> {
+        if !failed && text.trim_start().starts_with("Async agent launched") {
+            return None;
+        }
+        let mut child = Child::new(id);
+        child.parent_tool_call = Some(id.to_string());
+        child.state = Some(if failed {
+            ChildState::Failed
+        } else {
+            ChildState::Completed
+        });
+        if self.child_done.insert(id.to_string()) || failed {
+            child.result = Some(self.child_text(text));
+        }
+        Some(Event::Child(child))
+    }
+
+    fn child_text(&self, text: &str) -> String {
+        coqui_acp_harness::lines::cut(text, self.limits.max_child_text_bytes).to_string()
+    }
+
+    /// The `task_*` lines Claude Code writes for a subagent; other background work has no `subagent_type`.
+    fn background_task(&mut self, value: &Value) -> Vec<Event> {
+        let text = |key: &str| value.get(key).and_then(Value::as_str);
+        let Some(task) = text("task_id") else {
+            return Vec::new();
+        };
+        let subagent = text("subagent_type").is_some() || text("task_type") == Some("local_agent");
+        let known = self.child_tasks.get(task).cloned();
+        if !subagent && known.is_none() {
+            return Vec::new();
+        }
+        let Some(call) = text("tool_use_id").map(str::to_string).or(known) else {
+            return Vec::new();
+        };
+        if self.max_tools > 0 {
+            if self.child_tasks.len() >= self.max_tools && !self.child_tasks.contains_key(task) {
+                self.child_tasks.pop_first();
+            }
+            self.child_tasks.insert(task.to_string(), call.clone());
+        }
+        let mut child = Child::new(call.clone());
+        child.parent_tool_call = Some(call.clone());
+        let usage = |counts: Option<&Value>| {
+            counts.map(|counts| {
+                let mut usage = ChildUsage::default();
+                usage.total_tokens = counts.get("total_tokens").and_then(Value::as_u64);
+                usage.tool_uses = counts.get("tool_uses").and_then(Value::as_u64);
+                usage.duration_ms = counts.get("duration_ms").and_then(Value::as_u64);
+                usage
+            })
+        };
+        let state = |status: Option<&str>| match status? {
+            "running" | "in_progress" | "pending" => Some(ChildState::Working),
+            "completed" => Some(ChildState::Completed),
+            "failed" | "error" | "errored" => Some(ChildState::Failed),
+            "killed" | "stopped" | "cancelled" | "canceled" | "interrupted" => {
+                Some(ChildState::Cancelled)
+            }
+            _ => None,
+        };
+        match value.get("subtype").and_then(Value::as_str).unwrap_or("") {
+            "task_started" => {
+                child.title =
+                    text("description").map(|text| tools::cut(text, self.limits.max_title_bytes));
+                child.task = text("prompt").map(|text| self.child_text(text));
+                child.state = Some(ChildState::Working);
+            }
+            "task_progress" => {
+                child.state = Some(ChildState::Working);
+                child.usage = usage(value.get("usage"));
+            }
+            "task_updated" => {
+                child.state = state(value.pointer("/patch/status").and_then(Value::as_str));
+                if child.state.is_none() {
+                    return Vec::new();
+                }
+            }
+            _ => {
+                child.state = state(text("status"));
+                child.usage = usage(value.get("usage"));
+                if let Some(summary) = text("summary") {
+                    child.result = Some(self.child_text(summary));
+                    self.child_done.insert(call);
+                }
+            }
+        }
+        vec![Event::Child(child)]
     }
 
     /// The plan the Task tools keep, after one of them finished.
@@ -961,6 +1105,41 @@ impl Parser {
 
 /// What applying `suggestions` does, every one of them and where it is kept, as the always-allow option's name;
 /// `None` when none of them grants anything, so there is nothing to allow always.
+/// The tool call of the subagent a line belongs to, when it is one of a subagent's own.
+fn parent_of(value: &Value) -> Option<&str> {
+    value
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// What a subagent's own line became, marked as the subagent's. A plan, usage or title is the parent's alone.
+fn in_child(parent: Option<&str>, events: Vec<Event>) -> Vec<Event> {
+    let Some(parent) = parent else {
+        return events;
+    };
+    events
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::MessageChunk { .. }
+                    | Event::MessageEnd { .. }
+                    | Event::ThoughtChunk { .. }
+                    | Event::ThoughtEnd { .. }
+                    | Event::Tool(_)
+                    | Event::ToolChunk { .. }
+                    | Event::Terminal(_)
+            )
+        })
+        .map(|event| Event::InChild {
+            child: parent.to_string(),
+            parent_tool_call: Some(parent.to_string()),
+            event: Box::new(event),
+        })
+        .collect()
+}
+
 fn always_label(suggestions: &[Value]) -> Option<String> {
     let mut parts = Vec::new();
     let mut grants = false;
