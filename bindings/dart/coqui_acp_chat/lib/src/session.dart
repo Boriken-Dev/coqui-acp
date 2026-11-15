@@ -434,6 +434,7 @@ class ChatSession extends ChatNotifier {
   bool _agentNames;
   ChatStatus _status = ChatStatus.disconnected;
   final List<ChatMessage> _messages = [];
+  final List<ChatMessage> _heldFirst = [];
   final Map<String, ChatMessage> _toolEntries = {};
   late final ChildRegistry _childRegistry = ChildRegistry(limits);
   final Map<String, ChatMessage> _compactions = {};
@@ -634,6 +635,34 @@ class ChatSession extends ChatNotifier {
     _add(_entry(role, text, at: at));
     _trim();
     notifyListeners();
+  }
+
+  /// Shows the first message of a conversation whose agent has not started, as the person's own, before [send] can take it.
+  /// [attachments] names what goes with it. [send] replaces it with the message it sends, at the time shown here; [releaseFirst]
+  /// takes it back out when nothing is to be sent.
+  void holdFirst(String text, {List<String> attachments = const []}) {
+    releaseFirst(notify: false);
+    final message = _entry(MessageRole.user, text);
+    _heldFirst.add(message);
+    _add(message);
+    if (attachments.isNotEmpty) {
+      final note = _entry(MessageRole.notice, 'Sent with this: ${attachments.join(', ')}');
+      _heldFirst.add(note);
+      _add(note);
+    }
+    _trim();
+    notifyListeners();
+  }
+
+  /// The first message shown by [holdFirst] and not yet sent; null when there is none.
+  ChatMessage? get heldFirst => _heldFirst.firstOrNull;
+
+  /// Takes out what [holdFirst] showed.
+  void releaseFirst({bool notify = true}) {
+    if (_heldFirst.isEmpty) return;
+    _messages.removeWhere(_heldFirst.contains);
+    _heldFirst.clear();
+    if (notify) notifyListeners();
   }
 
   /// Takes out the messages [where] names, such as a host's copy of what was said that it puts another in place of.
@@ -948,6 +977,7 @@ class ChatSession extends ChatNotifier {
     }
 
     _messages.clear();
+    _heldFirst.clear();
     _toolEntries.clear();
     _compactions.clear();
     _terminals.clear();
@@ -2157,9 +2187,11 @@ class ChatSession extends ChatNotifier {
       if (mine != null) _v1Awaiting.add(mine);
     }
     // The person's message goes in before the agent can answer it, however fast the answer comes.
+    final shownAt = _heldFirst.firstOrNull?.at;
+    releaseFirst(notify: false);
     final local = text.trim().isEmpty
         ? null
-        : _entry(MessageRole.user, text, sentBy: from);
+        : _entry(MessageRole.user, text, sentBy: from, at: shownAt);
     if (local != null) {
       _add(local);
       if (!v1) _unacked.add(local);
