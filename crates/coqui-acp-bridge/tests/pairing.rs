@@ -7,6 +7,7 @@
 )]
 
 mod method;
+mod support;
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -26,7 +27,6 @@ use coqui_transport_web::{Dialer, Kind};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use url::Url;
 
-const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
 const WAIT: Duration = Duration::from_secs(20);
 const SHORT: Duration = Duration::from_secs(10);
 
@@ -96,7 +96,7 @@ fn forward<A: Channel, B: Channel>(front: &A, back: &B, tamper: Option<usize>) {
 }
 
 fn pair_accept(dir: &Dir, port: u16) -> (Child, String) {
-    let mut child = Command::new(BRIDGE)
+    let mut child = Command::new(support::bridge())
         .arg("pair-accept")
         .arg("--listen")
         .arg(format!("127.0.0.1:{port}"))
@@ -122,7 +122,7 @@ fn pair_accept(dir: &Dir, port: u16) -> (Child, String) {
 fn pair_dial(dir: &Dir, url: &str, pin: &str, ca: Option<&Path>) -> std::process::Output {
     let file = dir.path("pin.txt");
     std::fs::write(&file, format!("{pin}\n")).unwrap();
-    let mut command = Command::new(BRIDGE);
+    let mut command = Command::new(support::bridge());
     command
         .arg("pair-dial")
         .arg(url)
@@ -283,7 +283,7 @@ fn plain_ws_is_refused_beyond_loopback_and_a_pin_is_not_an_argument() {
     let dir = Dir::new("plain");
     let joined = pair_dial(&dir, "ws://example.org/pair", "000000", None);
     assert!(!joined.status.success());
-    let help = Command::new(BRIDGE)
+    let help = Command::new(support::bridge())
         .args(["pair-dial", "--help"])
         .output()
         .unwrap();
@@ -520,7 +520,7 @@ fn upgrade_status(port: u16, origin: Option<&str>) -> String {
 
 /// `pair-accept` with `origins` allowed, and its PIN.
 fn pair_accept_allowing(dir: &Dir, port: u16, origins: &[&str]) -> (Child, String) {
-    let mut command = Command::new(BRIDGE);
+    let mut command = Command::new(support::bridge());
     command
         .arg("pair-accept")
         .arg("--listen")
@@ -583,7 +583,7 @@ fn a_page_cannot_spend_the_pin_and_only_a_listed_origin_reaches_the_exchange() {
 
 #[test]
 fn a_pin_waits_as_long_as_the_desk_keeps_it_and_a_run_is_a_setting() {
-    let help = Command::new(BRIDGE)
+    let help = Command::new(support::bridge())
         .args(["pair-accept", "--help"])
         .output()
         .unwrap();

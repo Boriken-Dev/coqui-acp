@@ -2,6 +2,7 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 mod method;
+mod support;
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
@@ -20,7 +21,6 @@ use coqui_transport::{Channel, Failure};
 use coqui_transport_web::{Dialer, Kind, websocket};
 use serde_json::{Value, json};
 
-const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
 const WAIT: Duration = Duration::from_secs(30);
 
 struct Fixture {
@@ -64,7 +64,7 @@ impl Fixture {
 
     /// As [`Self::serve`], with `agent` as the program and its arguments.
     fn serve_program(&mut self, flags: &[&str], agent: &[OsString]) -> (u16, String) {
-        let mut command = Command::new(BRIDGE);
+        let mut command = Command::new(support::bridge());
         command
             .args(["serve", "--listen", "127.0.0.1:0"])
             .args(flags)
@@ -133,9 +133,8 @@ fn turn_agent() -> PathBuf {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut path = PathBuf::from(BRIDGE);
+    let mut path = support::bridge();
     path.pop();
-    path.push("examples");
     path.push(format!("turn_agent{}", std::env::consts::EXE_SUFFIX));
     path
 }
@@ -1063,7 +1062,7 @@ fn stopping_a_guarded_agent_dismisses_its_helper() {
     let program = turn_agent().into_os_string();
     let started = Agent::spawn(&program, &[], 1 << 20)
         .unwrap()
-        .guarded(BRIDGE.as_ref(), &["agent-guard"])
+        .guarded(support::bridge().as_os_str(), &["agent-guard"])
         .unwrap();
     let pid = started.pid();
     let helper = started.guard_pid().unwrap();
@@ -1220,7 +1219,7 @@ fn a_kept_agent_is_not_given_back_to_a_peer_no_longer_accepted() {
 fn linger_is_refused_where_no_key_was_proved_and_its_settings_need_it() {
     let fixture = Fixture::new("flags");
     let refused = |flags: &[&str], expect: &str| {
-        let mut child = Command::new(BRIDGE)
+        let mut child = Command::new(support::bridge())
             .args(["serve", "--listen", "127.0.0.1:0"])
             .args(flags)
             .args(["--", "x"])

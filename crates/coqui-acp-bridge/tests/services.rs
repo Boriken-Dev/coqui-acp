@@ -2,6 +2,7 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 mod method;
+mod support;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,6 @@ use coqui_agentic_peer::link::capabilities;
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
 use coqui_transport::Channel as _;
 
-const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
 const WAIT: Duration = Duration::from_secs(10);
 const INITIALIZE: &[u8] =
     br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#;
@@ -44,7 +44,7 @@ impl Fixture {
 
     /// `serve`, returning the peer id it prints, once it is listening.
     fn serve(&mut self, home: Option<&Path>, flags: &[&str], port: u16) -> String {
-        let mut command = Command::new(BRIDGE);
+        let mut command = Command::new(support::bridge());
         let paired = ["--method", method::name()];
         command
             .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
@@ -102,9 +102,8 @@ fn echo_agent() -> PathBuf {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut path = PathBuf::from(BRIDGE);
+    let mut path = support::bridge();
     path.pop();
-    path.push("examples");
     path.push(format!("echo_agent{}", std::env::consts::EXE_SUFFIX));
     path
 }
@@ -236,7 +235,7 @@ fn a_grant_names_what_a_peer_may_open_and_keeps_the_rest_refused() {
 fn pair(server_home: &Path, client_home: &Path) {
     let port = free_port();
     let home = coqui_agentic_peer::home::HOME_ENV;
-    let mut accept = Command::new(BRIDGE)
+    let mut accept = Command::new(support::bridge())
         .args(["pair-accept", "--listen", &format!("127.0.0.1:{port}")])
         .args(["--method", method::name()])
         .env(home, server_home)
@@ -248,7 +247,7 @@ fn pair(server_home: &Path, client_home: &Path) {
     let mut printed = BufReader::new(accept.stdout.take().unwrap());
     let mut pin = String::new();
     printed.read_line(&mut pin).unwrap();
-    let mut joining = Command::new(BRIDGE)
+    let mut joining = Command::new(support::bridge())
         .args(["pair-dial", &format!("ws://127.0.0.1:{port}/pair")])
         .args(["--method", method::name()])
         .env(home, client_home)
@@ -287,7 +286,7 @@ fn one_pairing_and_a_new_capability_is_a_grant_counted_at_once() {
     );
 
     let granting = |action: &str| {
-        let status = Command::new(BRIDGE)
+        let status = Command::new(support::bridge())
             .args(["grant", &peer, "mcp"])
             .args(if action == "revoke" {
                 &["--revoke"][..]
@@ -360,7 +359,7 @@ fn a_service_needs_the_in_band_proof_and_a_grant_needs_a_service() {
             grant.as_str(),
         ],
     ] {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["serve", "--listen", "127.0.0.1:0"])
             .args(&flags)
             .arg("--")
@@ -384,7 +383,7 @@ fn dial_tries_its_fallback_when_the_first_endpoint_is_not_there() {
         &["--identity", key.to_str().unwrap(), "--allow", &peer],
         port,
     );
-    let mut dialing = Command::new(BRIDGE)
+    let mut dialing = Command::new(support::bridge())
         .args([
             "dial",
             &format!("ws://127.0.0.1:{dead}/acp"),
@@ -504,7 +503,7 @@ fn curl_reaches_a_server_through_a_link_in_both_directions_and_only_as_granted()
     ];
     let server = fixture.serve(None, &flags, port);
     let forward_log = std::fs::File::create(fixture.dir.join("forward.log")).unwrap();
-    let forwarding = Command::new(BRIDGE)
+    let forwarding = Command::new(support::bridge())
         .args([
             "forward",
             &format!("ws://127.0.0.1:{port}/link"),
@@ -582,7 +581,7 @@ fn a_listener_beyond_loopback_is_refused() {
     let fixture = Fixture::new("beyond");
     let (key, identity) = fixture.identity("server");
     let peer = identity.peer_id().to_string();
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "forward",
             "ws://127.0.0.1:1/link",
@@ -598,7 +597,7 @@ fn a_listener_beyond_loopback_is_refused() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("loopback"));
     let reverse = format!("0.0.0.0:9000={peer}=db:5432");
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "serve",
             "--listen",
@@ -629,7 +628,7 @@ fn a_service_cannot_stand_in_for_a_grant_or_for_what_every_link_has() {
         "acp/1=x",
         "mcp-offer/1=x",
     ] {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args([
                 "serve",
                 "--listen",
@@ -726,7 +725,7 @@ fn one_peer_gets_only_so_many_links_and_others_are_not_affected() {
 fn a_target_a_person_allowed_is_only_for_the_peer_they_named() {
     let fixture = Fixture::new("allowed");
     let (key, _) = fixture.identity("client");
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "forward",
             "ws://127.0.0.1:1/link",
@@ -746,7 +745,7 @@ fn a_target_a_person_allowed_is_only_for_the_peer_they_named() {
 fn revoking_forwarding_leaves_no_targets_to_come_back() {
     let fixture = Fixture::new("revoke");
     let grant = |args: &[&str]| {
-        let status = Command::new(BRIDGE)
+        let status = Command::new(support::bridge())
             .arg("grant")
             .args(args)
             .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
@@ -1039,7 +1038,7 @@ fn an_agent_reaches_the_tools_of_the_peer_that_offered_them_through_the_real_shi
 fn what_comes_with_pairing_cannot_be_revoked_by_saying_it_was() {
     let fixture = Fixture::new("revoke-paired");
     for protocol in ["acp/1", "mcp-offer/1"] {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["grant", "sha256:peer", protocol, "--revoke"])
             .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
             .output()
@@ -1055,7 +1054,7 @@ fn what_comes_with_pairing_cannot_be_revoked_by_saying_it_was() {
 
 #[test]
 fn an_offer_needs_a_proof_to_be_for_someone() {
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "serve",
             "--listen",

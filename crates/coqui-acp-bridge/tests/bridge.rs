@@ -2,13 +2,12 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 mod method;
+mod support;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-
-const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
 
 struct Fixture {
     dir: PathBuf,
@@ -26,7 +25,7 @@ impl Fixture {
 
     fn keygen(&self, name: &str) -> (PathBuf, String) {
         let path = self.dir.join(name);
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["keygen"])
             .arg(&path)
             .args(["--method", method::name()])
@@ -61,10 +60,9 @@ fn echo_agent() -> PathBuf {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut path = PathBuf::from(BRIDGE);
+    let mut path = support::bridge();
     path.pop();
-    path.join("examples")
-        .join(format!("echo_agent{}", std::env::consts::EXE_SUFFIX))
+    path.join(format!("echo_agent{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn free_port() -> u16 {
@@ -150,7 +148,7 @@ fn start_serve(
     port: u16,
     log: Option<&Path>,
 ) -> String {
-    let mut command = Command::new(BRIDGE);
+    let mut command = Command::new(support::bridge());
     command
         .arg("serve")
         .arg("--listen")
@@ -193,7 +191,7 @@ fn wait_for_port(port: u16) {
 fn it_will_not_start_without_an_allowed_peer() {
     let fixture = Fixture::new("noallow");
     let (identity, _) = fixture.keygen("id.pem");
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .arg("serve")
         .arg("--identity")
         .arg(&identity)
@@ -210,7 +208,7 @@ fn keygen_never_replaces_a_file_and_help_takes_no_secret_value() {
     let fixture = Fixture::new("keygen");
     let (path, peer) = fixture.keygen("id.pem");
     assert!(peer.starts_with("sha256:"), "{peer}");
-    let again = Command::new(BRIDGE)
+    let again = Command::new(support::bridge())
         .arg("keygen")
         .arg(&path)
         .args(["--method", method::name()])
@@ -218,7 +216,7 @@ fn keygen_never_replaces_a_file_and_help_takes_no_secret_value() {
         .unwrap();
     assert!(!again.status.success());
     for mode in ["serve", "dial"] {
-        let help = Command::new(BRIDGE)
+        let help = Command::new(support::bridge())
             .args([mode, "--help"])
             .output()
             .unwrap();
@@ -234,7 +232,7 @@ fn keygen_never_replaces_a_file_and_help_takes_no_secret_value() {
 fn a_plain_listener_beyond_loopback_is_refused() {
     let fixture = Fixture::new("plain");
     let (identity, peer) = fixture.keygen("id.pem");
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "serve",
             "--listen",
@@ -361,7 +359,7 @@ fn dial_reaches_out_reconnects_with_the_agent_alive_and_ends_with_its_status() {
             .build()
             .unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mut bridge = Command::new(BRIDGE)
+    let mut bridge = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("wss://127.0.0.1:{port}/agent"))
         .arg("--tls-identity")
@@ -417,7 +415,7 @@ fn dial_stops_on_the_wrong_certificate_rather_than_knocking_forever() {
         let _ = listener.accept(Some(Duration::from_secs(25)));
     });
     let log = fixture.dir.join("agent.log");
-    let mut child = Command::new(BRIDGE)
+    let mut child = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("wss://127.0.0.1:{port}/agent"))
         .arg("--tls-identity")
@@ -454,7 +452,7 @@ fn start_mtls(
     extra: &[&str],
     log: &Path,
 ) {
-    let child = Command::new(BRIDGE)
+    let child = Command::new(support::bridge())
         .arg("serve")
         .arg("--listen")
         .arg(format!("127.0.0.1:{port}"))
@@ -564,7 +562,7 @@ fn dial_trusts_a_private_ca_by_name_on_a_versioned_path() {
     let port = server.local_addr().unwrap().port();
     let bearer = fixture.dir.join("token");
     std::fs::write(&bearer, "secret-token\n").unwrap();
-    let mut bridge = Command::new(BRIDGE)
+    let mut bridge = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("wss://localhost:{port}/v1/assistant/agent-link"))
         .arg("--tls-identity")
@@ -621,7 +619,7 @@ fn rcgen_issue(dir: &Path) -> PrivateCa {
 /// Serves with a store and returns the bridge's peer id.
 fn start_store_bridge(fixture: &mut Fixture, store: &Path, port: u16, log: &Path) -> String {
     let (identity, _) = fixture.keygen("bridge.pem");
-    let mut child = Command::new(BRIDGE)
+    let mut child = Command::new(support::bridge())
         .arg("serve")
         .arg("--listen")
         .arg(format!("127.0.0.1:{port}"))
@@ -884,7 +882,7 @@ fn start_in_band_dial(
     log: &Path,
     agent: &Path,
 ) -> Running {
-    let child = Command::new(BRIDGE)
+    let child = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("wss://localhost:{port}/v1/agent"))
         .arg("--identity")
@@ -961,7 +959,7 @@ fn dial_stops_when_the_remote_proves_the_wrong_key() {
     let stranger = method::identity(&fixture.dir.join("stranger.pem"));
     let mut serving = {
         let (identity, _) = fixture.keygen("bridge.pem");
-        Command::new(BRIDGE)
+        Command::new(support::bridge())
             .args(["serve", "--listen"])
             .arg("127.0.0.1:0")
             .arg("--identity")
@@ -979,7 +977,7 @@ fn dial_stops_when_the_remote_proves_the_wrong_key() {
         .read_line(&mut banner)
         .unwrap();
     let address = banner.trim().trim_start_matches("listening on ").to_owned();
-    let mut child = Command::new(BRIDGE)
+    let mut child = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("ws://{address}/"))
         .arg("--identity")
@@ -1064,7 +1062,7 @@ fn flags_that_cannot_apply_are_refused_rather_than_dropped() {
         ["--proof-seconds", "5"],
         ["--identity", "unused.pem"],
     ] {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["serve", "--listen", "127.0.0.1:0", "--tls-identity"])
             .arg(&server)
             .args([
@@ -1115,7 +1113,7 @@ fn an_agent_that_stops_reading_ends_the_link_rather_than_wedging_it() {
 }
 
 fn spawn_serve(fixture: &mut Fixture, port: u16, flags: &[&str], extra: &[&Path], log: &Path) {
-    let mut command = Command::new(BRIDGE);
+    let mut command = Command::new(support::bridge());
     command
         .arg("serve")
         .args(["--listen", &format!("127.0.0.1:{port}")])
@@ -1166,7 +1164,7 @@ fn no_peer_proof_serves_a_program_on_loopback_and_refuses_a_browser_unless_liste
 fn no_peer_proof_is_refused_where_anyone_could_reach_it() {
     let fixture = Fixture::new("noproofwide");
     native::identity(&fixture.dir.join("server.pem"));
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "serve",
             "--listen",
@@ -1180,7 +1178,7 @@ fn no_peer_proof_is_refused_where_anyone_could_reach_it() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--permit"));
-    let proofs = Command::new(BRIDGE)
+    let proofs = Command::new(support::bridge())
         .args(["serve", "--no-peer-proof", "--allow"])
         .arg(format!("sha256:{}", "0".repeat(64)))
         .args(["--", "x"])
@@ -1242,7 +1240,7 @@ fn dial_can_pin_only_the_server_or_with_a_flag_nothing_on_loopback() {
     .build()
     .unwrap();
     let port = pinned.local_addr().unwrap().port();
-    let bridge = Command::new(BRIDGE)
+    let bridge = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("wss://127.0.0.1:{port}/"))
         .arg("--expect")
@@ -1262,7 +1260,7 @@ fn dial_can_pin_only_the_server_or_with_a_flag_nothing_on_loopback() {
     .build()
     .unwrap();
     let port = plain.local_addr().unwrap().port();
-    let refused = Command::new(BRIDGE)
+    let refused = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("ws://127.0.0.1:{port}/"))
         .args(["--", "x"])
@@ -1272,7 +1270,7 @@ fn dial_can_pin_only_the_server_or_with_a_flag_nothing_on_loopback() {
         !refused.status.success(),
         "nothing checked needs asking for"
     );
-    let bridge = Command::new(BRIDGE)
+    let bridge = Command::new(support::bridge())
         .arg("dial")
         .arg(format!("ws://127.0.0.1:{port}/"))
         .arg("--no-peer-proof")
@@ -1345,7 +1343,7 @@ fn serve_saying(
     flags: &[&str],
     home: Option<&Path>,
 ) -> (Child, String, std::sync::mpsc::Receiver<String>) {
-    let mut command = Command::new(BRIDGE);
+    let mut command = Command::new(support::bridge());
     command
         .args(["serve", "--listen", "127.0.0.1:0"])
         .args(flags)
@@ -1396,7 +1394,7 @@ fn a_method_is_the_identitys_and_naming_another_is_refused() {
         (Method::Noise, Method::WebCrypto),
     ] {
         let path = fixture.dir.join(format!("{method}.pem"));
-        let made = Command::new(BRIDGE)
+        let made = Command::new(support::bridge())
             .arg("keygen")
             .arg(&path)
             .args(["--method", method.name()])
@@ -1404,7 +1402,7 @@ fn a_method_is_the_identitys_and_naming_another_is_refused() {
             .unwrap();
         assert!(made.status.success());
         assert_eq!(Identity::read(&path).unwrap().unwrap().method(), method);
-        let refused = Command::new(BRIDGE)
+        let refused = Command::new(support::bridge())
             .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
             .arg(&path)
             .args(["--allow", ANYONE, "--method", other.name(), "--", "x"])
@@ -1419,7 +1417,7 @@ fn a_method_is_the_identitys_and_naming_another_is_refused() {
     }
     let path = fixture.dir.join("default.pem");
     assert!(
-        Command::new(BRIDGE)
+        Command::new(support::bridge())
             .arg("keygen")
             .arg(&path)
             .output()
@@ -1431,7 +1429,7 @@ fn a_method_is_the_identitys_and_naming_another_is_refused() {
         Identity::read(&path).unwrap().unwrap().method(),
         Method::DEFAULT
     );
-    let unknown = Command::new(BRIDGE)
+    let unknown = Command::new(support::bridge())
         .arg("keygen")
         .arg(fixture.dir.join("unknown.pem"))
         .args(["--method", "p256-spki"])

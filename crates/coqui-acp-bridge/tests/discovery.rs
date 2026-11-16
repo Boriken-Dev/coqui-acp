@@ -2,15 +2,15 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 mod method;
+mod support;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
 const ENV: &str = coqui_agentic_peer::discovery::DESCRIPTORS_ENV;
 
 struct Fixture {
@@ -40,7 +40,7 @@ impl Fixture {
 
     fn keygen_as(&self, name: &str) -> (PathBuf, String) {
         let path = self.dir.join(name);
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .arg("keygen")
             .arg(&path)
             .args(["--method", method::name()])
@@ -55,7 +55,7 @@ impl Fixture {
 
     /// Starts `serve --advertise` on a port of its choosing, and returns when it listens.
     fn serve(&mut self, identity: &Path, allowed: &str, label: &str) -> usize {
-        let mut child = Command::new(BRIDGE)
+        let mut child = Command::new(support::bridge())
             .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
             .arg(identity)
             .args([
@@ -81,7 +81,7 @@ impl Fixture {
     }
 
     fn discover(&self) -> Vec<Value> {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["discover", "--seconds", "0"])
             .env(ENV, self.descriptors())
             .output()
@@ -148,7 +148,7 @@ fn an_agent_on_loopback_is_found_with_its_key_and_gone_when_it_dies() {
 fn nothing_is_advertised_unless_asked_for() {
     let fixture = Fixture::new("off");
     let (identity, peer) = fixture.keygen();
-    let mut child = Command::new(BRIDGE)
+    let mut child = Command::new(support::bridge())
         .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
         .arg(&identity)
         .args(["--allow", &peer, "--", "unused-agent"])
@@ -172,7 +172,7 @@ fn what_a_descriptor_cannot_carry_is_refused_at_the_command_line() {
     let fixture = Fixture::new("flags");
     let (identity, peer) = fixture.keygen();
     let run = |flags: &[&str]| {
-        Command::new(BRIDGE)
+        Command::new(support::bridge())
             .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
             .arg(&identity)
             .args(["--allow", &peer])
@@ -202,7 +202,7 @@ fn what_a_descriptor_cannot_carry_is_refused_at_the_command_line() {
 fn a_short_lived_certificate_is_advertised_by_its_hash_and_needs_the_in_band_proof() {
     let fixture = Fixture::new("short");
     let (identity, peer) = fixture.keygen();
-    let mut child = Command::new(BRIDGE)
+    let mut child = Command::new(support::bridge())
         .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
         .arg(&identity)
         .args([
@@ -254,7 +254,7 @@ fn a_short_lived_certificate_is_advertised_by_its_hash_and_needs_the_in_band_pro
             "y",
         ],
     ] {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["serve", "--listen", "127.0.0.1:0"])
             .args(&flags)
             .args(["--", "unused-agent"])
@@ -293,7 +293,7 @@ fn a_descriptor_directory_others_can_write_to_is_not_believed_and_a_fifo_holds_n
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(fixture.discover().is_empty());
     let (other, other_peer) = fixture.keygen_as("other");
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args(["serve", "--listen", "127.0.0.1:0", "--identity"])
         .arg(&other)
         .args([
@@ -313,7 +313,7 @@ fn a_descriptor_directory_others_can_write_to_is_not_believed_and_a_fifo_holds_n
 #[test]
 fn advertising_on_the_network_needs_a_key_a_client_can_check() {
     let fixture = Fixture::new("no-key");
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "serve",
             "--listen",
@@ -340,7 +340,7 @@ fn nothing_is_announced_until_every_listener_is_bound() {
     // Holds the UDP port, while TCP stays free for the same number.
     let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port().to_string();
-    let output = Command::new(BRIDGE)
+    let output = Command::new(support::bridge())
         .args([
             "serve",
             "--listen",
@@ -385,9 +385,8 @@ fn echo_agent() -> PathBuf {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut path = PathBuf::from(BRIDGE);
+    let mut path = support::bridge();
     path.pop();
-    path.push("examples");
     path.push(format!("echo_agent{}", std::env::consts::EXE_SUFFIX));
     path
 }
@@ -401,7 +400,7 @@ fn one_pairing_serves_every_command() {
     let home = coqui_agentic_peer::home::HOME_ENV;
     let port = free_tcp_port();
     let mut accept = Running(
-        Command::new(BRIDGE)
+        Command::new(support::bridge())
             .args(["pair-accept", "--listen", &format!("127.0.0.1:{port}")])
             .args(["--method", method::name()])
             .env(home, &server_home)
@@ -413,7 +412,7 @@ fn one_pairing_serves_every_command() {
     let mut out = BufReader::new(accept.0.stdout.take().unwrap());
     let mut pin = String::new();
     out.read_line(&mut pin).unwrap();
-    let mut dial = Command::new(BRIDGE)
+    let mut dial = Command::new(support::bridge())
         .args(["pair-dial", &format!("ws://127.0.0.1:{port}/pair")])
         .args(["--method", method::name()])
         .env(home, &client_home)
@@ -438,7 +437,7 @@ fn one_pairing_serves_every_command() {
 
     let port = free_tcp_port();
     let mut serve = Running(
-        Command::new(BRIDGE)
+        Command::new(support::bridge())
             .args([
                 "serve",
                 "--paired",
@@ -472,7 +471,7 @@ fn one_pairing_serves_every_command() {
     assert!(next().starts_with("listening on"));
     assert_eq!(next(), format!("proving by {}", method::name()));
     let _client = Running(
-        Command::new(BRIDGE)
+        Command::new(support::bridge())
             .args([
                 "dial",
                 &format!("ws://127.0.0.1:{port}/acp"),
@@ -498,79 +497,6 @@ fn free_tcp_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
-}
-
-/// A native host as a browser runs it: its origin as the first argument, and framed JSON on its standard streams.
-struct NativeHost(Child);
-
-impl NativeHost {
-    fn start(descriptors: &Path) -> Self {
-        Self(
-            Command::new(BRIDGE)
-                .args([
-                    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
-                    "--parent-window=0",
-                ])
-                .env(ENV, descriptors)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
-    }
-
-    fn send(&mut self, message: &Value) {
-        let text = message.to_string();
-        let stdin = self.0.stdin.as_mut().unwrap();
-        stdin
-            .write_all(&u32::try_from(text.len()).unwrap().to_ne_bytes())
-            .unwrap();
-        stdin.write_all(text.as_bytes()).unwrap();
-        stdin.flush().unwrap();
-    }
-
-    fn receive(&mut self) -> Value {
-        let stdout = self.0.stdout.as_mut().unwrap();
-        let mut length = [0_u8; 4];
-        stdout.read_exact(&mut length).unwrap();
-        let mut body = vec![0; usize::try_from(u32::from_ne_bytes(length)).unwrap()];
-        stdout.read_exact(&mut body).unwrap();
-        serde_json::from_slice(&body).unwrap()
-    }
-}
-
-impl Drop for NativeHost {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-#[test]
-fn the_companion_answers_a_browser_and_ends_when_it_goes() {
-    let mut fixture = Fixture::new("native");
-    let (identity, peer) = fixture.keygen();
-    fixture.serve(&identity, &peer, "Via companion");
-    let mut host = NativeHost::start(&fixture.descriptors());
-    host.send(&json!({ "op": "discover", "seconds": 0 }));
-    let reply = host.receive();
-    assert_eq!(reply["candidates"][0]["label"], "Via companion", "{reply}");
-    assert_eq!(reply["candidates"][0]["peer"], peer.as_str());
-    host.send(&json!({ "op": "spawn", "program": "calc" }));
-    assert_eq!(host.receive()["error"], "unknown op");
-    drop(host.0.stdin.take());
-    assert!(host.0.wait().unwrap().success());
-}
-
-#[test]
-fn the_companion_ends_on_a_length_no_browser_would_send() {
-    let fixture = Fixture::new("framing");
-    let mut host = NativeHost::start(&fixture.descriptors());
-    let stdin = host.0.stdin.as_mut().unwrap();
-    stdin.write_all(&u32::MAX.to_ne_bytes()).unwrap();
-    stdin.flush().unwrap();
-    assert_eq!(host.0.wait().unwrap().code(), Some(2));
 }
 
 /// Multicast has to work on this machine, so it is not in the default run.
@@ -599,17 +525,5 @@ fn a_record_on_the_link_is_found_with_what_it_claims() {
         mine.url
     );
 
-    // The same record through what a browser extension asks.
-    let fixture = Fixture::new("multicast");
-    let mut host = NativeHost::start(&fixture.descriptors());
-    host.send(&json!({ "op": "discover", "seconds": 6 }));
-    let reply = host.receive();
-    let candidates = reply["candidates"].as_array().unwrap();
-    let through = candidates
-        .iter()
-        .find(|candidate| candidate["label"] == label.as_str())
-        .unwrap_or_else(|| panic!("{reply}"));
-    assert_eq!(through["source"], "dns-sd");
-    assert_eq!(through["peer"], peer.as_str());
     drop(published);
 }

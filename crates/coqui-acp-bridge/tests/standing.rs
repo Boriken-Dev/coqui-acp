@@ -2,6 +2,7 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 mod method;
+mod support;
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,6 @@ use coqui_agentic_peer::mux::{Limits, Mux, Side};
 use coqui_transport::Channel as _;
 use serde_json::{Value, json};
 
-const BRIDGE: &str = env!("CARGO_BIN_EXE_coqui-acp-bridge");
 const WAIT: Duration = Duration::from_secs(10);
 const STANDING: &[u8] = b"standing/1";
 const READY: &[u8] = br#"{"standing":1}"#;
@@ -55,7 +55,7 @@ impl Fixture {
         for _ in 0..50 {
             let port = free_port();
             let log = std::fs::File::create(self.dir.join(format!("serve-{port}.log"))).unwrap();
-            let mut child = Command::new(BRIDGE)
+            let mut child = Command::new(support::bridge())
                 .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
                 .args(flags)
                 .args(["--", "no-agent-is-ever-started"])
@@ -92,7 +92,7 @@ impl Fixture {
     }
 
     fn config(&self, peer: &str) -> Value {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["mcp-config", "--peer", peer])
             .env(coqui_agentic_peer::home::HOME_ENV, &self.home)
             .output()
@@ -294,7 +294,7 @@ fn the_entry_names_the_peer_and_holds_nothing_secret() {
         .as_str()
         .unwrap();
     assert_eq!(Path::new(home), fixture.home);
-    let bare = Command::new(BRIDGE)
+    let bare = Command::new(support::bridge())
         .args(["mcp-config", "--peer", &peer])
         .env_remove(coqui_agentic_peer::home::HOME_ENV)
         .env("LOCALAPPDATA", &fixture.dir)
@@ -316,7 +316,7 @@ fn the_entry_names_the_peer_and_holds_nothing_secret() {
         format!("sha256:../../{}", "a".repeat(58)),
         "a".repeat(71),
     ] {
-        let output = Command::new(BRIDGE)
+        let output = Command::new(support::bridge())
             .args(["mcp-config", "--peer", &wrong])
             .output()
             .unwrap();

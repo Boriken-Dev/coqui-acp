@@ -9,14 +9,10 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 keywords = ["acp", "agent", "bridge", "websocket", "webtransport"]
-categories = ["network-programming", "command-line-utilities"]
+categories = ["network-programming"]
 exclude = [".*", "*.local.*"]
 # Nothing is published until the owner chooses a release.
 publish = false
-
-[[bin]]
-name = "coqui-acp-bridge"
-path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

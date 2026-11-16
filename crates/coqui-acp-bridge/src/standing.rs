@@ -10,7 +10,6 @@ use std::fs;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -86,8 +85,9 @@ fn file_for(dir: &Path, peer: &str) -> Result<PathBuf, &'static str> {
 }
 
 /// Where this user's standing files are kept.
-pub fn dir() -> Result<PathBuf, String> {
-    home::dir()
+pub fn dir(home: Option<&Path>) -> Result<PathBuf, String> {
+    home.map(Path::to_path_buf)
+        .or_else(home::dir)
         .map(|dir| dir.join("offers"))
         .ok_or_else(|| "no home directory for this user".to_owned())
 }
@@ -516,7 +516,12 @@ fn deliver(stream: &dyn LinkStream, line: &[u8], stop: &AtomicBool) -> bool {
 /// # Errors
 ///
 /// When `peer` or `name` cannot be used, or this program cannot find itself.
-pub fn config(peer: &str, name: &str) -> Result<String, String> {
+pub fn config(
+    helper: &crate::helper::Helper,
+    home: Option<&Path>,
+    peer: &str,
+    name: &str,
+) -> Result<String, String> {
     if hex_of(peer).is_none() {
         return Err("a peer id is sha256: and 64 lowercase hex digits".to_owned());
     }
@@ -528,18 +533,22 @@ pub fn config(peer: &str, name: &str) -> Result<String, String> {
     if !named {
         return Err("a server's name is ASCII letters, digits, - and _, up to 64".to_owned());
     }
-    let program = std::env::current_exe()
-        .map_err(|error| format!("this program cannot find itself: {error}"))?;
-    let program = program.to_str().ok_or("this program's path is not text")?;
+    let program = helper
+        .program
+        .to_str()
+        .ok_or("this program's path is not text")?;
     // A client may start a server with little of its own environment, and what home is depends on that.
-    let home = home::dir().ok_or("no home directory for this user")?;
+    let home = home
+        .map(Path::to_path_buf)
+        .or_else(home::dir)
+        .ok_or("no home directory for this user")?;
     let home = home.to_str().ok_or("this user's home is not text")?;
     let config = json!({
         "mcpServers": {
             name: {
                 "type": "stdio",
                 "command": program,
-                "args": ["mcp-shim", "--peer", peer],
+                "args": helper.command(&["mcp-shim", "--peer", peer]),
                 "env": { home::HOME_ENV: home },
             }
         }
@@ -637,7 +646,7 @@ fn read_private(path: &Path) -> io::Result<String> {
 }
 
 /// Says why on standard error, and to the client as an answer to its first message, which is usually what its user gets to see.
-fn tell_client(why: &str) -> ExitCode {
+fn tell_client(why: &str) -> u8 {
     eprintln!("coqui-acp-bridge: {why}");
     let (send, heard) = mpsc::channel();
     thread::spawn(move || {
@@ -659,12 +668,12 @@ fn tell_client(why: &str) -> ExitCode {
             println!("{answer}");
         }
     }
-    ExitCode::from(1)
+    1
 }
 
 /// The stdio server of what `mcp-config` prints. It carries bytes, since the bridge's relay holds each line to its limits.
-pub fn shim(peer: &str) -> Result<ExitCode, String> {
-    let connection = match reach(&dir()?, peer) {
+pub fn shim(peer: &str) -> Result<u8, String> {
+    let connection = match reach(&dir(None)?, peer) {
         Ok(connection) => connection,
         Err(why) => return Ok(tell_client(&why)),
     };
@@ -701,5 +710,5 @@ pub fn shim(peer: &str) -> Result<ExitCode, String> {
     if !client_left.load(Ordering::SeqCst) {
         eprintln!("coqui-acp-bridge: the browser ended this server's connection");
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(0)
 }
