@@ -164,7 +164,7 @@ What a host sends (`StartRequest`, `Requirement`, `SessionQuery`, `SessionImport
     pub cache_lifetime: CacheLifetime,      // how long the prompt cache should live; Default
 }
 StartRequest::new();  StartRequest::builder() -> StartRequestBuilder   // .environment(env) .working_root(r) .requirement(r) .account(grant) .cache_lifetime(l) .build()
-#[non_exhaustive] pub enum CacheLifetime { Default, Short, Long }   // "default" "short" "long"; the harness's own, about five minutes, about an hour
+#[non_exhaustive] pub enum CacheLifetime { Default, Off, Short, Long }   // "default" "off" "short" "long"; the harness's own, no cache, about five minutes, about an hour
 
 #[non_exhaustive] pub struct Requirement { pub name: String, pub value: Option<Value> }
 Requirement::new(name);  Requirement::with_value(name, value);  requirement.narrowing() -> Result<Narrowing, RequirementError>
@@ -181,8 +181,9 @@ pub struct Environment;   // BTreeMap<String, String> inside; Debug names the va
 Environment::new(); .insert(name, value); .get(name); .iter(); .names(); .len(); .is_empty(); FromIterator; From<BTreeMap<String, String>>
 
 #[non_exhaustive] pub struct HarnessInfo { pub title: String, pub versions: Vec<u16>, pub takes: Takes, pub resumes_wider: bool,
-    pub usage: UsageSupport, pub cache_lifetime: Option<String> }
+    pub usage: UsageSupport, pub cache_lifetime: Option<String>, pub cache_choices: Vec<CacheChoice> }
 HarnessInfo::new(title, versions)
+#[non_exhaustive] pub struct CacheChoice { pub lifetime: CacheLifetime, pub label: String }   CacheChoice::new(lifetime, label)
 #[non_exhaustive] #[derive(Default)] pub struct Takes { pub images: bool, pub audio: bool, pub embedded_context: bool,
     pub mcp_http: bool, pub mcp_sse: bool, pub load: bool, pub resume: bool, pub additional_directories: bool, pub system_prompt: bool }
 #[non_exhaustive] pub struct ModelListing { pub known: bool, pub unknown_because: Option<String>, pub unknown_kind: Option<UnknownKind>, pub signed_out: bool, pub models: Vec<ModelInfo> }
@@ -215,7 +216,7 @@ pub const REPLAYED_AS_PROMPT: &str  // "replayed_as_prompt"
 
 `usage`: what the harness can report (`UsageSupport { sources, spend, needs_turn }`; empty `sources` is none), which `initialize` agrees with: a harness that reports any advertises the usage capability, one that reports none does not. `needs_turn` is true for a harness that learns its usage only during a turn (Claude Code): `_coqui_acp/usage` then answers what the connection last saw, a host keeps a timed retry instead of polling, and the capability carries `"needs_turn": true` (absent means false). False means a read re-reads the account, so a host may poll it (Codex). `needs_session` is true for a harness whose figures come from the process a session starts and need no turn (Antigravity): with a session open a read re-reads, with none it answers what the connection last saw and starts nothing, and the capability carries `"needs_session": true` (absent means false).
 
-`cache_lifetime` (`HarnessInfo`) says in a sentence what the harness does with `StartRequest::cache_lifetime` (Claude Code sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`); absent, it has no such control and ignores the hint. The hint never refuses a start.
+`cache_lifetime` (`HarnessInfo`) says in a sentence what the harness does with `StartRequest::cache_lifetime` (Claude Code sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`); absent, it has no such control and ignores the hint. `cache_choices` names the lifetimes beyond `Default` it honours, each under its own label (Claude Code: Off, "5 minutes", "1 hour"); empty, none, and a host offers only those. `Off` is a value an older provider does not read, so a host sends it only to a provider that lists it. The hint never refuses a start.
 
 `resumes_wider`: a session held to requirements can be reopened (`session/load` or `session/resume`) on a later connection started with fewer, and then has what that connection allows. A host that changes what a session may do starts a new connection with the new requirements and reopens the session there.
 
