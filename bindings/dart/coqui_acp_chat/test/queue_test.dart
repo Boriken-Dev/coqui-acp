@@ -251,6 +251,35 @@ void main() {
       store.dispose();
     });
 
+    test(
+      'goes on its own under merged delivery, and cannot be joined while it waits',
+      () async {
+        final (:store, :session, :agent) = started();
+        session.queueDelivery = QueueDelivery.merge;
+        await session.send('job');
+        feed(session, state('running'));
+        await session.send('later');
+        await session.send('later still');
+        final message = (await session.steer('now'))!;
+        expect(
+          () => session.mergeQueued(session.queue[1]),
+          throwsStateError,
+          reason: 'the steer is above it',
+        );
+        expect(session.mergeAllQueued(), 1, reason: 'the other two join');
+        expect(session.queue.map((m) => m.text), [
+          'now',
+          'later\n\nlater still',
+        ]);
+        feed(session, state('idle', reason: 'cancelled'));
+        await settle();
+        await message.handedOver;
+        expect(agent.prompts, ['job', 'now']);
+        expect(session.queue.single.text, 'later\n\nlater still');
+        store.dispose();
+      },
+    );
+
     test('promotes a message already queued', () async {
       final (:store, :session, :agent) = started();
       await session.send('job');

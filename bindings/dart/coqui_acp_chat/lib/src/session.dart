@@ -271,6 +271,9 @@ final class QueuedMessage {
   Object? origin;
 
   final bool _steered;
+
+  /// A steer still waiting for its turn to end.
+  bool get _goingFirst => _steered && !_handed.isCompleted;
   final Completer<void> _handed = Completer<void>();
 
   /// Completes when the agent has been handed the message. A message written to steer that could not be sent fails here with
@@ -2222,8 +2225,10 @@ class ChatSession extends ChatNotifier {
     }
   }
 
-  /// The attachments of [above] and [below] together, one of each name, or null when that is more than a message holds.
+  /// The attachments of [above] and [below] together, one of each name, or null when that is more than a message holds or one
+  /// of them is a steer waiting for its turn to end, which goes alone.
   List<AcpAttachment>? _joined(QueuedMessage above, QueuedMessage below) {
+    if (above._goingFirst || below._goingFirst) return null;
     final names = {for (final item in above._attachments) item.name};
     final all = [
       ...above._attachments,
@@ -2253,6 +2258,9 @@ class ChatSession extends ChatNotifier {
     final above = _queue[index - 1];
     if (above.from != message.from) {
       throw StateError('They were written by different clients');
+    }
+    if (above._goingFirst || message._goingFirst) {
+      throw StateError('One of them is going first, on its own');
     }
     if (_joined(above, message) == null) {
       throw StateError(
