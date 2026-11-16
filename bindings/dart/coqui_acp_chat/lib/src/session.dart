@@ -251,6 +251,7 @@ final class QueuedMessage {
     this._text,
     List<AcpAttachment> attachments, {
     this.from,
+    this.origin,
     bool steered = false,
   }) : _attachments = List.of(attachments),
        _steered = steered {
@@ -264,6 +265,10 @@ final class QueuedMessage {
 
   /// The client that wrote it.
   final String? from;
+
+  /// What the host that wrote it keeps with it, such as what its attachments were before they were read. The conversation
+  /// never looks at it; the host keeps it right when it joins messages.
+  Object? origin;
 
   final bool _steered;
   final Completer<void> _handed = Completer<void>();
@@ -1993,6 +1998,7 @@ class ChatSession extends ChatNotifier {
     String text, {
     List<AcpAttachment> attachments = const [],
     String? from,
+    Object? origin,
   }) async {
     if (text.trim().isEmpty && attachments.isEmpty) return;
     _requireClient(from);
@@ -2000,7 +2006,10 @@ class ChatSession extends ChatNotifier {
         _delivering ||
         _opening ||
         _queue.isNotEmpty) {
-      _enqueue(QueuedMessage._(text, attachments, from: from), last: true);
+      _enqueue(
+        QueuedMessage._(text, attachments, from: from, origin: origin),
+        last: true,
+      );
       notifyListeners();
       // A queue waiting on nothing, after a turn that ended as it should, goes on at once.
       if (_status != ChatStatus.working &&
@@ -2038,13 +2047,19 @@ class ChatSession extends ChatNotifier {
     String text, {
     List<AcpAttachment> attachments = const [],
     String? from,
+    Object? origin,
   }) async {
     if (text.trim().isEmpty && attachments.isEmpty) return null;
     _requireClient(from);
     if (_status != ChatStatus.working) {
       if (_delivering || _opening) {
         // No turn runs yet, so there is nothing to end: it goes next, ahead of the rest of the queue.
-        final message = QueuedMessage._(text, attachments, from: from);
+        final message = QueuedMessage._(
+          text,
+          attachments,
+          from: from,
+          origin: origin,
+        );
         _enqueue(message, last: false);
         notifyListeners();
         return message;
@@ -2056,6 +2071,7 @@ class ChatSession extends ChatNotifier {
       text,
       attachments,
       from: from,
+      origin: origin,
       steered: true,
     );
     _enqueue(message, last: false);

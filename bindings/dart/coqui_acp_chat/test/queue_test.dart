@@ -799,8 +799,10 @@ void main() {
         await session.send(
           'again',
           attachments: [AcpAttachment.text('a.txt', 'a')],
+          origin: 'the draft',
         );
         final message = session.queue.single;
+        expect(message.origin, 'the draft');
         expect(session.unqueue(message), isTrue);
         expect(session.queue, isEmpty);
         expect(message.text, 'again');

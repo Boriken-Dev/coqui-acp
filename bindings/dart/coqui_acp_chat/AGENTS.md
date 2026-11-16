@@ -57,6 +57,7 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
   runs, another message is being handed over, or the conversation is being opened (sent after the kept mode is back; held if it did not open); throws `StateError` past `queued`. `steer(text) -> QueuedMessage?` goes first, even past `queued`, and with a turn running
   cancels the turn; it returns the message, whose `handedOver` completes when the agent has it, and a steer that cannot be asked of the agent (it throws) or cannot be sent after the turn
   ended (`handedOver` fails with the reason, also when the turn ended any other way than cancelled) leaves the queue, for the host to give back to the person.
+  `send` and `steer` take `origin`, kept on the `QueuedMessage` for the host (never read here).
   `steerQueued`, `sendQueued([m])`, `editQueued`, `removeQueued([m])`, `cancel({from})`.
 - **The queue**: `mergeQueued(m)` joins a message to the one above it (texts with a blank line, one attachment per name; returns the one they became, null for the first; throws
   `StateError` over `ChatLimits.attachments` or across two clients, changing nothing), `mergeAllQueued() -> int`, `moveQueued(m, by)`, `unqueue(m) -> bool` (out of the queue, its `text` and
