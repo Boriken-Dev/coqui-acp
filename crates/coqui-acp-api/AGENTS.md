@@ -21,8 +21,10 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 | `spawned_process` | `SpawnedProcessVtable` | `3306532587` | the host |
 | `account_keeper` | `AccountKeeperVtable` | `708146915` | the host |
 | `login_prompter` | `LoginPrompterVtable` | `2606822037` | the host |
+| `account_provider` | `AccountProviderVtable` | `767683853` | the provider |
+| `account_watch` | `AccountWatchVtable` | `589148782` | the provider |
 
-The package holds all seven as data in `include/coqui_acp_api.kinds.json`, every model's JSON Schema in `include/coqui_acp_api.schemas.json`, and the kinds for Python in `python/coqui_acp_api_kinds.py` (written by `python/write_kinds.py`).
+The package holds all nine as data in `include/coqui_acp_api.kinds.json`, every model's JSON Schema in `include/coqui_acp_api.schemas.json`, and the kinds for Python in `python/coqui_acp_api_kinds.py` (written by `python/write_kinds.py`).
 
 **How the kind changes.** Until its first release every method a harness has to answer is required, and a method added or changed is a break: every provider rebuilds, and the hash moves. No compatibility code is kept: no default so that an older provider loads, no deprecated alias, no reading of an older request's shape. After its first release the kind grows only by appending, as Guatiao provides for released kinds.
 
@@ -381,6 +383,50 @@ pub trait LoginPrompter: Send + Sync {
 - **`login`.** The provider runs the CLI in `LoginRequest::state_dir` through the spawner, relays what it prints through the prompter (`say`, `open_url` with a device or user code, `ask` for a form), and reads the files it wrote into `LoginOutcome::credentials`; `checked` says a call that spends nothing verified it. The person cancelling makes every prompter call answer `GONE` and `cancelled` true; that, or `timeout_ms` passing, makes the provider kill the CLI's whole tree and answer `GONE` `login cancelled` / `login timed out` within two seconds. A provider runs a watchdog of its own: at the deadline it answers even if a prompter call has not returned (the call ends by itself, and the provider lets go of the prompter and spawner then), so a host's `ask` should return by `timeout_ms`. The CLI a login starts has every credential variable cleared, as a connection's program has. A key the CLI refused is `BAD_VALUE` `login refused: <the CLI's reason>`; another failure `INTERNAL` with a reason that holds no input and no URL query; an unlisted method `BAD_VALUE`; a provider with no method `UNSUPPORTED`. The host removes the login's `state_dir` however it ended.
 - **Endpoints and the cache hint.** The host reads the slots plus the grant's settings; a value that is not an `https` URL (or `http` to loopback) is the host's to refuse before it starts.
 
+## The account provider (`coqui_acp_api::AccountProvider`)
+
+An account provider owns accounts. It is not an ACP harness and runs no agent: it signs a person in, renews and watches the credentials it made, and reports how much of the account's plan is used. A harness **accepts** standards (`AccountCatalog::accepts`); an account provider **provides** them (`AccountKindInfo::provides`), and a host lists an account for a harness exactly when the two lists meet. The host owns which accounts exist, their secrets at rest and who holds one. Until the first release every method is required (usage has no default either); the harness kind's own `login`, `renew`, `usage` and keeper stay on `acp_harness` until the providers move.
+
+```rust
+#[guatiao::kind(name = "account_provider")]
+pub trait AccountProvider: Send + Sync {
+    fn describe(&self) -> Result<AccountProviderInfo, ProviderError>;
+    fn offers(&self) -> Result<AccountOffer, ProviderError>;
+    fn login(&self, request: LoginRequest, spawner: Object<dyn ProcessSpawner>, prompter: Object<dyn LoginPrompter>)
+        -> Result<LoginOutcome, ProviderError>;
+    fn renew(&self, request: RenewRequest, spawner: Object<dyn ProcessSpawner>) -> Result<RenewReport, ProviderError>;
+    fn watch(&self, request: WatchRequest, spawner: Object<dyn ProcessSpawner>, keeper: Object<dyn AccountKeeper>)
+        -> Result<Object<dyn AccountWatch>, ProviderError>;
+    fn usage(&self, query: AccountUsageQuery, spawner: Object<dyn ProcessSpawner>, keeper: Object<dyn AccountKeeper>)
+        -> Result<AccountUsage, ProviderError>;
+}
+#[guatiao::kind(object, name = "account_watch")]
+pub trait AccountWatch: Send + Sync { fn stop(&self) -> Result<(), ProviderError>; }   // idempotent; dropping it stops it
+```
+
+```rust
+#[non_exhaustive] pub struct AccountProviderInfo { pub title: String, pub description: String }   AccountProviderInfo::new(title)
+#[non_exhaustive] pub struct AccountOffer { pub kinds: Vec<AccountKindInfo>, pub logins: Vec<LoginMethodInfo>, pub usage: Vec<String> }
+AccountOffer::new(); .kind(id); .reports_usage(id)        // `usage`: ids of the kinds that report plan usage
+#[non_exhaustive] pub struct WatchRequest { pub account: AccountGrant }   WatchRequest::new(account)
+#[non_exhaustive] pub struct AccountUsageQuery { pub account: AccountGrant, pub environment: Secret<Environment> }   ::new(account) .environment(env)
+#[non_exhaustive] pub struct AccountUsage { pub supported: bool, pub unsupported_because: Option<String>, pub sources: Vec<Source>,
+    pub account: Option<String>, pub revision: u64, pub observed_at: i64, pub buckets: Vec<Bucket> }
+AccountUsage::new(); ::unsupported(reason); ::fraction_permille(&Bucket) -> Option<u16>
+```
+
+`AccountKindInfo` (kind id, title, `settings` schema, `endpoints`, `rotates`, `state_dir`, `renews`, `history_portable`, `notices`, **`provides`**), `LoginMethodInfo`, `LoginRequest`, `LoginOutcome`, `RenewRequest`, `RenewReport`, `AccountGrant`, `AccountKeeper` and `LoginPrompter` are the account models of "Accounts", unchanged.
+
+- `describe`, `offers`: who it is, and what it makes: kinds (each names the standards an account of it provides; an offer lists at least one kind and each kind provides at least one standard), the ways to sign in (each `produces` a listed kind), and the kinds that report usage. Cheap, the same on every call, answered as configured.
+- `login`: one call, as the harness's was. The provider runs its sign-in in `request.state_dir` through `spawner`, relays each step through `prompter` (`say`, `open_url`, `ask`; `cancelled` is how the person ends it), and answers the outcome. Cancelled (`prompter.cancelled()` true or a call answering `GONE`) or past `timeout_ms`: it kills the program's tree and answers `GUATIAO_ERR_GONE`, `login cancelled` or `login timed out`, within two seconds, even with a prompter call still out. A key refused: `BAD_VALUE`, `login refused: <reason>`. No method listed: `UNSUPPORTED`; a method not listed: `BAD_VALUE`. Both objects are destroyed before it answers, a timeout excepted.
+- `renew`: the credentials renewed with no model turn, or why not (`not_renewed_because`). `UNSUPPORTED` for a kind that says `renews` false; `GONE` for a login that is blank or gone, never a renewal made of nothing.
+- `watch`: starts watching an account of a kind that both `rotates` and keeps a `state_dir` (any other: `UNSUPPORTED`). A changed credential file is told as `renewed`, a blank or deleted one as `lost`, once, with a `sequence` that counts every event of the account and is the same for every live watch of it in the instance; a watch tells what it finds when it begins, so a login already gone is told at once, and tells a change no later than 30 seconds after it. The returned object owns the `spawner` and the `keeper`: `stop` (or dropping it) ends it, leaves no keeper call running, and destroys both.
+- `usage`: the account's **plan** usage: its windows (`Bucket`s: used, limit or remaining, `refill` with `resets_at`, the models it covers, status), no session and no model turn. Cheap. A kind listed in `offers().usage` answers `supported`, with `account` echoing the grant's id and `observed_at` the newest bucket's; any other kind the provider lists answers "not offered" (`AccountUsage::unsupported(reason)`, no bucket); a kind it does not list is `BAD_VALUE`.
+- **Where each kind of usage comes from.** The plan's windows (percent used, resets, per model) are the account provider's `usage`. What a session or a run spent (tokens, cost) is ACP's: the session's usage updates, as `coqui_acp_api::usage` carries them through the harness. `AccountUsage` has no field for a session's tokens and no `limit` hit (an inferred refusal belongs to the turn that was refused); a reader drops a key it does not know.
+- Errors common to `renew`, `watch` and `usage`: `BAD_VALUE` for a kind it does not list, an id that is not 1 to 128 bytes without a control character, a credential that is missing; nothing it answers or refuses carries a credential or a value of the environment.
+
+The suite is `contract::AccountContract` (below); `acp-account-check` runs it on a library or source file.
+
 ## Starting a program in a folder on a share (`coqui_acp_api::batch`)
 
 ```rust
@@ -414,6 +460,17 @@ It makes and removes a directory under the system's temporary one, with a link (
 
 `acp-harness-check` runs it on a provider with no Rust of the provider's own: `--library FILE`, or `--source SOURCE_LIBRARY --source-config JSON` for one a Guatiao source loads; `--provider KEY`, `--settings JSON` (build an instance), `--version N`, `--holds NAME[=JSON]` (repeated), `--message-limit N`, `--no-imports` (it must refuse `import_session` with a reason), `--no-logins` (it lists no login method and must refuse `login` `UNSUPPORTED` with a reason), `--account KIND` (the account checks on that kind alone), `--program-agent` (the provider starts its harness's own program, which the checker's spawner starts for real: `--settings` must name a stand-in for it; the checker runs again in a home of its own, `ACP_HARNESS_CHECK_HOME`, with no `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and every program the suite starts gets that home, so a real command line on the `PATH` never reaches the person's; what the spec's environment sets stays). `--holds none` says the provider holds no requirement. Exits 0, 1 listing each rule broken, or 2 when the provider could not be loaded.
 
+### The account provider's suite
+
+```rust
+pub struct contract::AccountContract;   // #[must_use]
+AccountContract::new(name) .logins(bool /* true */) .account(kind) .run(&dyn AccountProvider) -> Result<(), contract::Failures>
+```
+
+It hands a provider the same virtual spawner, scripted prompter and recording keeper as the harness suite, and makes each account by signing in through the method that produces its kind (a kind no method makes gets a grant of canary credentials). It checks that `describe` and `offers` are well formed and repeat; that every kind provides a standard, every method produces a listed kind and every usage id is a kind; each sign-in (completes, never shows a typed secret back, cancels at the first prompt and while waiting, times out, kills what it started, destroys what it was handed); `renew` as each kind says, `GONE` for a blank or missing login, `UNSUPPORTED` otherwise; `watch` (one rotation told once to every live watch with one sequence, a second one later, a blank file a loss, a deleted file a loss, a login gone before the watch began told at once, a stopped watch silent with its objects destroyed, a dropped watch the same); and `usage` (supported only for the kinds listed, buckets well formed, never a value of the environment). Every call that takes an account is refused `BAD_VALUE` for a kind not listed and a bad id, with the handed objects destroyed. A kind that rotates and keeps a directory with no method that makes it is held only to starting and stopping a watch. `acp-account-check` takes `--library` or `--source`/`--source-config`, `--provider`, `--settings`, `--no-logins` and `--account`.
+
 ## Tests
 
 `examples/echo_harness.rs` is the contract agent in Rust, built by `cargo test` into a `cdylib` the tests load, with settings (`title`, `max_message_bytes`, `imports`, `usage` of `none` (the default) or `scripted`, `logins`, `renew_poll_ms`) a host builds instances from. It takes accounts of `echo-login` (a file credential in the account's directory, `auth_file`; rotates, renews; watched, and told to the keeper when it changes) and `echo-key` (`api_key` in `ECHO_API_KEY`), besides `harness-login`, and offers the login methods `scripted` (ask, open_url, user_code), `waiting` (open_url, then a wait a cancel or a timeout ends) and `api-key` (ask). `examples/provider-python/harness/acp_echo_harness.py` in the repository is the same in Python.
+
+`examples/echo_account_provider.rs` is the echo account provider in Rust (a `cdylib`; settings `title`, `logins`, `usage`, `poll_ms`): kinds `echo-login` (a file `auth.json`; provides `echo-login`; rotates, renews, watched, reports two buckets) and `echo-key` (provides `echo-api`), methods `scripted`, `waiting` and `api-key`. `examples/provider-python/account/acp_echo_account_provider.py` is the same in Python. `tests/account_provider.rs` holds the Rust echo to the suite and names each rule a provider that breaks one fails; the Python echo has the same in `examples/provider-python/tests/account_provider.rs`.

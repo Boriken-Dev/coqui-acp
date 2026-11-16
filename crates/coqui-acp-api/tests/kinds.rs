@@ -12,14 +12,16 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
     Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo,
-    AccountLoss, AccountRef, AccountRenewal, AcpHarnessVtable, Bucket, CacheChoice, CacheLifetime,
-    ChannelSinkVtable, ChannelVtable, Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo,
-    HarnessInfo, HarnessNotice, HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer,
-    LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo,
-    ModelListing, ModelSpend, ModelsRequest, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit,
-    ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport,
-    SessionImport, SessionQuery, SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo,
-    Spend, StartRequest, Takes, TerminalSize, UnknownKind, UsageQuery, UsageReport, UsageSupport,
+    AccountLoss, AccountOffer, AccountProviderInfo, AccountProviderVtable, AccountRef,
+    AccountRenewal, AccountUsage, AccountUsageQuery, AccountWatchVtable, AcpHarnessVtable, Bucket,
+    CacheChoice, CacheLifetime, ChannelSinkVtable, ChannelVtable, Credentials, EndpointSlot,
+    ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice, HistoryLoss, ImportReport,
+    LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo, LoginOutcome,
+    LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, ModelsRequest, NAMES,
+    NonDefault, NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest,
+    Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile,
+    SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize,
+    UnknownKind, UsageQuery, UsageReport, UsageSupport, WatchRequest,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -48,14 +50,16 @@ fn committed(path: &str, fresh: &str) {
 /// language has every kind its `start` names.
 fn rendered() -> String {
     let document = format!(
-        "{{\"kinds\":[{},{},{},{},{},{},{}]}}",
+        "{{\"kinds\":[{},{},{},{},{},{},{},{},{}]}}",
         AcpHarnessVtable::description(),
         ChannelVtable::description(),
         ChannelSinkVtable::description(),
         ProcessSpawnerVtable::description(),
         SpawnedProcessVtable::description(),
         AccountKeeperVtable::description(),
-        LoginPrompterVtable::description()
+        LoginPrompterVtable::description(),
+        AccountProviderVtable::description(),
+        AccountWatchVtable::description()
     );
     pretty(&serde_json::from_str(&document).expect("a kind's description is JSON"))
 }
@@ -127,6 +131,11 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("OpenUrl", schema_of::<OpenUrl>()),
         ("LoginForm", schema_of::<LoginForm>()),
         ("LoginAnswer", schema_of::<LoginAnswer>()),
+        ("AccountProviderInfo", schema_of::<AccountProviderInfo>()),
+        ("AccountOffer", schema_of::<AccountOffer>()),
+        ("WatchRequest", schema_of::<WatchRequest>()),
+        ("AccountUsageQuery", schema_of::<AccountUsageQuery>()),
+        ("AccountUsage", schema_of::<AccountUsage>()),
     ]
 }
 
@@ -148,7 +157,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 48] = [
+    let pinned: [(&str, &[&str], &[&str]); 53] = [
         (
             "StartRequest",
             &[
@@ -503,9 +512,30 @@ fn every_models_keys_are_pinned() {
         ("OpenUrl", &["expires_ms", "url", "user_code"], &["url"]),
         ("LoginForm", &["schema", "title"], &["title"]),
         ("LoginAnswer", &["secrets", "values"], &[]),
+        ("AccountProviderInfo", &["description", "title"], &["title"]),
+        ("AccountOffer", &["kinds", "logins", "usage"], &[]),
+        ("WatchRequest", &["account"], &["account"]),
+        (
+            "AccountUsageQuery",
+            &["account", "environment"],
+            &["account"],
+        ),
+        (
+            "AccountUsage",
+            &[
+                "account",
+                "buckets",
+                "observed_at",
+                "revision",
+                "sources",
+                "supported",
+                "unsupported_because",
+            ],
+            &["observed_at", "revision", "supported"],
+        ),
     ];
     let schemas = schemas();
-    assert_eq!(pinned.len(), 48);
+    assert_eq!(pinned.len(), 53);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()
@@ -621,6 +651,45 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     let mut models = Map::new();
     models.set("filter", "all");
     assert!(ModelsRequest::from_value(&Value::from(models)).is_err());
+    let mut watch = Map::new();
+    watch.set("account", grant(None));
+    assert!(WatchRequest::from_value(&Value::from(watch.clone())).is_ok());
+    watch.set("interval_ms", 10);
+    assert!(WatchRequest::from_value(&Value::from(watch)).is_err());
+    let mut account_usage = Map::new();
+    account_usage.set("account", grant(None));
+    assert!(AccountUsageQuery::from_value(&Value::from(account_usage.clone())).is_ok());
+    account_usage.set("session_id", "0f8fad5b-d9cb-469f-a165-70867728950e");
+    assert!(AccountUsageQuery::from_value(&Value::from(account_usage)).is_err());
+}
+
+/// Tokens a session or a run spent are ACP's, never an account's: the account's usage has no field
+/// for them, and a report that names one is not read.
+#[test]
+fn an_accounts_usage_has_no_place_for_a_sessions_tokens() {
+    let schema = schema_of::<AccountUsage>();
+    let keys: Vec<&str> = schema["properties"]
+        .as_object()
+        .expect("a model is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        !keys.contains(&"spend") && !keys.contains(&"limit"),
+        "{keys:?}"
+    );
+    let mut report = Map::new();
+    report.set("supported", true);
+    report.set("revision", 1_u64);
+    report.set("observed_at", 0_i64);
+    assert!(AccountUsage::from_value(&Value::from(report.clone())).is_ok());
+    let plain = AccountUsage::from_value(&Value::from(report.clone())).expect("read");
+    // An answer's reader skips a key it does not know, so a session's tokens are dropped, never kept.
+    report.set("spend", true);
+    assert_eq!(
+        AccountUsage::from_value(&Value::from(report)).expect("read"),
+        plain
+    );
 }
 
 /// A credential is a secret wherever it crosses: its schema says so, for `redact` and forms, and
@@ -689,6 +758,8 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(SpawnedProcessVtable::FLOOR_HASH, PROCESS_HASH);
     assert_eq!(AccountKeeperVtable::FLOOR_HASH, KEEPER_HASH);
     assert_eq!(LoginPrompterVtable::FLOOR_HASH, PROMPTER_HASH);
+    assert_eq!(AccountProviderVtable::FLOOR_HASH, ACCOUNT_PROVIDER_HASH);
+    assert_eq!(AccountWatchVtable::FLOOR_HASH, ACCOUNT_WATCH_HASH);
 }
 
 const HARNESS_HASH: u32 = 4111118208;
@@ -698,8 +769,10 @@ const SPAWNER_HASH: u32 = 4038904472;
 const PROCESS_HASH: u32 = 3306532587;
 const KEEPER_HASH: u32 = 708146915;
 const PROMPTER_HASH: u32 = 2606822037;
+const ACCOUNT_PROVIDER_HASH: u32 = 767683853;
+const ACCOUNT_WATCH_HASH: u32 = 589148782;
 
-const HASHES: [(&str, u32); 7] = [
+const HASHES: [(&str, u32); 9] = [
     ("acp_harness", HARNESS_HASH),
     ("channel", CHANNEL_HASH),
     ("channel_sink", SINK_HASH),
@@ -707,6 +780,8 @@ const HASHES: [(&str, u32); 7] = [
     ("spawned_process", PROCESS_HASH),
     ("account_keeper", KEEPER_HASH),
     ("login_prompter", PROMPTER_HASH),
+    ("account_provider", ACCOUNT_PROVIDER_HASH),
+    ("account_watch", ACCOUNT_WATCH_HASH),
 ];
 
 #[test]

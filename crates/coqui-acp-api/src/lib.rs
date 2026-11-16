@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod account;
+mod account_provider;
 pub mod batch;
 #[cfg(feature = "contract")]
 #[cfg_attr(docsrs, doc(cfg(feature = "contract")))]
@@ -27,6 +28,10 @@ pub use account::{
     DEFAULT_LOGIN_TIMEOUT_MS, EndpointSlot, HARNESS_LOGIN, LoginAnswer, LoginForm, LoginMethodInfo,
     LoginOutcome, LoginPrompter, LoginPrompterVtable, LoginRequest, MODEL_API, ModelsRequest,
     OPEN_URL, OpenUrl, PASTE_CODE, PROXY, RenewReport, RenewRequest, USER_CODE, is_account_id,
+};
+pub use account_provider::{
+    AccountOffer, AccountProvider, AccountProviderInfo, AccountProviderVtable, AccountUsage,
+    AccountUsageQuery, AccountWatch, AccountWatchVtable, WatchRequest,
 };
 pub use environment::Environment;
 pub mod standard;

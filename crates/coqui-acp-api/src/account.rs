@@ -957,6 +957,9 @@ impl AccountLoss {
 /// (every `renew_poll_ms`, 30000 by default) and after each import, export, models call and close,
 /// and reports a changed file here. A file deleted or blanked is [`lost`](Self::lost), never
 /// [`renewed`](Self::renewed).
+///
+/// An [`AccountProvider`](crate::AccountProvider) is handed one by `watch` and by `usage`, and tells
+/// it the same events of the accounts it keeps.
 #[guatiao::kind(object, name = "account_keeper")]
 pub trait AccountKeeper: Send + Sync {
     /// The harness renewed the credentials. The host stores them only when they are newer.
