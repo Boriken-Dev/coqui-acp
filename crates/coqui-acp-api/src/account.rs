@@ -176,7 +176,7 @@ pub struct AccountGrant {
     pub revision: u64,
     /// The standards the account provides, from the catalog of whoever made it. A harness reads
     /// it only for a `kind` its own catalog does not list: it then applies the account as the
-    /// first of its `accepts` that this names ([`AccountCatalog::resolve`]).
+    /// first of its `accepts` that this names.
     #[map(default)]
     pub provides: Vec<String>,
 }
@@ -337,7 +337,7 @@ pub struct AccountCatalog {
     pub credential_variables: Vec<String>,
     /// The standards the harness starts on, most preferred first, and how each is applied. An
     /// account whose `kind` this catalog does not list is applied as the first of these that it
-    /// provides ([`resolve`](Self::resolve)).
+    /// provides ([`accepted_by`](Self::accepted_by)).
     #[map(default)]
     pub accepts: Vec<Accepted>,
 }
