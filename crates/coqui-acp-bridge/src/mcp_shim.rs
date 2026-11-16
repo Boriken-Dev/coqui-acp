@@ -9,18 +9,18 @@ use coqui_agentic_peer::mcp_offer;
 use crate::helper::Helper;
 use crate::standing;
 
-/// The stdio MCP server. With a `peer`, the one `config` prints, which finds that peer's standing stream; without, the one an
+/// The stdio MCP server, finding a peer's door in `home` (this user's own when `None`). With a `peer`, the one `config` prints, which finds that peer's standing stream; without, the one an
 /// offer starts for an agent, which carries its lines to the peer that offered it.
 ///
 /// # Errors
 ///
 /// The server could not run.
-pub fn run(peer: Option<&str>) -> Result<u8, String> {
+pub fn run(peer: Option<&str>, home: Option<&Path>) -> Result<u8, String> {
     match peer {
         None => mcp_offer::shim(std::io::stdin(), std::io::stdout())
             .map(|()| 0)
             .map_err(|error| error.to_string()),
-        Some(peer) => standing::shim(peer),
+        Some(peer) => standing::shim(peer, home),
     }
 }
 

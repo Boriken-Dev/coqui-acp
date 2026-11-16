@@ -672,8 +672,8 @@ fn tell_client(why: &str) -> u8 {
 }
 
 /// The stdio server of what `mcp-config` prints. It carries bytes, since the bridge's relay holds each line to its limits.
-pub fn shim(peer: &str) -> Result<u8, String> {
-    let connection = match reach(&dir(None)?, peer) {
+pub fn shim(peer: &str, home: Option<&Path>) -> Result<u8, String> {
+    let connection = match reach(&dir(home)?, peer) {
         Ok(connection) => connection,
         Err(why) => return Ok(tell_client(&why)),
     };

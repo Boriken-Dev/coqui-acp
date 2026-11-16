@@ -19,7 +19,7 @@ pairing::PairDial, pairing::join(&PairDial)         // join a waiting accept wit
 grant::run(home: Option<&Path>, peer, protocol, revoke)
 discover::run(seconds)                        // one JSON line per candidate on standard output
 keygen::create(path, method) -> peer id
-mcp_shim::run(peer: Option<&str>)             // the stdio MCP server
+mcp_shim::run(peer: Option<&str>, home: Option<&Path>)   // the stdio MCP server
 mcp_shim::config(&Helper, home: Option<&Path>, peer, name) -> the `mcpServers` JSON
 helper::Helper { program, args }              // the program that runs `agent-guard PID`, `mcp-shim` and `mcp-shim --peer PEER`
 agent::watch(pid, stdin)                      // what `agent-guard` runs

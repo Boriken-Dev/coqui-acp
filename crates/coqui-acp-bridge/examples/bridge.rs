@@ -91,7 +91,7 @@ fn run(cli: Cli) -> Result<u8, String> {
             revoke,
         } => grant::run(None, &peer, &protocol, revoke),
         Mode::Discover { seconds } => discover::run(seconds),
-        Mode::McpShim { peer } => mcp_shim::run(peer.as_deref()),
+        Mode::McpShim { peer } => mcp_shim::run(peer.as_deref(), None),
         Mode::McpConfig { peer, name } => {
             mcp_shim::config(&helper, None, &peer, &name).map(|config| {
                 println!("{config}");
