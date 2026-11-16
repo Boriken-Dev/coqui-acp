@@ -14,8 +14,8 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
     AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, LoginPrompter,
-    ModelsRequest, ProcessSpawner, READ_ONLY, Requirement, SessionExport, SessionImport, SpawnSpec,
-    SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery,
+    ModelsRequest, ProcessSpawner, READ_ONLY, Requirement, SpawnSpec, SpawnedProcess, SpawnerInfo,
+    StartRequest, UsageQuery,
 };
 use coqui_acp_harness::{LocalSpawner, Mode};
 use coqui_acp_pi::{PiProvider, ProviderSettings};
@@ -133,7 +133,7 @@ fn the_suite_inside() {
         .expect("the settings are taken");
     let outcome = Contract::new("pi")
         .program_agent(true)
-        .imports(false)
+        .imports(cfg!(feature = "history"))
         .logins(false)
         .holds(Vec::new())
         .run(&harness);
@@ -289,7 +289,7 @@ fn it_lists_the_account_kinds_it_moved_from_the_stdio_provider_and_no_login() {
 }
 
 #[test]
-fn a_sign_in_a_renewal_an_import_and_an_export_answer_unsupported_with_a_reason() {
+fn a_sign_in_and_a_renewal_answer_unsupported_with_a_reason() {
     let provider = provider();
     let prompter = Prompter.into_object();
     let error = provider
@@ -301,6 +301,14 @@ fn a_sign_in_a_renewal_an_import_and_an_export_answer_unsupported_with_a_reason(
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
     assert!(error.message().contains("terminal"), "{}", error.message());
+}
+
+#[test]
+#[cfg(not(feature = "history"))]
+fn an_import_and_an_export_answer_unsupported_with_a_reason_without_the_history_feature() {
+    use coqui_acp_api::{SessionExport, SessionImport};
+
+    let provider = provider();
     let imported = provider.import_session(
         SessionImport::new("3a3a3a3a-3a3a-4a3a-8a3a-3a3a3a3a3a3a", "/w", ""),
         spawner(),

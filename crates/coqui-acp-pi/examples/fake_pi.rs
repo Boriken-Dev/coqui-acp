@@ -11,9 +11,10 @@
 //! A gate is emulated when `-e` names a file, as the extension does: every tool call is put to the client as a `select`
 //! dialog whose answer decides (`allow`, `plan`, anything else blocks).
 //!
-//! Sessions are kept in `sessions/<id>.json` of `PI_CODING_AGENT_DIR`, or of `.pi/agent` in the home
-//! `ACP_HARNESS_CHECK_HOME` names, one of which it requires so that it never writes in a real home; `--session` of an id
-//! with no file there fails as Pi does, and a file exists only after the first prompt.
+//! Sessions are kept as Pi keeps them (`sessions/--<directory>--/<time>_<id>.jsonl`, a header and a tree of entries) in
+//! `PI_CODING_AGENT_DIR`, or in `.pi/agent` of the home `ACP_HARNESS_CHECK_HOME` names, one of which it requires so
+//! that it never writes in a real home; `--session` of an id with no file there fails as Pi does, and a file exists only
+//! after the first prompt, unless one was written for it (an imported session, which may hold no entry).
 //!
 //! `COQUI_ACP_FAKE_PI_LOG` names a file each start appends to: one line of JSON with the arguments, the names (never the
 //! values) of the environment, and whether a gate was loaded. `COQUI_ACP_FAKE_PI_VERSION` replaces the version
@@ -42,6 +43,33 @@ fn now_ms() -> u64 {
 
 fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// A time in milliseconds since 1970 as Pi writes the time of an entry: `2026-01-02T03:04:05.678Z`.
+fn iso(ms: u64) -> String {
+    let (days, rest) = (i64::try_from(ms / 86_400_000).unwrap_or(0), ms % 86_400_000);
+    // The civil date of a day number, by the proleptic Gregorian calendar.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = if month_part < 10 {
+        month_part + 3
+    } else {
+        month_part - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rest / 3_600_000,
+        rest / 60_000 % 60,
+        rest / 1000 % 60,
+        rest % 1000
+    )
 }
 
 fn emit(value: &Value) {
@@ -109,23 +137,83 @@ struct Fake {
     gated: bool,
     /// The command the gate registers, found in the gate's file.
     gate_command: Option<String>,
-    messages: Vec<Value>,
+    /// The entries of the session file after its header, as the file has them.
+    entries: Vec<Value>,
+    /// The time in the file's header.
+    created: String,
     /// The id of an `abort`, answered once the run it stopped has settled.
     abort_id: Option<Value>,
     lines: Receiver<Value>,
 }
 
 impl Fake {
+    fn directory(&self) -> PathBuf {
+        coqui_acp_pi::paths::session_directory(&self.home, &self.cwd)
+    }
+
     fn file(&self) -> PathBuf {
-        self.home.join("sessions").join(format!("{}.json", self.id))
+        self.directory().join(format!(
+            "{}_{}.jsonl",
+            self.created.replace([':', '.'], "-"),
+            self.id
+        ))
     }
 
     fn save(&self) {
-        let _ = std::fs::create_dir_all(self.home.join("sessions"));
-        let _ = std::fs::write(
-            self.file(),
-            json!({"id": self.id, "cwd": self.cwd, "messages": self.messages}).to_string(),
-        );
+        let _ = std::fs::create_dir_all(self.directory());
+        let header = json!({"type": "session", "version": 3, "id": self.id, "timestamp": self.created,
+                            "cwd": self.cwd});
+        let mut text = format!("{header}\n");
+        for entry in &self.entries {
+            text.push_str(&format!("{entry}\n"));
+        }
+        let _ = std::fs::write(self.file(), text);
+    }
+
+    /// Adds a message to the session, after the last entry.
+    fn add(&mut self, message: Value) {
+        let mut n = self.entries.len();
+        let id = loop {
+            n += 1;
+            let id = format!("f{n:07x}");
+            if !self.entries.iter().any(|entry| entry["id"] == id) {
+                break id;
+            }
+        };
+        let parent = self
+            .entries
+            .last()
+            .map_or(Value::Null, |entry| entry["id"].clone());
+        self.entries
+            .push(json!({"type": "message", "id": id, "parentId": parent,
+            "timestamp": iso(now_ms()), "message": message}));
+    }
+
+    /// What the model reads: the messages after the latest compaction, which stands for what came before it, but for
+    /// those an edit hides.
+    fn messages(&self) -> Vec<Value> {
+        let hidden: Vec<&Value> = self
+            .entries
+            .iter()
+            .filter(|entry| entry["type"] == "context_edit" && entry["replacement"].is_null())
+            .map(|entry| &entry["targetId"])
+            .collect();
+        let start = self
+            .entries
+            .iter()
+            .rposition(|entry| entry["type"] == "compaction")
+            .unwrap_or(0);
+        self.entries[start..]
+            .iter()
+            .filter_map(|entry| match entry["type"].as_str() {
+                Some("message") if !hidden.contains(&&entry["id"]) => Some(entry["message"].clone()),
+                Some("compaction") => Some(json!({"role": "compactionSummary", "summary": entry["summary"],
+                    "tokensBefore": entry["tokensBefore"], "timestamp": now_ms()})),
+                Some("custom_message") => Some(json!({"role": "custom", "customType": entry["customType"],
+                    "content": entry["content"], "display": entry["display"], "timestamp": now_ms()})),
+                _ => None,
+            })
+            .collect()
     }
 
     fn state(&self) -> Value {
@@ -139,7 +227,7 @@ impl Fake {
             "sessionFile": self.file(),
             "sessionId": self.id,
             "autoCompactionEnabled": true,
-            "messageCount": self.messages.len(),
+            "messageCount": self.messages().len(),
             "pendingMessageCount": 0,
         })
     }
@@ -168,7 +256,7 @@ impl Fake {
                 }
                 respond(id, command, Some(json!({"commands": commands})));
             }
-            "get_messages" => respond(id, command, Some(json!({"messages": self.messages}))),
+            "get_messages" => respond(id, command, Some(json!({"messages": self.messages()}))),
             "set_model" => {
                 let wanted = line["modelId"].as_str().unwrap_or("");
                 if line["provider"] == "stub" && (wanted == "stub-fast" || wanted == "stub-think") {
@@ -264,7 +352,7 @@ impl Fake {
         let user = json!({"role": "user", "content": [{"type": "text", "text": text}], "timestamp": now_ms()});
         emit(&json!({"type": "message_start", "message": user}));
         emit(&json!({"type": "message_end", "message": user}));
-        self.messages.push(user);
+        self.add(user);
         let _ = images;
         let mut aborted = false;
         if text == "die" {
@@ -290,7 +378,7 @@ impl Fake {
             }
             let message = self.assistant(&[], "aborted", Some("Request was aborted"), 0);
             emit(&json!({"type": "message_end", "message": message}));
-            self.messages.push(message);
+            self.add(message);
         } else if text == "limit" || text == "fail" {
             let why = if text == "limit" {
                 "429: {\"message\":\"usage limit reached\",\"type\":\"rate_limit\"}"
@@ -300,12 +388,12 @@ impl Fake {
             let message = self.assistant(&[], "error", Some(why), 0);
             emit(&json!({"type": "message_start", "message": message}));
             emit(&json!({"type": "message_end", "message": message}));
-            self.messages.push(message);
+            self.add(message);
         } else if let Some((tool, args, refusal_text)) = self.tool_of(text) {
             aborted = self.tool_turn(&tool, &args, &refusal_text);
         } else {
             let message = self.text_message(&format!("echo: {text}"), text.contains("[[think]]"));
-            self.messages.push(message);
+            self.add(message);
         }
         // Kept before the run settles, since a client may end the process as soon as it hears so.
         self.save();
@@ -356,7 +444,7 @@ impl Fake {
         update(json!({"type": "toolcall_delta", "contentIndex": 0, "delta": args.to_string()}));
         update(json!({"type": "toolcall_end", "contentIndex": 0, "toolCall": call}));
         emit(&json!({"type": "message_end", "message": message}));
-        self.messages.push(message);
+        self.add(message);
         emit(
             &json!({"type": "tool_execution_start", "toolCallId": "call_1", "toolName": tool, "args": args}),
         );
@@ -417,13 +505,13 @@ impl Fake {
             "content": result["content"], "details": result["details"], "isError": is_error, "timestamp": now_ms()});
         emit(&json!({"type": "message_start", "message": result_message}));
         emit(&json!({"type": "message_end", "message": result_message}));
-        self.messages.push(result_message);
+        self.add(result_message);
         emit(&json!({"type": "turn_end", "message": {}, "toolResults": []}));
         if aborted {
             let message = self.assistant(&[], "aborted", Some("Request was aborted"), 0);
             emit(&json!({"type": "message_start", "message": message}));
             emit(&json!({"type": "message_end", "message": message}));
-            self.messages.push(message);
+            self.add(message);
             return true;
         }
         emit(&json!({"type": "turn_start"}));
@@ -433,7 +521,7 @@ impl Fake {
             "Tool finished.".to_string()
         };
         let message = self.text_message(&said, false);
-        self.messages.push(message);
+        self.add(message);
         false
     }
 
@@ -638,21 +726,36 @@ fn main() {
         level,
         gated,
         gate_command,
-        messages: Vec::new(),
+        entries: Vec::new(),
+        created: iso(now_ms()),
         abort_id: None,
         lines,
     };
     if let Some(wanted) = value_of("--session") {
-        let saved =
-            std::fs::read_to_string(fake.home.join("sessions").join(format!("{wanted}.json")))
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        let Some(saved) = saved else {
+        let found = std::fs::read_dir(fake.directory())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(&path).ok()?;
+                let mut lines = text.lines();
+                let header: Value = serde_json::from_str(lines.next()?).ok()?;
+                (header["type"] == "session" && header["id"] == wanted.as_str()).then(|| {
+                    let entries: Vec<Value> = lines
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .collect();
+                    (header, entries)
+                })
+            })
+            .next();
+        let Some((header, entries)) = found else {
             eprintln!("No session found matching '{wanted}'");
             std::process::exit(1);
         };
         fake.id = wanted;
-        fake.messages = saved["messages"].as_array().cloned().unwrap_or_default();
+        fake.created = header["timestamp"].as_str().unwrap_or_default().to_string();
+        fake.entries = entries;
     }
     loop {
         let line = match fake.lines.recv_timeout(Duration::from_secs(3600)) {

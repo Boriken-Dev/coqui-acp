@@ -165,6 +165,31 @@ pub fn lexical(path: &Path) -> PathBuf {
     PathBuf::from(alloc::format!("{head}{}", parts.join(&separator)))
 }
 
+/// The directory Pi keeps the sessions of `cwd` in under `agent_dir`: `sessions/--<directory>--`, the directory's
+/// leading separator dropped and each `/`, `\` and `:` made `-`.
+#[must_use]
+pub fn session_directory(agent_dir: &Path, cwd: &Path) -> PathBuf {
+    let cwd = lexical(cwd).to_string_lossy().into_owned();
+    let trimmed = if cwd.len() > 1 {
+        cwd.trim_end_matches(['/', '\\'])
+    } else {
+        cwd.as_str()
+    };
+    let name: String = trimmed
+        .strip_prefix(['/', '\\'])
+        .unwrap_or(trimmed)
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    agent_dir.join("sessions").join(format!("--{name}--"))
+}
+
 /// Whether the text names a drive with no root (`C:foo`): relative to that drive's own directory, which this does not know.
 fn drive_relative(text: &str) -> bool {
     let mut chars = text.chars();

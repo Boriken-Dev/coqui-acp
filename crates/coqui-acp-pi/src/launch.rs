@@ -302,6 +302,32 @@ impl PiLaunch {
             .or_else(|| std::env::var_os(name).map(PathBuf::from))
     }
 
+    /// The directory Pi keeps this launch's sessions in, as Pi decides it: `PI_CODING_AGENT_SESSION_DIR`, else the
+    /// `sessionDir` of the agent directory's `settings.json`, in either case holding the files directly; otherwise
+    /// the agent directory's `sessions/--<working directory>--`. `None` when no agent directory is known.
+    #[must_use]
+    pub fn sessions_dir(&self) -> Option<PathBuf> {
+        let agent = self.agent_dirs().into_iter().next()?;
+        let home = self.home();
+        let named = self
+            .named("PI_CODING_AGENT_SESSION_DIR")
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .filter(|dir| !dir.is_empty())
+            .or_else(|| {
+                let text = std::fs::read_to_string(agent.join("settings.json")).ok()?;
+                let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
+                settings
+                    .get("sessionDir")?
+                    .as_str()
+                    .filter(|dir| !dir.is_empty())
+                    .map(str::to_owned)
+            });
+        Some(match named {
+            Some(dir) => paths::setting(&dir, &self.cwd, home.as_deref(), cfg!(windows)).path,
+            None => paths::session_directory(&agent, &self.cwd),
+        })
+    }
+
     /// The home directory Pi expands `~` to: `USERPROFILE` (Windows) or `HOME` of the launch's environment, else the
     /// process's.
     #[must_use]

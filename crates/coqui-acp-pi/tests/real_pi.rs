@@ -524,3 +524,106 @@ fn a_real_pi_started_as_a_node_and_its_script_loads_the_gate_and_answers() {
     let said = world.turn(&session, &mut events, "alpha");
     assert!(said.contains("TurnEnd"), "{said}");
 }
+
+/// A session Pi wrote, exported and imported under another id, and a session of another harness's, resume in a real Pi, and
+/// the model is sent what the history said (`COQUI_ACP_PI_REAL_NODE_EXE`, `COQUI_ACP_PI_REAL_SCRIPT`).
+#[cfg(feature = "history")]
+#[test]
+fn a_real_pi_resumes_a_session_imported_from_its_own_history_and_from_claude_codes() {
+    use coqui_acp_pi::SessionStart;
+    use coqui_acp_pi::history::{DEFAULT_MAX_BYTES, ImportOptions, export_file, import_file};
+
+    let (Some(world), Some(node), Some(script)) = (
+        world("real-import"),
+        env("COQUI_ACP_PI_REAL_NODE_EXE"),
+        env("COQUI_ACP_PI_REAL_SCRIPT"),
+    ) else {
+        eprintln!("skipped: no real Pi, Node and script named");
+        return;
+    };
+    let mut launch = world.launch(Mode::Manual);
+    launch.executable = "pi".into();
+    launch.node = Some(PathBuf::from(node));
+    launch.script = Some(PathBuf::from(script));
+    let directory = launch.sessions_dir().expect("an agent directory");
+
+    // A turn in a real Pi, read out of the file it kept.
+    let (sink, mut events) = Events::new();
+    let session = PiSession::start(&launch, &PlainSpawn, PiSettings::new(), sink)
+        .expect("the real Pi starts with the gate");
+    let first = session.session().to_owned();
+    world.turn(&session, &mut events, "what is the first question");
+    session.close();
+    drop(session);
+    let history = export_file(&directory, &first, DEFAULT_MAX_BYTES).expect("Pi's own file reads");
+    assert_eq!(history.header.origin.harness, "pi");
+    assert!(
+        history
+            .to_string()
+            .unwrap()
+            .contains("what is the first question")
+    );
+
+    // Imported under another id, it resumes with the turn in it, and the model is sent the turn.
+    let moved = "3f2b8c1e-5d7a-4b9c-8e1f-0a2c4e6a8b0d";
+    let imported = import_file(
+        &directory,
+        &world.project,
+        moved,
+        &history,
+        &ImportOptions::default(),
+    )
+    .expect("written where Pi finds it");
+    assert!(imported.report.is_empty());
+    let mut load = launch.clone();
+    load.session = SessionStart::Load(moved.into());
+    let (sink, mut events) = Events::new();
+    let session = PiSession::start(&load, &PlainSpawn, PiSettings::new(), sink)
+        .expect("a real Pi opens the imported session");
+    assert_eq!(session.session(), moved);
+    events.drain();
+    let replayed = format!("{:?}", events.seen);
+    assert!(
+        replayed.contains("what is the first question"),
+        "{replayed}"
+    );
+    world.turn(&session, &mut events, "and the second question");
+    session.close();
+    drop(session);
+    let requests = std::fs::read_to_string(world.scratch.0.join("requests.jsonl")).unwrap();
+    let last = requests.lines().last().expect("a request to the model");
+    assert!(last.contains("what is the first question"), "{last}");
+    assert!(last.contains("and the second question"));
+
+    // A history that came from Claude Code: its prompt and its tool call and result are what the model is sent.
+    let transcript = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../coqui-acp-claude/tests/fixtures/2.1.318/turn.transcript.jsonl"),
+    )
+    .unwrap();
+    let other = "9a1d3c5e-7b2f-4d6a-8c0e-2b4d6f8a0c1e";
+    let claude = coqui_acp_claude::history::export(&transcript, other).unwrap();
+    let imported = import_file(
+        &directory,
+        &world.project,
+        other,
+        &claude,
+        &ImportOptions::default(),
+    )
+    .expect("written where Pi finds it");
+    assert!(imported.report.count(coqui_acp_history::THINKING) > 0);
+    let mut load = launch.clone();
+    load.session = SessionStart::Resume(other.into());
+    let (sink, mut events) = Events::new();
+    let session = PiSession::start(&load, &PlainSpawn, PiSettings::new(), sink)
+        .expect("a real Pi opens the session imported from Claude Code");
+    assert_eq!(session.session(), other);
+    world.turn(&session, &mut events, "and the third question");
+    session.close();
+    drop(session);
+    let requests = std::fs::read_to_string(world.scratch.0.join("requests.jsonl")).unwrap();
+    let last = requests.lines().last().expect("a request to the model");
+    assert!(last.contains("Change two to three in notes.txt"), "{last}");
+    assert!(last.contains("echo checked > checked.txt"), "{last}");
+    assert!(last.contains("and the third question"));
+}

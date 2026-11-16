@@ -26,6 +26,9 @@ use coqui_acp_pi::{PiAgent, PiLaunch};
     others) from the environment it is given."
 )]
 struct Cli {
+    #[cfg(feature = "history")]
+    #[command(subcommand)]
+    command: Option<Command>,
     /// The Pi program. On Windows npm's shim is `pi.cmd`.
     #[arg(long, env = "COQUI_ACP_PI_EXECUTABLE", default_value = "pi")]
     executable: OsString,
@@ -74,6 +77,99 @@ struct Cli {
     allow_network_paths: bool,
 }
 
+/// What `coqui-acp-pi` does besides serving.
+#[cfg(feature = "history")]
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Moves a session in and out of the standard history format (`docs/session-history.md`).
+    History {
+        #[command(subcommand)]
+        action: Action,
+    },
+}
+
+#[cfg(feature = "history")]
+#[derive(Debug, clap::Subcommand)]
+enum Action {
+    /// Writes the session's history to standard output, as it is.
+    Export {
+        /// Pi's agent directory; by default `PI_CODING_AGENT_DIR`, else `.pi/agent` in the home directory.
+        #[arg(long)]
+        agent_dir: Option<PathBuf>,
+        /// The directory the session worked in.
+        cwd: PathBuf,
+        /// The session's UUID.
+        id: String,
+    },
+    /// Reads a history from standard input and writes it as a session Pi resumes. Prints what could not be carried
+    /// over on standard error; never replaces a session.
+    Import {
+        /// Pi's agent directory; by default `PI_CODING_AGENT_DIR`, else `.pi/agent` in the home directory.
+        #[arg(long)]
+        agent_dir: Option<PathBuf>,
+        /// The directory the session worked in.
+        cwd: PathBuf,
+        /// The session's UUID.
+        id: String,
+        /// Seed from the first line of the history, not from its latest compaction summary.
+        #[arg(long)]
+        no_summary: bool,
+    },
+}
+
+#[cfg(feature = "history")]
+fn history_main(action: Action) -> Result<(), String> {
+    use std::io::{Read, Write};
+
+    use coqui_acp_pi::history::{DEFAULT_MAX_BYTES, ImportOptions, export_file, import_file};
+
+    let place = |agent_dir: Option<PathBuf>, cwd: &PathBuf| {
+        let mut launch = PiLaunch::new(cwd);
+        if let Some(dir) = agent_dir {
+            launch.env.insert("PI_CODING_AGENT_DIR".into(), dir.into());
+        }
+        launch
+            .sessions_dir()
+            .ok_or_else(|| "Pi's agent directory is unknown: pass --agent-dir".to_owned())
+    };
+    match action {
+        Action::Export { agent_dir, cwd, id } => {
+            let directory = place(agent_dir, &cwd)?;
+            let doc = export_file(&directory, &id, DEFAULT_MAX_BYTES)
+                .map_err(|error| error.to_string())?;
+            let bytes = doc.to_vec().map_err(|error| error.to_string())?;
+            std::io::stdout()
+                .write_all(&bytes)
+                .map_err(|error| error.to_string())
+        }
+        Action::Import {
+            agent_dir,
+            cwd,
+            id,
+            no_summary,
+        } => {
+            let directory = place(agent_dir, &cwd)?;
+            let mut text = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut text)
+                .map_err(|error| error.to_string())?;
+            let doc = coqui_acp_history::Document::from_slice(&text)
+                .map_err(|error| error.to_string())?;
+            let options = ImportOptions::default().use_summary(!no_summary);
+            let imported = import_file(&directory, &cwd, &id, &doc, &options)
+                .map_err(|error| error.to_string())?;
+            let lost: Vec<String> = imported
+                .report
+                .losses()
+                .iter()
+                .map(|loss| format!("{}:{}", loss.kind, loss.count))
+                .collect();
+            eprintln!("imported; lost: [{}]", lost.join(", "));
+            Ok(())
+        }
+    }
+}
+
 fn parse_mode(id: &str) -> Result<Mode, String> {
     Mode::from_id(id).ok_or_else(|| format!("{id} is not a mode"))
 }
@@ -90,6 +186,16 @@ fn settings_of(cli: &Cli) -> Settings {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    #[cfg(feature = "history")]
+    if let Some(Command::History { action }) = cli.command {
+        return match history_main(action) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("coqui-acp-pi: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let settings = settings_of(&cli);
     let mut defaults = PiLaunch::new(".");
     defaults.executable = cli.executable;

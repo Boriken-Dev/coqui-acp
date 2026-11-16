@@ -18,6 +18,11 @@ publish = false
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = []
+# Export and import of the harness's own session files in the standard history format.
+history = ["dep:coqui-acp-history"]
+
 [[bin]]
 name = "coqui-acp-pi"
 path = "src/main.rs"
@@ -26,11 +31,15 @@ path = "src/main.rs"
 clap.workspace = true
 coqui-acp-api = { path = "../coqui-acp-api" }
 coqui-acp-harness = { path = "../coqui-acp-harness", features = ["kind"] }
+coqui-acp-history = { path = "../coqui-acp-history", optional = true }
 serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 coqui-acp = { path = "../coqui-acp" }
+# A history that came from another harness, to move a session between them.
+coqui-acp-claude = { path = "../coqui-acp-claude", features = ["history"] }
+coqui-acp-history = { path = "../coqui-acp-history" }
 # The contract suite and `acp-harness-check`, which hold the provider to the kind.
 coqui-acp-api = { path = "../coqui-acp-api", features = ["contract"] }
 guatiao = { workspace = true, features = ["provider", "load"] }

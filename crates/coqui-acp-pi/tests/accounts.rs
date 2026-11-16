@@ -131,7 +131,7 @@ fn the_suite_inside() {
         .expect("the settings are taken");
     let outcome = Contract::new(format!("pi {kind}"))
         .program_agent(true)
-        .imports(false)
+        .imports(cfg!(feature = "history"))
         .logins(false)
         .holds(Vec::new())
         .account(kind)

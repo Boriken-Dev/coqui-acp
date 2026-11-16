@@ -7,12 +7,17 @@ extern crate alloc;
 pub mod accounts;
 mod agent;
 mod gate;
+#[cfg(feature = "history")]
+#[cfg_attr(docsrs, doc(cfg(feature = "history")))]
+pub mod history;
 mod launch;
 pub mod mode;
 pub mod parse;
 pub mod paths;
 pub mod protect;
 mod provider;
+#[cfg(feature = "history")]
+mod provider_history;
 mod session;
 
 use alloc::string::String;
