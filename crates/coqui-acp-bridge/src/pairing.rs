@@ -105,6 +105,7 @@ pub struct PairDial {
 ///
 /// The PIN expired or was used up, nobody paired in time, or a listener could not be bound.
 pub fn accept(args: &PairAccept) -> Result<u8, String> {
+    crate::common::check_origins(&args.origins)?;
     let identity = Arc::new(proof_identity(
         args.home.as_deref(),
         args.identity.as_deref(),

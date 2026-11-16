@@ -45,6 +45,27 @@ const SHORT_LIVED_RUN: Duration = Duration::from_secs(13 * 86_400);
 /// The status `serve` ends the process with when its short-lived certificate is about to end.
 pub const EXIT_CERTIFICATE_ENDING: i32 = 3;
 
+/// A rule a host adds to who may be served: given a proven peer, whether it is let in.
+#[derive(Clone)]
+pub struct Admit(Arc<dyn Fn(&PeerId) -> bool + Send + Sync>);
+
+impl Admit {
+    /// A rule that lets in the peers `rule` says yes to.
+    pub fn new(rule: impl Fn(&PeerId) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(rule))
+    }
+
+    fn allows(&self, peer: &PeerId) -> bool {
+        (self.0)(peer)
+    }
+}
+
+impl core::fmt::Debug for Admit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Admit")
+    }
+}
+
 /// The arguments of `serve`: where to listen, which peers to let in and by what proof, and what each is given.
 #[derive(clap::Args, Clone, Debug)]
 pub struct Serve {
@@ -85,7 +106,7 @@ pub struct Serve {
     /// A PEM bundle of certificate authorities a client certificate may chain to, over mutual TLS. Needs `--tls-identity`.
     #[arg(long)]
     pub client_ca: Option<PathBuf>,
-    /// Prove nothing about the peer: whoever can connect gets the agent. Only on loopback, or with `--permit` naming who can
+    /// Prove nothing about the peer: whoever can connect gets the agent, any account on this machine included. Only on loopback, or with `--permit` naming who can
     /// reach it, and a browser needs its `--origin` listed, or any page it opens could drive the agent. With `--tls-identity` a
     /// client can still pin this server.
     #[arg(long)]
@@ -93,7 +114,7 @@ pub struct Serve {
     /// Serve WebTransport on this UDP port too; needs `--tls-identity`, and the in-band proof.
     #[arg(long)]
     pub webtransport_port: Option<u16>,
-    /// A browser origin allowed in. Repeat for more. A non-browser client sends none. With none listed, no origin is checked.
+    /// A browser origin allowed in, as scheme://host[:port]. Repeat for more. A non-browser client sends none. With none listed, no origin is checked.
     #[arg(long = "origin")]
     pub origins: Vec<String>,
     /// A source network allowed to connect at all, like 10.6.0.0/16. Repeat for more. With any listed, everything else is
@@ -141,7 +162,8 @@ pub struct Serve {
     #[arg(long)]
     pub forward: bool,
     /// Listen on this machine and reach a target from a peer that forwards for this one, as LOCAL=PEER=TARGET. LOCAL has to be a
-    /// loopback address. Repeat for more. That peer decides from its own grants.
+    /// loopback address, and any account on this machine that connects to it gets what the peer was granted. Repeat for more.
+    /// That peer decides from its own grants.
     #[arg(long = "reverse", value_name = "LOCAL=PEER=TARGET")]
     pub reverses: Vec<String>,
     /// Serve `mcp-offer/1`, so a peer can give its agent the peer's own MCP tools. A peer allowed `acp/1` can already declare any
@@ -172,6 +194,10 @@ pub struct Serve {
     /// `coqui_agentic_peer::home` does. Not a command-line argument.
     #[arg(skip)]
     pub home: Option<PathBuf>,
+    /// Whether a proven peer may be served at all, asked once it has proved itself and again, for a link that lasts, whenever the
+    /// trust store is asked. For a host whose own rules limit some keys. Not a command-line argument.
+    #[arg(skip)]
+    pub admit: Option<Admit>,
 }
 
 /// A certificate browsers will pin, starting a little early for a client whose clock runs behind.
@@ -223,6 +249,7 @@ fn parse_reverse(text: &str) -> Result<Reverse, String> {
 }
 
 struct Service {
+    admit: Option<Admit>,
     helper: Option<Helper>,
     method: Option<Proof>,
     store: Option<Arc<TrustStore>>,
@@ -526,11 +553,19 @@ impl Service {
                 drop(unproven);
                 let peer = established.peer;
                 let label = peer.to_string();
+                if !self.admit.as_ref().is_none_or(|admit| admit.allows(&peer)) {
+                    eprintln!("{label} was turned away: this host's own rules do not admit it");
+                    return channel.close();
+                }
                 let sealed = Sealed::new(channel, established.session);
+                let admit = self.admit.clone();
                 let sealed = match &self.store {
                     Some(store) => {
                         let store = Arc::clone(store);
-                        sealed.with_check(move || store.is_accepted(&peer))
+                        sealed.with_check(move || {
+                            store.is_accepted(&peer)
+                                && admit.as_ref().is_none_or(|admit| admit.allows(&peer))
+                        })
                     }
                     None => sealed,
                 };
@@ -638,14 +673,16 @@ fn linger(args: &Serve, no_key: bool) -> Result<Option<Settings>, String> {
 }
 
 /// Keeps agents by `settings` for peers `store` still accepts, or with no store, for every peer the command line allowed.
-fn keeper(settings: Settings, store: Option<&Arc<TrustStore>>) -> Keeper {
+fn keeper(settings: Settings, store: Option<&Arc<TrustStore>>, admit: Option<Admit>) -> Keeper {
     let report = |said: &str| eprintln!("{said}");
     match store {
         Some(store) => {
             let store = Arc::clone(store);
             let accepted = move |peer: &str| {
-                peer.parse::<PeerId>()
-                    .is_ok_and(|peer| store.is_accepted(&peer))
+                peer.parse::<PeerId>().is_ok_and(|peer| {
+                    store.is_accepted(&peer)
+                        && admit.as_ref().is_none_or(|admit| admit.allows(&peer))
+                })
             };
             Keeper::new(settings, accepted, report)
         }
@@ -759,6 +796,7 @@ fn advertise(
 ///
 /// The arguments do not fit together, a key or certificate could not be read, or a listener could not be bound.
 pub fn run(args: &Serve) -> Result<u8, String> {
+    crate::common::check_origins(&args.origins)?;
     let in_band = !args.allow.is_empty() || args.allow_store.is_some() || args.paired;
     let certificates =
         !args.allow_cert.is_empty() || args.allow_cert_store.is_some() || args.client_ca.is_some();
@@ -848,6 +886,7 @@ pub fn run(args: &Serve) -> Result<u8, String> {
         let _advertised = advertise(args, bound, None, None, None)?;
         eprintln!("listening on {bound}");
         let service = Arc::new(Service {
+            admit: args.admit.clone(),
             helper: args.helper.clone(),
             method: None,
             store: None,
@@ -953,7 +992,7 @@ pub fn run(args: &Serve) -> Result<u8, String> {
     };
     eprintln!("listening on {bound}");
     say_proof(&method);
-    let keeper = linger.map(|settings| keeper(settings, store.as_ref()));
+    let keeper = linger.map(|settings| keeper(settings, store.as_ref(), args.admit.clone()));
     let links = links(args, &running, keeper.as_ref())?;
     let reverses = args
         .reverses
@@ -961,6 +1000,7 @@ pub fn run(args: &Serve) -> Result<u8, String> {
         .map(|text| parse_reverse(text))
         .collect::<Result<Vec<_>, _>>()?;
     let service = Arc::new(Service {
+        admit: args.admit.clone(),
         helper: args.helper.clone(),
         method: Some(method),
         store,
@@ -1021,6 +1061,7 @@ fn serve_unproven(
         "listening on {bound}, with no proof of the peer: whoever can connect gets the agent"
     );
     let service = Arc::new(Service {
+        admit: args.admit.clone(),
         helper: args.helper.clone(),
         method: None,
         store: None,

@@ -313,3 +313,65 @@ pub(crate) fn status_code(status: std::process::ExitStatus) -> u8 {
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1)
 }
+
+/// Whether `text` is a browser origin as a listener can match it: `scheme://host` or `scheme://host:port`, with no path, query,
+/// user information or spaces. `null` is no origin (a sandboxed page or a local file sends it), so it is refused.
+#[must_use]
+pub fn valid_origin(text: &str) -> bool {
+    let Some((scheme, rest)) = text.split_once("://") else {
+        return false;
+    };
+    let scheme_ok = !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    let host_port_ok = !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':' | '[' | ']' | '_'));
+    scheme_ok && host_port_ok && !rest.starts_with(':')
+}
+
+/// Refuses an origin list that has a malformed entry.
+pub(crate) fn check_origins(origins: &[String]) -> Result<(), String> {
+    match origins.iter().find(|origin| !valid_origin(origin)) {
+        Some(_) => Err(
+            "an --origin is scheme://host or scheme://host:port, with no path (and never null)"
+                .to_owned(),
+        ),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_origin;
+
+    #[test]
+    fn an_origin_is_scheme_host_and_port_and_nothing_else() {
+        for good in [
+            "https://example.com",
+            "http://localhost:8080",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+            "http://[::1]:7800",
+        ] {
+            assert!(valid_origin(good), "{good}");
+        }
+        for bad in [
+            "null",
+            "",
+            "example.com",
+            "https://",
+            "https://example.com/",
+            "https://example.com/path",
+            "https://user@example.com",
+            "https://exa mple.com",
+            "https://example.com?x=1",
+            "://example.com",
+            "1http://example.com",
+        ] {
+            assert!(!valid_origin(bad), "{bad}");
+        }
+    }
+}

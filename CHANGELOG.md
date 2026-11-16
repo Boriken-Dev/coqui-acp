@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - `coqui-acp-bridge` is a library: its commands are the modules `serve`, `dial`, `forward`, `pairing`, `grant`, `discover`, `keygen` and `mcp_shim` (and `standing`), each with its arguments as a `clap::Args` type and a `run`. The `coqui-acp-bridge` program is gone, and with it `companion install|uninstall` and the companion mode: a host that wants a program names itself in a `helper::Helper` (what `agent-guard` and `mcp-shim` run through) and, when its identity, trust store and grants are not where `coqui_agentic_peer::home` puts them, a `home`. `examples/bridge.rs` is a command line over the modules, for the tests.
+- `coqui-acp-bridge`: `serve::Admit` (`Serve::admit`) lets a host refuse a proven peer its own rules do not admit, including later on a link that lasts; `Dial::paired_store` and `Forward::paired_store` name the store `--paired` proves the remote against; `valid_origin`, and an `--origin` of `serve` or `pair-accept` that is not `scheme://host[:port]` (`null`, a path) is refused; the help of `--no-peer-proof`, `--reverse` and `forward --local` says any account on the machine reaches what they open.
 
 ### Added
 

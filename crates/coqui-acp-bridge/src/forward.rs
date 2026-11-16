@@ -43,8 +43,9 @@ pub struct Forward {
     /// A PEM bundle of certificate authorities the remote certificate must chain to, with wss://.
     #[arg(long)]
     pub ca_file: Option<PathBuf>,
-    /// Listen here and reach a target from the remote, as LOCAL=TARGET. LOCAL has to be a loopback address. Repeat for more. The
-    /// remote decides from its own grants.
+    /// Listen here and reach a target from the remote, as LOCAL=TARGET. LOCAL has to be a loopback address, and any account on
+    /// this machine that connects to it reaches the target as the remote allows. Repeat for more. The remote decides from its own
+    /// grants.
     #[arg(long = "local", value_name = "LOCAL=TARGET")]
     pub locals: Vec<String>,
     /// Let the remote reach this target from here, once it listens for it with `serve --reverse`. Repeat for more. With none, it
@@ -61,6 +62,10 @@ pub struct Forward {
     /// `coqui_agentic_peer::home` does. Not a command-line argument.
     #[arg(skip)]
     pub home: Option<PathBuf>,
+    /// With `--paired`, the trust store the remote is proved against, in place of this user's own: a host that keeps the keys
+    /// it dials apart from the keys it serves names it. Not a command-line argument.
+    #[arg(skip)]
+    pub paired_store: Option<PathBuf>,
 }
 
 pub(crate) fn local_address(text: &str) -> Result<SocketAddr, String> {
@@ -168,7 +173,10 @@ pub fn run(args: &Forward) -> Result<u8, String> {
     }
     let (method, store) = if args.paired {
         let identity = proof_identity(args.home.as_deref(), None, args.method, true)?;
-        let store = Arc::new(store_of(args.home.as_deref(), None)?);
+        let store = Arc::new(store_of(
+            args.home.as_deref(),
+            args.paired_store.as_deref(),
+        )?);
         (
             built(
                 proof_of(identity, args.session)

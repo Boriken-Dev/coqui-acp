@@ -82,6 +82,10 @@ pub struct Dial {
     /// `coqui_agentic_peer::home` does. Not a command-line argument.
     #[arg(skip)]
     pub home: Option<PathBuf>,
+    /// With `--paired`, the trust store the remote is proved against, in place of this user's own: a host that keeps the keys
+    /// it dials apart from the keys it serves names it. Not a command-line argument.
+    #[arg(skip)]
+    pub paired_store: Option<PathBuf>,
 }
 
 fn remote_trust(args: &Dial) -> Result<tls::Trust, String> {
@@ -136,7 +140,10 @@ fn dial_setup(args: &Dial) -> Result<(DialProof, websocket::DialerBuilder), Stri
             );
         }
         let identity = proof_identity(args.home.as_deref(), None, args.method, true)?;
-        let store = Arc::new(store_of(args.home.as_deref(), None)?);
+        let store = Arc::new(store_of(
+            args.home.as_deref(),
+            args.paired_store.as_deref(),
+        )?);
         let method = built(
             proof_of(identity, args.session).responders(Trust::Store(TrustStore::clone(&store))),
         )?;

@@ -23,4 +23,4 @@ pub mod relay;
 pub mod serve;
 pub mod standing;
 
-pub use common::{MethodArgs, SessionArgs};
+pub use common::{MethodArgs, SessionArgs, valid_origin};
