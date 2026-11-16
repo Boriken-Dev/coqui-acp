@@ -848,7 +848,37 @@ fn an_account_made_for_another_harness_starts_when_its_standard_is_accepted_and_
         .settings(coqui_acp_harness::provider::schema(
             &serde_json::json!({"base_url": "https://gateway.example"}),
         ));
-    run_session(&provider, key, &dir, &Heard::default());
+    let environment: coqui_acp_api::Environment =
+        [("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+    let (sender, received) = std::sync::mpsc::channel();
+    let channel = provider
+        .start(
+            StartRequest::builder()
+                .account(key)
+                .environment(environment)
+                .build(),
+            spawner(&dir),
+            Sink(sender).into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("it starts");
+    channel
+        .send(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#)
+        .expect("taken");
+    answer_to(&received, 1);
+    channel
+        .send(
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": {"cwd": dir.to_string_lossy(), "mcpServers": []}})
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("taken");
+    answer_to(&received, 2);
+    channel.close(0, "");
+    drop(channel);
     let started = log(&dir);
     let seen = names(started.last().expect("it was started"));
     assert!(seen.contains(&"ANTHROPIC_API_KEY".to_string()), "{seen:?}");
