@@ -86,6 +86,47 @@ void main() {
     },
   );
 
+  test(
+    'a mode the agent lists only because it is in use is not selectable, and cycling skips it without asking',
+    () async {
+      final (:store, :session, :agent) = started();
+      session.applyOpened(
+        AcpOpenedSession('s1', {
+          'configOptions': [
+            {
+              'id': 'mode',
+              'name': 'Mode',
+              'category': 'mode',
+              'type': 'select',
+              'currentValue': 'manual',
+              'options': [
+                {'value': 'manual', 'name': 'Manual'},
+                {'value': 'plan', 'name': 'Plan'},
+                {
+                  'value': 'bypass',
+                  'name': 'Bypass',
+                  '_meta': {'dev.boriken.coqui.acp/selectable': false},
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      final entries = modeEntries(session.options.single);
+      expect(
+        {for (final e in entries) e.value: e.selectable},
+        {'manual': true, 'plan': true, 'bypass': false},
+      );
+      await session.cycleMode();
+      await session.cycleMode();
+      expect(agent.calls, ['config:mode=plan', 'config:mode=manual']);
+      expect(session.refusedModes, isEmpty);
+      await session.chooseMode(entries.last);
+      expect(agent.calls, hasLength(2), reason: 'nothing is asked for');
+      store.dispose();
+    },
+  );
+
   test('a mode the agent refused is not asked for again by cycling', () async {
     final (:store, :session, :agent) = _moded();
     agent.onSetMode = (mode) async {

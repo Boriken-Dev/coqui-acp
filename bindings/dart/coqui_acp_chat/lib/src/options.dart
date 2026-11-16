@@ -3,11 +3,17 @@ import 'package:coqui_acp/coqui_acp.dart' show AcpPermissionOption;
 import 'limits.dart';
 import 'text.dart';
 
+/// The `_meta` key of an option's value that an agent lists only because it is in use: `false` says it cannot be chosen.
+const String selectableMetaKey = 'dev.boriken.coqui.acp/selectable';
+
 /// One value an option can take.
 final class Choice {
-  const Choice(this.value, this.label);
+  const Choice(this.value, this.label, {this.selectable = true});
   final String value;
   final String label;
+
+  /// Whether the agent lets it be chosen: false for a value it lists only because it is in use.
+  final bool selectable;
 }
 
 /// Something the agent lets a person choose, such as its model or its mode.
@@ -59,7 +65,11 @@ final class ConfigOption {
     'currentValue': current,
     'options': [
       for (final choice in choices)
-        {'value': choice.value, 'name': choice.label},
+        {
+          'value': choice.value,
+          'name': choice.label,
+          if (!choice.selectable) '_meta': {selectableMetaKey: false},
+        },
     ],
   };
 }
@@ -99,6 +109,7 @@ List<ConfigOption>? parseConfigOptions(Object? raw, ChatLimits limits) {
           (choice) => Choice(
             choice['value'] as String,
             shortText(choice['name'], limits) ?? choice['value'] as String,
+            selectable: !_unselectable(choice['_meta']),
           ),
         )
         .toList();
@@ -116,6 +127,9 @@ List<ConfigOption>? parseConfigOptions(Object? raw, ChatLimits limits) {
   }
   return parsed;
 }
+
+bool _unselectable(Object? meta) =>
+    meta is Map && meta[selectableMetaKey] == false;
 
 /// ACP v1's `modes` as an option; null when it is not a mode state or its current mode is not among those offered.
 ConfigOption? parseModes(Object? raw, ChatLimits limits) {
@@ -287,7 +301,7 @@ List<ModeEntry> modeEntries(
       ModeEntry(
         choice.value,
         label?.call(choice) ?? choice.label,
-        selectable: choice.value != 'custom',
+        selectable: choice.selectable && choice.value != 'custom',
       ),
   ];
   if (!entries.any((entry) => entry.bypass)) {
