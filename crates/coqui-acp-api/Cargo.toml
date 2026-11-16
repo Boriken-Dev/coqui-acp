@@ -48,9 +48,18 @@ uuid.workspace = true
 name = "acp-harness-check"
 required-features = ["contract"]
 
+[[bin]]
+name = "acp-account-check"
+required-features = ["contract"]
+
 # A real library the tests load: `cargo test` builds it into target/<profile>/examples.
 [[example]]
 name = "echo_harness"
+crate-type = ["cdylib"]
+
+# The echo account provider's library, which the tests load.
+[[example]]
+name = "echo_account_provider"
 crate-type = ["cdylib"]
 
 [[test]]
@@ -59,6 +68,10 @@ required-features = ["contract"]
 
 [[test]]
 name = "check"
+required-features = ["contract"]
+
+[[test]]
+name = "account_provider"
 required-features = ["contract"]
 
 [lints]
