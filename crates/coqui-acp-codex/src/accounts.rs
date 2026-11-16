@@ -224,7 +224,7 @@ fn bad(why: &str) -> ProviderError {
 }
 
 /// The endpoint setting `key` of `settings`: absent, or a plain `http(s)` address.
-fn endpoint(
+pub(crate) fn endpoint(
     settings: &coqui_acp_api::guatiao::Value,
     key: &str,
 ) -> Result<Option<String>, ProviderError> {

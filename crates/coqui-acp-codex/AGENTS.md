@@ -224,6 +224,16 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 - `renew`: for `codex-chatgpt`, the app server is asked `account/read` with `refreshToken: true` and the file is read: changed is `credentials`, unchanged `not_renewed_because`, missing or blank (or no account in the answer) `GONE`. Other kinds: `UNSUPPORTED`.
 - `login`: `chatgpt` and `chatgpt-device` run `codex login [--device-auth]` in the login's home, relay the page (and the code) with `open_url`, and wait for the command to end, then read `auth.json` and check it with `codex login status`; `api-key` and `access-token` ask for the secret and save it on standard input (`BAD_VALUE` `login refused: ...` with the command's last line when it refuses). Cancelling or `timeout_ms` ends the command's tree and answers `GONE` within a moment. `import_session`, `export_session`: with the `history` feature the rollout's, as above; without it `GUATIAO_ERR_UNSUPPORTED` with a reason (after checking the account). `session_record`, `non_defaults`: the kind's defaults.
 
+## Plan limits of an account (`coqui_acp_codex::account_usage`)
+
+```rust
+pub fn read_limits(grant: &AccountGrant, options: &ReadOptions) -> Result<UsageReport, ProviderError>
+pub struct ReadOptions { pub endpoint: Option<String>, pub timeout: Duration /* 10 s */, pub now: Option<i64> }   // #[non_exhaustive]; ReadOptions::new().endpoint(..).timeout(..).now(..)
+pub const DEFAULT_ENDPOINT: &str = "https://chatgpt.com/backend-api";
+```
+
+The account's side, with no harness, session or program (`codex app-server` is not started): `GET <chatgpt_base_url>/wham/usage` (`/api/codex/usage` when the address has no `/backend-api`; a trailing `/codex` dropped) with the access token as a bearer token and `ChatGPT-Account-Id` (the file's `tokens.account_id`, else the token's claim), the request `account/rateLimits/read` makes (measured on Codex 0.166.0 against a loopback stand-in). The address is the account's own `chatgpt_base_url` setting, where Codex sends the token too. The buckets are the harness reader's own: `codex:five_hour`, `codex:weekly` and `<metered_feature>:five_hour|weekly` for an additional limit, labelled by its `limit_name`; a disallowed plan holds every bucket exhausted. `codex-chatgpt` and `codex-access-token` read (an expired token is `GONE`, never refreshed here; 401 and 403 are `GONE`; anything else that fails `INTERNAL`); `codex-api-key`, `harness-login` and a document with no limit answer `UsageReport::unsupported` with the reason. No message holds the token or the answer. `CodexProvider::usage` (app-server) is unchanged.
+
 ## Errors
 
 `Error` (`#[non_exhaustive]`): `Spawn(io::Error)`, `Refused(String)`, `Timeout { what, limit }`, `Harness(String)` in Codex's words or saying how it ended. Into `HarnessError`: `Refused` stays refused, the rest is `Failed`.

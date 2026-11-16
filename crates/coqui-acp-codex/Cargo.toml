@@ -29,7 +29,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-coqui-acp-api = { path = "../coqui-acp-api" }
+coqui-acp-api = { path = "../coqui-acp-api", features = ["reader"] }
 coqui-acp-harness = { path = "../coqui-acp-harness", features = ["kind"] }
 serde_json.workspace = true
 coqui-acp-history = { path = "../coqui-acp-history", optional = true }
