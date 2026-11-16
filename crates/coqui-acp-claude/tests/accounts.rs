@@ -836,3 +836,50 @@ fn a_credential_variable_of_another_case_does_not_survive_on_windows() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_account_made_for_another_harness_starts_when_its_standard_is_accepted_and_is_refused_when_not()
+ {
+    let provider = provider();
+    let dir = scratch("standards");
+    let key = AccountGrant::new("acct", "a-gateways-kind")
+        .provides(["openai-api", "anthropic-api"])
+        .credentials(credentials_of(&[("api_key", CANARY)]))
+        .settings(coqui_acp_harness::provider::schema(
+            &serde_json::json!({"base_url": "https://gateway.example"}),
+        ));
+    run_session(&provider, key, &dir, &Heard::default());
+    let started = log(&dir);
+    let seen = names(started.last().expect("it was started"));
+    assert!(seen.contains(&"ANTHROPIC_API_KEY".to_string()), "{seen:?}");
+    assert!(seen.contains(&"ANTHROPIC_BASE_URL".to_string()), "{seen:?}");
+    assert!(
+        !std::fs::read_to_string(dir.join("fake-claude.log"))
+            .unwrap()
+            .contains(CANARY)
+    );
+
+    let (sender, _received) = std::sync::mpsc::channel();
+    let openai = AccountGrant::new("acct", "a-gateways-kind")
+        .provides(["openai-api"])
+        .credentials(credentials_of(&[("api_key", CANARY)]));
+    let refused = provider.start(
+        StartRequest::builder().account(openai).build(),
+        spawner(&dir),
+        Sink(sender).into_object(),
+        Heard::default().into_object(),
+    );
+    let Err(error) = refused else {
+        panic!("an account of a standard Claude Code does not take started");
+    };
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let said = error.message();
+    assert!(
+        said.contains("claude-code")
+            && said.contains("anthropic-api")
+            && said.contains("openai-api"),
+        "{said}"
+    );
+    assert!(!said.contains(CANARY));
+    let _ = std::fs::remove_dir_all(&dir);
+}

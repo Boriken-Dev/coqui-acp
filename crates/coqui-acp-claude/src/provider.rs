@@ -292,6 +292,7 @@ impl ClaudeProvider {
         let Some(grant) = account else {
             return Ok(Applying { hold: None });
         };
+        let grant = &accounts::resolved(grant)?;
         let mut applied = accounts::plan(grant)?;
         if grant.kind == coqui_acp_api::HARNESS_LOGIN {
             return Ok(Applying { hold: None });

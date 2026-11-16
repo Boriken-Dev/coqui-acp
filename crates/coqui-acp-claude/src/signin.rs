@@ -463,7 +463,7 @@ pub(crate) fn renew(
     request: &RenewRequest,
     spawner: Object<dyn ProcessSpawner>,
 ) -> Result<RenewReport, ProviderError> {
-    let grant = &request.account;
+    let grant = &accounts::resolved(&request.account)?;
     let applied = accounts::plan(grant)?;
     let catalog = accounts::catalog();
     if !catalog.kind(&grant.kind).is_some_and(|kind| kind.renews) {

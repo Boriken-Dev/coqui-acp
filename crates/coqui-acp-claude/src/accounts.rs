@@ -10,12 +10,14 @@ use alloc::vec::Vec;
 
 use coqui_acp_api::guatiao::library::ProviderError;
 use coqui_acp_api::guatiao::{Status, Wipe};
+use coqui_acp_api::standard::{ANTHROPIC_API, CLAUDE_CODE};
 use coqui_acp_api::{
-    ASK, AUTH, AccountCatalog, AccountGrant, AccountKindInfo, AccountRef, Credentials,
-    EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL, PASTE_CODE, PROXY,
+    ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountRef,
+    Credentials, EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL, PASTE_CODE,
+    PROXY,
 };
 use coqui_acp_harness::account::{Watched, rfc3339_ms};
-use coqui_acp_harness::provider::{credential, schema, to_json};
+use coqui_acp_harness::provider::{credential, resolve, schema, to_json};
 use serde_json::{Value, json};
 
 /// The kind of a login made by `claude auth login --claudeai`, kept in `.credentials.json`.
@@ -247,11 +249,42 @@ pub fn catalog() -> AccountCatalog {
             AUTH_TOKEN,
         ),
     ];
+    for kind in &mut catalog.kinds {
+        let standard = match kind.id.as_str() {
+            API_KEY | AUTH_TOKEN => ANTHROPIC_API,
+            _ => CLAUDE_CODE,
+        };
+        kind.provides = vec![standard.to_string()];
+    }
+    catalog.accepts = accepts();
     catalog.credential_variables = VARIABLES
         .iter()
         .map(|v| (*v).to_string())
         .collect::<Vec<String>>();
     catalog
+}
+
+/// The standards Claude Code starts on, and how each is applied: a Claude Code login (a configuration directory
+/// holding `.credentials.json`, or a long-lived token in `CLAUDE_CODE_OAUTH_TOKEN`), or the Anthropic API (a key in
+/// `ANTHROPIC_API_KEY` or a bearer token in `ANTHROPIC_AUTH_TOKEN`), whose endpoint `ANTHROPIC_BASE_URL` moves.
+fn accepts() -> Vec<Accepted> {
+    let url = |slot: AcceptedSlot| slot.base_url("base_url", Some("ANTHROPIC_BASE_URL"));
+    vec![
+        Accepted::new(CLAUDE_CODE)
+            .slot(url(AcceptedSlot::new(FILE_KEY, LOGIN)
+                .file(CREDENTIALS_FILE)
+                .dir_variable("CLAUDE_CONFIG_DIR")))
+            .slot(url(
+                AcceptedSlot::new("token", OAUTH_TOKEN).variable("CLAUDE_CODE_OAUTH_TOKEN")
+            )),
+        Accepted::new(ANTHROPIC_API)
+            .slot(url(
+                AcceptedSlot::new("api_key", API_KEY).variable("ANTHROPIC_API_KEY")
+            ))
+            .slot(url(
+                AcceptedSlot::new("auth_token", AUTH_TOKEN).variable("ANTHROPIC_AUTH_TOKEN")
+            )),
+    ]
 }
 
 fn bad(why: &str) -> ProviderError {
@@ -337,10 +370,11 @@ pub(crate) fn expires_ms(text: &str) -> Option<i64> {
 
 /// Why a reference to an account is not one the provider takes: `BAD_VALUE` for an id, kind or settings it refuses.
 pub(crate) fn check(account: &AccountRef) -> Result<(), ProviderError> {
-    account.check_id()?;
     let catalog = catalog();
+    catalog.accepts_reference(account)?;
     let Some(info) = catalog.kind(&account.kind) else {
-        return Err(bad("this harness takes no account of that kind"));
+        // An account of an accepted standard: `plan` reads its credential and settings.
+        return Ok(());
     };
     if info.id == HARNESS_LOGIN {
         if !guatiao_json(&account.settings)
@@ -365,6 +399,7 @@ pub(crate) fn check(account: &AccountRef) -> Result<(), ProviderError> {
 /// `BAD_VALUE`: an id that is not one, a kind not listed, settings the kind refuses, a credential missing, empty or
 /// one the kind does not take, a missing directory.
 pub(crate) fn plan(grant: &AccountGrant) -> Result<Applied, ProviderError> {
+    let grant = &resolved(grant)?;
     check(&grant.reference())?;
     let credentials: &Credentials = grant.credentials.expose();
     if grant.kind == HARNESS_LOGIN {
@@ -421,6 +456,11 @@ pub(crate) fn plan(grant: &AccountGrant) -> Result<Applied, ProviderError> {
     Ok(applied)
 }
 
+/// The grant of Claude Code's own kind that applies `grant`, when `grant` is an account of an accepted standard.
+pub(crate) fn resolved(grant: &AccountGrant) -> Result<AccountGrant, ProviderError> {
+    resolve(&catalog(), grant)
+}
+
 fn secret_key_variable(kind: &str) -> &'static str {
     match kind {
         OAUTH_TOKEN => "CLAUDE_CODE_OAUTH_TOKEN",
@@ -449,5 +489,124 @@ impl Drop for Applied {
         for (_, value) in &mut self.set {
             value.wipe();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coqui_acp_api::guatiao::Value as GValue;
+
+    const CANARY: &str = "sk-canary-61c0";
+
+    fn foreign(standards: &[&str], key: &str) -> AccountGrant {
+        AccountGrant::new("a", "someone-elses-kind")
+            .provides(standards.iter().copied())
+            .credentials(Credentials::from_iter([(key, CANARY)]))
+    }
+
+    fn settings(json: &Value) -> GValue {
+        coqui_acp_harness::provider::schema(json)
+    }
+
+    fn set_of(applied: &Applied, name: &str) -> Option<String> {
+        applied
+            .set
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn every_kind_says_what_it_provides_and_every_standard_is_applied_by_a_listed_kind() {
+        let catalog = catalog();
+        for id in [LOGIN, CONSOLE, OAUTH_TOKEN, HARNESS_LOGIN] {
+            assert_eq!(catalog.kind(id).expect(id).provides, [CLAUDE_CODE], "{id}");
+        }
+        for id in [API_KEY, AUTH_TOKEN] {
+            assert_eq!(
+                catalog.kind(id).expect(id).provides,
+                [ANTHROPIC_API],
+                "{id}"
+            );
+        }
+        let standards: Vec<&str> = catalog
+            .accepts
+            .iter()
+            .map(|a| a.standard.as_str())
+            .collect();
+        assert_eq!(standards, [CLAUDE_CODE, ANTHROPIC_API]);
+        for slot in catalog.accepts.iter().flat_map(|a| &a.slots) {
+            assert!(catalog.kind(&slot.kind).is_some(), "{}", slot.kind);
+        }
+    }
+
+    #[test]
+    fn an_account_of_anthropic_api_from_elsewhere_sets_the_key_and_the_endpoint() {
+        let grant = foreign(&[ANTHROPIC_API], "api_key")
+            .settings(settings(&json!({"base_url": "https://gateway.example/v1"})));
+        let applied = plan(&grant).expect("accepted");
+        assert_eq!(
+            set_of(&applied, "ANTHROPIC_API_KEY").as_deref(),
+            Some(CANARY)
+        );
+        assert_eq!(
+            set_of(&applied, "ANTHROPIC_BASE_URL").as_deref(),
+            Some("https://gateway.example/v1")
+        );
+        assert!(applied.remove.contains(&"ANTHROPIC_AUTH_TOKEN".to_string()));
+        assert!(applied.dir.is_none());
+        let bearer =
+            plan(&foreign(&[ANTHROPIC_API, "openai-api"], "auth_token")).expect("accepted");
+        assert_eq!(
+            set_of(&bearer, "ANTHROPIC_AUTH_TOKEN").as_deref(),
+            Some(CANARY)
+        );
+        assert!(set_of(&bearer, "ANTHROPIC_API_KEY").is_none());
+    }
+
+    #[test]
+    fn an_account_of_claude_code_from_elsewhere_is_a_token_or_a_login_directory() {
+        let token = plan(&foreign(&[CLAUDE_CODE], "token")).expect("accepted");
+        assert_eq!(
+            set_of(&token, "CLAUDE_CODE_OAUTH_TOKEN").as_deref(),
+            Some(CANARY)
+        );
+        let text = json!({"claudeAiOauth": {"accessToken": "t", "refreshToken": "r"}}).to_string();
+        let login = AccountGrant::new("a", "someone-elses-kind")
+            .provides([CLAUDE_CODE])
+            .credentials(Credentials::from_iter([(FILE_KEY, text.as_str())]))
+            .state_dir("/some/dir");
+        let applied = plan(&login).expect("accepted");
+        assert_eq!(
+            set_of(&applied, "CLAUDE_CONFIG_DIR").as_deref(),
+            Some("/some/dir")
+        );
+        assert_eq!(applied.watched.len(), 1);
+        assert_eq!(applied.watched[0].path, CREDENTIALS_FILE);
+    }
+
+    #[test]
+    fn an_account_of_a_standard_it_does_not_accept_is_refused_saying_which() {
+        for standards in [&["openai-api"][..], &["codex", "xai-api"][..], &[][..]] {
+            let grant = foreign(standards, "api_key");
+            let error = plan(&grant).expect_err("not accepted");
+            assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+            let said = error.message().to_string();
+            assert!(
+                said.contains("claude-code") && said.contains("anthropic-api"),
+                "{said}"
+            );
+            assert!(!said.contains(CANARY), "{said}");
+            assert!(check(&grant.reference()).is_err());
+        }
+    }
+
+    #[test]
+    fn an_account_of_an_accepted_standard_with_the_wrong_credential_or_setting_is_refused() {
+        assert!(plan(&foreign(&[ANTHROPIC_API], "token")).is_err());
+        assert!(plan(&foreign(&[CLAUDE_CODE], "api_key")).is_err());
+        let loose = foreign(&[ANTHROPIC_API], "api_key").settings(settings(&json!({"proxy": "x"})));
+        assert!(plan(&loose).is_err());
     }
 }

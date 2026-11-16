@@ -378,7 +378,7 @@ pub(crate) fn renew(
     request: &RenewRequest,
     spawner: Object<dyn ProcessSpawner>,
 ) -> Result<RenewReport, ProviderError> {
-    let grant = &request.account;
+    let grant = &accounts::resolved(&request.account)?;
     let applied = accounts::plan(grant)?;
     let Some(applied) = applied.filter(|_| grant.kind == CHATGPT) else {
         return Err(failure(
