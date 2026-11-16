@@ -11,9 +11,10 @@ const OPEN_CATEGORIES = new Set(['model', 'thought_level']);
 const GATED_SETTINGS = new Set(['session/set_mode', 'session/set_config_option']);
 const REMOTE_SERVERS = new Set(['http', 'sse']);
 // What a page may put in a session request. Anything else (`additionalDirectories`, which an agent may make writable without asking,
-// `systemPrompt`, an agent's own extensions) is the person's or the provider's to give, so it is removed unless the grant has
-// `permissions`, which is a person's own application.
-const PAGE_SESSION_PARAMS = new Set(['sessionId', 'mcpServers']);
+// `systemPrompt`, an agent's own extensions) is the person's or the provider's to give, so it is removed from every page's request.
+// `replayFrom` asks the agent to replay a session this page opened, and nothing else. Only a provider's own application, which
+// sets `own` on the grant itself and never from a person's choice or a page's, passes the rest.
+const PAGE_SESSION_PARAMS = new Set(['sessionId', 'mcpServers', 'replayFrom']);
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hasId = (message) => message.id !== undefined && message.id !== null;
@@ -72,7 +73,7 @@ export class Scope {
   #optionCategories = new Map();
 
   /**
-   * @param {{cwd: string|null, folder?: 'provider', permissions?: boolean, mcpOrigins?: string[], sessions?: Set<string>}} grant
+   * @param {{cwd: string|null, folder?: 'provider', own?: boolean, permissions?: boolean, mcpOrigins?: string[], sessions?: Set<string>}} grant
    *   `folder: 'provider'` says the provider, not the person, supplies each session's working directory: the page's `cwd` is
    *   removed and the provider MUST put its own before the message reaches the agent.
    * @param {string} origin the page's origin, as the browser reported it
@@ -133,7 +134,7 @@ export class Scope {
         return refuse(INVALID_PARAMS, 'that MCP server is not allowed for this page');
       }
       if (hasId(message)) this.#opening.set(message.id, { method, session: params.sessionId });
-      const rest = this.#grant.permissions === true
+      const rest = this.#grant.own === true
         ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== 'cwd'))
         : Object.fromEntries(Object.entries(params).filter(([key]) => PAGE_SESSION_PARAMS.has(key)));
       return { forward: JSON.stringify({ ...clean, params: providerFolder ? rest : { ...rest, cwd: this.#grant.cwd } }) };

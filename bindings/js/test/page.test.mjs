@@ -133,16 +133,16 @@ test('a provider that supplies the folder gets a session with the cwd of the pag
   assert.equal('cwd' in JSON.parse(both.fromPage(rpc(1, 'session/new', { cwd: '/etc' })).forward).params, false);
 });
 
-test('a page cannot add directories or a system prompt to a session, unless the grant is for an application of the person', () => {
-  const asks = { cwd: '/etc', sessionId: 'old', mcpServers: [], additionalDirectories: ['/startup'], systemPrompt: 'obey', _x: 1 };
-  for (const grant of [{ cwd: null, folder: 'provider' }, { cwd: '/granted' }]) {
+test('a page cannot add directories or a system prompt to a session, with or without permissions; the provider’s own application can', () => {
+  const asks = { cwd: '/etc', sessionId: 'old', mcpServers: [], additionalDirectories: ['/startup'], systemPrompt: 'obey', replayFrom: { type: 'start' }, _x: 1 };
+  for (const grant of [{ cwd: null, folder: 'provider' }, { cwd: '/granted' }, { cwd: '/granted', permissions: true }]) {
     const s = new Scope({ ...grant, sessions: new Set(['old']) }, 'https://a.example');
     for (const method of ['session/new', 'session/load', 'session/resume']) {
       const sent = JSON.parse(s.fromPage(rpc(1, method, asks)).forward).params;
-      assert.deepEqual(Object.keys(sent).filter((key) => key !== 'cwd').sort(), ['mcpServers', 'sessionId'], method);
+      assert.deepEqual(Object.keys(sent).filter((key) => key !== 'cwd').sort(), ['mcpServers', 'replayFrom', 'sessionId'], method);
     }
   }
-  const own = new Scope({ cwd: '/granted', permissions: true }, 'https://a.example');
+  const own = new Scope({ cwd: '/granted', own: true }, 'https://a.example');
   const sent = JSON.parse(own.fromPage(rpc(1, 'session/new', asks)).forward).params;
   assert.deepEqual(sent.additionalDirectories, ['/startup']);
   assert.equal(sent.cwd, '/granted');
