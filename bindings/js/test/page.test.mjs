@@ -133,6 +133,21 @@ test('a provider that supplies the folder gets a session with the cwd of the pag
   assert.equal('cwd' in JSON.parse(both.fromPage(rpc(1, 'session/new', { cwd: '/etc' })).forward).params, false);
 });
 
+test('a page cannot add directories or a system prompt to a session, unless the grant is for an application of the person', () => {
+  const asks = { cwd: '/etc', sessionId: 'old', mcpServers: [], additionalDirectories: ['/startup'], systemPrompt: 'obey', _x: 1 };
+  for (const grant of [{ cwd: null, folder: 'provider' }, { cwd: '/granted' }]) {
+    const s = new Scope({ ...grant, sessions: new Set(['old']) }, 'https://a.example');
+    for (const method of ['session/new', 'session/load', 'session/resume']) {
+      const sent = JSON.parse(s.fromPage(rpc(1, method, asks)).forward).params;
+      assert.deepEqual(Object.keys(sent).filter((key) => key !== 'cwd').sort(), ['mcpServers', 'sessionId'], method);
+    }
+  }
+  const own = new Scope({ cwd: '/granted', permissions: true }, 'https://a.example');
+  const sent = JSON.parse(own.fromPage(rpc(1, 'session/new', asks)).forward).params;
+  assert.deepEqual(sent.additionalDirectories, ['/startup']);
+  assert.equal(sent.cwd, '/granted');
+});
+
 test('a provider-supplied folder changes nothing else about a session', () => {
   const s = new Scope({ cwd: null, folder: 'provider' }, 'https://a.example');
   assert.ok(s.fromPage(rpc(1, 'session/new', { mcpServers: [{ type: 'http', name: 'x', url: 'https://other.example/mcp' }] })).reply);

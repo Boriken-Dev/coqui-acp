@@ -10,6 +10,10 @@ const OWN_SESSION = new Set(['session/prompt', 'session/cancel', 'session/close'
 const OPEN_CATEGORIES = new Set(['model', 'thought_level']);
 const GATED_SETTINGS = new Set(['session/set_mode', 'session/set_config_option']);
 const REMOTE_SERVERS = new Set(['http', 'sse']);
+// What a page may put in a session request. Anything else (`additionalDirectories`, which an agent may make writable without asking,
+// `systemPrompt`, an agent's own extensions) is the person's or the provider's to give, so it is removed unless the grant has
+// `permissions`, which is a person's own application.
+const PAGE_SESSION_PARAMS = new Set(['sessionId', 'mcpServers']);
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hasId = (message) => message.id !== undefined && message.id !== null;
@@ -129,7 +133,9 @@ export class Scope {
         return refuse(INVALID_PARAMS, 'that MCP server is not allowed for this page');
       }
       if (hasId(message)) this.#opening.set(message.id, { method, session: params.sessionId });
-      const { cwd: _page, ...rest } = params;
+      const rest = this.#grant.permissions === true
+        ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== 'cwd'))
+        : Object.fromEntries(Object.entries(params).filter(([key]) => PAGE_SESSION_PARAMS.has(key)));
       return { forward: JSON.stringify({ ...clean, params: providerFolder ? rest : { ...rest, cwd: this.#grant.cwd } }) };
     }
     if (OWN_SESSION.has(method)) {

@@ -130,6 +130,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | `authenticate`, `session/list`, anything else, any `_` extension | refused with `-32601`; a notification is dropped |
 
 - **`cwd`** is the grant's, chosen by the person. Without one, `session/new` is refused. A provider whose agent works in a folder the provider's side makes (a host that gives each site its own scratch folder) may instead mark the grant `folder: "provider"`: the page's `cwd` is then removed from `session/new`, `session/load` and `session/resume` and never reaches the agent, and the provider MUST supply the folder itself in the same message, from what the browser reported of the page and never from the page. Everything else in the table holds.
+- **Everything else in a session request** is removed: a page may send `sessionId` (to reopen one of its sessions) and `mcpServers`, and nothing more. `additionalDirectories`, which an agent may make writable without asking, `systemPrompt` and any other field are the person's or the provider's to give, never a page's. A grant with `permissions`, which is a person's own application, passes them.
 - **`mcpServers`** may hold only `type` `http`, `sse` or `acp`. Anything else, above all an entry with a `command`, is refused whole. An `http` or `sse` URL MUST be `https` and have the page's origin or one in the grant's `mcpOrigins`, because the agent connects from its own network and sends the given headers there.
 - **`_meta`** is removed from every message, since an agent may give it private meaning.
 
