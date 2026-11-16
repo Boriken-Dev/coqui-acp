@@ -22,13 +22,14 @@ pub use guatiao;
 pub use guatiao_channel::{Channel, ChannelSink, ChannelSinkVtable, ChannelVtable};
 
 pub use account::{
-    ACCOUNT_ID_MAX, ASK, AUTH, AccountCatalog, AccountGrant, AccountKeeper, AccountKeeperVtable,
-    AccountKindInfo, AccountLoss, AccountRef, AccountRenewal, Credentials,
+    ACCOUNT_ID_MAX, ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeper,
+    AccountKeeperVtable, AccountKindInfo, AccountLoss, AccountRef, AccountRenewal, Credentials,
     DEFAULT_LOGIN_TIMEOUT_MS, EndpointSlot, HARNESS_LOGIN, LoginAnswer, LoginForm, LoginMethodInfo,
     LoginOutcome, LoginPrompter, LoginPrompterVtable, LoginRequest, MODEL_API, ModelsRequest,
     OPEN_URL, OpenUrl, PASTE_CODE, PROXY, RenewReport, RenewRequest, USER_CODE, is_account_id,
 };
 pub use environment::Environment;
+pub mod standard;
 pub use files::PrivateDir;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{

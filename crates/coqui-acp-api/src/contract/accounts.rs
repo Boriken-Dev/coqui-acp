@@ -311,6 +311,59 @@ fn catalog(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
         ensure!(!variables.contains(&name), "{name} is listed twice");
         variables.push(name);
     }
+    for info in &catalog.kinds {
+        for standard in &info.provides {
+            ensure!(
+                crate::standard::is_standard(standard),
+                "{} provides {standard:?}, which is not a standard id",
+                info.id
+            );
+        }
+    }
+    let mut standards = Vec::new();
+    for accepted in &catalog.accepts {
+        ensure!(
+            crate::standard::is_standard(&accepted.standard),
+            "accepts {:?}, which is not a standard id",
+            accepted.standard
+        );
+        ensure!(
+            !standards.contains(&&accepted.standard),
+            "{} is accepted twice",
+            accepted.standard
+        );
+        standards.push(&accepted.standard);
+        ensure!(
+            !accepted.slots.is_empty(),
+            "{} is accepted with no way to apply it",
+            accepted.standard
+        );
+        for slot in &accepted.slots {
+            let Some(kind) = catalog.kind(&slot.kind) else {
+                return Err(format!(
+                    "{} is applied by {}, which the catalog does not list",
+                    accepted.standard, slot.kind
+                ));
+            };
+            ensure!(
+                kind.provides.is_empty() || kind.provides.contains(&accepted.standard),
+                "{} applies {} but does not provide it",
+                slot.kind,
+                accepted.standard
+            );
+            for variable in [&slot.variable, &slot.base_url_variable]
+                .into_iter()
+                .flatten()
+            {
+                ensure!(
+                    catalog.credential_variables.contains(variable),
+                    "{} is set for {} but is not in credential_variables, so a start would not clear it",
+                    variable,
+                    accepted.standard
+                );
+            }
+        }
+    }
     let mut methods = Vec::new();
     for login in &catalog.logins {
         ensure!(!login.id.is_empty(), "a login method has no id");

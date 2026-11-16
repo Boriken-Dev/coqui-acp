@@ -83,6 +83,14 @@
             "maximum": 18446744073709551615,
             "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
             "default": 0
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -226,6 +234,14 @@
             "maximum": 18446744073709551615,
             "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
             "default": 0
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -305,6 +321,14 @@
             "maximum": 18446744073709551615,
             "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
             "default": 0
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -1273,6 +1297,14 @@
             "maximum": 18446744073709551615,
             "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
             "default": 0
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -2550,6 +2582,14 @@
         "maximum": 18446744073709551615,
         "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
         "default": 0
+      },
+      "provides": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+        "default": []
       }
     },
     "additionalProperties": false,
@@ -2587,6 +2627,14 @@
         "maximum": 18446744073709551615,
         "description": "As [`AccountGrant::revision`].",
         "default": 0
+      },
+      "provides": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "As [`AccountGrant::provides`].",
+        "default": []
       }
     },
     "additionalProperties": false,
@@ -2660,7 +2708,7 @@
             },
             "history_portable": {
               "type": "boolean",
-              "description": "A session started on one account of this kind resumes on another account of the same provider directly.",
+              "description": "The harness keeps its sessions where every account of this kind shares them, so a session started on one account resumes on another directly, with nothing moved. `false` does not say the conversation cannot follow the person: where each account has its own directory ([`state_dir`](Self::state_dir)) a host exports it from the first account's with [`export_session`](crate::AcpHarness::export_session) and imports it into the second's with [`import_session`](crate::AcpHarness::import_session), then resumes it there.",
               "default": false
             },
             "state_dir": {
@@ -2679,6 +2727,14 @@
                 "type": "string"
               },
               "description": "What using it weakens, shown when the account is added and logged at start.",
+              "default": []
+            },
+            "provides": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The standards an account of this kind provides, each an id of [`crate::standard`]: what it can be used as. Empty: only this harness takes it.",
               "default": []
             }
           },
@@ -2748,9 +2804,235 @@
         },
         "description": "Every variable any of its kinds reads: applying an account clears all of them, then sets the chosen kind's.",
         "default": []
+      },
+      "accepts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "standard": {
+              "type": "string",
+              "description": "The standard, an id of [`crate::standard`] or the provider's own."
+            },
+            "slots": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "credential": {
+                    "type": "string",
+                    "description": "The credential key of the standard ([`crate::standard::StandardInfo::credentials`])."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "The harness's own kind that applies it: a grant of the standard is run as a grant of this kind, with the same credential."
+                  },
+                  "variable": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The environment variable the credential is set in, when it is."
+                  },
+                  "file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The file in the harness's directory the credential's text is written to, when it is a login file."
+                  },
+                  "base_url_setting": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The setting of [`kind`](Self::kind) that holds the account's `base_url`, when the harness's endpoint can move; an account that names a `base_url` for a harness with none is refused."
+                  },
+                  "base_url_variable": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The environment variable the base URL ends up in, when it is one."
+                  },
+                  "dir_variable": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The environment variable naming the harness's private directory (the grant's `state_dir`), when the credential is kept in one."
+                  },
+                  "settings": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Settings of [`kind`](Self::kind) the standard fixes, as a map of name to text.",
+                    "default": {}
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "credential",
+                  "kind"
+                ]
+              },
+              "description": "How each credential key of it is applied.",
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "standard"
+          ]
+        },
+        "description": "The standards the harness starts on, most preferred first, and how each is applied. An account whose `kind` this catalog does not list is applied as the first of these that it provides ([`resolve`](Self::resolve)).",
+        "default": []
       }
     },
     "additionalProperties": false
+  },
+  "Accepted": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "standard": {
+        "type": "string",
+        "description": "The standard, an id of [`crate::standard`] or the provider's own."
+      },
+      "slots": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "credential": {
+              "type": "string",
+              "description": "The credential key of the standard ([`crate::standard::StandardInfo::credentials`])."
+            },
+            "kind": {
+              "type": "string",
+              "description": "The harness's own kind that applies it: a grant of the standard is run as a grant of this kind, with the same credential."
+            },
+            "variable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The environment variable the credential is set in, when it is."
+            },
+            "file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The file in the harness's directory the credential's text is written to, when it is a login file."
+            },
+            "base_url_setting": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The setting of [`kind`](Self::kind) that holds the account's `base_url`, when the harness's endpoint can move; an account that names a `base_url` for a harness with none is refused."
+            },
+            "base_url_variable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The environment variable the base URL ends up in, when it is one."
+            },
+            "dir_variable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The environment variable naming the harness's private directory (the grant's `state_dir`), when the credential is kept in one."
+            },
+            "settings": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Settings of [`kind`](Self::kind) the standard fixes, as a map of name to text.",
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "credential",
+            "kind"
+          ]
+        },
+        "description": "How each credential key of it is applied.",
+        "default": []
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "standard"
+    ]
+  },
+  "AcceptedSlot": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "credential": {
+        "type": "string",
+        "description": "The credential key of the standard ([`crate::standard::StandardInfo::credentials`])."
+      },
+      "kind": {
+        "type": "string",
+        "description": "The harness's own kind that applies it: a grant of the standard is run as a grant of this kind, with the same credential."
+      },
+      "variable": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The environment variable the credential is set in, when it is."
+      },
+      "file": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The file in the harness's directory the credential's text is written to, when it is a login file."
+      },
+      "base_url_setting": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The setting of [`kind`](Self::kind) that holds the account's `base_url`, when the harness's endpoint can move; an account that names a `base_url` for a harness with none is refused."
+      },
+      "base_url_variable": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The environment variable the base URL ends up in, when it is one."
+      },
+      "dir_variable": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The environment variable naming the harness's private directory (the grant's `state_dir`), when the credential is kept in one."
+      },
+      "settings": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Settings of [`kind`](Self::kind) the standard fixes, as a map of name to text.",
+        "default": {}
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "credential",
+      "kind"
+    ]
   },
   "AccountKindInfo": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2812,7 +3094,7 @@
       },
       "history_portable": {
         "type": "boolean",
-        "description": "A session started on one account of this kind resumes on another account of the same provider directly.",
+        "description": "The harness keeps its sessions where every account of this kind shares them, so a session started on one account resumes on another directly, with nothing moved. `false` does not say the conversation cannot follow the person: where each account has its own directory ([`state_dir`](Self::state_dir)) a host exports it from the first account's with [`export_session`](crate::AcpHarness::export_session) and imports it into the second's with [`import_session`](crate::AcpHarness::import_session), then resumes it there.",
         "default": false
       },
       "state_dir": {
@@ -2831,6 +3113,14 @@
           "type": "string"
         },
         "description": "What using it weakens, shown when the account is added and logged at start.",
+        "default": []
+      },
+      "provides": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The standards an account of this kind provides, each an id of [`crate::standard`]: what it can be used as. Empty: only this harness takes it.",
         "default": []
       }
     },
@@ -3033,6 +3323,14 @@
             "maximum": 18446744073709551615,
             "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
             "default": 0
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -3136,6 +3434,14 @@
             "maximum": 18446744073709551615,
             "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
             "default": 0
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "default": []
           }
         },
         "additionalProperties": false,

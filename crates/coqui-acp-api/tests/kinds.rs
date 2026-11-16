@@ -11,12 +11,12 @@ use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo, AccountLoss, AccountRef,
-    AccountRenewal, AcpHarnessVtable, Bucket, CacheChoice, CacheLifetime, ChannelSinkVtable,
-    ChannelVtable, Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo,
-    HarnessNotice, HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm,
-    LoginMethodInfo, LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing,
-    ModelSpend, ModelsRequest, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit,
+    Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo,
+    AccountLoss, AccountRef, AccountRenewal, AcpHarnessVtable, Bucket, CacheChoice, CacheLifetime,
+    ChannelSinkVtable, ChannelVtable, Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo,
+    HarnessInfo, HarnessNotice, HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer,
+    LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo,
+    ModelListing, ModelSpend, ModelsRequest, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit,
     ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport,
     SessionImport, SessionQuery, SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo,
     Spend, StartRequest, Takes, TerminalSize, UnknownKind, UsageQuery, UsageReport, UsageSupport,
@@ -112,6 +112,8 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("AccountGrant", schema_of::<AccountGrant>()),
         ("AccountRef", schema_of::<AccountRef>()),
         ("AccountCatalog", schema_of::<AccountCatalog>()),
+        ("Accepted", schema_of::<Accepted>()),
+        ("AcceptedSlot", schema_of::<AcceptedSlot>()),
         ("AccountKindInfo", schema_of::<AccountKindInfo>()),
         ("EndpointSlot", schema_of::<EndpointSlot>()),
         ("LoginMethodInfo", schema_of::<LoginMethodInfo>()),
@@ -146,7 +148,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 46] = [
+    let pinned: [(&str, &[&str], &[&str]); 48] = [
         (
             "StartRequest",
             &[
@@ -388,6 +390,7 @@ fn every_models_keys_are_pinned() {
                 "credentials",
                 "id",
                 "kind",
+                "provides",
                 "revision",
                 "settings",
                 "state_dir",
@@ -396,13 +399,35 @@ fn every_models_keys_are_pinned() {
         ),
         (
             "AccountRef",
-            &["id", "kind", "revision", "settings", "state_dir"],
+            &[
+                "id",
+                "kind",
+                "provides",
+                "revision",
+                "settings",
+                "state_dir",
+            ],
             &["id", "kind"],
         ),
         (
             "AccountCatalog",
-            &["credential_variables", "kinds", "logins"],
+            &["accepts", "credential_variables", "kinds", "logins"],
             &[],
+        ),
+        ("Accepted", &["slots", "standard"], &["standard"]),
+        (
+            "AcceptedSlot",
+            &[
+                "base_url_setting",
+                "base_url_variable",
+                "credential",
+                "dir_variable",
+                "file",
+                "kind",
+                "settings",
+                "variable",
+            ],
+            &["credential", "kind"],
         ),
         (
             "AccountKindInfo",
@@ -412,6 +437,7 @@ fn every_models_keys_are_pinned() {
                 "history_portable",
                 "id",
                 "notices",
+                "provides",
                 "renews",
                 "rotates",
                 "settings",
@@ -479,7 +505,7 @@ fn every_models_keys_are_pinned() {
         ("LoginAnswer", &["secrets", "values"], &[]),
     ];
     let schemas = schemas();
-    assert_eq!(pinned.len(), 46);
+    assert_eq!(pinned.len(), 48);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()
