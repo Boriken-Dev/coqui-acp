@@ -214,6 +214,16 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 - `renew`: for a login kind, `claude auth status` in the account's directory, which refreshes a login within five minutes of `expiresAt` (a login further from its end is answered `not_renewed_because` with no command run); then the file is read: changed is `credentials` (and `expires_at`), unchanged `not_renewed_because`, missing or blank `GONE`. Other kinds: `UNSUPPORTED` with a reason.
 - `login`: runs `claude auth login --claudeai|--console` in the login's directory (every credential variable removed), relays the page it prints with `open_url`, asks for the code the page shows (`ask`, a secret) and writes it to the command's standard input; a code the command refuses is `BAD_VALUE` `login refused: ...`. `api-key` and `auth-token` ask for the secret and check it with `claude auth status` (the secret in the environment). Cancelling or `timeout_ms` ends the command's tree and answers `GONE` within a moment, whatever the call is waiting on. `import_session`, `export_session`: with the `history` feature the transcript's, as above; without it `GUATIAO_ERR_UNSUPPORTED` with a reason (after checking the account). `session_record`, `non_defaults`: the kind's defaults.
 
+## Plan limits of an account (`coqui_acp_claude::account_usage`)
+
+```rust
+pub fn read_limits(grant: &AccountGrant, options: &ReadOptions) -> Result<UsageReport, ProviderError>
+pub struct ReadOptions { pub endpoint: Option<String>, pub timeout: Duration /* 10 s */, pub now: Option<i64> }   // #[non_exhaustive]; ReadOptions::new().endpoint(..).timeout(..).now(..)
+pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com"; pub const USAGE_PATH: &str = "/api/oauth/usage";
+```
+
+The account's side, with no harness, session or program: `GET <endpoint>/api/oauth/usage` with the login's access token as a bearer token and `anthropic-beta: oauth-2025-04-20`, the request Claude Code's own `/usage` view makes (read from its code; the OAuth API address is fixed there and the account's `base_url`, the model endpoint, never moves it). The report is `supported` with a reported bucket per window the document names (`five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `seven_day_oauth_apps`, each `utilization` percent as permille of 1000 and `resets_at` as a fixed window) and per `model_scoped` entry (`seven_day_model_<name>`, covering that model). `claude-login` reads (its `scopes` must hold `user:profile`, else not offered, and its access token must not have expired: `GONE`, never refreshed here since a refresh rotates the file's refresh token); `claude-oauth-token` is tried and a 403 is not offered; `claude-console`, `anthropic-api-key`, `anthropic-auth-token`, `harness-login` and a document with no window answer `UsageReport::unsupported` with the reason. 401 is `GONE`, anything else that fails `INTERNAL`; no message holds the token or the answer. Per-session token counts are not here: they stay with ACP's usage updates. `ClaudeProvider::usage` is unchanged.
+
 ## Errors
 
 `Error` (`#[non_exhaustive]`): `Spawn(io::Error)`, `Refused(String)`, `Timeout { what, limit }`, `Harness(String)` in Claude Code's words or saying how it ended. Into `HarnessError`: `Refused` stays refused, the rest is `Failed`.

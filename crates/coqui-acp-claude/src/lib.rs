@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod account_usage;
 pub mod accounts;
 mod agent;
 #[cfg(feature = "history")]
