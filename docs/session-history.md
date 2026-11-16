@@ -1,6 +1,6 @@
 # Session history format
 
-One file format for the history of an Agent Client Protocol session, so a session can move between machines and between harnesses (Claude Code, Codex, Antigravity, any ACP agent). Version 1.
+One file format for the history of an Agent Client Protocol session, so a session can move between machines and between harnesses (Claude Code, Codex, Pi, Antigravity, any ACP agent). Version 1.
 
 The reference implementation is the crate [`coqui-acp-history`](https://github.com/Boriken-Dev/coqui-acp/tree/main/crates/coqui-acp-history). The shared test vectors in `vectors/session_history/` are normative with this document: a reader in any language is correct when it passes them.
 
@@ -91,20 +91,20 @@ Content that is large or binary may be embedded in its block, or left out and kn
 
 ### The normalised tool table
 
-So a tool transfers between harnesses, the table names each harness's built-in tools once. A native tool call is read as `tool` plus input keys renamed to the normalised spelling; writing to another harness picks that harness's tool and renames back. The table renames keys; a change of shape (Codex's `command` as an argument vector, Claude's as a string) is the codec's.
+So a tool transfers between harnesses, the table names each harness's built-in tools once. A native tool call is read as `tool` plus input keys renamed to the normalised spelling; writing to another harness picks that harness's tool and renames back. The table renames keys; a change of shape (Codex's `command` as an argument vector, Claude's as a string) is the codec's, except the two that are Pi's alone, which the table makes: Pi's `edit` takes a list of replacements where the normalised form has one `old` and `new` (a list of one is read, and a normalised edit that replaces every match has no Pi equivalent), and its `bash` takes `timeout` in seconds where the normalised form has `timeout_ms`.
 
-| Tool | ACP `kind` | Normalised input keys | Claude | Codex | agy |
-| --- | --- | --- | --- | --- | --- |
-| `read` | `read` | `path`, `offset`, `limit` | `Read` (`file_path`) | none | `read_file` |
-| `write` | `edit` | `path`, `content` | `Write` (`file_path`) | none | none |
-| `edit` | `edit` | `path`, `old`, `new`, `replace_all` | `Edit` (`file_path`, `old_string`, `new_string`) | none | `edit_file` |
-| `patch` | `edit` | `patch` | none | `apply_patch` (`input`) | none |
-| `shell` | `execute` | `command`, `cwd`, `timeout_ms` | `Bash` (`timeout`) | `shell`, `shell_command` (`workdir`) | `run_command` |
-| `grep` | `search` | `pattern`, `path`, `glob` | `Grep` | none | none |
-| `glob` | `search` | `pattern`, `path` | `Glob` | none | none |
-| `fetch` | `fetch` | `url` | `WebFetch` | none | none |
+| Tool | ACP `kind` | Normalised input keys | Claude | Codex | Pi | agy |
+| --- | --- | --- | --- | --- | --- | --- |
+| `read` | `read` | `path`, `offset`, `limit` | `Read` (`file_path`) | none | `read` | `read_file` |
+| `write` | `edit` | `path`, `content` | `Write` (`file_path`) | none | `write` | none |
+| `edit` | `edit` | `path`, `old`, `new`, `replace_all` | `Edit` (`file_path`, `old_string`, `new_string`) | none | `edit` (`edits`) | `edit_file` |
+| `patch` | `edit` | `patch` | none | `apply_patch` (`input`) | none | none |
+| `shell` | `execute` | `command`, `cwd`, `timeout_ms` | `Bash` (`timeout`) | `shell`, `shell_command` (`workdir`) | `bash` (`timeout`, seconds) | `run_command` |
+| `grep` | `search` | `pattern`, `path`, `glob`, `-i` | `Grep` | none | `grep` (`ignoreCase`) | none |
+| `glob` | `search` | `pattern`, `path` | `Glob` | none | `find` | none |
+| `fetch` | `fetch` | `url` | `WebFetch` | none | none | none |
 
-Claude's and Codex's names and keys are those of their tool schemas; agy's are names only, its input keys taken to be the normalised ones until recorded fixtures say otherwise. A call with no row, or to a harness with no equivalent, is written to the target as a plain note, and counted in the loss report. `vectors/session_history/tools.json` holds the table.
+Claude's, Codex's and Pi's names and keys are those of their tool schemas; agy's are names only, its input keys taken to be the normalised ones until recorded fixtures say otherwise. A call with no row, or to a harness with no equivalent, is written to the target as a plain note, and counted in the loss report. `vectors/session_history/tools.json` holds the table.
 
 ### Compaction boundaries and seeding a session
 
@@ -120,15 +120,15 @@ With no boundary that has a summary, the seed is every body line. A later bounda
 
 The seed's starting point is reported as a line number (the boundary's, else line 2, the first body line) and the SHA-256 of that line in canonical spelling (below), so a later reader can tell it is the same history. A helper reports the latest whole turns that fit a size budget with the summary always kept; what to do when the seed does not fit (start from what fits and ask the harness to compact first) is the caller's policy.
 
-## The Claude Code and Codex codecs
+## The Claude Code, Codex and Pi codecs
 
-`coqui-acp-claude` and `coqui-acp-codex` read and write their harness's own session files (feature `history`; the programs' `history export` and `history import`; the providers' `export_session` and `import_session`). What they share:
+`coqui-acp-claude`, `coqui-acp-codex` and `coqui-acp-pi` read and write their harness's own session files (feature `history`; the programs' `history export` and `history import`; the providers' `export_session` and `import_session`). What they share:
 
 - **A tool call** is `tool_call` and `tool_call_update` with ACP version 2's `name` set to the harness's own tool name, which with the header's `origin.harness` is the key into the tool table; `kind`, `title` and `locations` as the harness's own driver tells them; `rawInput` the call's input and `rawOutput` its output exactly as the harness has them (a test holds every recorded call to this). `toolCallId` is the harness's call id.
-- **`_meta`** under `dev.boriken.history/native` is an object with `harness` (`claude` or `codex`) and what only that harness can use on a resume: Claude Code's message id, model, thinking signature; Codex's reasoning summary and encrypted content, the call's item type and argument text, a compaction's whole message. A codec reads it only when `harness` is its own and uses nothing from it but those values, so a history cannot put a line of its own into a transcript or a rollout through it.
-- **What is not part of a history** is not carried: Claude Code's system prompt, file-history snapshots, titles and subagent transcripts; Codex's base instructions, developer messages, environment context, tool list and turn settings. A harness adds its own on the next turn.
+- **`_meta`** under `dev.boriken.history/native` is an object with `harness` (`claude`, `codex` or `pi`) and what only that harness can use on a resume: Claude Code's message id, model, thinking signature; Codex's reasoning summary and encrypted content, the call's item type and argument text, a compaction's whole message; Pi's entry id, provider, api and model, thinking signature, an extension message's type, and whether a command was the person's own. A codec reads it only when `harness` is its own and uses nothing from it but those values, so a history cannot put a line of its own into a transcript or a rollout through it.
+- **What is not part of a history** is not carried: Claude Code's system prompt, file-history snapshots, titles and subagent transcripts; Codex's base instructions, developer messages, environment context, tool list and turn settings; Pi's system prompt and tool loadout, usage, labels, names, extension state, the edits that hide a message from its model, and the branches the active one left. A harness adds its own on the next turn.
 - **An import writes the seed** (`Conversation::of`: the latest compaction summary into the target's slot for one, then what follows), ends what the history left open as cancelled, writes no permission as a grant and no snapshot, and names the session by the host's UUID in a place the host chose. Thinking and reasoning go across only to the harness that wrote them.
-- **Tools cross by the table**: Read, Write, Edit, Grep, Glob and WebFetch for Claude Code's rows, `shell` and `shell_command` and Bash for the shell, and `apply_patch` and Claude Code's Write and Edit as file changes (a whole file added, or one run of lines in one file replaced). A call the target has no tool for is a note of the call and its result, counted `tool_as_note`. The loss report also counts `thinking`, `attachment_by_digest`, `summary_missing` and `content_dropped` (content of a kind the target does not take).
+- **Tools cross by the table**: Read, Write, Edit, Grep, Glob and WebFetch for Claude Code's rows, `read`, `write`, `edit`, `grep` and `find` for Pi's, `shell` and `shell_command`, Bash and `bash` for the shell, and `apply_patch` and Claude Code's Write and Edit as file changes (a whole file added, or one run of lines in one file replaced). A call the target has no tool for is a note of the call and its result, counted `tool_as_note`. The loss report also counts `thinking`, `attachment_by_digest`, `summary_missing` and `content_dropped` (content of a kind the target does not take).
 
 Moving the recorded Claude Code session of the tests to Codex reports `thinking` 1 and `tool_as_note` 3 (Read, Grep and the todo list); Codex's recorded script-tool session to Claude Code reports `thinking` 1 and `tool_as_note` 5 (every call of `exec`, Codex's script tool, has no equivalent).
 

@@ -217,6 +217,108 @@
           "command": "ls"
         }
       }
+    },
+    {
+      "harness": "pi",
+      "name": "read",
+      "input": {
+        "path": "/a",
+        "offset": 3,
+        "limit": 9
+      },
+      "expect": {
+        "tool": "read",
+        "input": {
+          "path": "/a",
+          "offset": 3,
+          "limit": 9
+        }
+      }
+    },
+    {
+      "harness": "pi",
+      "name": "write",
+      "input": {
+        "path": "/a",
+        "content": "x"
+      },
+      "expect": {
+        "tool": "write",
+        "input": {
+          "path": "/a",
+          "content": "x"
+        }
+      }
+    },
+    {
+      "harness": "pi",
+      "name": "edit",
+      "input": {
+        "path": "/a",
+        "edits": [
+          {
+            "oldText": "o",
+            "newText": "n"
+          }
+        ]
+      },
+      "expect": {
+        "tool": "edit",
+        "input": {
+          "path": "/a",
+          "old": "o",
+          "new": "n"
+        }
+      }
+    },
+    {
+      "harness": "pi",
+      "name": "bash",
+      "input": {
+        "command": "ls",
+        "timeout": 5
+      },
+      "expect": {
+        "tool": "shell",
+        "input": {
+          "command": "ls",
+          "timeout_ms": 5000
+        }
+      }
+    },
+    {
+      "harness": "pi",
+      "name": "grep",
+      "input": {
+        "pattern": "p",
+        "path": "/a",
+        "glob": "*.rs",
+        "ignoreCase": true
+      },
+      "expect": {
+        "tool": "grep",
+        "input": {
+          "pattern": "p",
+          "path": "/a",
+          "glob": "*.rs",
+          "-i": true
+        }
+      }
+    },
+    {
+      "harness": "pi",
+      "name": "find",
+      "input": {
+        "pattern": "*.rs",
+        "path": "/a"
+      },
+      "expect": {
+        "tool": "glob",
+        "input": {
+          "pattern": "*.rs",
+          "path": "/a"
+        }
+      }
     }
   ],
   "denormalise": [
@@ -294,6 +396,64 @@
           "command": "ls"
         }
       }
+    },
+    {
+      "tool": "edit",
+      "harness": "pi",
+      "input": {
+        "path": "/a",
+        "old": "o",
+        "new": "n"
+      },
+      "expect": {
+        "name": "edit",
+        "input": {
+          "path": "/a",
+          "edits": [
+            {
+              "oldText": "o",
+              "newText": "n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "tool": "edit",
+      "harness": "pi",
+      "input": {
+        "path": "/a",
+        "old": "o",
+        "new": "n",
+        "replace_all": false
+      },
+      "expect": {
+        "name": "edit",
+        "input": {
+          "path": "/a",
+          "edits": [
+            {
+              "oldText": "o",
+              "newText": "n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "tool": "shell",
+      "harness": "pi",
+      "input": {
+        "command": "ls",
+        "timeout_ms": 1500
+      },
+      "expect": {
+        "name": "bash",
+        "input": {
+          "command": "ls",
+          "timeout": 2
+        }
+      }
     }
   ],
   "unknown_native": [
@@ -326,6 +486,14 @@
     {
       "tool": "fetch",
       "harness": "agy"
+    },
+    {
+      "tool": "patch",
+      "harness": "pi"
+    },
+    {
+      "tool": "fetch",
+      "harness": "pi"
     }
   ],
   "collisions": [
@@ -359,6 +527,49 @@
         "timeout_ms": 9
       },
       "why": "`timeout` renames to `timeout_ms`, which the input already has."
+    },
+    {
+      "harness": "pi",
+      "name": "edit",
+      "input": {
+        "path": "/a",
+        "old": "x",
+        "edits": [
+          {
+            "oldText": "o",
+            "newText": "n"
+          }
+        ]
+      },
+      "why": "`edits` becomes `old` and `new`, and the input already has `old`: neither may win."
+    },
+    {
+      "harness": "pi",
+      "name": "edit",
+      "input": {
+        "path": "/a",
+        "edits": [
+          {
+            "oldText": "o",
+            "newText": "n"
+          },
+          {
+            "oldText": "p",
+            "newText": "q"
+          }
+        ]
+      },
+      "why": "Two replacements are no one `old` and `new`, so the call is not normalised."
+    },
+    {
+      "harness": "pi",
+      "name": "bash",
+      "input": {
+        "command": "ls",
+        "timeout": 5,
+        "timeout_ms": 9
+      },
+      "why": "`timeout` becomes `timeout_ms`, which the input already has."
     }
   ],
   "collisions_denormalise": [
@@ -370,6 +581,28 @@
         "file_path": "/b"
       },
       "why": "`path` renames to `file_path`, which the input already has."
+    },
+    {
+      "tool": "edit",
+      "harness": "pi",
+      "input": {
+        "path": "/a",
+        "old": "o",
+        "new": "n",
+        "replace_all": true
+      },
+      "why": "A replacement of every match is no call of Pi's `edit`, whose replacements are each one match."
+    },
+    {
+      "tool": "edit",
+      "harness": "pi",
+      "input": {
+        "path": "/a",
+        "old": "o",
+        "new": "n",
+        "edits": []
+      },
+      "why": "`old` and `new` become `edits`, which the input already has."
     }
   ]
 }
