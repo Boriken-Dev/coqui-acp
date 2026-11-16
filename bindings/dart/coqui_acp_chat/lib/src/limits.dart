@@ -8,6 +8,7 @@ final class ChatLimits {
     this.pendingQuestions = 16,
     this.settledRequests = 32,
     this.queued = 20,
+    this.attachments = 8,
     this.clients = 16,
     this.turns = 1000,
     this.toolText = 256 * 1024,
@@ -36,6 +37,7 @@ final class ChatLimits {
              pendingQuestions >= 0 &&
              settledRequests >= 0 &&
              queued >= 0 &&
+             attachments >= 0 &&
              clients >= 0 &&
              turns >= 0 &&
              toolText >= 0 &&
@@ -76,6 +78,9 @@ final class ChatLimits {
 
   /// The most messages one conversation holds waiting for its turn to end. Default 20.
   final int queued;
+
+  /// The most attachments one queued message holds when messages are joined into one. Default 8.
+  final int attachments;
 
   /// The most clients attached to one conversation at once. Default 16.
   final int clients;

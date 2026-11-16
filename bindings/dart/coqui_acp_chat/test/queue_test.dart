@@ -266,21 +266,65 @@ void main() {
     });
 
     test(
-      'that the agent could not be asked for leaves the message waiting, and the queue held as a stop holds it',
+      'that the agent could not be asked for is not kept, so it can go back to the person, and the turn goes on',
       () async {
         final (:store, :session, :agent) = started();
         await session.send('job');
         feed(session, state('running'));
         agent.onCancel = (_) async => throw StateError('not now');
         await expectLater(session.steer('urgent'), throwsStateError);
-        expect(session.queue.single.text, 'urgent');
-        feed(session, state('idle', reason: 'cancelled'));
+        expect(session.queue, isEmpty);
+        expect(session.status, ChatStatus.working);
+        feed(session, state('idle', reason: 'end_turn'));
         await settle();
-        expect(session.queueHeld, 'the turn was stopped');
+        expect(session.queueHeld, isNull);
         expect(agent.prompts, ['job']);
         store.dispose();
       },
     );
+
+    test(
+      'is handed over when the agent has it, and one the agent refuses is not kept but fails handedOver',
+      () async {
+        final (:store, :session, :agent) = started();
+        await session.send('job');
+        feed(session, state('running'));
+        final message = (await session.steer('change course'))!;
+        var handed = false;
+        unawaited(message.handedOver.then((_) => handed = true));
+        await settle();
+        expect(handed, isFalse, reason: 'the turn has not ended yet');
+        feed(session, state('idle', reason: 'cancelled'));
+        await settle();
+        expect(handed, isTrue);
+        expect(agent.prompts, ['job', 'change course']);
+
+        feed(session, state('running'));
+        agent.onPrompt = (_) async => throw StateError('offline');
+        final second = (await session.steer('and again'))!;
+        final failed = expectLater(second.handedOver, throwsStateError);
+        feed(session, state('idle', reason: 'cancelled'));
+        await failed;
+        expect(session.queue, isEmpty, reason: 'it goes back to the person');
+        expect(session.queueHeld, isNull);
+        store.dispose();
+      },
+    );
+
+    test('one whose turn failed instead comes back with the reason', () async {
+      final (:store, :session, :agent) = started();
+      await session.send('job');
+      feed(session, state('running'));
+      await session.send('later');
+      final message = (await session.steer('change course'))!;
+      final failed = expectLater(message.handedOver, throwsStateError);
+      feed(session, state('idle', reason: 'error'));
+      await failed;
+      expect(session.queue.map((m) => m.text), ['later']);
+      expect(session.queueHeld, 'the turn failed');
+      expect(agent.prompts, ['job']);
+      store.dispose();
+    });
   });
 
   group('under v1, whose turn ends with the answer to its prompt', () {
@@ -659,6 +703,178 @@ void main() {
         await first;
         await settle();
         expect(agent.prompts, ['one', 'two']);
+        store.dispose();
+      },
+    );
+  });
+  group('merging, moving and taking back', () {
+    Future<({ChatStore store, ChatSession session, FakeConnection agent})>
+    working({ChatLimits limits = const ChatLimits()}) async {
+      final s = started(limits: limits);
+      await s.session.send('go');
+      feed(s.session, state('running'));
+      return s;
+    }
+
+    test(
+      'a message joins the one above it: texts with a blank line, attachments once each',
+      () async {
+        final (:store, :session, :agent) = await working();
+        await session.send(
+          'one',
+          attachments: [
+            AcpAttachment.text('a.txt', 'a'),
+            AcpAttachment.text('b.txt', 'b'),
+          ],
+        );
+        await session.send(
+          'two',
+          attachments: [
+            AcpAttachment.text('b.txt', 'b again'),
+            AcpAttachment.text('c.txt', 'c'),
+          ],
+        );
+        await session.send('three');
+        final joined = session.mergeQueued(session.queue[1])!;
+        expect(joined, same(session.queue.first));
+        expect(session.queue.map((m) => m.text), ['one\n\ntwo', 'three']);
+        expect(
+          [for (final item in joined.attachments) item.name],
+          ['a.txt', 'b.txt', 'c.txt'],
+        );
+        expect(
+          session.mergeQueued(session.queue.first),
+          isNull,
+          reason: 'the first has nothing above it',
+        );
+        expect(session.mergeAllQueued(), 1);
+        expect(session.queue.single.text, 'one\n\ntwo\n\nthree');
+        store.dispose();
+      },
+    );
+
+    test(
+      'more attachments than a message holds refuse the join and change nothing; merging all joins what fits',
+      () async {
+        final (:store, :session, :agent) = await working(
+          limits: const ChatLimits(attachments: 2),
+        );
+        await session.send(
+          'one',
+          attachments: [
+            AcpAttachment.text('a', 'a'),
+            AcpAttachment.text('b', 'b'),
+          ],
+        );
+        await session.send('two', attachments: [AcpAttachment.text('c', 'c')]);
+        await session.send('three');
+        expect(() => session.mergeQueued(session.queue[1]), throwsStateError);
+        expect(session.queue.map((m) => m.text), ['one', 'two', 'three']);
+        expect(session.mergeAllQueued(), 1, reason: 'the last two fit');
+        expect(session.queue.map((m) => m.text), ['one', 'two\n\nthree']);
+        store.dispose();
+      },
+    );
+
+    test('moves one place at a time and stops at the ends', () async {
+      final (:store, :session, :agent) = await working();
+      for (final t in ['a', 'b', 'c']) {
+        await session.send(t);
+      }
+      session.moveQueued(session.queue[2], -1);
+      expect(session.queue.map((m) => m.text), ['a', 'c', 'b']);
+      session.moveQueued(session.queue.first, -1);
+      expect(session.queue.map((m) => m.text), ['a', 'c', 'b']);
+      session.moveQueued(session.queue.last, 1);
+      expect(session.queue.map((m) => m.text), ['a', 'c', 'b']);
+      session.moveQueued(session.queue.first, 1);
+      expect(session.queue.map((m) => m.text), ['c', 'a', 'b']);
+      store.dispose();
+    });
+
+    test(
+      'one taken back leaves the queue with its text and attachments for the host to put in the draft',
+      () async {
+        final (:store, :session, :agent) = await working();
+        await session.send(
+          'again',
+          attachments: [AcpAttachment.text('a.txt', 'a')],
+        );
+        final message = session.queue.single;
+        expect(session.unqueue(message), isTrue);
+        expect(session.queue, isEmpty);
+        expect(message.text, 'again');
+        expect([for (final item in message.attachments) item.name], ['a.txt']);
+        expect(session.unqueue(message), isFalse);
+        feed(session, state('idle', reason: 'end_turn'));
+        await settle();
+        expect(agent.prompts, ['go'], reason: 'it is not sent');
+        store.dispose();
+      },
+    );
+
+    test(
+      'merged delivery sends what waits as one prompt when the turn ends; each keeps one a turn',
+      () async {
+        final (:store, :session, :agent) = await working();
+        session.queueDelivery = QueueDelivery.merge;
+        await session.send('one', attachments: [AcpAttachment.text('a', 'a')]);
+        await session.send('two', attachments: [AcpAttachment.text('a', 'a')]);
+        await session.send('three');
+        feed(session, state('idle', reason: 'end_turn'));
+        await settle();
+        expect(agent.prompts, ['go', 'one\n\ntwo\n\nthree']);
+        expect(agent.attachmentNames.last, ['a']);
+        expect(session.queue, isEmpty);
+        store.dispose();
+      },
+    );
+
+    test(
+      'merged delivery sends as many as one prompt holds and the rest in the next turn',
+      () async {
+        final (:store, :session, :agent) = await working(
+          limits: const ChatLimits(attachments: 1),
+        );
+        session.queueDelivery = QueueDelivery.merge;
+        await session.send('one', attachments: [AcpAttachment.text('a', 'a')]);
+        await session.send('two', attachments: [AcpAttachment.text('b', 'b')]);
+        await session.send('three');
+        feed(session, state('idle', reason: 'end_turn'));
+        await settle();
+        expect(agent.prompts.last, 'one');
+        expect(session.queue.map((m) => m.text), ['two', 'three']);
+        feed(session, state('running'));
+        feed(session, state('idle', reason: 'end_turn'));
+        await settle();
+        expect(agent.prompts.last, 'two\n\nthree');
+        store.dispose();
+      },
+    );
+
+    test(
+      'a held queue goes as one with sendMerged, or one at a time with sendQueued of the first',
+      () async {
+        final (:store, :session, :agent) = await working();
+        session.queueDelivery = QueueDelivery.merge;
+        for (final t in ['a', 'b', 'c']) {
+          await session.send(t);
+        }
+        await session.cancel();
+        feed(session, state('idle', reason: 'cancelled'));
+        await settle();
+        expect(session.queueHeld, 'the turn was stopped');
+        await session.sendQueued(session.queue.first);
+        expect(agent.prompts.last, 'a', reason: 'Send next is one message');
+        feed(session, state('idle', reason: 'cancelled'));
+        feed(session, state('running'));
+        await session.cancel();
+        feed(session, state('idle', reason: 'cancelled'));
+        await settle();
+        expect(session.queueHeld, 'the turn was stopped');
+        await session.sendMerged();
+        expect(agent.prompts.last, 'b\n\nc');
+        expect(session.queue, isEmpty);
         store.dispose();
       },
     );

@@ -247,14 +247,39 @@ final class AgentQuestion {
 
 /// A message written while the agent was working, sent when its turn ends.
 final class QueuedMessage {
-  QueuedMessage._(this._text, List<AcpAttachment> attachments, {this.from})
-    : attachments = List.unmodifiable(attachments);
+  QueuedMessage._(
+    this._text,
+    List<AcpAttachment> attachments, {
+    this.from,
+    bool steered = false,
+  }) : _attachments = List.of(attachments),
+       _steered = steered {
+    // Whoever does not wait for it is not told of a failure it has no use for.
+    _handed.future.ignore();
+  }
   String _text;
   String get text => _text;
-  final List<AcpAttachment> attachments;
+  List<AcpAttachment> _attachments;
+  List<AcpAttachment> get attachments => UnmodifiableListView(_attachments);
 
   /// The client that wrote it.
   final String? from;
+
+  final bool _steered;
+  final Completer<void> _handed = Completer<void>();
+
+  /// Completes when the agent has been handed the message. A message written to steer that could not be sent fails here with
+  /// the reason, and is no longer in the queue, so a host can give it back to the person.
+  Future<void> get handedOver => _handed.future;
+}
+
+/// How a queue goes on when a turn ends as it should.
+enum QueueDelivery {
+  /// One prompt holds everything that waits, joined with a blank line between the messages.
+  merge,
+
+  /// One message goes with each turn.
+  each,
 }
 
 /// Something a conversation tells beside its state: it is delivered once, to whoever listens when it happens.
@@ -557,6 +582,9 @@ class ChatSession extends ChatNotifier {
   /// Why the queue waits for the person rather than going on: a turn that was stopped or failed. Null while it goes on.
   String? get queueHeld => _queueHeld;
 
+  /// Whether the queue goes with one message to a turn or all at once when a turn ends as it should.
+  QueueDelivery queueDelivery = QueueDelivery.each;
+
   /// Choices made while a turn ran, by option id: sent before the next prompt.
   Map<String, PendingChoice> get pendingChoices =>
       UnmodifiableMapView(_pending);
@@ -646,7 +674,10 @@ class ChatSession extends ChatNotifier {
     _heldFirst.add(message);
     _add(message);
     if (attachments.isNotEmpty) {
-      final note = _entry(MessageRole.notice, 'Sent with this: ${attachments.join(', ')}');
+      final note = _entry(
+        MessageRole.notice,
+        'Sent with this: ${attachments.join(', ')}',
+      );
       _heldFirst.add(note);
       _add(note);
     }
@@ -1999,25 +2030,43 @@ class ChatSession extends ChatNotifier {
 
   /// Sends [text] ahead of everything queued and ends the running turn to do it: the agent is stopped, then takes this message
   /// first, and the rest of the queue goes on after it as the turns end. With no turn running it is an ordinary send.
-  Future<void> steer(
+  ///
+  /// Completes when the turn has been asked to end, with the message, whose [QueuedMessage.handedOver] says when the agent has
+  /// it (null when it went at once). If the agent cannot be asked, the message is not kept and this throws; one that cannot be
+  /// sent after the turn ended fails [QueuedMessage.handedOver] and is not kept either.
+  Future<QueuedMessage?> steer(
     String text, {
     List<AcpAttachment> attachments = const [],
     String? from,
   }) async {
-    if (text.trim().isEmpty && attachments.isEmpty) return;
+    if (text.trim().isEmpty && attachments.isEmpty) return null;
     _requireClient(from);
     if (_status != ChatStatus.working) {
       if (_delivering || _opening) {
         // No turn runs yet, so there is nothing to end: it goes next, ahead of the rest of the queue.
-        _enqueue(QueuedMessage._(text, attachments, from: from), last: false);
+        final message = QueuedMessage._(text, attachments, from: from);
+        _enqueue(message, last: false);
         notifyListeners();
-        return;
+        return message;
       }
       await send(text, attachments: attachments, from: from);
-      return;
+      return null;
     }
-    _enqueue(QueuedMessage._(text, attachments, from: from), last: false);
-    await _steerWith();
+    final message = QueuedMessage._(
+      text,
+      attachments,
+      from: from,
+      steered: true,
+    );
+    _enqueue(message, last: false);
+    try {
+      await _steerWith();
+    } catch (_) {
+      _queue.remove(message);
+      notifyListeners();
+      rethrow;
+    }
+    return message;
   }
 
   /// Promotes a message already queued to the front and ends the running turn, as [steer] does.
@@ -2068,9 +2117,22 @@ class ChatSession extends ChatNotifier {
             TurnOutcome.cancelled => 'the turn was stopped',
             TurnOutcome.failed => 'the turn failed',
           };
-    _queueHeld = held;
+    // A message written to steer goes with the turn it ended; one whose turn ended otherwise comes back to the person.
+    if (held != null) _failSteered(held);
+    _queueHeld = _queue.isEmpty ? null : held;
     // After the update that ended the turn has been dispatched: an answer to the next prompt could otherwise arrive inside it.
     if (held == null) _scheduleQueue();
+  }
+
+  void _failSteered(String why) {
+    final steering = [
+      for (final message in _queue)
+        if (message._steered && !message._handed.isCompleted) message,
+    ];
+    for (final message in steering) {
+      _queue.remove(message);
+      message._handed.completeError(StateError(why));
+    }
   }
 
   void _scheduleQueue() {
@@ -2094,18 +2156,136 @@ class ChatSession extends ChatNotifier {
     }
     if (message != null && !_queue.contains(message)) return;
     _queueHeld = null;
+    if (message == null && queueDelivery == QueueDelivery.merge) {
+      _mergeForDelivery();
+    }
     final next = message ?? _queue.first;
     _queue.remove(next);
     notifyListeners();
     try {
-      await _deliver(next._text, next.attachments, next.from);
+      await _deliver(next._text, next._attachments, next.from);
+      if (!next._handed.isCompleted) next._handed.complete();
     } catch (error) {
+      if (next._steered) {
+        // It goes back to the person, not to the head of a queue they did not choose.
+        next._handed.completeError(error);
+        if (_queue.isNotEmpty) {
+          _queueHeld = 'it could not be sent: ${reasonOf(error)}';
+        }
+        notifyListeners();
+        return;
+      }
       // Not sent, so it stays first in the queue, which waits for the person.
       if (!_queue.contains(next)) _queue.insert(0, next);
       _queueHeld = 'it could not be sent: ${reasonOf(error)}';
       notifyListeners();
       rethrow;
     }
+  }
+
+  /// Sends everything that waits as one prompt, whatever [queueDelivery] says: the messages are joined first, as many as one
+  /// prompt holds, and the rest go as turns end.
+  Future<void> sendMerged() async {
+    if (_queue.isEmpty ||
+        _status == ChatStatus.working ||
+        _delivering ||
+        _opening) {
+      return;
+    }
+    _mergeForDelivery();
+    await sendQueued(_queue.first);
+  }
+
+  /// Joins the messages at the front of the queue that one prompt can hold: those from the same client, as many as keep within
+  /// [ChatLimits.attachments].
+  void _mergeForDelivery() {
+    while (_queue.length > 1) {
+      final first = _queue.first, second = _queue[1];
+      if (first.from != second.from || _joined(first, second) == null) return;
+      _join(first, second);
+    }
+  }
+
+  /// The attachments of [above] and [below] together, one of each name, or null when that is more than a message holds.
+  List<AcpAttachment>? _joined(QueuedMessage above, QueuedMessage below) {
+    final names = {for (final item in above._attachments) item.name};
+    final all = [
+      ...above._attachments,
+      for (final item in below._attachments)
+        if (names.add(item.name)) item,
+    ];
+    return all.length > limits.attachments ? null : all;
+  }
+
+  void _join(QueuedMessage above, QueuedMessage below) {
+    above
+      .._attachments = _joined(above, below)!
+      .._text = [
+        above._text,
+        below._text,
+      ].where((part) => part.trim().isNotEmpty).join('\n\n');
+    _queue.remove(below);
+    if (!below._handed.isCompleted) below._handed.complete();
+  }
+
+  /// Joins [message] to the one above it, with a blank line between their texts and one of each attachment, and returns the one
+  /// they became. Throws [StateError] when the attachments are more than a message holds ([ChatLimits.attachments]) or the two
+  /// were written by different clients; nothing is changed then. The first message, or one not queued, is left as it is.
+  QueuedMessage? mergeQueued(QueuedMessage message) {
+    final index = _queue.indexOf(message);
+    if (index < 1) return null;
+    final above = _queue[index - 1];
+    if (above.from != message.from) {
+      throw StateError('They were written by different clients');
+    }
+    if (_joined(above, message) == null) {
+      throw StateError(
+        'A message holds at most ${limits.attachments} attachments',
+      );
+    }
+    _join(above, message);
+    notifyListeners();
+    return above;
+  }
+
+  /// Joins every queued message into the one before it, as [mergeQueued] does, as far as one message can hold them; what does
+  /// not fit stays queued after it. Returns how many messages were joined into others.
+  int mergeAllQueued() {
+    var joined = 0;
+    var index = 1;
+    while (index < _queue.length) {
+      final above = _queue[index - 1], message = _queue[index];
+      if (above.from != message.from || _joined(above, message) == null) {
+        index++;
+        continue;
+      }
+      _join(above, message);
+      joined++;
+    }
+    if (joined > 0) notifyListeners();
+    return joined;
+  }
+
+  /// Moves [message] [by] places toward the front (negative) or the back of the queue, to the end it can reach.
+  void moveQueued(QueuedMessage message, int by) {
+    final from = _queue.indexOf(message);
+    if (from < 0 || by == 0) return;
+    final to = (from + by).clamp(0, _queue.length - 1);
+    if (to == from) return;
+    _queue
+      ..removeAt(from)
+      ..insert(to, message);
+    notifyListeners();
+  }
+
+  /// Takes [message] out of the queue to be written again, and returns whether it was there. What it said and went with it
+  /// are for the host to put back where the person writes.
+  bool unqueue(QueuedMessage message) {
+    if (!_queue.remove(message)) return false;
+    if (!message._handed.isCompleted) message._handed.complete();
+    if (_queue.isEmpty) _queueHeld = null;
+    notifyListeners();
+    return true;
   }
 
   /// Changes the text of a queued message.
@@ -2120,10 +2300,16 @@ class ChatSession extends ChatNotifier {
 
   /// Takes one queued message out, or every one.
   void removeQueued([QueuedMessage? message]) {
+    final gone = message == null ? List.of(_queue) : [message];
     if (message == null) {
       _queue.clear();
     } else {
       _queue.remove(message);
+    }
+    for (final one in gone) {
+      if (!one._handed.isCompleted && !_queue.contains(one)) {
+        one._handed.complete();
+      }
     }
     if (_queue.isEmpty) _queueHeld = null;
     notifyListeners();

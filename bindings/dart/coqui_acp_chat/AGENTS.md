@@ -54,8 +54,14 @@ Host-owned plain fields: `agent`, `peerId`, `sessionId`, `cwd`, `unread`; hooks 
 - **Prompts**: `send(text, {attachments, from}) -> Future<void>` completes when the agent has been handed the message (v2: its
   acknowledgement; v1: the prompt is under way and was not refused at once). The message is in the conversation before the agent can
   answer, takes its id from the acknowledgement or its echo, and a prompt that is refused leaves nothing behind (a v1 prompt the agent fails before it said anything too; one it echoed in v2 stays). Queued while a turn
-  runs, another message is being handed over, or the conversation is being opened (sent after the kept mode is back; held if it did not open); throws `StateError` past `queued`. `steer(text)` goes first, even past `queued`, and with a turn running
-  cancels the turn. `steerQueued`, `sendQueued([m])`, `editQueued`, `removeQueued([m])`, `cancel({from})`.
+  runs, another message is being handed over, or the conversation is being opened (sent after the kept mode is back; held if it did not open); throws `StateError` past `queued`. `steer(text) -> QueuedMessage?` goes first, even past `queued`, and with a turn running
+  cancels the turn; it returns the message, whose `handedOver` completes when the agent has it, and a steer that cannot be asked of the agent (it throws) or cannot be sent after the turn
+  ended (`handedOver` fails with the reason, also when the turn ended any other way than cancelled) leaves the queue, for the host to give back to the person.
+  `steerQueued`, `sendQueued([m])`, `editQueued`, `removeQueued([m])`, `cancel({from})`.
+- **The queue**: `mergeQueued(m)` joins a message to the one above it (texts with a blank line, one attachment per name; returns the one they became, null for the first; throws
+  `StateError` over `ChatLimits.attachments` or across two clients, changing nothing), `mergeAllQueued() -> int`, `moveQueued(m, by)`, `unqueue(m) -> bool` (out of the queue, its `text` and
+  `attachments` still readable, for the host to put back in the draft), `sendMerged()` (a held queue as one prompt). `queueDelivery` (`QueueDelivery.each`, the default, or `merge`):
+  with `merge` the first send after a turn that ended as it should joins what waits, as many as one prompt holds, and the rest follow in the next turns.
 - **Requests**: `PermissionQuestion` (`title`, `kind`, `detail` what it would run or touch, `reason` why the agent says it needs it, `diff` the
   change an edit would make as a `ToolDiff` (`describeToolDiff`), `options` in the agent's order, `forPerson`, `toolCallId`,
   `outcome`), `AgentQuestion`. `answerPermission(allow:, by:)`, `choosePermission(option, by:)`, `cancelPermission`,
@@ -123,7 +129,7 @@ the first answer to a request settles it for everyone.
 
 ## ChatLimits (every field: any value from 0 up)
 
-`entries` 5000, `messageText` 2 MiB, `pendingPermissions` 64, `pendingQuestions` 16, `settledRequests` 32, `queued` 20, `clients` 16,
+`entries` 5000, `messageText` 2 MiB, `pendingPermissions` 64, `pendingQuestions` 16, `settledRequests` 32, `queued` 20, `attachments` 8 (per joined queued message), `clients` 16,
 `turns` 1000, `toolText` 256 KiB, `terminalOutput` 256 KiB (kept from its end), `planEntries` 200, `commands` 500, `configOptions` 32,
 `choices` 200, `toolBlocks` 64, `locations` 64, `shortText` 512, `terminals` 256 (one still running is never dropped), `describedInput`
 4000, `hostNotices` 4, `listShapes` 8, `shapeDepth` 8, `titleLength` 60, `usageBuckets` 64, `children` 256, `childUpdates` 1000, `handOverSeconds` 60 (0: no bound; a v2 agent that does not acknowledge a prompt in time fails `send`, and the queue behind it is held). A request past `pendingPermissions` or
