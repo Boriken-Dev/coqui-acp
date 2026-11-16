@@ -784,8 +784,26 @@ FILE_MAX = 1 << 20
 #: still counts as changed since.
 FILE_CLOCK_SLACK_MS = 50
 ACCOUNT_ID_MAX = 128
-GRANT_KEYS = {"id", "kind", "settings", "credentials", "state_dir", "revision"}
-REF_KEYS = {"id", "kind", "settings", "state_dir", "revision"}
+GRANT_KEYS = {"id", "kind", "settings", "credentials", "state_dir", "revision", "provides"}
+REF_KEYS = {"id", "kind", "settings", "state_dir", "revision", "provides"}
+#: What the echo starts on besides its own kinds: a key of the standard `echo-api`, run as `echo-key`.
+ACCEPTS = [
+    {
+        "standard": "echo-api",
+        "slots": [
+            {
+                "credential": "api_key",
+                "kind": "echo-key",
+                "variable": "ECHO_API_KEY",
+                "file": None,
+                "base_url_setting": "base_url",
+                "base_url_variable": None,
+                "dir_variable": None,
+                "settings": {},
+            }
+        ],
+    }
+]
 MODELS_KEYS = {"environment", "account"}
 LOGIN_KEYS = {"method", "inputs", "state_dir", "timeout_ms"}
 RENEW_KEYS = {"account"}
@@ -819,6 +837,7 @@ def _catalog(logins: bool) -> Dict[str, Any]:
             "state_dir": False,
             "renews": False,
             "notices": [],
+            "provides": [],
         },
         {
             "id": FILE_KIND,
@@ -836,6 +855,7 @@ def _catalog(logins: bool) -> Dict[str, Any]:
             "state_dir": True,
             "renews": True,
             "notices": ["the login file can be read by what the agent runs"],
+            "provides": ["echo"],
         },
         {
             "id": KEY_KIND,
@@ -853,6 +873,7 @@ def _catalog(logins: bool) -> Dict[str, Any]:
             "state_dir": False,
             "renews": False,
             "notices": [],
+            "provides": ["echo-api"],
         },
     ]
     methods: List[Dict[str, Any]] = []
@@ -889,7 +910,7 @@ def _catalog(logins: bool) -> Dict[str, Any]:
                 "remote": False,
             },
         ]
-    return {"kinds": kinds, "logins": methods, "credential_variables": list(VARIABLES)}
+    return {"kinds": kinds, "logins": methods, "credential_variables": list(VARIABLES), "accepts": ACCEPTS}
 
 
 def _is_account_id(text: Any) -> bool:
@@ -906,9 +927,20 @@ def _read_account(logins: bool, asked: Any, keys: set) -> None:
         raise BadValue("the account has a key the echo does not know")
     if not _is_account_id(asked.get("id")):
         raise BadValue("an account id is 1 to 128 bytes with no control character")
+    provides = asked.get("provides", [])
+    if not isinstance(provides, list) or not all(isinstance(p, str) for p in provides):
+        raise BadValue("provides is not a list of standards")
     kind = asked.get("kind")
     if kind not in [k["id"] for k in _catalog(logins)["kinds"]]:
-        raise BadValue("the echo takes no account of that kind")
+        accepted = [a["standard"] for a in ACCEPTS]
+        if not any(p in accepted for p in provides):
+            raise BadValue(
+                "the echo takes no account of that kind: it accepts "
+                + (", ".join(accepted) or "none")
+                + ", and the account provides "
+                + (", ".join(provides) or "none")
+            )
+        return
     settings = asked.get("settings", {})
     if not isinstance(settings, dict):
         raise BadValue("the settings are not an object")
@@ -919,9 +951,29 @@ def _read_account(logins: bool, asked: Any, keys: set) -> None:
             raise BadValue("the settings do not fit the kind's schema")
 
 
+def _resolve(grant: Dict[str, Any]) -> Dict[str, Any]:
+    """The grant of the echo's own kind that applies a grant of an accepted standard."""
+    accepted = next(a for a in ACCEPTS if a["standard"] in grant.get("provides", []))
+    credentials = grant.get("credentials", {})
+    slot = next((s for s in accepted["slots"] if sorted(credentials) == [s["credential"]]), None)
+    if slot is None:
+        raise BadValue("the credential is not one the echo takes for " + accepted["standard"])
+    settings = {}
+    for name, value in grant.get("settings", {}).items():
+        if name != "base_url" or slot["base_url_setting"] is None:
+            raise BadValue("the settings do not fit the standard")
+        settings[slot["base_url_setting"]] = value
+    resolved = dict(grant)
+    resolved["kind"] = slot["kind"]
+    resolved["settings"] = settings
+    return resolved
+
+
 def _read_grant(logins: bool, grant: Any, spawner: ProcessSpawner) -> Dict[str, Any]:
     """Checks a grant for the echo and what it needs of `spawner`."""
     _read_account(logins, grant, GRANT_KEYS)
+    if grant["kind"] not in [k["id"] for k in _catalog(logins)["kinds"]]:
+        grant = _resolve(grant)
     credentials = grant.get("credentials", {})
     wanted = {FILE_KIND: [FILE_KEY], KEY_KIND: ["api_key"]}.get(grant["kind"], [])
     if (
@@ -1059,7 +1111,7 @@ def _put_file(accounts: _Accounts, grant: Dict[str, Any], spawner: ProcessSpawne
 def _apply(logins: bool, accounts: _Accounts, grant: Any, spawner: ProcessSpawner, sub: _Sub) -> Dict[str, Any]:
     """Applies `grant` for a call that runs the harness: `sub` listens for the account, its file is
     first read for what changed, then recorded and written when it is not there, and read again."""
-    _read_grant(logins, grant, spawner)
+    grant = _read_grant(logins, grant, spawner)
     key = _key_of(grant)
     _subscribe(accounts, key, sub)
     _watch_file(accounts, key, spawner)
