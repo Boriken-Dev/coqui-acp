@@ -17,7 +17,8 @@ use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, CacheLifetime, Channel,
     ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter,
     LoginRequest, ModelInfo, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport,
-    RenewRequest, Requirement, SessionExport, SessionImport, StartRequest, UsageQuery, UsageReport,
+    RenewRequest, Requirement, SessionExport, SessionImport, StartRequest, UnknownKind, UsageQuery,
+    UsageReport,
 };
 use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, same_name};
@@ -494,6 +495,7 @@ impl AcpHarness for ClaudeProvider {
         let spawn = ThroughSpawner::shared(spawner);
         let listing = match ClaudeSession::start(&launch, &spawn, ClaudeSettings::new(), |_| true) {
             Ok(session) => {
+                let signed_out = session.signed_out();
                 let listing = session.models().map_or_else(
                     || ModelListing::unknown("Claude Code listed no model"),
                     |models| {
@@ -515,9 +517,21 @@ impl AcpHarness for ClaudeProvider {
                     },
                 );
                 session.close();
-                listing
+                if signed_out && listing.known {
+                    listing.signed_out()
+                } else {
+                    listing
+                }
             }
-            Err(error) => ModelListing::unknown(format!("Claude Code could not be asked: {error}")),
+            Err(error) => ModelListing::unavailable(
+                match &error {
+                    crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                        UnknownKind::NotInstalled
+                    }
+                    _ => UnknownKind::Failed,
+                },
+                format!("Claude Code could not be asked: {error}"),
+            ),
         };
         // The last look: a refresh Claude Code made while it was asked is told before the call returns.
         if let Some(hold) = applying.hold {

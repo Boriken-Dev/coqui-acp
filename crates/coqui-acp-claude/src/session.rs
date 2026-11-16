@@ -469,6 +469,19 @@ impl ClaudeSession {
         models_of(&self.answer)
     }
 
+    /// Whether Claude Code's answer to `initialize` says it runs on Anthropic's own service with no login at all: no
+    /// token and no API key. An answer that names no account, or another provider, is not signed out.
+    #[must_use]
+    pub fn signed_out(&self) -> bool {
+        let Some(account) = self.answer.get("account") else {
+            return false;
+        };
+        let source = |key: &str| account.get(key).and_then(Value::as_str);
+        source("tokenSource") == Some("none")
+            && source("apiKeySource").is_none_or(|key| key == "none")
+            && source("apiProvider").is_none_or(|provider| provider == "firstParty")
+    }
+
     /// Sends one control request and waits up to `limit` for its answer.
     fn control(&self, request: Value, limit: Duration) -> Result<Value, Error> {
         let number = self.requests.fetch_add(1, Ordering::SeqCst) + 1;

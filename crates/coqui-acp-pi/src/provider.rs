@@ -18,7 +18,7 @@ use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
     Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter, LoginRequest,
     ModelInfo, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport, RenewRequest,
-    Requirement, SessionExport, SessionImport, StartRequest, UsageQuery, UsageReport,
+    Requirement, SessionExport, SessionImport, StartRequest, UnknownKind, UsageQuery, UsageReport,
 };
 use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, Watched, same_name};
@@ -451,7 +451,15 @@ impl AcpHarness for PiProvider {
                     })
                     .collect(),
             ),
-            Err(error) => ModelListing::unknown(format!("Pi could not be asked: {error}")),
+            Err(error) => ModelListing::unavailable(
+                match &error {
+                    crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                        UnknownKind::NotInstalled
+                    }
+                    _ => UnknownKind::Failed,
+                },
+                format!("Pi could not be asked: {error}"),
+            ),
         };
         // The last look: a refresh Pi made while it was asked is told before the call returns.
         if let Some(hold) = hold {

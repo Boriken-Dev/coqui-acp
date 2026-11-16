@@ -12,6 +12,7 @@
 //!
 //! `COQUI_ACP_FAKE_CLAUDE_LOG` names a file each start appends to: one line of JSON with the arguments, the names (never
 //! the values) of the environment, and the two prompt-cache variables' values. `--version` prints the recorded version.
+//! `COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT` makes its `initialize` report no login.
 
 #![allow(
     clippy::std_instead_of_core,
@@ -30,6 +31,16 @@ const VERSION: &str = "2.1.318";
 /// The version it reports: `COQUI_ACP_FAKE_CLAUDE_VERSION` when set, so a test can run a version that was not tested.
 fn version() -> String {
     std::env::var("COQUI_ACP_FAKE_CLAUDE_VERSION").unwrap_or_else(|_| VERSION.to_owned())
+}
+
+/// The account it reports: signed in by an API key, as the recordings are, or with no login at all when
+/// `COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT` is set.
+fn account() -> Value {
+    if std::env::var_os("COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT").is_some() {
+        json!({"tokenSource": "none", "apiProvider": "firstParty"})
+    } else {
+        json!({"tokenSource": "none", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"})
+    }
 }
 const MODEL: &str = "claude-standin";
 const TTL_VARIABLES: [&str; 2] = [
@@ -82,7 +93,7 @@ impl Fake {
                 "supportsEffort": true,
                 "supportedEffortLevels": ["low", "medium", "high"],
             }],
-            "account": {"tokenSource": "none", "apiKeySource": "none", "apiProvider": "firstParty"},
+            "account": account(),
             "claude_code_version": version(),
             "current_permission_mode": self.mode,
             "session_state": "idle",

@@ -651,3 +651,78 @@ fn an_untested_version_and_an_exit_reach_the_spawner_as_notices() {
     drop(channel);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What `models` answers for a provider running `executable` with `environment` and nothing else of the host's.
+fn listing_of(
+    executable: String,
+    environment: coqui_acp_api::Environment,
+) -> coqui_acp_api::ModelListing {
+    ClaudeProvider::new(ProviderSettings {
+        executable,
+        ..ProviderSettings::default()
+    })
+    .models(
+        coqui_acp_api::ModelsRequest::new().environment(environment),
+        LocalSpawner::new().into_object(),
+        Keeper.into_object(),
+    )
+    .expect("answered")
+}
+
+#[test]
+fn models_of_a_program_that_is_not_installed_say_so_by_kind() {
+    let dir = scratch("models-missing");
+    let missing = dir.join("no-such-claude");
+    let listing = listing_of(
+        missing.to_string_lossy().into_owned(),
+        coqui_acp_api::Environment::new(),
+    );
+    assert!(!listing.known, "{listing:?}");
+    assert_eq!(
+        listing.unknown_kind,
+        Some(coqui_acp_api::UnknownKind::NotInstalled)
+    );
+    assert!(listing.unknown_because.is_some() && listing.models.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn models_of_a_program_that_cannot_be_run_are_a_failure_with_its_text() {
+    // A directory is found, and cannot be started.
+    let dir = scratch("models-failed");
+    let listing = listing_of(
+        dir.to_string_lossy().into_owned(),
+        coqui_acp_api::Environment::new(),
+    );
+    assert!(!listing.known, "{listing:?}");
+    assert_eq!(
+        listing.unknown_kind,
+        Some(coqui_acp_api::UnknownKind::Failed)
+    );
+    assert!(
+        listing
+            .unknown_because
+            .as_deref()
+            .is_some_and(|why| why.contains("could not be")),
+        "{listing:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn models_of_a_claude_code_with_no_login_say_nobody_is_signed_in() {
+    let dir = scratch("models-signed-out");
+    let environment = |signed_out: bool| -> coqui_acp_api::Environment {
+        let mut pairs = vec![("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned())];
+        if signed_out {
+            pairs.push(("COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT", "1".to_owned()));
+        }
+        pairs.into_iter().collect()
+    };
+    let out = listing_of(fake(), environment(true));
+    assert!(out.known && out.signed_out, "{out:?}");
+    assert!(!out.models.is_empty() && out.unknown_kind.is_none());
+    let signed_in = listing_of(fake(), environment(false));
+    assert!(signed_in.known && !signed_in.signed_out, "{signed_in:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

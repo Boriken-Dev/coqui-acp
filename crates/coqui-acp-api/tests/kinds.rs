@@ -19,7 +19,7 @@ use coqui_acp_api::{
     ModelsRequest, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable,
     RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery,
     SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes,
-    TerminalSize, UsageQuery, UsageReport, UsageSupport,
+    TerminalSize, UnknownKind, UsageQuery, UsageReport, UsageSupport,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -85,6 +85,7 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("HarnessInfo", schema_of::<HarnessInfo>()),
         ("Takes", schema_of::<Takes>()),
         ("ModelListing", schema_of::<ModelListing>()),
+        ("UnknownKind", schema_of::<UnknownKind>()),
         ("ModelInfo", schema_of::<ModelInfo>()),
         ("SessionRecordFile", schema_of::<SessionRecordFile>()),
         ("NonDefault", schema_of::<NonDefault>()),
@@ -237,7 +238,13 @@ fn every_models_keys_are_pinned() {
         ),
         (
             "ModelListing",
-            &["known", "models", "unknown_because"],
+            &[
+                "known",
+                "models",
+                "signed_out",
+                "unknown_because",
+                "unknown_kind",
+            ],
             &["known"],
         ),
         (
@@ -503,6 +510,14 @@ fn every_models_keys_are_pinned() {
             .expect("described")
             .1["enum"],
         serde_json::json!(["default", "short", "long"])
+    );
+    assert_eq!(
+        schemas
+            .iter()
+            .find(|(n, _)| *n == "UnknownKind")
+            .expect("described")
+            .1["enum"],
+        serde_json::json!(["not_installed", "failed"])
     );
     assert_eq!(
         schemas

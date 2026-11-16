@@ -248,6 +248,17 @@ impl ModelInfo {
     }
 }
 
+/// Why a harness could not list its models, as a kind a host can act on; the text beside it is for people.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq)]
+#[map(crate = ::guatiao, rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum UnknownKind {
+    /// The program the harness runs is not on the machine.
+    NotInstalled,
+    /// The program is there and could not be asked; the text says what.
+    Failed,
+}
+
 /// What a harness can say about the models an account may use, with no model turn. A harness that
 /// cannot list says so; it never guesses.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
@@ -258,19 +269,39 @@ pub struct ModelListing {
     pub known: bool,
     /// Why it could not, when `known` is false.
     pub unknown_because: Option<String>,
+    /// What kind of reason that is, when the harness could not be started; absent when it simply
+    /// lists its models only once a session has started.
+    pub unknown_kind: Option<UnknownKind>,
+    /// Whether the harness, though it listed its models, says nobody is signed in, so a session
+    /// on the machine's own login would be refused its first prompt. Says nothing of an account a
+    /// host applies.
+    #[map(default)]
+    pub signed_out: bool,
     /// The models, in the harness's order.
     #[map(default)]
     pub models: Vec<ModelInfo>,
 }
 
 impl ModelListing {
-    /// A listing the harness could not give, with the reason.
+    /// A listing the harness could not give, with the reason: it lists its models only in a
+    /// session, or has no way to list them.
     #[must_use]
     pub fn unknown(reason: impl Into<String>) -> Self {
         Self {
             known: false,
             unknown_because: Some(reason.into()),
+            unknown_kind: None,
+            signed_out: false,
             models: Vec::new(),
+        }
+    }
+
+    /// A listing the harness could not give because of `kind`, with the reason for people.
+    #[must_use]
+    pub fn unavailable(kind: UnknownKind, reason: impl Into<String>) -> Self {
+        Self {
+            unknown_kind: Some(kind),
+            ..Self::unknown(reason)
         }
     }
 
@@ -280,8 +311,17 @@ impl ModelListing {
         Self {
             known: true,
             unknown_because: None,
+            unknown_kind: None,
+            signed_out: false,
             models,
         }
+    }
+
+    /// The same listing, saying nobody is signed in.
+    #[must_use]
+    pub const fn signed_out(mut self) -> Self {
+        self.signed_out = true;
+        self
     }
 }
 

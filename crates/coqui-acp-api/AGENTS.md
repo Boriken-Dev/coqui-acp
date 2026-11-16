@@ -185,8 +185,10 @@ Environment::new(); .insert(name, value); .get(name); .iter(); .names(); .len();
 HarnessInfo::new(title, versions)
 #[non_exhaustive] #[derive(Default)] pub struct Takes { pub images: bool, pub audio: bool, pub embedded_context: bool,
     pub mcp_http: bool, pub mcp_sse: bool, pub load: bool, pub resume: bool, pub additional_directories: bool, pub system_prompt: bool }
-#[non_exhaustive] pub struct ModelListing { pub known: bool, pub unknown_because: Option<String>, pub models: Vec<ModelInfo> }
-ModelListing::unknown(reason);  ModelListing::of(models)
+#[non_exhaustive] pub struct ModelListing { pub known: bool, pub unknown_because: Option<String>, pub unknown_kind: Option<UnknownKind>, pub signed_out: bool, pub models: Vec<ModelInfo> }
+ModelListing::unknown(reason)  // no kind: the harness lists only in a session, or cannot list
+ModelListing::unavailable(kind, reason);  ModelListing::of(models).signed_out()   // signed_out: it listed, and says nobody is signed in (Claude Code and Codex list their models signed out too)
+#[non_exhaustive] pub enum UnknownKind { NotInstalled, Failed }   // JSON `not_installed`, `failed`: the program is not found; it is there and could not be asked (the text says what)
 #[non_exhaustive] pub struct ModelInfo { pub id: String, pub name: Option<String>, pub description: Option<String>, pub resolved: Option<String>, pub version: Option<String>, pub efforts: Vec<String>, pub default_effort: Option<String>, pub is_default: bool }   ModelInfo::new(id)
 #[non_exhaustive] pub struct SessionQuery { pub session_id: String, pub working_directory: String, pub environment: Secret<Environment> }
 SessionQuery::new(session_id, working_directory).environment(env)

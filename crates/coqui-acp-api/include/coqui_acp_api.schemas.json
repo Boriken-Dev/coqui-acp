@@ -680,6 +680,30 @@
         ],
         "description": "Why it could not, when `known` is false."
       },
+      "unknown_kind": {
+        "anyOf": [
+          {
+            "type": "string",
+            "enum": [
+              "not_installed",
+              "failed"
+            ],
+            "x-enum-labels": {
+              "not_installed": "The program the harness runs is not on the machine.",
+              "failed": "The program is there and could not be asked; the text says what."
+            }
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What kind of reason that is, when the harness could not be started; absent when it simply lists its models only once a session has started."
+      },
+      "signed_out": {
+        "type": "boolean",
+        "description": "Whether the harness, though it listed its models, says nobody is signed in, so a session on the machine's own login would be refused its first prompt. Says nothing of an account a host applies.",
+        "default": false
+      },
       "models": {
         "type": "array",
         "items": {
@@ -751,6 +775,19 @@
     "required": [
       "known"
     ]
+  },
+  "UnknownKind": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "string",
+    "enum": [
+      "not_installed",
+      "failed"
+    ],
+    "x-enum-labels": {
+      "not_installed": "The program the harness runs is not on the machine.",
+      "failed": "The program is there and could not be asked; the text says what."
+    },
+    "properties": {}
   },
   "ModelInfo": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

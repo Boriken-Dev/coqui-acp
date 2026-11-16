@@ -63,7 +63,8 @@ pub fn interrupt(&self) -> Result<(), Error>
 pub fn steer(&self, turn: &str, content: &[Content]) -> Result<(), Error>   // turn/steer, its answer not awaited
 pub fn request(&self, method: &str, params: Value, limit: Duration) -> Result<Value, Error>
 pub fn read_usage(&self) -> Result<Vec<Bucket>, Error>      // account/rateLimits/read: needs no turn; the answer is the base later updates merge into
-pub fn CodexSession::read_models(launch: &CodexLaunch, spawn: &dyn Spawn, settings: CodexSettings) -> Result<Option<Vec<Model>>, Error>   // starts app-server, initializes, lists models, ends it: no thread, no turn
+pub fn CodexSession::read_models(launch: &CodexLaunch, spawn: &dyn Spawn, settings: CodexSettings) -> Result<ModelRead, Error>   // starts app-server, initializes, lists models, asks account/read, ends it: no thread, no turn
+#[non_exhaustive] pub struct ModelRead { pub models: Option<Vec<Model>>, pub signed_out: bool }   // signed_out: account null with requiresOpenaiAuth
 pub fn CodexSession::read_account_usage(launch: &CodexLaunch, spawn: &dyn Spawn, settings: CodexSettings) -> Result<Vec<Bucket>, Error>   // starts app-server, initializes, reads, ends it: no thread, no turn
 pub fn close(&self)                                              // also on drop
 #[non_exhaustive] pub struct Model { pub id: String, pub name: String, pub description: Option<String>,
