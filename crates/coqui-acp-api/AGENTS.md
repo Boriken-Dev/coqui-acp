@@ -320,6 +320,20 @@ pub const USAGE_VERSION: u32 = 1;
 
 The request needs no session and no turn and is cheap, so a host may poll it; how often is the host's choice. `account` is the host's id for the account a connection runs on, taken from `StartRequest.account`'s `id` (else the client's opt-in), echoed into every report and never interpreted; a host that launched the connection overwrites it in what it relays, so a provider cannot misattribute.
 
+### Account-side readers (feature `reader`, `coqui_acp_api::reader`)
+
+What a vendor's plan-limit reader shares; nothing in it knows a harness, a session or a launch. Depends on `serde_json` and `ureq`.
+
+```rust
+pub const MAX_BODY_BYTES: u64 = 1 << 20;
+pub enum ReadError { BadAddress, Unreachable, Status(u16), Malformed }   // #[non_exhaustive], Display names nothing of the request
+pub fn get_json(url: &str, headers: &[(&str, &str)], timeout: Duration) -> Result<serde_json::Value, ReadError>
+pub fn now_seconds() -> i64
+pub fn rfc3339_seconds(text: &str) -> Option<i64>   // `Z` or an offset, a fraction dropped
+```
+
+`get_json` is a `GET` of a plain `http(s)` address, redirects never followed (a credential in `headers` goes nowhere else), the environment's proxy settings applied, at most `MAX_BODY_BYTES` read; a status other than 200 is `Status`.
+
 ## Accounts (`coqui_acp_api::account`)
 
 A provider owns every fact about how its harness takes an account: kinds, variables, directories, files, login commands, renewal and endpoints. The host owns which accounts exist, their secrets at rest, who holds one, claims and limits. A credential crosses only as `Secret<Credentials>`: its schema is `writeOnly` and `x-sensitive`, its `Debug` names the keys and never a value, and wiping it zeroes both.

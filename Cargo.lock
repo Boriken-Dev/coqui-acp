@@ -447,6 +447,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "ureq",
  "uuid",
  "win32job",
 ]

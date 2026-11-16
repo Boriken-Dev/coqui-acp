@@ -21,6 +21,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 # The suite every provider of the kind is held to, as a module and as `acp-harness-check`, which runs it
 # on a library file or a source file in any language.
+# The readers an account's usage is read with: one bounded read of a JSON document, and RFC 3339 times.
+reader = ["dep:serde_json", "dep:ureq"]
 contract = ["dep:serde_json", "dep:guatiao-serde", "dep:coqui-acp", "dep:rustix", "dep:win32job", "guatiao/load"]
 
 [dependencies]
@@ -29,6 +31,7 @@ guatiao-channel.workspace = true
 serde.workspace = true
 coqui-acp = { path = "../coqui-acp", optional = true }
 serde_json = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
 guatiao-serde = { workspace = true, optional = true }
 
 # The programs the contract suite starts end with their whole tree.
