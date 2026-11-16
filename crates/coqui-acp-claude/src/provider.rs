@@ -507,7 +507,21 @@ impl AcpHarness for ClaudeProvider {
             Ok(session) => {
                 let signed_out = session.signed_out();
                 let listing = session.models().map_or_else(
-                    || ModelListing::unknown("Claude Code listed no model"),
+                    || {
+                        // A Claude Code with nobody signed in can list none; that is the person's next step, not a
+                        // list that waits for a session.
+                        if signed_out {
+                            ModelListing::unknown(
+                                "nobody is signed in to Claude Code, which lists its models once someone is",
+                            )
+                            .signed_out()
+                        } else {
+                            ModelListing::unavailable(
+                                UnknownKind::Failed,
+                                "Claude Code listed no model",
+                            )
+                        }
+                    },
                     |models| {
                         ModelListing::of(
                             models

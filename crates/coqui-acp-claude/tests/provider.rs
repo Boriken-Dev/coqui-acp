@@ -745,3 +745,28 @@ fn models_of_a_claude_code_with_no_login_say_nobody_is_signed_in() {
     assert!(signed_in.known && !signed_in.signed_out, "{signed_in:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_claude_code_that_lists_no_model_says_why_and_never_waits_for_a_session() {
+    let dir = scratch("models-none");
+    let environment = |signed_out: bool| -> coqui_acp_api::Environment {
+        let mut pairs = vec![
+            ("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()),
+            ("COQUI_ACP_FAKE_CLAUDE_NO_MODELS", "1".to_owned()),
+        ];
+        if signed_out {
+            pairs.push(("COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT", "1".to_owned()));
+        }
+        pairs.into_iter().collect()
+    };
+    let out = listing_of(fake(), environment(true));
+    assert!(
+        !out.known && out.signed_out && out.models.is_empty(),
+        "{out:?}"
+    );
+    assert!(out.unknown_because.is_some(), "{out:?}");
+    let other = listing_of(fake(), environment(false));
+    assert!(!other.known && !other.signed_out, "{other:?}");
+    assert_eq!(other.unknown_kind, Some(coqui_acp_api::UnknownKind::Failed));
+    let _ = std::fs::remove_dir_all(&dir);
+}

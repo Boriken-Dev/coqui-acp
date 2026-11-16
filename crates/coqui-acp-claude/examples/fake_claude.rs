@@ -13,6 +13,7 @@
 //! `COQUI_ACP_FAKE_CLAUDE_LOG` names a file each start appends to: one line of JSON with the arguments, the names (never
 //! the values) of the environment, and the two prompt-cache variables' values. `--version` prints the recorded version.
 //! `COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT` makes its `initialize` report no login.
+//! `COQUI_ACP_FAKE_CLAUDE_NO_MODELS` makes its `initialize` list no model.
 
 #![allow(
     clippy::std_instead_of_core,
@@ -83,7 +84,7 @@ impl Fake {
     }
 
     fn init(&self) -> Value {
-        json!({
+        let mut answer = json!({
             "commands": [],
             "agents": [],
             "models": [{
@@ -98,7 +99,11 @@ impl Fake {
             "claude_code_version": version(),
             "current_permission_mode": self.mode,
             "session_state": "idle",
-        })
+        });
+        if std::env::var_os("COQUI_ACP_FAKE_CLAUDE_NO_MODELS").is_some() {
+            answer.as_object_mut().map(|map| map.remove("models"));
+        }
+        answer
     }
 
     fn keep(&self, line: &Value) {
