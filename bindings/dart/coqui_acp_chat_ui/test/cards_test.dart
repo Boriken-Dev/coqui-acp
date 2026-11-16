@@ -294,6 +294,74 @@ void main() {
       expect(log, ['remove 1', 'clear', 'edit 0 changed']);
     });
 
+    testWidgets('a row\'s menu steers, merges up, moves to the composer and moves; the header merges all', (tester) async {
+      final log = <String>[];
+      await tester.pumpWidget(host(QueuePanel(
+        lines: const [QueuedLine('a', 'first'), QueuedLine('b', 'second'), QueuedLine('c', 'third')],
+        merged: true,
+        onEdit: (_, _) {},
+        onRemove: (_) {},
+        onClear: () {},
+        onSteer: (index) => log.add('steer $index'),
+        onMerge: (index) => log.add('merge $index'),
+        onToComposer: (index) => log.add('composer $index'),
+        onMove: (index, by) => log.add('move $index $by'),
+        onMergeAll: () => log.add('all'),
+      )));
+      expect(find.text('3 queued: sent together when the turn ends'), findsOneWidget);
+      Future<void> pick(int row, String label) async {
+        await tester.tap(find.byKey(Key('queue-more-$row')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(label));
+        await tester.pumpAndSettle();
+      }
+      await pick(1, 'Steer now');
+      await pick(1, 'Merge with above');
+      await pick(2, 'Move to composer');
+      await pick(1, 'Move up');
+      await pick(1, 'Move down');
+      await tester.tap(find.text('Merge all'));
+      expect(log, ['steer 1', 'merge 1', 'composer 2', 'move 1 -1', 'move 1 1', 'all']);
+      // The first has nothing above it to merge with or move past, and the last nothing below.
+      await tester.tap(find.byKey(const Key('queue-more-0')));
+      await tester.pumpAndSettle();
+      expect(find.text('Merge with above'), findsNothing);
+      expect(find.text('Move up'), findsNothing);
+      expect(find.text('Move down'), findsOneWidget);
+      await tester.tap(find.text('Move down'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('queue-more-2')));
+      await tester.pumpAndSettle();
+      expect(find.text('Move down'), findsNothing);
+    });
+
+    testWidgets('held, it offers Merge & send beside Send next, edit and clear', (tester) async {
+      final log = <String>[];
+      await tester.pumpWidget(host(QueuePanel(
+        lines: const [QueuedLine('a', 'first'), QueuedLine('b', 'second')],
+        held: 'a stopped turn',
+        onEdit: (_, _) {},
+        onRemove: (_) {},
+        onClear: () => log.add('clear'),
+        onSendNext: () => log.add('next'),
+        onMergeSend: () => log.add('merge'),
+      )));
+      await tester.tap(find.text('Merge & send'));
+      await tester.tap(find.text('Send next'));
+      await tester.tap(find.text('Clear queue'));
+      expect(log, ['merge', 'next', 'clear']);
+      expect(find.byTooltip('Edit queued message'), findsNWidgets(2));
+      await tester.pumpWidget(host(QueuePanel(
+        lines: const [QueuedLine('a', 'first')],
+        held: 'a stopped turn',
+        onEdit: (_, _) {},
+        onRemove: (_) {},
+        onClear: () {},
+        onMergeSend: () {},
+      )));
+      expect(find.text('Merge & send'), findsNothing, reason: 'one message has nothing to merge');
+    });
+
     testWidgets('held, it says why and offers the next one once the agent is idle', (tester) async {
       var sent = false;
       await tester.pumpWidget(panel(held: 'a stopped turn', sendNext: () => sent = true));

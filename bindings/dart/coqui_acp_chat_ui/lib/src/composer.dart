@@ -186,6 +186,8 @@ class Composer extends StatefulWidget {
     this.working = false,
     this.starting = false,
     this.onStop,
+    this.onSteer,
+    this.enterSteers = false,
     this.commands = const [],
     this.actions = const [],
     this.commandsTitle = 'Agent commands',
@@ -222,6 +224,13 @@ class Composer extends StatefulWidget {
 
   /// Whether a turn is running: Send becomes Queue, and Stop appears.
   final bool working;
+
+  /// Stops the turn and sends the message first. With it, a turn running shows Steer beside Queue and Stop; [onSend] is Queue.
+  /// Enter does one of the two and Alt+Enter the other, as [enterSteers] says.
+  final VoidCallback? onSteer;
+
+  /// Whether Enter steers while a turn runs and Alt+Enter queues, rather than the reverse.
+  final bool enterSteers;
 
   /// Whether the conversation is starting: a spinner stands in for Send.
   final bool starting;
@@ -332,9 +341,24 @@ class ComposerState extends State<Composer> {
     );
   }
 
-  /// Shift+Tab goes to [Composer.onShiftTab], Up in an empty message brings back [Composer.recall], and Ctrl+V (⌘V on a Mac)
-  /// pastes through [paste]; every other key goes on as usual.
+  bool get _steering => widget.working && widget.onSteer != null;
+
+  /// What Enter does: send, or while a turn runs queue or steer as [Composer.enterSteers] says.
+  void _enter() => (_steering && widget.enterSteers ? widget.onSteer! : widget.onSend)();
+
+  /// Shift+Tab goes to [Composer.onShiftTab], Up in an empty message brings back [Composer.recall], Alt+Enter while a turn runs
+  /// does what Enter does not (queue or steer), and Ctrl+V (⌘V on a Mac) pastes through [paste]; every other key goes on as usual.
   KeyEventResult onKey(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
+        HardwareKeyboard.instance.isAltPressed &&
+        !HardwareKeyboard.instance.isControlPressed &&
+        !HardwareKeyboard.instance.isShiftPressed &&
+        _steering &&
+        widget.enabled) {
+      (widget.enterSteers ? widget.onSend : widget.onSteer!)();
+      return KeyEventResult.handled;
+    }
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.tab &&
         HardwareKeyboard.instance.isShiftPressed &&
@@ -372,7 +396,7 @@ class ComposerState extends State<Composer> {
       minLines: widget.centred ? 3 : 1,
       maxLines: widget.centred ? 10 : 5,
       textInputAction: TextInputAction.send,
-      onSubmitted: (_) => widget.onSend(),
+      onSubmitted: (_) => _enter(),
       decoration: InputDecoration(
         hintText: widget.hint,
         hintMaxLines: 1,
@@ -543,9 +567,26 @@ class _Controls extends StatelessWidget {
       ...widget.after,
     ];
     final right = widget.trailing;
+    final steers = widget.working && widget.onSteer != null;
     final send = widget.working
         ? Row(mainAxisSize: MainAxisSize.min, children: [
-            IconButton(tooltip: 'Queue', onPressed: widget.enabled ? widget.onSend : null, icon: const Icon(Icons.schedule_send_outlined)),
+            if (steers)
+              IconButton(
+                key: const Key('composer-steer'),
+                tooltip: widget.enterSteers ? 'Steer: stop the turn and send this first (Enter)' : 'Steer: stop the turn and send this first (Alt+Enter)',
+                onPressed: widget.enabled ? widget.onSteer : null,
+                icon: const Icon(Icons.bolt),
+              ),
+            IconButton(
+              key: const Key('composer-queue'),
+              tooltip: !steers
+                  ? 'Queue'
+                  : widget.enterSteers
+                  ? 'Queue: send this when the turn ends (Alt+Enter)'
+                  : 'Queue: send this when the turn ends (Enter)',
+              onPressed: widget.enabled ? widget.onSend : null,
+              icon: const Icon(Icons.schedule_send_outlined),
+            ),
             IconButton(tooltip: 'Stop', onPressed: widget.onStop, icon: const Icon(Icons.stop_circle_outlined)),
           ])
         : widget.starting

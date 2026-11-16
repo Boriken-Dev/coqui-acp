@@ -69,6 +69,8 @@ Future<TextEditingController> pump(
   bool working = false,
   bool starting = false,
   VoidCallback? onStop,
+  VoidCallback? onSteer,
+  bool enterSteers = false,
   List<AgentCommandInfo> commands = const [],
   List<ComposerAction> actions = const [],
   String commandsTitle = 'Agent commands',
@@ -103,6 +105,8 @@ Future<TextEditingController> pump(
       working: working,
       starting: starting,
       onStop: onStop,
+      onSteer: onSteer,
+      enterSteers: enterSteers,
       commands: commands,
       actions: actions,
       commandsTitle: commandsTitle,
@@ -177,6 +181,61 @@ void main() {
     await pump(tester, starting: true);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.byTooltip('Send'), findsNothing);
+  });
+
+  group('steering while the agent works', () {
+    testWidgets('Queue, Steer and Stop sit together, and each tooltip says its key', (tester) async {
+      final log = <String>[];
+      await pump(tester, working: true, onSend: () => log.add('queue'), onSteer: () => log.add('steer'), onStop: () => log.add('stop'));
+      await tester.tap(find.byKey(const Key('composer-steer')));
+      await tester.tap(find.byKey(const Key('composer-queue')));
+      await tester.tap(find.byTooltip('Stop'));
+      expect(log, ['steer', 'queue', 'stop']);
+      expect(find.byTooltip('Queue: send this when the turn ends (Enter)'), findsOneWidget);
+      expect(find.byTooltip('Steer: stop the turn and send this first (Alt+Enter)'), findsOneWidget);
+    });
+
+    testWidgets('Enter queues and Alt+Enter steers by default', (tester) async {
+      final log = <String>[];
+      await pump(tester, working: true, onSend: () => log.add('queue'), onSteer: () => log.add('steer'));
+      await tester.tap(find.byType(TextField));
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.tap(find.byType(TextField)); // submitting leaves the field
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+      expect(log, ['queue', 'steer']);
+    });
+
+    testWidgets('with enterSteers it is the other way round, and the tooltips follow', (tester) async {
+      final log = <String>[];
+      await pump(tester, working: true, enterSteers: true, onSend: () => log.add('queue'), onSteer: () => log.add('steer'));
+      await tester.tap(find.byType(TextField));
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.tap(find.byType(TextField)); // submitting leaves the field
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+      expect(log, ['steer', 'queue']);
+      expect(find.byTooltip('Steer: stop the turn and send this first (Enter)'), findsOneWidget);
+      expect(find.byTooltip('Queue: send this when the turn ends (Alt+Enter)'), findsOneWidget);
+    });
+
+    testWidgets('with no turn running, or no steer given, Enter sends and Steer is not offered', (tester) async {
+      final log = <String>[];
+      await pump(tester, enterSteers: true, onSend: () => log.add('send'), onSteer: () => log.add('steer'));
+      expect(find.byKey(const Key('composer-steer')), findsNothing);
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      expect(log, ['send']);
+      await pump(tester, working: true);
+      expect(find.byKey(const Key('composer-steer')), findsNothing);
+      expect(find.byTooltip('Queue'), findsOneWidget);
+    });
   });
 
   testWidgets('a / lists the commands that match, and choosing one writes it with a space', (tester) async {

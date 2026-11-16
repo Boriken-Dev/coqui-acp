@@ -74,8 +74,10 @@ and `selection` (`SelectableTranscriptState.copyAll()`).
   `permission-deny`, `permission-primary`, `permission-more`, `answer-<kind>`.
 - `QuestionCard({request: AcpElicitation, agent, onAnswer, more, host})`: a form from the question's schema; a new `request` object
   starts a new form.
-- `QueuePanel({lines: List<QueuedLine>, onEdit, onRemove, onClear, held, working, onSendNext, dialog})`: messages waiting for the turn
-  to end, editable and removable; `dialog` shows the edit with the app's own dialog function.
+- `QueuePanel({lines: List<QueuedLine>, onEdit, onRemove, onClear, held, working, merged, onSendNext, onMergeSend, onMergeAll, onSteer, onMerge, onToComposer, onMove, dialog})`: messages waiting for the turn
+  to end, editable and removable; `dialog` shows the edit with the app's own dialog function. A callback given adds its entry: the row's menu (`queue-more-<i>`) has Steer now, Merge with
+  above, Move to composer, Move up and Move down; the header Merge all (`queue-merge-all`) and, held with several, Merge & send (`queue-merge-send`) beside Send next. `merged` words the header for a queue
+  that goes as one message.
 - `BypassBanner({onLeave})`, `UsageFooter({text})`, `PlanPanel({entries})` (the plan folded to a line, for an app that keeps it above
   the composer).
 
@@ -106,9 +108,9 @@ the model must never see, and a display of values the person chose to look at. T
 
 ## Composer
 
-`Composer({controller, onSend, focusNode, enabled, working, starting, onStop, commands, centred, hint, header, attachments, pickFiles,
+`Composer({controller, onSend, focusNode, enabled, working, starting, onStop, onSteer, enterSteers, commands, centred, hint, header, attachments, pickFiles,
 pickFolder, clipboard, pasteAsFile, before, after, trailing, plusItems, onShiftTab, recall, actions, commandsTitle, actionsTitle,
-mentions})`: the field, `/` suggestions from the agent's commands (and the host's own `actions`), `@` mentions from the host, paste, the attachment chips, the `+` menu, and Send (Queue and Stop while `working`, a spinner while `starting`).
+mentions})`: the field, `/` suggestions from the agent's commands (and the host's own `actions`), `@` mentions from the host, paste, the attachment chips, the `+` menu, and Send (Queue and Stop while `working`, a spinner while `starting`). With `onSteer`, a running turn also shows Steer (keys `composer-steer`, `composer-queue`): Enter does Queue (`onSend`), or Steer when `enterSteers`, and Alt+Enter the other; each tooltip names its key.
 `ComposerState.onKey` handles Shift+Tab (`onShiftTab`), Up in an empty message (`recall`: the last message sent, or null) and Ctrl+V (⌘V)
 itself, whatever `focusNode` it is given; `paste()` is public.
 

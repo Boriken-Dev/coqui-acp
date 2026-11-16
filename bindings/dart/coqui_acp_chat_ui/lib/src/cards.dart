@@ -673,6 +673,10 @@ class QueuedLine {
 
 /// The messages written while the agent worked, in the order they go, each editable and removable. While the queue is held,
 /// after a turn that was stopped or failed, it says so and waits for the person to send the next or clear them.
+///
+/// A row's menu offers what the host gives a callback for: Steer now ([onSteer]), Merge with above ([onMerge]), Move to composer
+/// ([onToComposer]), and Move up and down ([onMove]). The header offers Merge all ([onMergeAll]) and, held, Merge & send
+/// ([onMergeSend]).
 class QueuePanel extends StatelessWidget {
   const QueuePanel({
     super.key,
@@ -682,11 +686,39 @@ class QueuePanel extends StatelessWidget {
     required this.onClear,
     this.held,
     this.working = false,
+    this.merged = false,
     this.onSendNext,
+    this.onMergeSend,
+    this.onMergeAll,
+    this.onSteer,
+    this.onMerge,
+    this.onToComposer,
+    this.onMove,
     this.dialog,
   });
 
   final List<QueuedLine> lines;
+
+  /// Whether what waits goes as one message when the turn ends, rather than one message a turn.
+  final bool merged;
+
+  /// Sends everything that waits as one message, from a held queue.
+  final VoidCallback? onMergeSend;
+
+  /// Joins every message into the one before it.
+  final VoidCallback? onMergeAll;
+
+  /// Stops the turn and sends the message at an index first.
+  final ValueChanged<int>? onSteer;
+
+  /// Joins the message at an index to the one above it.
+  final ValueChanged<int>? onMerge;
+
+  /// Takes the message at an index out of the queue and into the composer.
+  final ValueChanged<int>? onToComposer;
+
+  /// Moves the message at an index by -1 (up) or 1 (down).
+  final void Function(int index, int by)? onMove;
 
   /// Why the queue waits for the person rather than going on; null while it goes on.
   final String? held;
@@ -707,6 +739,52 @@ class QueuePanel extends StatelessWidget {
     if (text != null) onEdit(index, text);
   }
 
+  Widget _rowMenu(int index) => MenuAnchor(
+    menuChildren: [
+      if (onSteer != null)
+        MenuItemButton(
+          key: const Key('queue-steer'),
+          leadingIcon: const Icon(Icons.bolt, size: 18),
+          onPressed: () => onSteer!(index),
+          child: const Text('Steer now'),
+        ),
+      if (onMerge != null && index > 0)
+        MenuItemButton(
+          key: const Key('queue-merge'),
+          leadingIcon: const Icon(Icons.call_merge, size: 18),
+          onPressed: () => onMerge!(index),
+          child: const Text('Merge with above'),
+        ),
+      if (onToComposer != null)
+        MenuItemButton(
+          key: const Key('queue-to-composer'),
+          leadingIcon: const Icon(Icons.edit_note, size: 18),
+          onPressed: () => onToComposer!(index),
+          child: const Text('Move to composer'),
+        ),
+      if (onMove != null && index > 0)
+        MenuItemButton(
+          key: const Key('queue-up'),
+          leadingIcon: const Icon(Icons.arrow_upward, size: 18),
+          onPressed: () => onMove!(index, -1),
+          child: const Text('Move up'),
+        ),
+      if (onMove != null && index < lines.length - 1)
+        MenuItemButton(
+          key: const Key('queue-down'),
+          leadingIcon: const Icon(Icons.arrow_downward, size: 18),
+          onPressed: () => onMove!(index, 1),
+          child: const Text('Move down'),
+        ),
+    ],
+    builder: (context, controller, _) => IconButton(
+      key: Key('queue-more-$index'),
+      tooltip: 'More for this message',
+      icon: const Icon(Icons.more_vert, size: 18),
+      onPressed: () => controller.isOpen ? controller.close() : controller.open(),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final look = context.chatLook;
@@ -724,12 +802,18 @@ class QueuePanel extends StatelessWidget {
               Expanded(
                 child: Text(
                   held == null
-                      ? '${lines.length} queued: sent one at a time, as each turn ends'
+                      ? (merged
+                            ? '${lines.length} queued: sent together when the turn ends'
+                            : '${lines.length} queued: sent one at a time, as each turn ends')
                       : 'Held, since $held: nothing more is sent until you say',
                   style: small,
                 ),
               ),
+              if (held != null && !working && lines.length > 1 && onMergeSend != null)
+                TextButton(key: const Key('queue-merge-send'), onPressed: onMergeSend, child: const Text('Merge & send')),
               if (held != null && !working && onSendNext != null) TextButton(onPressed: onSendNext, child: const Text('Send next')),
+              if (lines.length > 1 && onMergeAll != null)
+                TextButton(key: const Key('queue-merge-all'), onPressed: onMergeAll, child: const Text('Merge all')),
               TextButton(onPressed: onClear, child: const Text('Clear queue')),
             ]),
             ConstrainedBox(
@@ -761,6 +845,7 @@ class QueuePanel extends StatelessWidget {
                         onPressed: () => _edit(context, index),
                       ),
                       IconButton(tooltip: 'Remove queued message', icon: const Icon(Icons.close, size: 18), onPressed: () => onRemove(index)),
+                      if (onSteer != null || onMerge != null || onToComposer != null || onMove != null) _rowMenu(index),
                     ]),
                   ),
               ]),
