@@ -154,6 +154,10 @@ fn it_says_what_pi_takes_and_that_it_reports_no_usage() {
         info.cache_lifetime
             .is_some_and(|text| text.starts_with("ignored"))
     );
+    assert!(
+        info.cache_choices.is_empty(),
+        "no lifetime, Off included, is offered"
+    );
     assert!(info.takes.resume && info.takes.load && info.takes.images);
     assert!(
         !info.takes.mcp_http && !info.takes.mcp_sse,

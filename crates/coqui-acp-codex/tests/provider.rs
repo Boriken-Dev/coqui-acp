@@ -140,6 +140,10 @@ fn it_says_the_cache_hint_is_ignored_and_that_usage_needs_no_turn() {
         info.cache_lifetime
             .is_some_and(|text| text.starts_with("ignored"))
     );
+    assert!(
+        info.cache_choices.is_empty(),
+        "no lifetime, Off included, is offered"
+    );
     assert!(info.takes.resume && info.takes.load && !info.takes.mcp_sse);
 }
 

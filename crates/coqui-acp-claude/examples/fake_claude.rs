@@ -43,7 +43,8 @@ fn account() -> Value {
     }
 }
 const MODEL: &str = "claude-standin";
-const TTL_VARIABLES: [&str; 2] = [
+const TTL_VARIABLES: [&str; 3] = [
+    "DISABLE_PROMPT_CACHING",
     "CLAUDE_CODE_PROMPT_CACHE_TTL",
     "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
 ];

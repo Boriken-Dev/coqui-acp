@@ -12,14 +12,14 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo, AccountLoss, AccountRef,
-    AccountRenewal, AcpHarnessVtable, Bucket, CacheLifetime, ChannelSinkVtable, ChannelVtable,
-    Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice,
-    HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo,
-    LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend,
-    ModelsRequest, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable,
-    RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery,
-    SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes,
-    TerminalSize, UnknownKind, UsageQuery, UsageReport, UsageSupport,
+    AccountRenewal, AcpHarnessVtable, Bucket, CacheChoice, CacheLifetime, ChannelSinkVtable,
+    ChannelVtable, Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo,
+    HarnessNotice, HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm,
+    LoginMethodInfo, LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing,
+    ModelSpend, ModelsRequest, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit,
+    ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport,
+    SessionImport, SessionQuery, SessionRecordFile, SpawnSpec, SpawnedProcessVtable, SpawnerInfo,
+    Spend, StartRequest, Takes, TerminalSize, UnknownKind, UsageQuery, UsageReport, UsageSupport,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -106,6 +106,7 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("ModelSpend", schema_of::<ModelSpend>()),
         ("UsageSupport", schema_of::<UsageSupport>()),
         ("CacheLifetime", schema_of::<CacheLifetime>()),
+        ("CacheChoice", schema_of::<CacheChoice>()),
         ("FileInfo", schema_of::<FileInfo>()),
         ("Credentials", schema_of::<Credentials>()),
         ("AccountGrant", schema_of::<AccountGrant>()),
@@ -145,7 +146,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 45] = [
+    let pinned: [(&str, &[&str], &[&str]); 46] = [
         (
             "StartRequest",
             &[
@@ -156,6 +157,11 @@ fn every_models_keys_are_pinned() {
                 "working_roots",
             ],
             &[],
+        ),
+        (
+            "CacheChoice",
+            &["label", "lifetime"],
+            &["label", "lifetime"],
         ),
         ("Requirement", &["name", "value"], &["name"]),
         (
@@ -212,6 +218,7 @@ fn every_models_keys_are_pinned() {
         (
             "HarnessInfo",
             &[
+                "cache_choices",
                 "cache_lifetime",
                 "resumes_wider",
                 "takes",
@@ -472,7 +479,7 @@ fn every_models_keys_are_pinned() {
         ("LoginAnswer", &["secrets", "values"], &[]),
     ];
     let schemas = schemas();
-    assert_eq!(pinned.len(), 45);
+    assert_eq!(pinned.len(), 46);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()
@@ -509,7 +516,7 @@ fn every_models_keys_are_pinned() {
             .find(|(n, _)| *n == "CacheLifetime")
             .expect("described")
             .1["enum"],
-        serde_json::json!(["default", "short", "long"])
+        serde_json::json!(["default", "off", "short", "long"])
     );
     assert_eq!(
         schemas

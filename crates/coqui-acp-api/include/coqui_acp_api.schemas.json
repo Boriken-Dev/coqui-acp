@@ -96,11 +96,13 @@
         "type": "string",
         "enum": [
           "default",
+          "off",
           "short",
           "long"
         ],
         "x-enum-labels": {
           "default": "The harness's own default.",
+          "off": "No prompt cache at all, for a harness that can switch it off (see [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.",
           "short": "The short cache (about five minutes): for one-shot and background runs and loops that wake more often than that.",
           "long": "The long cache (about an hour): for an interactive session while someone is active."
         },
@@ -605,6 +607,41 @@
           "null"
         ],
         "description": "What the harness does with [`StartRequest::cache_lifetime`], in a sentence for people (the variables it sets, say); absent when it has no such control and ignores the hint."
+      },
+      "cache_choices": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "lifetime": {
+              "type": "string",
+              "enum": [
+                "default",
+                "off",
+                "short",
+                "long"
+              ],
+              "x-enum-labels": {
+                "default": "The harness's own default.",
+                "off": "No prompt cache at all, for a harness that can switch it off (see [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.",
+                "short": "The short cache (about five minutes): for one-shot and background runs and loops that wake more often than that.",
+                "long": "The long cache (about an hour): for an interactive session while someone is active."
+              },
+              "description": "The lifetime."
+            },
+            "label": {
+              "type": "string",
+              "description": "Its name for people, in the harness's own terms."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lifetime",
+            "label"
+          ]
+        },
+        "description": "The lifetimes beyond [`CacheLifetime::Default`] the harness honours, each with the name it gives it; empty when the hint is ignored. A host offers these and no others.",
+        "default": []
       }
     },
     "additionalProperties": false,
@@ -2400,15 +2437,48 @@
     "type": "string",
     "enum": [
       "default",
+      "off",
       "short",
       "long"
     ],
     "x-enum-labels": {
       "default": "The harness's own default.",
+      "off": "No prompt cache at all, for a harness that can switch it off (see [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.",
       "short": "The short cache (about five minutes): for one-shot and background runs and loops that wake more often than that.",
       "long": "The long cache (about an hour): for an interactive session while someone is active."
     },
     "properties": {}
+  },
+  "CacheChoice": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "lifetime": {
+        "type": "string",
+        "enum": [
+          "default",
+          "off",
+          "short",
+          "long"
+        ],
+        "x-enum-labels": {
+          "default": "The harness's own default.",
+          "off": "No prompt cache at all, for a harness that can switch it off (see [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.",
+          "short": "The short cache (about five minutes): for one-shot and background runs and loops that wake more often than that.",
+          "long": "The long cache (about an hour): for an interactive session while someone is active."
+        },
+        "description": "The lifetime."
+      },
+      "label": {
+        "type": "string",
+        "description": "Its name for people, in the harness's own terms."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "lifetime",
+      "label"
+    ]
   },
   "FileInfo": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

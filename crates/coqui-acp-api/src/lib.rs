@@ -32,9 +32,9 @@ pub use environment::Environment;
 pub use files::PrivateDir;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{
-    CacheLifetime, DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo, HistoryLoss, ImportReport,
-    LINE_TOO_LARGE, ModelInfo, ModelListing, NonDefault, REPLAYED_AS_PROMPT, SeedPoint,
-    SessionExport, SessionImport, SessionQuery, SessionRecordFile, StartRequest,
+    CacheChoice, CacheLifetime, DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo, HistoryLoss,
+    ImportReport, LINE_TOO_LARGE, ModelInfo, ModelListing, NonDefault, REPLAYED_AS_PROMPT,
+    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, StartRequest,
     StartRequestBuilder, Takes, UnknownKind, line_too_large,
 };
 pub use requirement::{

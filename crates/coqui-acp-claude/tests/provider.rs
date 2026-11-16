@@ -220,11 +220,12 @@ fn logged(path: &Path) -> Vec<serde_json::Value> {
 }
 
 #[test]
-fn a_cache_lifetime_sets_claude_codes_two_variables_and_default_leaves_them() {
-    for (lifetime, expected) in [
-        (CacheLifetime::Short, Some("5m")),
-        (CacheLifetime::Long, Some("1h")),
-        (CacheLifetime::Default, None),
+fn a_cache_lifetime_sets_claude_codes_variables_and_default_leaves_them() {
+    for (lifetime, expected, off) in [
+        (CacheLifetime::Short, Some("5m"), None),
+        (CacheLifetime::Long, Some("1h"), None),
+        (CacheLifetime::Off, None, Some("1")),
+        (CacheLifetime::Default, None, None),
     ] {
         let dir = scratch("cache");
         let log = dir.join("log.jsonl");
@@ -252,6 +253,11 @@ fn a_cache_lifetime_sets_claude_codes_two_variables_and_default_leaves_them() {
         ] {
             assert_eq!(ttl[name].as_str(), expected, "{name} for {lifetime:?}");
         }
+        assert_eq!(
+            ttl["DISABLE_PROMPT_CACHING"].as_str(),
+            off,
+            "DISABLE_PROMPT_CACHING for {lifetime:?}"
+        );
         drop(channel);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -265,6 +271,19 @@ fn it_describes_what_it_does_with_the_cache_hint_and_the_usage_it_reports() {
     let text = info.cache_lifetime.expect("it says what it does");
     assert!(
         text.contains("CLAUDE_CODE_PROMPT_CACHE_TTL") && text.contains("5m") && text.contains("1h")
+    );
+    let offered: Vec<(CacheLifetime, &str)> = info
+        .cache_choices
+        .iter()
+        .map(|choice| (choice.lifetime, choice.label.as_str()))
+        .collect();
+    assert_eq!(
+        offered,
+        [
+            (CacheLifetime::Off, "Off"),
+            (CacheLifetime::Short, "5 minutes"),
+            (CacheLifetime::Long, "1 hour")
+        ]
     );
     assert!(info.takes.resume && info.takes.load && info.takes.images);
 }

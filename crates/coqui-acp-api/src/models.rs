@@ -90,6 +90,32 @@ pub struct HarnessInfo {
     /// What the harness does with [`StartRequest::cache_lifetime`], in a sentence for people (the
     /// variables it sets, say); absent when it has no such control and ignores the hint.
     pub cache_lifetime: Option<String>,
+    /// The lifetimes beyond [`CacheLifetime::Default`] the harness honours, each with the name it
+    /// gives it; empty when the hint is ignored. A host offers these and no others.
+    #[map(default)]
+    pub cache_choices: Vec<CacheChoice>,
+}
+
+/// A prompt-cache lifetime a harness honours and what it calls it, such as `1 hour`.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct CacheChoice {
+    /// The lifetime.
+    pub lifetime: CacheLifetime,
+    /// Its name for people, in the harness's own terms.
+    pub label: String,
+}
+
+impl CacheChoice {
+    /// `lifetime` under `label`.
+    #[must_use]
+    pub fn new(lifetime: CacheLifetime, label: impl Into<String>) -> Self {
+        Self {
+            lifetime,
+            label: label.into(),
+        }
+    }
 }
 
 impl HarnessInfo {
@@ -104,6 +130,7 @@ impl HarnessInfo {
             resumes_wider: false,
             usage: UsageSupport::none(),
             cache_lifetime: None,
+            cache_choices: Vec::new(),
         }
     }
 }
@@ -143,6 +170,9 @@ pub enum CacheLifetime {
     /// The harness's own default.
     #[default]
     Default,
+    /// No prompt cache at all, for a harness that can switch it off (see
+    /// [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.
+    Off,
     /// The short cache (about five minutes): for one-shot and background runs and loops that wake
     /// more often than that.
     Short,
