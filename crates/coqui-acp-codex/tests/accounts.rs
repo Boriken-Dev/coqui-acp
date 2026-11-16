@@ -383,6 +383,13 @@ struct Person {
     secret: String,
     shown: Arc<Mutex<Vec<String>>>,
     codes: Arc<Mutex<Vec<Option<String>>>>,
+    /// What the person pastes when asked for the address, one for each time, `{valid}` standing for the callback of
+    /// the page they were shown; when none is left, that callback.
+    addresses: Arc<Mutex<std::collections::VecDeque<String>>>,
+    /// The title of each form the sign-in put to the person.
+    titles: Arc<Mutex<Vec<String>>>,
+    /// A person whose browser comes back to Codex by itself, and who never answers the address form.
+    never: bool,
 }
 
 impl Person {
@@ -391,7 +398,34 @@ impl Person {
             secret: secret.to_string(),
             shown: Arc::default(),
             codes: Arc::default(),
+            addresses: Arc::default(),
+            titles: Arc::default(),
+            never: false,
         }
+    }
+
+    fn pasting(secret: &str, addresses: &[&str]) -> Self {
+        let person = Self::new(secret);
+        person
+            .addresses
+            .lock()
+            .unwrap()
+            .extend(addresses.iter().map(ToString::to_string));
+        person
+    }
+
+    /// The callback the browser would end on after the page it was shown.
+    fn valid(&self) -> String {
+        let shown = self.shown.lock().unwrap();
+        let page = shown
+            .iter()
+            .find(|url| url.contains("redirect_uri"))
+            .expect("the page");
+        let port = page.split("localhost%3A").nth(1).expect("a port");
+        let port: String = port.chars().take_while(char::is_ascii_digit).collect();
+        format!(
+            "http://127.0.0.1:{port}/auth/callback?code=stand-in-code&scope=openid+profile&state=stand-in-state"
+        )
     }
 }
 
@@ -409,9 +443,26 @@ impl LoginPrompter for Person {
 
     fn ask(&self, form: LoginForm) -> Result<LoginAnswer, ProviderError> {
         let schema = coqui_acp_harness::provider::to_json(&form.schema);
+        self.titles.lock().unwrap().push(form.title.clone());
         let mut secrets = Credentials::new();
         for (name, property) in schema["properties"].as_object().expect("fields") {
             assert_eq!(property["writeOnly"], true, "only secrets are asked");
+            if name == "address" {
+                if self.never {
+                    std::thread::sleep(Duration::from_secs(4));
+                    return Err(ProviderError::new(Status::GUATIAO_ERR_GONE, "gone"));
+                }
+                let pasted = self.addresses.lock().unwrap().pop_front();
+                let pasted = pasted.unwrap_or_else(|| "{valid}".to_string());
+                let other = self.valid().replace("stand-in-state", "somebody-elses");
+                secrets.insert(
+                    name.clone(),
+                    pasted
+                        .replace("{other}", &other)
+                        .replace("{valid}", &self.valid()),
+                );
+                continue;
+            }
             secrets.insert(name.clone(), self.secret.clone());
         }
         Ok(LoginAnswer::new(
@@ -466,8 +517,103 @@ fn both_chatgpt_sign_ins_relay_the_page_and_the_device_code_and_read_the_login_t
             [wants_code.then(|| "ABCD-12345".to_string())],
             "{method}"
         );
+        if method == "chatgpt" {
+            let seen = std::fs::read_to_string(dir.join("fake-callback")).unwrap();
+            assert_eq!(seen.trim(), "callback accepted");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+#[test]
+fn a_browser_sign_in_is_finished_from_the_pasted_address_and_it_is_in_no_message() {
+    let dir = scratch("paste");
+    let person = Person::new(CANARY);
+    let outcome = login("chatgpt", &dir, &person).expect("signed in");
+    assert!(outcome.checked);
+    let titles = person.titles.lock().unwrap().clone();
+    assert_eq!(titles.len(), 1, "{titles:?}");
+    assert!(titles[0].contains("paste the address your browser ends on"));
+    assert!(titles[0].contains("http://127.0.0.1:"), "{titles:?}");
+    let shown = person.shown.lock().unwrap().join("\n");
+    for text in titles.iter().chain([&shown]) {
+        assert!(!text.contains("stand-in-code"), "{text}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_address_that_is_not_the_waiting_callback_is_refused_with_a_reason_and_asked_again() {
+    let dir = scratch("refuse");
+    let person = Person::pasting(
+        CANARY,
+        &[
+            "https://127.0.0.1:1/auth/callback?code=stand-in-code&state=stand-in-state",
+            "http://evil.example:1455/auth/callback?code=stand-in-code&state=stand-in-state",
+            "{valid}&state=again",
+        ],
+    );
+    login("chatgpt", &dir, &person).expect_err("three refused in a row");
+    let titles = person.titles.lock().unwrap().clone();
+    assert_eq!(titles.len(), 3, "{titles:?}");
+    assert!(
+        titles[1].starts_with("That address was not taken: "),
+        "{titles:?}"
+    );
+    assert!(titles[2].contains("127.0.0.1"), "{titles:?}");
+    for title in &titles {
+        assert!(
+            !title.contains("evil.example") && !title.contains("stand-in-code"),
+            "{title}"
+        );
+    }
+    // Nothing that was refused reached the login server.
+    assert!(!dir.join("fake-callback").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = scratch("refuse-then");
+    let person = Person::pasting(
+        CANARY,
+        &["http://127.0.0.1:1/auth/callback?code=stand-in-code&state=stand-in-state"],
+    );
+    let outcome = login("chatgpt", &dir, &person).expect("the second address is the callback");
+    assert!(outcome.checked);
+    assert_eq!(person.titles.lock().unwrap().len(), 2);
+    let seen = std::fs::read_to_string(dir.join("fake-callback")).unwrap();
+    assert_eq!(seen.trim(), "callback accepted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+#[test]
+fn the_state_of_another_sign_in_is_refused_and_never_requested() {
+    let dir = scratch("state");
+    let person = Person::pasting(CANARY, &["{other}", "{valid}"]);
+    login("chatgpt", &dir, &person).expect("the second address is the callback");
+    let titles = person.titles.lock().unwrap().clone();
+    assert!(titles[1].contains("state differs"), "{titles:?}");
+    let seen = std::fs::read_to_string(dir.join("fake-callback")).unwrap();
+    assert_eq!(
+        seen.trim(),
+        "callback accepted",
+        "the other state reached the login server"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_browser_on_this_machine_finishes_the_sign_in_without_the_address() {
+    let dir = scratch("local");
+    std::fs::write(dir.join("fake-login"), "local").unwrap();
+    let mut person = Person::new(CANARY);
+    person.never = true;
+    let started = std::time::Instant::now();
+    let outcome = login("chatgpt", &dir, &person).expect("signed in");
+    assert!(outcome.checked);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "it waited for the form"
+    );
+    assert!(!dir.join("fake-callback").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

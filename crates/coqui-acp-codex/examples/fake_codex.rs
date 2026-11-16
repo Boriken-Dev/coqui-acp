@@ -653,16 +653,111 @@ fn login(args: &[String], home: &std::path::Path) -> i32 {
             finish_web(&auth, refused)
         }
         None => {
-            eprintln!("Starting local login server on http://localhost:1455.");
+            // The login server of Codex: a port of the loopback the sign-in page's redirect names. `fake-login`
+            // holding `local` stands for a browser on this machine, which comes back by itself.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+            let port = listener.local_addr().map_or(0, |at| at.port());
+            eprintln!("Starting local login server on http://localhost:{port}.");
             eprintln!("If your browser did not open, navigate to this URL to authenticate:\n");
+            // The contract suite cannot paste an address: under it the page names no callback to relay and the
+            // browser comes back by itself.
+            let contract = std::env::var_os("ACP_HARNESS_CHECK_HOME").is_some();
+            let redirect = if contract {
+                String::new()
+            } else {
+                format!("&redirect_uri=http%3A%2F%2Flocalhost%3A{port}%2Fauth%2Fcallback")
+            };
             eprintln!(
-                "https://auth.openai.com/oauth/authorize?response_type=code&client_id=stand-in&state=stand-in\n"
+                "https://auth.openai.com/oauth/authorize?response_type=code&client_id=stand-in{redirect}&state={CALLBACK_STATE}\n"
             );
             eprintln!("On a remote or headless machine? Use `codex login --device-auth` instead.");
-            finish_web(&auth, refused)
+            let local =
+                std::fs::read_to_string(home.join("fake-login")).is_ok_and(|s| s.trim() == "local");
+            if local || contract {
+                return finish_web(&auth, refused);
+            }
+            wait_for_callback(&listener, home, &auth, refused)
         }
         _ => 2,
     }
+}
+
+const CALLBACK_STATE: &str = "stand-in-state";
+
+/// Waits for the browser's callback on `listener`, as Codex's login server does: a `GET /auth/callback` carrying the
+/// state and a code ends the login; any other request is answered 400 and waited past. What each request was (never
+/// its code) is appended to `fake-callback` in the home.
+fn wait_for_callback(
+    listener: &std::net::TcpListener,
+    home: &std::path::Path,
+    auth: &std::path::Path,
+    refused: bool,
+) -> i32 {
+    use std::io::Read;
+    let note = |text: &str| {
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(home.join("fake-callback"))
+            .ok();
+        if let Some(log) = log.as_mut() {
+            let _ = writeln!(log, "{text}");
+        }
+    };
+    let _ = listener.set_nonblocking(true);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < end {
+        let Ok((mut stream, _)) = listener.accept() else {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            continue;
+        };
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") && head.len() < 8192 {
+            if stream.read(&mut byte).unwrap_or(0) == 0 {
+                break;
+            }
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head).into_owned();
+        let first = head.lines().next().unwrap_or_default();
+        let host = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Host: "))
+            .unwrap_or_default();
+        let query = first
+            .strip_prefix("GET /auth/callback?")
+            .and_then(|rest| rest.strip_suffix(" HTTP/1.1"))
+            .unwrap_or_default();
+        let state = query
+            .split('&')
+            .any(|part| part == format!("state={CALLBACK_STATE}"));
+        let code = query.split('&').any(|part| part == "code=stand-in-code");
+        let named = host.starts_with("localhost:");
+        if state && code && named {
+            note("callback accepted");
+            let _ = stream.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: /success\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            if refused {
+                eprintln!("Login failed");
+                return 1;
+            }
+            let _ = std::fs::write(auth, chatgpt_file(1).to_string());
+            eprintln!("Successfully logged in");
+            return 0;
+        }
+        note(&format!(
+            "callback refused: state {state}, code {code}, host {named}"
+        ));
+        let _ = stream.write_all(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    }
+    eprintln!("Login failed: timed out waiting for the callback");
+    1
 }
 
 /// The browser comes back after a moment, and the login is written.

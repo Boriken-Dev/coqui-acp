@@ -115,7 +115,7 @@ pub fn cli::Cli::start(spawn: &dyn Spawn, launch: &Launch) -> io::Result<Arc<Cli
 pub fn cli::run(spawn, launch, input: Option<&[u8]>, limit: Duration, max_bytes: usize) -> io::Result<Done { exit, stdout, stderr, timed_out }>   // Done::succeeded(); inside a sign-in use Job::run
 pub fn cli::plain(text) -> String;  pub fn cli::host_of(url) -> Option<String>;  pub fn cli::is_loopback(host) -> bool   // localhost and loopback or unspecified IPs, parsed
 pub fn cli::address_in(text, hosts: &[&str]) -> Option<String>   // OSC 8 link, else the first http(s) address once something follows it; never one on this machine; with `hosts`, only on one of them or under one
-pub fn login::supervise(spawner: Arc<Object<dyn ProcessSpawner>>, prompter: Object<dyn LoginPrompter>, timeout_ms: u64, work: Work) -> Result<LoginOutcome, ProviderError>
+pub fn login::supervise(spawner: Arc<Object<dyn ProcessSpawner>>, prompter: Object<dyn LoginPrompter>, timeout_ms: u64, work: Work) -> Result<LoginOutcome, ProviderError>   // Work: FnOnce(&Arc<Object<dyn ProcessSpawner>>, &Arc<Object<dyn LoginPrompter>>, &Job): the prompter is shared so the work can ask on a thread of its own
 pub struct login::Job;  Job::start(&dyn Spawn, &Launch) -> Result<Arc<Cli>>;  Job::run(&dyn Spawn, &Launch, input, limit, max_bytes) -> Result<Done>;  Job::check() -> Result<()>      // GONE once the supervisor has answered
 pub fn login::asked(result) -> result  // a prompter's GONE is `login cancelled`;  login::gone(why);  login::reason(output, typed: &[&str]) -> String   // a command's last line: no address (with or without a scheme), and nothing that echoes a value typed, whole or its first or last four characters
 ```

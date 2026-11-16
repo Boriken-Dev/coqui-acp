@@ -13,7 +13,7 @@ use coqui_acp_api::guatiao::{Status, Wipe};
 use coqui_acp_api::standard::{CODEX, OPENAI_API};
 use coqui_acp_api::{
     ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountRef,
-    EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL, USER_CODE,
+    EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL, PASTE_CODE, USER_CODE,
 };
 use coqui_acp_harness::account::{Watched, jwt_expiry};
 use coqui_acp_harness::provider::{credential, resolve, schema, to_json};
@@ -147,10 +147,11 @@ pub fn catalog() -> AccountCatalog {
     let mut web = method(
         CHATGPT_METHOD,
         "Sign in with ChatGPT",
-        "Runs `codex login`: a page to open, whose callback comes back to the machine where Codex runs.",
+        "Runs `codex login`: a page to open, whose callback comes back to the machine where Codex runs. From another machine, paste the address the browser ends on.",
         CHATGPT,
     );
-    web.steps = vec![OPEN_URL.to_string()];
+    web.steps = vec![OPEN_URL.to_string(), PASTE_CODE.to_string()];
+    web.remote = true;
     let mut device = method(
         DEVICE_METHOD,
         "Sign in with ChatGPT by a code",
