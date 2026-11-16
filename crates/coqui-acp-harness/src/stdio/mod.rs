@@ -540,7 +540,7 @@ impl AcpHarness for StdioProvider {
         spawner: Object<dyn ProcessSpawner>,
     ) -> Result<RenewReport, ProviderError> {
         let def = self.def();
-        let grant = request.account;
+        let grant = accounts::resolve_grant(def, &request.account)?;
         let Some(applied) = Self::applied(&grant, def)? else {
             return Err(unsupported(
                 "the harness's own login is the harness's to renew",

@@ -135,7 +135,7 @@ pub struct StdioSettings { pub harness: StdioHarness, pub executable: Option<Str
     pub replay_waiting_secs: u64 /* 3600 */, pub replay_remembered_ids: u64 /* 4096 */, pub replay_waiting_max: u64 /* 64 */ }   // ToValue, FromValue, Schema
 pub const fn StdioSettings::new(harness: StdioHarness) -> StdioSettings
 #[non_exhaustive] pub enum StdioHarness { Grok, Antigravity }                          // written grok, antigravity
-pub mod accounts { pub struct HarnessDef; pub struct KindDef; pub fn catalog(..); pub fn apply(..); pub fn known(..);
+pub mod accounts { pub struct HarnessDef; pub struct KindDef /* .provides */; pub struct AcceptDef; pub struct SlotDef; pub fn resolve_grant(def, grant); pub fn resolve(catalog, grant) /* provider */; pub fn catalog(..); pub fn apply(..); pub fn known(..);
     pub fn json_of(..); pub mod grok; pub mod antigravity }                      // the tables; `coqui-acp-pi` builds its own `HarnessDef` on the same machinery
 ```
 

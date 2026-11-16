@@ -6,7 +6,10 @@
 use alloc::vec::Vec;
 
 use coqui_acp_api::AccountCatalog;
-use coqui_acp_harness::stdio::accounts::{self, Credential, HarnessDef, KindDef, Setting};
+use coqui_acp_api::standard;
+use coqui_acp_harness::stdio::accounts::{
+    self, AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef,
+};
 
 /// The kind of a key read from one of the variables below.
 pub const API_KEY: &str = "pi-api-key";
@@ -116,6 +119,25 @@ const VARIABLES: &[&str] = &[
     "ANTHROPIC_WORKSPACE_ID",
 ];
 
+/// A key for the API `$standard`, read by Pi from `$variable`: a key account with that variable fixed.
+macro_rules! key_of {
+    ($standard:expr, $variable:literal) => {
+        AcceptDef {
+            standard: $standard,
+            slots: &[SlotDef {
+                credential: "api_key",
+                kind: API_KEY,
+                variable: Some($variable),
+                file: None,
+                base_url_setting: None,
+                base_url_variable: None,
+                dir_variable: Some("PI_CODING_AGENT_DIR"),
+                settings: &[("variable", $variable)],
+            }],
+        }
+    };
+}
+
 /// What Pi takes as an account.
 pub static DEF: HarnessDef = HarnessDef {
     name: "Pi",
@@ -124,6 +146,9 @@ pub static DEF: HarnessDef = HarnessDef {
     kinds: &[
         KindDef {
             id: API_KEY,
+            // Which API the key is for is the `variable` setting's: the account of a standard is made
+            // by `accepts` below, which fixes it.
+            provides: &[],
             title: "Pi provider key",
             description: "A key for one provider, read from the variable `variable` names, with Pi started in a directory of its own so that no key in `auth.json` and no `baseUrl` in the person's own `models.json` overrides it.",
             credentials: &[Credential {
@@ -154,6 +179,7 @@ pub static DEF: HarnessDef = HarnessDef {
         },
         KindDef {
             id: OAUTH,
+            provides: &[standard::PI],
             title: "Pi sign-in",
             description: "The `auth.json` Pi's own sign-in (`/login`) wrote, kept in Pi's directory.",
             credentials: &[Credential {
@@ -175,6 +201,28 @@ pub static DEF: HarnessDef = HarnessDef {
             renew_unsupported: "Pi refreshes a sign-in itself, under a lock, when it needs one; it has no command that does so without a model turn",
         },
     ],
+    own_standard: Some(standard::PI),
+    // A key of each API Pi has a variable for. Pi's endpoints are the person's own `models.json`, which a key account's
+    // directory leaves out, so none of these moves one.
+    accepts: &[
+        key_of!(standard::ANTHROPIC_API, "ANTHROPIC_API_KEY"),
+        key_of!(standard::OPENAI_API, "OPENAI_API_KEY"),
+        key_of!(standard::GEMINI_API, "GEMINI_API_KEY"),
+        key_of!(standard::XAI_API, "XAI_API_KEY"),
+        AcceptDef {
+            standard: standard::PI,
+            slots: &[SlotDef {
+                credential: "auth_json",
+                kind: OAUTH,
+                variable: None,
+                file: Some("auth.json"),
+                base_url_setting: None,
+                base_url_variable: None,
+                dir_variable: Some("PI_CODING_AGENT_DIR"),
+                settings: &[],
+            }],
+        },
+    ],
     variables: VARIABLES,
     renew_args: None,
     login_unsupported: "Pi signs in only inside its terminal interface (`/login`), which this provider does not drive; a key account is made from its settings",
@@ -184,4 +232,109 @@ pub static DEF: HarnessDef = HarnessDef {
 #[must_use]
 pub fn catalog() -> AccountCatalog {
     accounts::catalog(&DEF, Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coqui_acp_api::AccountGrant;
+    use coqui_acp_api::Credentials;
+    use coqui_acp_harness::stdio::accounts::apply;
+
+    const CANARY: &str = "sk-canary-77aa";
+
+    fn foreign(standards: &[&str], key: &str) -> AccountGrant {
+        AccountGrant::new("a", "someone-elses-kind")
+            .provides(standards.iter().copied())
+            .credentials(Credentials::from_iter([(key, CANARY)]))
+            .state_dir("/some/dir")
+    }
+
+    #[test]
+    fn pi_lists_the_apis_it_has_a_variable_for_and_its_own_sign_in() {
+        let catalog = catalog();
+        let accepted: Vec<&str> = catalog
+            .accepts
+            .iter()
+            .map(|a| a.standard.as_str())
+            .collect();
+        assert_eq!(
+            accepted,
+            [
+                standard::ANTHROPIC_API,
+                standard::OPENAI_API,
+                standard::GEMINI_API,
+                standard::XAI_API,
+                standard::PI
+            ]
+        );
+        assert_eq!(
+            catalog.kind(OAUTH).expect("sign-in").provides,
+            [standard::PI]
+        );
+        assert!(catalog.kind(API_KEY).expect("key").provides.is_empty());
+        for slot in catalog.accepts.iter().flat_map(|a| &a.slots) {
+            assert!(catalog.kind(&slot.kind).is_some());
+            if let Some(variable) = &slot.variable {
+                assert!(KEY_VARIABLES.contains(&variable.as_str()), "{variable}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_of_each_accepted_api_is_read_by_pi_from_that_apis_variable_in_a_directory_of_its_own()
+    {
+        for (standard, variable) in [
+            (standard::ANTHROPIC_API, "ANTHROPIC_API_KEY"),
+            (standard::OPENAI_API, "OPENAI_API_KEY"),
+            (standard::GEMINI_API, "GEMINI_API_KEY"),
+            (standard::XAI_API, "XAI_API_KEY"),
+        ] {
+            let grant = foreign(&[standard], "api_key");
+            let applied = apply(&DEF, &grant).expect("accepted").expect("a kind");
+            let names: Vec<String> = applied
+                .environment
+                .expose()
+                .names()
+                .map(ToString::to_string)
+                .collect();
+            assert!(
+                names.contains(&variable.to_string()),
+                "{standard}: {names:?}"
+            );
+            assert!(
+                names.contains(&"PI_CODING_AGENT_DIR".to_string()),
+                "{standard}"
+            );
+            assert!(!alloc::format!("{applied:?}").contains(CANARY));
+        }
+    }
+
+    #[test]
+    fn pi_takes_what_it_has_no_variable_for_or_an_endpoint_it_cannot_move_by_refusing() {
+        for (standards, key) in [
+            (&[standard::CLAUDE_CODE][..], "token"),
+            (&[standard::CODEX][..], "auth_file"),
+            (&[][..], "api_key"),
+            (&[standard::ANTHROPIC_API][..], "auth_token"),
+        ] {
+            let Err(error) = apply(&DEF, &foreign(standards, key)) else {
+                panic!("{standards:?} {key} was taken");
+            };
+            assert!(!error.message().contains(CANARY));
+        }
+        let moved = foreign(&[standard::OPENAI_API], "api_key").settings(
+            coqui_acp_harness::provider::schema(
+                &serde_json::json!({"base_url": "https://x.example"}),
+            ),
+        );
+        let Err(error) = apply(&DEF, &moved) else {
+            panic!("an endpoint Pi cannot move was taken");
+        };
+        assert!(
+            error.message().contains("cannot move the endpoint"),
+            "{}",
+            error.message()
+        );
+    }
 }
