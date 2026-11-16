@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- `coqui-acp-bridge`: `companion install` registers the host `dev.boriken.coqui_acp_bridge` through coqui-agentic-peer's `Registration`, which no longer has a name of its own.
+- `coqui-acp-bridge` is a library: its commands are the modules `serve`, `dial`, `forward`, `pairing`, `grant`, `discover`, `keygen` and `mcp_shim` (and `standing`), each with its arguments as a `clap::Args` type and a `run`. The `coqui-acp-bridge` program is gone, and with it `companion install|uninstall` and the companion mode: a host that wants a program names itself in a `helper::Helper` (what `agent-guard` and `mcp-shim` run through) and, when its identity, trust store and grants are not where `coqui_agentic_peer::home` puts them, a `home`. `examples/bridge.rs` is a command line over the modules, for the tests.
 
 ### Added
 

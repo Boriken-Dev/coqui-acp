@@ -42,7 +42,7 @@ person or the application decides what to send again.
 
 ## Keeping an agent through a reconnect
 
-`coqui-acp-bridge serve --linger SECONDS` keeps a link's agent that long after the link ends, and gives it to the next connection that proves the same key, never to another, and only while that key is still accepted. Nothing else about the connection changes: the bridge reads no ACP, so nothing says an agent was kept, and the client asks with `session/resume`. An agent past its time, or one that ended, is a fresh agent on the new connection, which answers in its own words; what an agent that ended wrote while nobody was connected comes first.
+The bridge's `serve` with `--linger SECONDS` keeps a link's agent that long after the link ends, and gives it to the next connection that proves the same key, never to another, and only while that key is still accepted. Nothing else about the connection changes: the bridge reads no ACP, so nothing says an agent was kept, and the client asks with `session/resume`. An agent past its time, or one that ended, is a fresh agent on the new connection, which answers in its own words; what an agent that ended wrote while nobody was connected comes first.
 
 The key is the whole of what is checked. Where several programs on one machine prove the same key, as every tool of a user does under `--paired`, any of them can be given another's kept agent, with its session and what it wrote.
 

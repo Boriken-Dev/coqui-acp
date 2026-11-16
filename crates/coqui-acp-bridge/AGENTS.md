@@ -1,41 +1,60 @@
 # `coqui-acp-bridge` — API header
 
-Header-file-style reference for the `coqui-acp-bridge` crate: its command line and its small library, so it can be used without reading the source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
+Header-file-style reference for the `coqui-acp-bridge` crate: the commands it offers as library modules, and its small library, so it can be used without reading the source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
 No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-transport` (its `Channel` and `Failure` are what `relay` and `Arrival::serve` take) and `coqui-transport-web` (the WebSocket and WebTransport drivers), `coqui-peer`, `coqui-agentic-peer` (which brings `coqui-peer-noise`), `coqui-peer-webcrypto`, `coqui-peer-tls`, `coqui-net-acl`, `clap`, `rustls`, `mdns-sd`, `serde_json` and `url`, with `rustix` on Unix and `win32job` on Windows for ending an agent and what it started.
 
-No `unsafe` code (`#![forbid(unsafe_code)]`). Public modules: `agent`, `linger`, `relay`. Proof, pairing, discovery and the companion are `coqui-agentic-peer`'s; see its `AGENTS.md`.
+No `unsafe` code (`#![forbid(unsafe_code)]`). The crate builds no program: a program that people run is its host's, and a host exposes these commands. Public modules: `agent`, `linger`, `relay`, and one per command: `serve`, `dial`, `forward`, `pairing`, `grant`, `discover`, `keygen`, `mcp_shim`, `standing`, with `helper` (below) and `MethodArgs`/`SessionArgs` at the root. Proof, pairing, discovery and the companion are `coqui-agentic-peer`'s; see its `AGENTS.md`.
 
-## Command line
+## Commands as modules
+
+Each command's arguments are one `clap::Args` type with public fields, which a host flattens into its own command line or builds by hand; its `run` takes them and returns `Result<u8, String>`: `Ok` is the status to end with (0, or an agent's), `Err` the message to say, which a host ends with status 2 on.
+
+```rust
+serve::Serve, serve::run(&Serve)              // wait for peers, prove each, give each an agent; ends only on a failure to start
+dial::Dial, dial::run(&Dial)                  // connect out, reconnect, keep the agent running; ends with the agent's status
+forward::Forward, forward::run(&Forward)      // TCP over a link
+pairing::PairAccept, pairing::accept(&PairAccept)   // show a PIN, pair one peer
+pairing::PairDial, pairing::join(&PairDial)         // join a waiting accept with its PIN
+grant::run(home: Option<&Path>, peer, protocol, revoke)
+discover::run(seconds)                        // one JSON line per candidate on standard output
+keygen::create(path, method) -> peer id
+mcp_shim::run(peer: Option<&str>)             // the stdio MCP server
+mcp_shim::config(&Helper, home: Option<&Path>, peer, name) -> the `mcpServers` JSON
+helper::Helper { program, args }              // the program that runs `agent-guard PID`, `mcp-shim` and `mcp-shim --peer PEER`
+agent::watch(pid, stdin)                      // what `agent-guard` runs
+```
+
+Two settings are not command-line arguments: `Serve::helper`, the `Helper` a linger guard (Unix) and `--mcp-offers` start, without which `--mcp-offers` is refused and a kept agent has no guard; and `home` on `Serve`, `Dial`, `Forward`, `PairAccept` and `PairDial` (and `grant::run`, `mcp_shim::config`), the directory of the identity (`identity`, `identity-noise`, `method`), trust store (`peers`) and grants (`grants.json`) of a host that keeps them somewhere other than `coqui_agentic_peer::home`. A command's flags, as a host spells them (`serve`, `dial`, `forward`, `pair-accept`, `pair-dial`, `grant`, `discover`, `keygen`, `mcp-config`, `mcp-shim`, `agent-guard`), are those of its argument type:
 
 ```text
-coqui-acp-bridge keygen PATH [--method noise|webcrypto]
-coqui-acp-bridge serve --identity FILE (--allow PEER... | --allow-store DIR) [--listen ADDR] [--tls-identity FILE] [--webtransport-port PORT]
-                       [--origin URL...] [--permit NET...] [--deny NET...] [--proof-seconds N] [--max-peers N]
-                       [--linger SECONDS [--linger-per-peer N] [--linger-total N] [--linger-buffer-bytes BYTES] [--linger-settle-ms MS]] -- PROGRAM ARGS...
-coqui-acp-bridge serve --tls-identity FILE (--allow-cert FP... | --allow-cert-store DIR | --client-ca FILE) [--listen ADDR] [--origin URL...] [--permit NET...] [--deny NET...] [--max-peers N] -- PROGRAM ARGS...
-coqui-acp-bridge serve --no-peer-proof [--tls-identity FILE] [--listen ADDR] [--origin URL...] [--permit NET...] [--deny NET...] [--max-peers N] -- PROGRAM ARGS...
-coqui-acp-bridge dial URL --identity FILE (--peer ID... | --trust-store DIR) [--ca-file FILE [--bearer-file FILE]] [--max-backoff-seconds N] -- PROGRAM ARGS...
-coqui-acp-bridge dial URL --tls-identity FILE (--expect FP... | --ca-file FILE) [--bearer-file FILE] [--max-backoff-seconds N] -- PROGRAM ARGS...
-coqui-acp-bridge dial wss://... (--expect FP... | --ca-file FILE) [--bearer-file FILE] [--max-backoff-seconds N] -- PROGRAM ARGS...
-coqui-acp-bridge dial ws://loopback --no-peer-proof [--max-backoff-seconds N] -- PROGRAM ARGS...
-coqui-acp-bridge pair-accept --listen ADDR [--identity FILE] [--store DIR] [--tls-identity FILE] [--origin URL...] [--timeout-seconds N] [--run-seconds N] [--permit NET...] [--deny NET...]
-coqui-acp-bridge pair-dial URL [--identity FILE] [--store DIR] [--pin-file FILE] [--ca-file FILE]
-coqui-acp-bridge serve --paired [--listen ADDR] [--tls-identity FILE | --tls-short-lived] ... -- PROGRAM ARGS...
-coqui-acp-bridge dial URL --paired [--ca-file FILE [--bearer-file FILE]] [--max-backoff-seconds N] -- PROGRAM ARGS...
-coqui-acp-bridge discover [--seconds N]
-coqui-acp-bridge companion install --extension-id ID...
-coqui-acp-bridge companion uninstall
-coqui-acp-bridge grant PEER TOKEN [--revoke]
-coqui-acp-bridge mcp-config --peer PEER [--name NAME]
-coqui-acp-bridge mcp-shim --peer PEER
-coqui-acp-bridge forward URL (--paired | --identity KEY --peer ID) [--local LOCAL=TARGET]... [--allow-target HOST:PORT]...
+keygen PATH [--method noise|webcrypto]
+serve --identity FILE (--allow PEER... | --allow-store DIR) [--listen ADDR] [--tls-identity FILE] [--webtransport-port PORT]
+      [--origin URL...] [--permit NET...] [--deny NET...] [--proof-seconds N] [--max-peers N]
+      [--linger SECONDS [--linger-per-peer N] [--linger-total N] [--linger-buffer-bytes BYTES] [--linger-settle-ms MS]] -- PROGRAM ARGS...
+serve --tls-identity FILE (--allow-cert FP... | --allow-cert-store DIR | --client-ca FILE) [--listen ADDR] [--origin URL...] [--permit NET...] [--deny NET...] [--max-peers N] -- PROGRAM ARGS...
+serve --no-peer-proof [--tls-identity FILE] [--listen ADDR] [--origin URL...] [--permit NET...] [--deny NET...] [--max-peers N] -- PROGRAM ARGS...
+serve --paired [--listen ADDR] [--tls-identity FILE | --tls-short-lived] ... -- PROGRAM ARGS...
+dial URL --identity FILE (--peer ID... | --trust-store DIR) [--ca-file FILE [--bearer-file FILE]] [--max-backoff-seconds N] -- PROGRAM ARGS...
+dial URL --tls-identity FILE (--expect FP... | --ca-file FILE) [--bearer-file FILE] [--max-backoff-seconds N] -- PROGRAM ARGS...
+dial wss://... (--expect FP... | --ca-file FILE) [--bearer-file FILE] [--max-backoff-seconds N] -- PROGRAM ARGS...
+dial ws://loopback --no-peer-proof [--max-backoff-seconds N] -- PROGRAM ARGS...
+dial URL --paired [--ca-file FILE [--bearer-file FILE]] [--max-backoff-seconds N] -- PROGRAM ARGS...
+pair-accept --listen ADDR [--identity FILE] [--store DIR] [--tls-identity FILE] [--origin URL...] [--timeout-seconds N] [--run-seconds N] [--permit NET...] [--deny NET...]
+pair-dial URL [--identity FILE] [--store DIR] [--pin-file FILE] [--ca-file FILE]
+discover [--seconds N]
+grant PEER TOKEN [--revoke]
+mcp-config --peer PEER [--name NAME]
+mcp-shim --peer PEER
+forward URL (--paired | --identity KEY --peer ID) [--local LOCAL=TARGET]... [--allow-target HOST:PORT]...
 ```
+
+The crate's tests drive them through `examples/bridge.rs`, a command line over exactly these modules.
 
 Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`. With the in-band proof it also takes `--service TOKEN=PROGRAM...` and `--grant PEER=TOKEN...`, and `dial` takes `--fallback URL...`. With the in-band proof, `--tls-short-lived` replaces `--tls-identity`. Every in-band form of `serve`, `dial` and `forward`, and `pair-accept` and `pair-dial`, takes `--method noise|webcrypto`; `serve`, `dial` and `forward` also take `--key-limit BYTES` and `--no-rekey`.
 
 - **Several protocols on one link:** `--service mcp=PROGRAM` serves another protocol beside the agent after `--`, which is `acp/1`. A client opens streams on one proven link, and the first message tells a link from a plain ACP client, which keeps working. A proof admits a peer and grants nothing: `--grant PEER=TOKEN` names what it may open, with everything for an allowed peer when none is listed. Under `--paired`, a peer gets `acp/1` for being paired, and `grant PEER TOKEN` adds or takes away anything else, counted at once on a live link, with no second pairing. A store that cannot be read refuses. `--advertise` then says what is offered, as a hint.
-- **A peer's own tools:** `serve --mcp-offers` serves `mcp-offer/1`. A peer opens it, with a server name in its metadata, and is answered with one stdio `mcpServers` entry running `coqui-acp-bridge mcp-shim`, with a loopback address and the path of an owner-only token file in its environment, to declare in `session/new`. It has to run as the bridge's user. The relay still reads no ACP. A paired peer has it with `acp/1`, since it could already declare any command, so `grant --revoke` refuses either rather than saying it worked; `--grant` names it like anything else. The wire is in `coqui-agentic-peer`'s `docs/link.md`.
+- **A peer's own tools:** `serve --mcp-offers` serves `mcp-offer/1`. A peer opens it, with a server name in its metadata, and is answered with one stdio `mcpServers` entry running the host's `mcp-shim` (the `Helper`), with a loopback address and the path of an owner-only token file in its environment, to declare in `session/new`. It has to run as the bridge's user. The relay still reads no ACP. A paired peer has it with `acp/1`, since it could already declare any command, so `grant --revoke` refuses either rather than saying it worked; `--grant` names it like anything else. The wire is in `coqui-agentic-peer`'s `docs/link.md`.
 - **A program no peer declared to:** with `serve --mcp-offers`, an MCP client on this machine, such as an IDE or a CLI agent, can reach a peer's tools with no ACP session. `mcp-config --peer PEER` prints the `mcpServers` entry to paste, named `canoa-browser` unless `--name` says otherwise. It holds no port and no secret, so it stays good across restarts of either side. It runs `mcp-shim --peer PEER`, which reaches only that peer: another peer of this bridge has a file of its own.
 - **Its wire:** the peer opens `mcp-offer/1` with the metadata `standing/1`, which an older bridge refuses as no server name. It is answered `{"standing":1}`, and `{"claimed":true}` when a program takes the stream; from then on each message is MCP's own, carried as lines to that program, and the stream ends when the program does. One stream carries one program, so the peer opens the next when it hears one was taken, and several programs share the peer's one grant. The peer's first stream makes a loopback port with a random token and an answer, in `standing-<hex>.json` in `offers/` under this user's home, and its last stream ends them. The shim shows the token, and checks the answer before saying anything, so something else on a port a dead bridge left learns only a dead token. This is not HTTP, so a web page firing at the port gets nothing, and something connected has two seconds in all to show the token.
 - **Nothing connected:** the shim says why on standard error, answers its client's first message with a JSON-RPC error saying the same, and exits with status 1. A stream ending, which is the peer going away or turning this off, ends the shim, which its client sees as a stdio server closing. A client has to start the server again to come back, from the same entry. A peer gone without a word, over WebTransport, can take that link's idle timeout to be noticed (about 25 seconds, measured), and a program starting meanwhile gets in and hears nothing.
@@ -50,7 +69,7 @@ Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`. W
   - Output while nobody is connected: `--linger-buffer-bytes` (16 MiB, at most 256 MiB) of the newest lines per agent, each counted with what holding it takes. Past it the oldest are dropped, since the newest hold the answer that ends a turn, and the next link's first message is a JSON-RPC notification, method `_dev.boriken.coqui.acp/output_lost`, params `{"lines": N, "bytes": N}`. That is the one message the bridge writes itself. Whichever connection of that peer comes next gets all of this. An agent that ends while kept, having written something meanwhile, leaves what it wrote: the next connection gets that first, then a fresh agent.
   - What this does not cover: what a link had accepted and never delivered when it was cut is lost with no notice, since nothing acknowledges it, so a client treats any reconnect as a possible gap. What the agent answers on a new link may be to a request of the old one, with its id. A request the agent is waiting on an answer to stays open while nobody is connected.
   - Agent input while nobody is connected: nothing new is written and its standard input stays open. Lines already queued to it are written; one still waiting when the link ended is dropped, so what a peer sent last has an unknown outcome.
-  - When the bridge goes: on Windows every agent, with or without `--linger`, is in a job object of its own, which the system ends with everything in it when the bridge's handle closes, however the bridge ends. A process the agent starts in the moment before it is put there is not in it. On Unix, under `--linger`, each agent has a helper, `coqui-acp-bridge agent-guard PID`, that ends the agent's process group when the bridge goes. That is cleanup, not containment: a process that leaves the group (`setsid`, `setpgid`) escapes it, a signal to every process of this program's name (`killall`) ends the helpers too, and the agent runs as the same user, so it can end or dismiss its helper. Without `--linger`, on Unix, an agent is told only by its input closing.
+  - When the bridge goes: on Windows every agent, with or without `--linger`, is in a job object of its own, which the system ends with everything in it when the bridge's handle closes, however the bridge ends. A process the agent starts in the moment before it is put there is not in it. On Unix, under `--linger`, each agent has a helper, the host's `agent-guard PID` (the `Helper`), that ends the agent's process group when the bridge goes. That is cleanup, not containment: a process that leaves the group (`setsid`, `setpgid`) escapes it, a signal to every process of this program's name (`killall`) ends the helpers too, and the agent runs as the same user, so it can end or dismiss its helper. Without `--linger`, on Unix, an agent is told only by its input closing.
 - **Stopping an agent:** ends what it started too, by process group on Unix and job object on Windows. An agent runs in its own group, so a terminal's Ctrl-C reaches the bridge and not it directly; the bridge ends it.
 - **Failover:** `dial --fallback URL` tries the next endpoint when one cannot be reached. Each has to prove what the first would, and they share a scheme.
 - **One pairing:** `pair-accept` and `pair-dial` default to this user's own identity and trust store (`coqui_agentic_peer::home`), and `serve --paired` and `dial --paired` read them, so one pairing serves every command, with nothing to name.
@@ -70,7 +89,6 @@ Every `serve` form also takes `--advertise LABEL` and `--advertise-host NAME`. W
 - `serve` says `listening on` on standard error only once it can also be found. `--advertise LABEL` is off by default. On loopback it writes a descriptor; otherwise it publishes `_acp-agent._tcp` on every interface the listener is bound to, with no secret in it. `--advertise-host` publishes a host name for a certificate a browser accepts; without it, clients get an address. A killed `serve` leaves a descriptor, which the next search removes. The DNS-SD record is not withdrawn on a kill, and expires.
 - `serve --tls-short-lived` makes a certificate for this run, in memory, which a browser can pin over WebTransport with no certificate authority, and advertises its hash as `wth`. Browsers take one valid for 14 days at most, so `serve` ends with status 3 after 13 days: restart it, and a client finds the new hash by searching again. It needs the in-band proof, which is what authenticates.
 - `discover` prints one JSON object per line: `label`, `url`, `peer`, `method`, `source` (`dns-sd` or `local`), `webtransport`, `webtransportHash`, `acpVersions`. It is what they claim. `serve --advertise` publishes the method its identity proves by, and a record naming none is WebCrypto's.
-- `companion install` registers this program, where it is now, for this user's Chrome, Chromium and Edge: the manifest and, on Windows, the registry keys. A browser starts it with `chrome-extension://…/` as its first argument, which selects native messaging instead of the command line.
 - Exit status: 3 when a short-lived certificate is ending; the agent's when it ended the bridge; 2 for a bad configuration, a failed pairing, or a remote that failed its proof.
 
 ## `coqui_acp_bridge::relay`

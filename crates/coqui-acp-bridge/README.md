@@ -14,7 +14,7 @@ bridge passes complete messages and reads none of them, so what the agent may do
 - `serve --forward`, `forward`: TCP over the link in either direction, each target its own grant.
 - `serve --mcp-offers`: a peer can give its agent the peer's own MCP tools, through a stdio server every agent can start.
 - `mcp-config`: the same tools for an MCP client with no ACP session, such as an IDE, from one stable `mcpServers` entry: a peer keeps a stream standing, and each program gets its own.
-- `serve --advertise`, `discover`: find agents on this machine and the link. What is found is a claim, and only the proof at connect tests it. A browser extension asks through `companion install`, and `--tls-short-lived` lets it open WebTransport with no certificate authority.
+- `serve --advertise`, `discover`: find agents on this machine and the link. What is found is a claim, and only the proof at connect tests it. `--tls-short-lived` lets it open WebTransport with no certificate authority.
 - `dial`: connect out from behind NAT, reconnecting with the agent still running; ends with the agent's exit status.
 - Nothing is trusted on first use. A peer proves a key in-band (`--allow`, or a paired key with `--allow-store`), by Noise or by WebCrypto, chosen per endpoint and never negotiated, and everything after that is inside an encrypted session, so a reverse proxy that ends TLS can carry it and can neither read nor inject. Or by a pinned client certificate (`--allow-cert`), which ends where TLS ends.
 - `pair-accept` and `pair-dial`: a PIN makes a full key, inside the same kind of session, so a reverse proxy can carry it. One wrong try ends the attempt.
@@ -24,29 +24,29 @@ bridge passes complete messages and reads none of them, so what the agent may do
 
 ## Installation
 
-Not published: `publish = false` until a release is chosen. `cargo build -p coqui-acp-bridge` from a checkout.
+Not published: `publish = false` until a release is chosen. A library: a program that people run exposes its commands (`serve`, `dial`, `forward`, `pairing`, `grant`, `discover`, `keygen`, `mcp_shim`), each a module with its arguments and a `run`. `cargo run -p coqui-acp-bridge --example bridge -- <command>` is a command line over them, for trying them from a checkout; the tests use it.
 
 ## Quick start
 
-A browser, on this machine:
+With the example command line (`cargo run -p coqui-acp-bridge --example bridge --`, written `bridge` below). A browser, on this machine:
 
 ```sh
-coqui-acp-bridge keygen bridge.pem
-coqui-acp-bridge serve --identity bridge.pem --allow sha256:<browser peer id> -- gemini --acp
+bridge keygen bridge.pem
+bridge serve --identity bridge.pem --allow sha256:<browser peer id> -- gemini --acp
 ```
 
 Two machines, paired by a PIN, with the agent behind NAT:
 
 ```sh
 # On the server: shows a PIN
-coqui-acp-bridge pair-accept --listen 127.0.0.1:7443 --identity server.pem --store peers   # behind a proxy
+bridge pair-accept --listen 127.0.0.1:7443 --identity server.pem --store peers   # behind a proxy
 
 # On the agent's machine: asks for it on standard input
-coqui-acp-bridge pair-dial wss://server.example/v1/agent/pair --identity agent.pem --store peers
+bridge pair-dial wss://server.example/v1/agent/pair --identity agent.pem --store peers
 
 # Then, on each side
-coqui-acp-bridge serve --listen 127.0.0.1:7444 --identity server.pem --allow-store peers -- my-gateway
-coqui-acp-bridge dial wss://server.example/v1/agent --identity agent.pem --trust-store peers -- gemini --acp
+bridge serve --listen 127.0.0.1:7444 --identity server.pem --allow-store peers -- my-gateway
+bridge dial wss://server.example/v1/agent --identity agent.pem --trust-store peers -- gemini --acp
 ```
 
 ## Command line
