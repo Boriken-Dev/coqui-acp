@@ -229,6 +229,10 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 - `models`: starts `pi --mode rpc --no-session` through the spawner, lists `get_available_models` and ends it (no session, no turn); no model with a credential is `unknown`. `is_default` marks the model Pi would use, and only that model has `efforts` (its `get_available_thinking_levels`) and `default_effort` (Pi's starting level): Pi lists levels for the model in use only, so the others have none and `resolved` and `version` are unset. `usage`: `unsupported`, after looking at the account's file so a renewal is told.
 - `login`: `GUATIAO_ERR_UNSUPPORTED`, since Pi signs in only inside its terminal (`/login`, `pi auth login`); `renew`: `UNSUPPORTED` for both kinds after the grant is read (a key is not renewed; Pi refreshes a sign-in itself). `import_session`, `export_session`: with the `history` feature the session file's, as above (a spawner that runs Pi elsewhere is refused: the file is on this machine); without it `GUATIAO_ERR_UNSUPPORTED` with a reason (after checking the account). `session_record`, `non_defaults`: the kind's defaults.
 
+## Plan limits of an account (`coqui_acp_pi::account_usage`)
+
+`pub fn read_limits(grant: &AccountGrant) -> Result<UsageReport, ProviderError>`: the account's side, with no harness. Pi reports no plan limits, so after the grant is checked as everywhere (`BAD_VALUE` for one the provider refuses) every Pi account answers `UsageReport::unsupported` with the reason (`pi-api-key`: billed by use; `pi-oauth`: Pi reports none for the sign-in it keeps), `account` echoed. `PiProvider::usage` is unchanged.
+
 ## Errors
 
 `Error` (`#[non_exhaustive]`): `Spawn(io::Error)`, `Refused(String)`, `Timeout { what, limit }`, `Harness(String)` in Pi's words or saying how it ended. Into `HarnessError`: `Refused` stays refused, the rest is `Failed`.
