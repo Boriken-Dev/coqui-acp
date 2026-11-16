@@ -89,7 +89,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
             "default": []
           }
         },
@@ -240,7 +240,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
             "default": []
           }
         },
@@ -327,7 +327,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
             "default": []
           }
         },
@@ -1303,7 +1303,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
             "default": []
           }
         },
@@ -2588,7 +2588,7 @@
         "items": {
           "type": "string"
         },
-        "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+        "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
         "default": []
       }
     },
@@ -2886,7 +2886,7 @@
             "standard"
           ]
         },
-        "description": "The standards the harness starts on, most preferred first, and how each is applied. An account whose `kind` this catalog does not list is applied as the first of these that it provides ([`resolve`](Self::resolve)).",
+        "description": "The standards the harness starts on, most preferred first, and how each is applied. An account whose `kind` this catalog does not list is applied as the first of these that it provides ([`accepted_by`](Self::accepted_by)).",
         "default": []
       }
     },
@@ -3329,7 +3329,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
             "default": []
           }
         },
@@ -3440,7 +3440,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names ([`AccountCatalog::resolve`]).",
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
             "default": []
           }
         },
