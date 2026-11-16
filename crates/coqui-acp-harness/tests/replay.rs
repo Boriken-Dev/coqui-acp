@@ -13,8 +13,8 @@ use std::time::Duration;
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, Channel, ChannelSink, ImportReport,
-    ProcessSpawner, SessionImport, StartRequest,
+    AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, Channel, ChannelSink, Environment,
+    ImportReport, ProcessSpawner, SessionExport, SessionImport, StartRequest,
 };
 use coqui_acp_harness::LocalSpawner;
 use coqui_acp_harness::stdio::{StdioHarness, StdioProvider, StdioSettings};
@@ -119,9 +119,14 @@ struct Connection {
 
 impl Connection {
     fn open(provider: &StdioProvider, dir: &Path) -> Self {
+        Self::open_with(provider, dir, Environment::new())
+    }
+
+    fn open_with(provider: &StdioProvider, dir: &Path, environment: Environment) -> Self {
         let (sender, received) = mpsc::channel();
         let request = StartRequest::builder()
             .working_root(dir.to_str().expect("text"))
+            .environment(environment)
             .build();
         let channel = provider
             .start(request, spawner(), Sink(sender).into_object(), keeper())
@@ -194,6 +199,43 @@ fn without_a_replay_budget_an_import_is_unsupported() {
     let dir = scratch("off");
     let refused = import(&provider(0), SESSION, &dir, "").expect_err("refused");
     assert_eq!(status_of(&refused), Status::GUATIAO_ERR_UNSUPPORTED);
+    // It says why Antigravity cannot be seeded, and what the person can set.
+    let why = refused.message();
+    assert!(
+        why.contains("protobuf") && why.contains("replay_max_bytes"),
+        "{why}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_antigravity_session_is_not_read_out_of_the_agent_and_the_refusal_says_why() {
+    let dir = scratch("export");
+    let refused = provider(4096)
+        .export_session(
+            SessionExport::new(SESSION, dir.to_str().expect("text")),
+            spawner(),
+            keeper(),
+        )
+        .expect_err("refused");
+    assert_eq!(status_of(&refused), Status::GUATIAO_ERR_UNSUPPORTED);
+    let why = refused.message();
+    assert!(
+        why.contains("SQLite") && why.contains("records the sessions it serves"),
+        "{why}"
+    );
+    // Grok has no such store to describe, and is refused in the words that held before.
+    let mut settings = StdioSettings::new(StdioHarness::Grok);
+    settings.executable = Some(fake());
+    let refused = StdioProvider::new(settings)
+        .export_session(
+            SessionExport::new(SESSION, dir.to_str().expect("text")),
+            spawner(),
+            keeper(),
+        )
+        .expect_err("refused");
+    assert_eq!(status_of(&refused), Status::GUATIAO_ERR_UNSUPPORTED);
+    assert!(!refused.message().contains("SQLite"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -412,5 +454,57 @@ fn patterns_are_removed_from_the_history_before_it_is_replayed() {
     let (said, _, _) = connection.prompt(SESSION, "go");
     assert!(!said.contains("hunter42"), "{said}");
     assert!(said.contains("the key is [redacted]"), "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The real program (`COQUI_ACP_AGY_REAL`: the `agy` executable), in a home made for the test and signed in to nothing:
+/// the session an import seeds opens at the imported id through `session/resume`, which the program itself refuses for an
+/// id it does not hold, and no turn is made, so nothing is spent.
+#[test]
+fn a_real_antigravity_opens_a_session_imported_by_replay_at_its_id() {
+    let Some(real) = std::env::var("COQUI_ACP_AGY_REAL")
+        .ok()
+        .filter(|path| !path.is_empty())
+    else {
+        eprintln!("skipped: no real Antigravity named");
+        return;
+    };
+    let dir = scratch("real");
+    let home = dir.join("home");
+    let work = dir.join("work");
+    for path in [
+        &home,
+        &work,
+        &home.join("AppData").join("Roaming"),
+        &home.join("AppData").join("Local"),
+        &home.join("tmp"),
+    ] {
+        std::fs::create_dir_all(path).expect("a directory");
+    }
+    let mut environment = Environment::new();
+    let text = |path: &Path| path.to_str().expect("text").to_owned();
+    for name in ["HOME", "USERPROFILE"] {
+        environment.insert(name, text(&home));
+    }
+    environment.insert("APPDATA", text(&home.join("AppData").join("Roaming")));
+    environment.insert("LOCALAPPDATA", text(&home.join("AppData").join("Local")));
+    environment.insert("TEMP", text(&home.join("tmp")));
+    environment.insert("TMP", text(&home.join("tmp")));
+    let mut settings = StdioSettings::new(StdioHarness::Antigravity);
+    settings.executable = Some(real);
+    settings.replay_max_bytes = 4096;
+    let provider = StdioProvider::new(settings);
+    let report = import(
+        &provider,
+        SESSION,
+        &work,
+        &history(&[("fix the failing test", "I will run it first.")]),
+    )
+    .expect("imports by replay");
+    assert!(report.replayed());
+    let mut connection = Connection::open_with(&provider, &work, environment);
+    let answer = connection.resume(SESSION, &work);
+    assert!(answer.get("error").is_none(), "{answer}");
+    drop(connection);
     let _ = std::fs::remove_dir_all(&dir);
 }
