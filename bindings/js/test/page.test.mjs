@@ -121,6 +121,32 @@ test('no grant of a working directory means no session', () => {
   assert.ok(new Scope({ cwd: null }, 'https://a.example').fromPage(rpc(1, 'session/new', {})).reply);
 });
 
+test('a provider that supplies the folder gets a session with the cwd of the page removed, for every way of opening one', () => {
+  const s = new Scope({ cwd: null, folder: 'provider', sessions: new Set(['old']) }, 'https://a.example');
+  for (const [method, params] of [['session/new', {}], ['session/load', { sessionId: 'old' }], ['session/resume', { sessionId: 'old' }]]) {
+    const step = s.fromPage(rpc(1, method, { ...params, cwd: '/etc', mcpServers: [] }));
+    assert.ok(step.forward, method);
+    assert.equal('cwd' in JSON.parse(step.forward).params, false, method);
+  }
+  // Even with a directory granted as well, the page's own never goes on, and the provider's folder wins.
+  const both = new Scope({ cwd: '/granted', folder: 'provider' }, 'https://a.example');
+  assert.equal('cwd' in JSON.parse(both.fromPage(rpc(1, 'session/new', { cwd: '/etc' })).forward).params, false);
+});
+
+test('a provider-supplied folder changes nothing else about a session', () => {
+  const s = new Scope({ cwd: null, folder: 'provider' }, 'https://a.example');
+  assert.ok(s.fromPage(rpc(1, 'session/new', { mcpServers: [{ type: 'http', name: 'x', url: 'https://other.example/mcp' }] })).reply);
+  assert.ok(s.fromPage(rpc(2, 'session/new', { mcpServers: [{ name: 'x', command: '/bin/sh' }] })).reply);
+  assert.ok(s.fromPage(rpc(3, 'session/resume', { sessionId: 'someone-elses' })).reply);
+  const sent = JSON.parse(s.fromPage(JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'session/new', _meta: { x: 1 }, params: { _meta: { y: 1 }, mcpServers: [] } })).forward);
+  assert.deepEqual(sent.params, { mcpServers: [] });
+  assert.equal(sent._meta, undefined);
+});
+
+test('a grant without a folder from the provider still needs one from the person', () => {
+  assert.ok(new Scope({ cwd: null, folder: 'person' }, 'https://a.example').fromPage(rpc(1, 'session/new', {})).reply);
+});
+
 test('mcpOrigins widens exactly what it names, and an entry cannot hide a command', () => {
   const s = scope({ mcpOrigins: ['https://tools.example'] });
   const session = (server) => rpc(1, 'session/new', { mcpServers: [server] });

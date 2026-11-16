@@ -121,7 +121,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | From the page | Result |
 | --- | --- |
 | `initialize` | forwarded |
-| `session/new` | forwarded with `cwd` replaced by the grant's, and `mcpServers` checked |
+| `session/new` | forwarded with `cwd` replaced by the grant's (removed, for a grant whose folder the provider supplies), and `mcpServers` checked |
 | `session/prompt`, `session/cancel`, `session/close` | forwarded for a session this origin opened with this agent |
 | `session/load`, `session/resume` | the same, with `cwd` and `mcpServers` handled as for `session/new` |
 | `session/set_model`, and `session/set_config_option` of an option the agent described as category `model` or `thought_level` | forwarded for its own session |
@@ -129,7 +129,7 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 | A response to a request the agent made of the page | forwarded |
 | `authenticate`, `session/list`, anything else, any `_` extension | refused with `-32601`; a notification is dropped |
 
-- **`cwd`** is the grant's, chosen by the person. Without one, `session/new` is refused.
+- **`cwd`** is the grant's, chosen by the person. Without one, `session/new` is refused. A provider whose agent works in a folder the provider's side makes (a host that gives each site its own scratch folder) may instead mark the grant `folder: "provider"`: the page's `cwd` is then removed from `session/new`, `session/load` and `session/resume` and never reaches the agent, and the provider MUST supply the folder itself in the same message, from what the browser reported of the page and never from the page. Everything else in the table holds.
 - **`mcpServers`** may hold only `type` `http`, `sse` or `acp`. Anything else, above all an entry with a `command`, is refused whole. An `http` or `sse` URL MUST be `https` and have the page's origin or one in the grant's `mcpOrigins`, because the agent connects from its own network and sends the given headers there.
 - **`_meta`** is removed from every message, since an agent may give it private meaning.
 

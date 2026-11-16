@@ -68,7 +68,9 @@ export class Scope {
   #optionCategories = new Map();
 
   /**
-   * @param {{cwd: string|null, permissions?: boolean, mcpOrigins?: string[], sessions?: Set<string>}} grant
+   * @param {{cwd: string|null, folder?: 'provider', permissions?: boolean, mcpOrigins?: string[], sessions?: Set<string>}} grant
+   *   `folder: 'provider'` says the provider, not the person, supplies each session's working directory: the page's `cwd` is
+   *   removed and the provider MUST put its own before the message reaches the agent.
    * @param {string} origin the page's origin, as the browser reported it
    */
   constructor(grant, origin) {
@@ -121,12 +123,14 @@ export class Scope {
       if (method !== 'session/new' && !this.#ownsSession(params)) {
         return refuse(METHOD_NOT_FOUND, 'not a session of this page');
       }
-      if (typeof this.#grant.cwd !== 'string') return refuse(INVALID_PARAMS, 'no working directory was granted');
+      const providerFolder = this.#grant.folder === 'provider';
+      if (!providerFolder && typeof this.#grant.cwd !== 'string') return refuse(INVALID_PARAMS, 'no working directory was granted');
       if (!this.#serversAllowed(params.mcpServers)) {
         return refuse(INVALID_PARAMS, 'that MCP server is not allowed for this page');
       }
       if (hasId(message)) this.#opening.set(message.id, { method, session: params.sessionId });
-      return { forward: JSON.stringify({ ...clean, params: { ...params, cwd: this.#grant.cwd } }) };
+      const { cwd: _page, ...rest } = params;
+      return { forward: JSON.stringify({ ...clean, params: providerFolder ? rest : { ...rest, cwd: this.#grant.cwd } }) };
     }
     if (OWN_SESSION.has(method)) {
       return this.#ownsSession(params)
