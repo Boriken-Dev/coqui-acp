@@ -354,8 +354,12 @@ pub struct AccountKindInfo {
     /// account exclusively. A kind whose rotation is unmeasured says `true`.
     #[map(default)]
     pub rotates: bool,
-    /// A session started on one account of this kind resumes on another account of the same
-    /// provider directly.
+    /// The harness keeps its sessions where every account of this kind shares them, so a session
+    /// started on one account resumes on another directly, with nothing moved. `false` does not say
+    /// the conversation cannot follow the person: where each account has its own directory
+    /// ([`state_dir`](Self::state_dir)) a host exports it from the first account's with
+    /// [`export_session`](crate::AcpHarness::export_session) and imports it into the second's with
+    /// [`import_session`](crate::AcpHarness::import_session), then resumes it there.
     #[map(default)]
     pub history_portable: bool,
     /// The kind needs a private directory where the harness runs ([`AccountGrant::state_dir`]).
