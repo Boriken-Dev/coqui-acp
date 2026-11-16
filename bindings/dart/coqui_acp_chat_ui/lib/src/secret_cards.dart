@@ -381,9 +381,14 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         key: ValueKey('secret-${field.name}'),
         controller: _texts[field.name],
         obscureText: true,
-        // What is typed never leaves the field: no selection, no copy, no cut, no suggestions, no saved words.
-        enableInteractiveSelection: false,
-        contextMenuBuilder: (context, state) => const SizedBox.shrink(),
+        // What is typed never leaves the field: an obscured field has no copy or cut, its menu holds Paste alone (a sign-in code
+        // is pasted from the page that showed it), and there are no suggestions or saved words.
+        contextMenuBuilder: (context, state) {
+          final paste = [for (final item in state.contextMenuButtonItems) if (item.type == ContextMenuButtonType.paste) item];
+          return paste.isEmpty
+              ? const SizedBox.shrink()
+              : AdaptiveTextSelectionToolbar.buttonItems(anchors: state.contextMenuAnchors, buttonItems: paste);
+        },
         enableSuggestions: false,
         autocorrect: false,
         enableIMEPersonalizedLearning: false,

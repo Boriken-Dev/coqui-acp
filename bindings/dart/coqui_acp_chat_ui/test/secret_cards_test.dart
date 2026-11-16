@@ -36,7 +36,7 @@ void main() {
       for (final name in ['password', 'pin']) {
         final field = tester.widget<TextField>(find.byKey(ValueKey('secret-$name')));
         expect(field.obscureText, isTrue, reason: name);
-        expect(field.enableInteractiveSelection, isFalse, reason: name);
+        expect(field.contextMenuBuilder, isNotNull, reason: name);
         expect(field.enableSuggestions, isFalse);
         expect(field.autocorrect, isFalse);
         expect(field.autofillHints, isNull);
@@ -44,7 +44,8 @@ void main() {
       expect(tester.widget<TextField>(find.byKey(const ValueKey('question-user'))).obscureText, isFalse);
     });
 
-    testWidgets('a secret field has no way to copy out: no menu, no copy shortcut, nothing on the clipboard', (tester) async {
+    testWidgets('a secret field has no way to copy out: Paste is its only menu item, no copy or cut shortcut, nothing on the clipboard',
+        (tester) async {
       bigScreen(tester);
       watchClipboard();
       final (params, _) = await tester.runAsync(asked) as (AcpSecretRequestParams, AcpSecretReceiver);
@@ -52,17 +53,41 @@ void main() {
       await settle(tester);
       await type(tester, 'secret-password', password);
       final editable = find.descendant(of: find.byKey(const ValueKey('secret-password')), matching: find.byType(EditableText));
+      final state = tester.state<EditableTextState>(editable);
+      expect(state.copyEnabled, isFalse);
+      expect(state.cutEnabled, isFalse);
       final field = tester.widget<TextField>(find.byKey(const ValueKey('secret-password')));
-      expect(field.contextMenuBuilder!(tester.element(editable), tester.state<EditableTextState>(editable)), isA<SizedBox>());
+      final menu = field.contextMenuBuilder!(tester.element(editable), state);
+      final items = menu is AdaptiveTextSelectionToolbar ? menu.buttonItems ?? const <ContextMenuButtonItem>[] : const <ContextMenuButtonItem>[];
+      expect(items.map((item) => item.type), everyElement(ContextMenuButtonType.paste));
       await tester.tap(find.byKey(const ValueKey('secret-password')));
       await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pump();
       expect(clipboard, isEmpty);
       expect(tester.widget<EditableText>(editable).obscureText, isTrue);
-      expect(tester.widget<EditableText>(editable).enableInteractiveSelection, isFalse);
+      expect(tester.widget<EditableText>(editable).controller.text, password);
+    });
+
+    testWidgets('a code is pasted into a secret field with the paste shortcut', (tester) async {
+      bigScreen(tester);
+      watchClipboard();
+      clip = 'pasted-code-1234';
+      final (params, _) = await tester.runAsync(asked) as (AcpSecretRequestParams, AcpSecretReceiver);
+      await tester.pumpWidget(host(SecretRequestCard(request: params, environment: environment(), onReply: (_) {})));
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('secret-password')));
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await settle(tester);
+      final editable = find.descendant(of: find.byKey(const ValueKey('secret-password')), matching: find.byType(EditableText));
+      expect(tester.widget<EditableText>(editable).controller.text, 'pasted-code-1234');
+      expect(clipboard, isEmpty);
     });
 
     testWidgets('Send sealed waits for the required fields and for values that fit', (tester) async {
