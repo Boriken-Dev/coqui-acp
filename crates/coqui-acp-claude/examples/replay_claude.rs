@@ -12,7 +12,8 @@
 //! `--allow-dangerously-skip-permissions` or in that mode, and a mode it has no name for is refused.
 //!
 //! `COQUI_ACP_CLAUDE_MODE_LINE` names a `permissionMode` it reports in a `system` line each time it reads a message of the
-//! person's, as Claude Code does when its mode changes by itself.
+//! person's, as Claude Code 2.1.311 does when its mode changes by itself (measured: `status` null, a `uuid` and the
+//! `session_id`).
 //!
 //! `COQUI_ACP_CLAUDE_ARGS` names a file its arguments are written to, as JSON, and `COQUI_ACP_CLAUDE_COPY` a file the
 //! file `--mcp-config=` names is copied to. `COQUI_ACP_CLAUDE_STDERR` makes it write that many bytes of diagnostics on
@@ -109,6 +110,7 @@ fn main() {
             .or_else(|| arg.strip_prefix("--resume="))
             .map(str::to_string)
     });
+    let session_written = asked_session.clone().or_else(|| recorded_session.clone());
     let lines: Vec<Vec<u8>> = match (recorded_session, asked_session) {
         (Some(recorded), Some(asked))
             if recorded != asked && std::env::var_os("COQUI_ACP_CLAUDE_KEEP_SESSION").is_none() =>
@@ -156,7 +158,8 @@ fn main() {
                     writeln!(
                         out,
                         "{}",
-                        json!({"type": "system", "subtype": "status", "permissionMode": mode})
+                        json!({"type": "system", "subtype": "status", "status": null, "permissionMode": mode,
+                            "uuid": "6f2c1b0e-0000-4000-8000-00000000d00d", "session_id": session_written})
                     )
                     .unwrap();
                     out.flush().unwrap();

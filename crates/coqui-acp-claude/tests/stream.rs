@@ -1185,6 +1185,41 @@ fn the_parser_tells_the_mode_claude_code_reports_and_one_always_allow_switches_i
     );
 }
 
+/// Measured on Claude Code 2.1.311 in `plan` mode: after ExitPlanMode is allowed once, the next line it writes is a
+/// `status` line naming the mode the session left plan for, and nothing else names a mode. The parser reports that line.
+#[test]
+fn allowing_exit_plan_mode_once_is_followed_by_the_status_line_that_names_the_new_mode() {
+    let (mut parser, _) = parser();
+    let told = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hear = Arc::clone(&told);
+    parser.on_permission_mode(Arc::new(move |mode: &str| {
+        hear.lock().unwrap().push(mode.into())
+    }));
+    parser.line(&json!({"type": "system", "subtype": "init", "permissionMode": "plan"}));
+    let events = parser.line(
+        &json!({"type": "control_request", "request_id": "r1", "request": {
+        "subtype": "can_use_tool", "tool_name": "ExitPlanMode", "display_name": "ExitPlanMode",
+        "input": {"plan": "Write hello.txt.
+", "planFilePath": "/home/p/.claude/plans/plan.md"},
+        "matched_ask_rule": {"source": "projectSettings", "tool_name": "ExitPlanMode"},
+        "tool_use_id": "t1", "requires_user_interaction": true}}),
+    );
+    let Some(Event::Permission(request)) = events
+        .into_iter()
+        .find(|event| matches!(event, Event::Permission(_)))
+    else {
+        panic!("a permission request")
+    };
+    request
+        .responder
+        .answer(Outcome::Selected("allow_once".into()))
+        .unwrap();
+    assert_eq!(*told.lock().unwrap(), ["plan"], "the answer names no mode");
+    parser.line(&json!({"type": "system", "subtype": "status", "status": null, "permissionMode": "default",
+        "uuid": "6f2c1b0e-0000-4000-8000-00000000d00d", "session_id": "6f2c1b0e-0000-4000-8000-000000000000"}));
+    assert_eq!(*told.lock().unwrap(), ["plan", "default"]);
+}
+
 /// What "allow always" applies is cut to the modes the host lets a client choose: a `setMode` beyond them is left out, and
 /// an option that would grant nothing else is not offered.
 #[test]
