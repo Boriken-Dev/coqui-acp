@@ -241,6 +241,58 @@ void main() {
       );
       s.store.dispose();
     });
+
+    test('carries the agent\'s own words when it gives them', () async {
+      final s = started();
+      await s.session.send('A');
+      s.agent.update(state('running'));
+      await settle();
+      s.agent.update({
+        ...state('idle', reason: 'error'),
+        'error': {'code': -32000, 'message': 'quota exhausted for model x'},
+      });
+      await settle();
+      final notes = s.session.messages.map((m) => m.text);
+      expect(
+        notes.any((t) => t.contains('quota exhausted for model x')),
+        isTrue,
+      );
+      expect(notes, isNot(contains('Agent reported an operation failure.')));
+      s.store.dispose();
+    });
+
+    test('bounds the agent\'s words like any other note', () async {
+      final s = started();
+      await s.session.send('A');
+      s.agent.update(state('running'));
+      await settle();
+      s.agent.update({
+        ...state('idle', reason: 'error'),
+        'error': {'message': 'z' * 100000},
+      });
+      await settle();
+      final note = s.session.messages.last.text;
+      expect(note, contains('zzz'));
+      expect(note.length, lessThan(5000));
+      s.store.dispose();
+    });
+
+    test('keeps the fixed sentence when the error has no message', () async {
+      final s = started();
+      await s.session.send('A');
+      s.agent.update(state('running'));
+      await settle();
+      s.agent.update({
+        ...state('idle', reason: 'error'),
+        'error': {'code': -32000},
+      });
+      await settle();
+      expect(
+        s.session.messages.last.text,
+        'Agent reported an operation failure.',
+      );
+      s.store.dispose();
+    });
   });
 
   group('a v1 prompt', () {

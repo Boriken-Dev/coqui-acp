@@ -1347,7 +1347,14 @@ class ChatSession extends ChatNotifier {
       if (update.reason == 'cancelled') {
         _note('Stopped.');
       } else if (update.reason == 'error') {
-        _note('Agent reported an operation failure.');
+        // The agent's own account of the failure, when it gives one, says more than the fixed sentence.
+        final error = update.raw['error'];
+        final said = error is Map ? shortText(error['message'], limits) : null;
+        _note(
+          said == null
+              ? 'Agent reported an operation failure.'
+              : 'Agent reported an operation failure: $said',
+        );
       }
       if (ended) _turnEnded(outcome);
     }
