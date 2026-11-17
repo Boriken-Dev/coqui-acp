@@ -1,4 +1,4 @@
-//! The command: an export is left unchanged by default, and redaction happens only when asked.
+//! The history commands, run as the `history` example runs them: an export is left unchanged by default, and redaction happens only when asked.
 
 #![cfg(feature = "cli")]
 
@@ -6,14 +6,42 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 use coqui_acp_history::{Document, Line};
 use support::document;
 
 const SECRET: &str = "sk-live-4242424242";
 
+/// The `history` example, `target/<profile>/examples/history`, built once for the run.
+fn example() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-p",
+                "coqui-acp-history",
+                "--features",
+                "cli",
+                "--example",
+                "history",
+            ])
+            .status()
+            .expect("cargo runs");
+        assert!(status.success());
+        let mut path = std::env::current_exe().expect("the test knows where it is");
+        path.pop();
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        path.join("examples")
+            .join(format!("history{}", std::env::consts::EXE_SUFFIX))
+    })
+}
+
 fn command(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_coqui-acp-history"))
+    Command::new(example())
         .args(args)
         .output()
         .expect("the command runs")

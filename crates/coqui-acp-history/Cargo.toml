@@ -20,12 +20,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-# The `coqui-acp-history` command.
+# The `cli` module: the history commands as library code.
 cli = ["dep:clap"]
 
-[[bin]]
-name = "coqui-acp-history"
-path = "src/main.rs"
+[[example]]
+name = "history"
 required-features = ["cli"]
 
 [dependencies]
