@@ -100,6 +100,7 @@ Watched::new(path, key) /* usable: not blank */ .usable(f) .expires(f) .identity
 pub struct Accounts;   // one per provider; Accounts::new()
 pub fn Accounts::hold(self: &Arc<Self>, files: Files, keeper: Option<Object<dyn AccountKeeper>>, id: &str, dir: &str, revision: u64,
     credentials: &Credentials, watched: Vec<Watched>) -> Result<Hold, ProviderError>
+pub fn Accounts::observe(self: &Arc<Self>, files, keeper, id, dir, revision, credentials, watched) -> Result<Hold, ProviderError>   // as `hold`, but writes nothing: a login missing, blank or another account's is `lost` at once, one that differs from the grant's `renewed`; for an account provider's watch and renewal
 pub struct Hold;   // Clone; #[must_use]
 Hold::look() -> Result<Looked { renewed: Vec<(Secret<Credentials>, Option<String>)>, lost: Vec<String> }>;  .lost() -> Option<String>;  .credentials() -> Result<Secret<Credentials>>;
     .expires_at() -> Option<String>;  .finish();  .watch(poll: Duration) -> Watcher   // Watcher::stop(); dropping it stops it too

@@ -426,7 +426,7 @@ AccountOffer::new(); .kind(id); .reports_usage(id)        // `usage`: ids of the
 #[non_exhaustive] pub struct AccountUsageQuery { pub account: AccountGrant, pub environment: Secret<Environment> }   ::new(account) .environment(env)
 #[non_exhaustive] pub struct AccountUsage { pub supported: bool, pub unsupported_because: Option<String>, pub sources: Vec<Source>,
     pub account: Option<String>, pub revision: u64, pub observed_at: i64, pub buckets: Vec<Bucket> }
-AccountUsage::new(); ::unsupported(reason); ::fraction_permille(&Bucket) -> Option<u16>
+AccountUsage::new(); ::unsupported(reason); ::from_report(UsageReport) /* the windows; a report's spend and limit are no account's */; ::fraction_permille(&Bucket) -> Option<u16>
 ```
 
 `AccountKindInfo` (kind id, title, `settings` schema, `endpoints`, `rotates`, `state_dir`, `renews`, `history_portable`, `notices`, **`provides`**), `LoginMethodInfo`, `LoginRequest`, `LoginOutcome`, `RenewRequest`, `RenewReport`, `AccountGrant`, `AccountKeeper` and `LoginPrompter` are the account models of "Accounts", unchanged.
@@ -438,6 +438,8 @@ AccountUsage::new(); ::unsupported(reason); ::fraction_permille(&Bucket) -> Opti
 - `usage`: the account's **plan** usage: its windows (`Bucket`s: used, limit or remaining, `refill` with `resets_at`, the models it covers, status), no session and no model turn. Cheap. A kind listed in `offers().usage` answers `supported`, with `account` echoing the grant's id and `observed_at` the newest bucket's; any other kind the provider lists answers "not offered" (`AccountUsage::unsupported(reason)`, no bucket); a kind it does not list is `BAD_VALUE`.
 - **Where each kind of usage comes from.** The plan's windows (percent used, resets, per model) are the account provider's `usage`. What a session or a run spent (tokens, cost) is ACP's: the session's usage updates, as `coqui_acp_api::usage` carries them through the harness. `AccountUsage` has no field for a session's tokens and no `limit` hit (an inferred refusal belongs to the turn that was refused); a reader drops a key it does not know.
 - Errors common to `renew`, `watch` and `usage`: `BAD_VALUE` for a kind it does not list, an id that is not 1 to 128 bytes without a control character, a credential that is missing; nothing it answers or refuses carries a credential or a value of the environment.
+
+`Contract::watches(false)` (`acp-harness-check --no-watches`) is for a harness whose account provider watches the login: its keeper is not asked to hear a renewal. `AccountContract::program(true)` starts the account's own program (a CLI the provider signs in with) for real in a home of the suite's, and finds the file a sign-in's program wrote by reading the account's directory. A secret the person typed may be a variable of the program that checks it, never an argument.
 
 The suite is `contract::AccountContract` (below); `acp-account-check` runs it on a library or source file.
 
@@ -459,7 +461,7 @@ Every method takes and answers plain data; `start` also takes the spawner and th
 ```rust
 pub struct contract::Contract;   // #[must_use]
 Contract::new(name) .version(u16 /* 1 */) .holds(Vec<Requirement> /* read_only, no_commands */) .message_limit(bytes)
-    .imports(bool /* true */)  .logins(bool /* true */)  .account(kind)  .program_agent(bool /* false */)
+    .imports(bool /* true */)  .logins(bool /* true */)  .watches(bool /* true */)  .account(kind)  .program_agent(bool /* false */)
     .run(&dyn AcpHarness) -> Result<(), contract::Failures>
 contract::spawner_files(&dyn ProcessSpawner, root: &Path) -> Result<(), contract::Failures>   // a host's spawner, in its directory
 #[non_exhaustive] pub struct contract::Failure { pub check: &'static str, pub message: String }
@@ -478,7 +480,7 @@ It makes and removes a directory under the system's temporary one, with a link (
 
 ```rust
 pub struct contract::AccountContract;   // #[must_use]
-AccountContract::new(name) .logins(bool /* true */) .account(kind) .run(&dyn AccountProvider) -> Result<(), contract::Failures>
+AccountContract::new(name) .logins(bool /* true */) .account(kind) .program(bool /* false */) .run(&dyn AccountProvider) -> Result<(), contract::Failures>
 ```
 
 It hands a provider the same virtual spawner, scripted prompter and recording keeper as the harness suite, and makes each account by signing in through the method that produces its kind (a kind no method makes gets a grant of canary credentials). It checks that `describe` and `offers` are well formed and repeat; that every kind provides a standard, every method produces a listed kind and every usage id is a kind; each sign-in (completes, never shows a typed secret back, cancels at the first prompt and while waiting, times out, kills what it started, destroys what it was handed); `renew` as each kind says, `GONE` for a blank or missing login, `UNSUPPORTED` otherwise; `watch` (one rotation told once to every live watch with one sequence, a second one later, a blank file a loss, a deleted file a loss, a login gone before the watch began told at once, a stopped watch silent with its objects destroyed, a dropped watch the same); and `usage` (supported only for the kinds listed, buckets well formed, never a value of the environment). Every call that takes an account is refused `BAD_VALUE` for a kind not listed and a bad id, with the handed objects destroyed. A kind that rotates and keeps a directory with no method that makes it is held only to starting and stopping a watch. `acp-account-check` takes `--library` or `--source`/`--source-config`, `--provider`, `--settings`, `--no-logins` and `--account`.

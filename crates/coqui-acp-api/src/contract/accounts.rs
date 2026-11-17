@@ -897,6 +897,9 @@ fn conn_losses(conn: &super::host::Conn, sequence: u64) -> usize {
 }
 
 fn keeps_watch(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outcome {
+    if !contract.watches {
+        return Ok(());
+    }
     let catalog = catalog_of(harness)?;
     for info in kinds(contract, &catalog)? {
         // A kind that keeps a rotating login in a directory keeps it in a file the suite can see.

@@ -59,6 +59,7 @@ pub struct Contract {
     message_limit: Option<usize>,
     imports: bool,
     logins: bool,
+    watches: bool,
     account: Option<String>,
     program_agent: bool,
 }
@@ -110,6 +111,7 @@ impl Contract {
             message_limit: None,
             imports: true,
             logins: true,
+            watches: true,
             account: None,
             program_agent: false,
         }
@@ -146,6 +148,13 @@ impl Contract {
     /// in its catalog and refuse `login` with `GUATIAO_ERR_UNSUPPORTED` and a reason.
     pub const fn logins(mut self, logins: bool) -> Self {
         self.logins = logins;
+        self
+    }
+
+    /// Whether the provider reports a renewal or a loss of the account's login that it saw while a connection ran
+    /// (the default). One that does not leaves watching to an `account_provider`, and its keeper hears nothing.
+    pub const fn watches(mut self, watches: bool) -> Self {
+        self.watches = watches;
         self
     }
 
