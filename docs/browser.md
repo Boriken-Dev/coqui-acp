@@ -127,7 +127,7 @@ What a second provider has to do the same way, or a page cannot tell which one i
 - `readable` carries each message from the agent as one string, in order, none dropped for a slow reader. It ends, cleanly and not with an error, whenever the connection ends for any reason, after the messages already queued.
 - `closed` resolves once, with the reason, at the moment `readable` ends. It never rejects.
 - `close()`, `writable.close()`, `writable.abort()` and `readable.cancel()` are the same act: they end the connection with the reason `page`, and doing it again does nothing.
-- A write after the connection has ended rejects with `InvalidStateError`, and sends nothing.
+- A write after the connection has ended rejects with `InvalidStateError`, and sends nothing. After the page's own `writable.close()` or `writable.abort()` the stream itself refuses the write first, with the `TypeError` every `WritableStream` gives; nothing is sent either way.
 - A write of anything but a string rejects with `TypeError` and errors the writable, so no later write succeeds. Nothing was sent, and the connection stays open until `close()` or its readable's end.
 - The `closed` reasons: `page` when the page ended it; `navigation` when its document went (navigated, tab closed, or `pagehide`); `revoked` when its grant ended, whoever ended it; `agent` when the agent ended it in order, with its close; `failed` for any other end: a link cut with no close from the agent, the provider restarting, or its worker stopping.
 
