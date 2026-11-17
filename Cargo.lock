@@ -543,6 +543,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-acp-hub"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "coqui-acp-page"
 version = "0.0.0-alpha.0"
 dependencies = [

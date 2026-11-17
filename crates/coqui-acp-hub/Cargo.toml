@@ -1,0 +1,29 @@
+[package]
+name = "coqui-acp-hub"
+description = "One live Agent Client Protocol session served to any number of attached clients: attach, replay, queued prompts and shared permission requests, with no I/O of its own"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["acp", "agent", "session", "remote-control"]
+categories = ["network-programming"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# `Serialize` and `Deserialize` for `Settings`, so a host reads it from whatever format it keeps its configuration in.
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+serde_json.workspace = true
+
+[lints]
+workspace = true
