@@ -47,6 +47,19 @@ test('the conformance checks catch a provider that passes everything through', a
   }
 });
 
+test('a provider that never closes a connection fails its checks by name within the bound, and does not hang the run', async () => {
+  const started = Date.now();
+  const results = await runConformance(() => makeReferenceDriver({ neverCloses: true, timeoutMs: 150 }));
+  const failed = results.filter((result) => !result.passed);
+  for (const id of ['revoke', 'navigation', 'stream-end']) {
+    const result = failed.find((candidate) => candidate.id === id);
+    assert.ok(result, `${id} did not fail`);
+    assert.match(result.why, new RegExp(`^${id} did not finish in 150 ms`));
+  }
+  assert.ok(Date.now() - started < 8000, 'the run was not bounded');
+  assert.equal(results.length, Object.keys(CHECKS).length);
+});
+
 test('two providers share one registry, the earlier stays, and each agent routes to its own', async () => {
   const win = new FakeWindow();
   const first = registerProvider(provider('one'), win);

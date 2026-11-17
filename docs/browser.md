@@ -318,7 +318,8 @@ Passing these shows a provider keeps pages in their place. It does not show it p
 
 | Id | A provider must |
 | --- | --- |
-| `registry` | define `document.acp` once, keep an earlier provider, and answer `acp:request` |
+| `registry` | hold the registry as [the binding parts](#the-registrys-binding-parts) say, keep an earlier provider when a later one registers, route by `provider`, and answer `acp:request` |
+| `lifetime` | keep the `lifetime` the person chose, `once` when they chose none |
 | `no-grant-no-agents` | show a page nothing without a grant, including an agent it has discovered |
 | `no-grant-no-connection` | refuse to connect, with the same error as for an unknown agent |
 | `activation` | refuse `request()` without user activation |
@@ -328,6 +329,11 @@ Passing these shows a provider keeps pages in their place. It does not show it p
 | `messages` | carry messages both ways, in order, unchanged in meaning |
 | `revoke` | close at once on revocation, and refuse after it |
 | `navigation` | close at once when the document goes |
+| `stream-end` | end `readable` cleanly, and resolve `closed` with the reason |
+| `write-after-close` | reject a write after the end with `InvalidStateError`, and send nothing |
+| `stream-close` | end as `page` on `close()`, `writable.close()`, `writable.abort()` and `readable.cancel()`, and again with no change |
+| `cancel-drops-messages` | drop what the agent says after `readable.cancel()`, and throw nothing |
+| `write-non-string` | reject a write that is not a string with `TypeError`, error the writable, and keep the connection open |
 | `no-stdio` | never let a `command` in `mcpServers` reach the agent |
 | `mcp-origin` | never let a server of another origin reach the agent, unless granted |
 | `cwd` | replace a page's `cwd` |

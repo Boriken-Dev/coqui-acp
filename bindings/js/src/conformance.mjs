@@ -2,12 +2,13 @@
 //
 // driver.page(origin) -> a page: { acp, activate(), navigate() }
 // driver.person.answerNext(answer): what the person does at the next prompt: { allow: agentLabel or a list of them, add?: labels they
-//   add by hand during it, cwd, permissions?, mcpOrigins? } or { refuse: true }. driver.person.permissionsAsked(): the permission
+//   add by hand during it, cwd, lifetime? ('once', the default, or 'always'), permissions?, mcpOrigins? } or { refuse: true }. driver.person.permissionsAsked(): the permission
 //   requests put to the person.
 // driver.discover(label): an agent the provider has found and nobody has granted.
 // driver.agent(label): what the agent received: { received(): objects[], send(object) }. The agent answers `session/new` with a
 //   `sessionId`, and any other request with an empty result.
 // driver.page(origin).window, when given: the window the provider's registry is defined on, for `registry`.
+// driver.timeoutMs, when given: the time bound of each check, in place of 10 seconds.
 // `strict-csp` needs a real browser, so it is not here: run it as the document says.
 
 const RPC = (id, method, params) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
@@ -39,6 +40,8 @@ async function grantAndConnect(driver, origin, grant = {}) {
   const seen = driver.agent(label);
   return {
     page,
+    writer,
+    reader,
     agent,
     connection,
     seen,
@@ -75,6 +78,130 @@ export const CHECKS = {
     });
     page.window.dispatchEvent(new Event('acp:request'));
     check(answered === page.acp, 'acp:request was not answered');
+    check(Object.isFrozen(page.acp) && Object.isFrozen(page.acp.providers), 'the registry or its providers are not frozen');
+    for (const member of ['agents', 'request', 'connect', 'revoke', 'register', 'addEventListener', 'removeEventListener']) {
+      check(typeof page.acp[member] === 'function', `the registry has no ${member}()`);
+    }
+    check(page.acp.onagentschange === null, 'onagentschange does not start as null');
+    const win = page.window;
+    const held = Object.getOwnPropertyDescriptor(win, Symbol.for('coqui-acp.registry'));
+    check(held?.value === page.acp && !held.writable && !held.configurable, "the window does not hold the registry under Symbol.for('coqui-acp.registry') as a fixed value");
+    const prop = Object.getOwnPropertyDescriptor(win.document, 'acp');
+    check(prop?.value === page.acp && prop.enumerable && !prop.writable && !prop.configurable, 'document.acp is not a fixed, enumerable value');
+
+    // A later provider joins the registry and leaves the earlier ones where they were.
+    const before = [...page.acp.providers];
+    const later = {
+      info: { uuid: 'conformance-later-provider', name: 'Later', rdns: 'dev.example.later' },
+      agents: async () => [],
+      request: async () => [],
+      connect: async () => {
+        throw new DOMException('no', 'NotAllowedError');
+      },
+      revoke: async () => {},
+    };
+    let announced;
+    win.addEventListener('acp:ready', (event) => {
+      announced = event.detail.acp;
+    });
+    page.acp.register(later);
+    check(announced === page.acp, 'registering did not dispatch acp:ready');
+    const after = page.acp.providers;
+    check(after.length === before.length + 1, 'a later provider was not added');
+    check(before.every((info, index) => after[index] === info), 'an earlier provider was dropped or reordered');
+    check(after.at(-1) === later.info, 'the later provider was not added last');
+    check(win.document.acp === page.acp, 'a later provider replaced the registry');
+    await page.acp.agents();
+    check((await page.acp.request({ provider: later.info.uuid })).length === 0, 'request did not reach the provider it names');
+    await rejectsWith(page.acp.request({ provider: 'conformance-nobody' }), 'NotFoundError');
+    await rejectsWith(page.acp.connect({ id: 'x', provider: 'conformance-nobody' }), 'NotFoundError');
+  },
+  async lifetime(driver) {
+    const kept = async (origin, label, lifetime) => {
+      driver.discover(label);
+      const page = driver.page(origin);
+      page.activate();
+      driver.person.answerNext({ allow: label, cwd: '/granted', ...(lifetime === undefined ? {} : { lifetime }) });
+      const [agent] = await page.acp.request();
+      check(agent.provider === page.acp.providers[0].uuid, "an agent does not carry its provider's uuid");
+      return agent.scope.lifetime;
+    };
+    check((await kept('https://a.example', 'one', 'always')) === 'always', 'the lifetime the person chose, always, was not kept');
+    check((await kept('https://b.example', 'two', 'once')) === 'once', 'the lifetime the person chose, once, was not kept');
+    check((await kept('https://c.example', 'three')) === 'once', 'a person who chose no lifetime did not get once');
+  },
+  async 'stream-end'(driver) {
+    const { page, connection, reader } = await grantAndConnect(driver, 'https://a.example');
+    page.navigate();
+    // The stream ends cleanly, not with an error, and `closed` resolves with the reason.
+    check((await reader.read()).done === true, 'readable did not end');
+    check((await connection.closed).reason === 'navigation', 'closed does not name why');
+    check((await reader.read()).done === true, 'readable did not stay ended');
+  },
+  async 'write-after-close'(driver) {
+    for (const [origin, end] of [
+      ['https://a.example', (grant) => grant.connection.close()],
+      ['https://b.example', (grant) => grant.page.navigate()],
+      ['https://c.example', (grant) => grant.page.acp.revoke(grant.agent)],
+    ]) {
+      const grant = await grantAndConnect(driver, origin);
+      await end(grant);
+      await grant.connection.closed;
+      const received = grant.seen.received().length;
+      await rejectsWith(grant.send(RPC(1, 'initialize', { protocolVersion: 1 })), 'InvalidStateError');
+      check(grant.seen.received().length === received, 'a write after the end reached the agent');
+    }
+  },
+  async 'stream-close'(driver) {
+    const ways = {
+      'close()': (grant) => grant.connection.close(),
+      'writable.close()': (grant) => grant.writer.close(),
+      'writable.abort()': (grant) => grant.writer.abort(new Error('the page gave up')),
+      'readable.cancel()': (grant) => grant.reader.cancel(),
+    };
+    let origin = 0;
+    for (const [way, end] of Object.entries(ways)) {
+      const grant = await grantAndConnect(driver, `https://o${(origin += 1)}.example`);
+      await end(grant);
+      check((await grant.connection.closed).reason === 'page', `${way} did not end the connection as page`);
+      grant.connection.close();
+      check((await grant.connection.closed).reason === 'page', `${way}: ending it again changed the reason`);
+    }
+  },
+  async 'cancel-drops-messages'(driver) {
+    const { connection, reader, seen, openSession } = await grantAndConnect(driver, 'https://a.example');
+    const opened = await openSession(1);
+    await reader.cancel();
+    check((await connection.closed).reason === 'page', 'cancel did not end the connection');
+    // What the agent says later is dropped, and nothing is thrown at the page.
+    const failures = [];
+    const catcher = (event) => failures.push(event);
+    process.on('uncaughtException', catcher);
+    process.on('unhandledRejection', catcher);
+    try {
+      seen.send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: opened.result.sessionId, update: { sessionUpdate: 'agent_message_chunk' } } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    } finally {
+      process.off('uncaughtException', catcher);
+      process.off('unhandledRejection', catcher);
+    }
+    check(failures.length === 0, `a message after cancel threw: ${failures[0]}`);
+  },
+  async 'write-non-string'(driver) {
+    const { connection, writer, seen, settle } = await grantAndConnect(driver, 'https://a.example');
+    await settle(1);
+    const received = seen.received().length;
+    await rejectsWith(writer.write({ jsonrpc: '2.0' }), 'TypeError');
+    await writer.write(RPC(2, 'initialize', { protocolVersion: 1 })).then(
+      () => check(false, 'a write after a non-string succeeded'),
+      () => {},
+    );
+    check(seen.received().length === received, 'a write after a non-string reached the agent');
+    // The connection stays open until close() or its readable's end.
+    const state = await Promise.race([connection.closed.then(() => 'closed'), new Promise((resolve) => setTimeout(() => resolve('open'), 30))]);
+    check(state === 'open', 'a non-string ended the connection');
+    connection.close();
+    check((await connection.closed).reason === 'page', 'close() after a non-string did not end it as page');
   },
   async 'no-grant-no-agents'(driver) {
     driver.discover('agent');
@@ -266,15 +393,39 @@ export const CHECKS = {
   },
 };
 
-/** Runs every check, each against a fresh provider from `makeDriver`. Returns [{ id, passed, why }]. */
-export async function runConformance(makeDriver) {
+export const DEFAULT_TIMEOUT_MS = 10_000;
+
+/**
+ * Runs every check, each against a fresh provider from `makeDriver` and within a time bound (`driver.timeoutMs`, else
+ * `options.timeoutMs`, else 10 seconds): a provider that never answers fails that check by name. Returns [{ id, passed, why }].
+ */
+export async function runConformance(makeDriver, options = {}) {
   const results = [];
   for (const [id, run] of Object.entries(CHECKS)) {
+    let timer;
+    let expire;
+    const late = new Promise((_, reject) => {
+      expire = (ms) => reject(new Error(`${id} did not finish in ${ms} ms`));
+    });
+    const arm = (ms) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => expire(ms), ms);
+    };
+    arm(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
-      await run(await makeDriver());
+      await Promise.race([
+        (async () => {
+          const driver = await makeDriver();
+          if (driver.timeoutMs !== undefined) arm(driver.timeoutMs);
+          await run(driver);
+        })(),
+        late,
+      ]);
       results.push({ id, passed: true });
     } catch (error) {
       results.push({ id, passed: false, why: String(error?.message ?? error) });
+    } finally {
+      clearTimeout(timer);
     }
   }
   return results;

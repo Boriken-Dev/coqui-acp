@@ -28,7 +28,8 @@ class Agent {
   }
 }
 
-export function makeReferenceDriver() {
+/** `neverCloses`: a deliberately broken provider whose connections never report that they ended. */
+export function makeReferenceDriver({ neverCloses = false, timeoutMs } = {}) {
   const found = new Map();
   const grants = new Map();
   const live = new Set();
@@ -46,7 +47,7 @@ export function makeReferenceDriver() {
     const win = new FakeWindow();
     let activated = false;
     const open = new Set();
-    const toAgent = (origin_, grant) => ({ id: `${origin_}#${grant.label}`, label: grant.label, provider: 'reference', source: 'manual', identity: { peer: null, verified: found.get(grant.label).proven, method: null }, offers: {}, status: 'available', scope: { permissions: grant.permissions === true, lifetime: 'always', mcpOrigins: grant.mcpOrigins ?? [] } });
+    const toAgent = (origin_, grant) => ({ id: `${origin_}#${grant.label}`, label: grant.label, provider: 'reference', source: 'manual', identity: { peer: null, verified: found.get(grant.label).proven, method: null }, offers: {}, status: 'available', scope: { permissions: grant.permissions === true, lifetime: grant.lifetime ?? 'once', mcpOrigins: grant.mcpOrigins ?? [] } });
     const held = () => [...grants.entries()].filter(([name]) => name.startsWith(`${origin} `)).map(([, grant]) => grant);
     const find = (agent) => held().find((grant) => toAgent(origin, grant).id === agent?.id);
     const closeAll = (reason, only) => {
@@ -65,7 +66,7 @@ export function makeReferenceDriver() {
         if (decision === undefined || decision.refuse) throw new DOMException('refused', 'NotAllowedError');
         for (const label of decision.add ?? []) found.set(label, Object.assign(new Agent(), { proven: true }));
         return [decision.allow].flat().map((label) => {
-          const grant = { label, cwd: decision.cwd, permissions: decision.permissions, mcpOrigins: decision.mcpOrigins, sessions: new Set() };
+          const grant = { label, cwd: decision.cwd, lifetime: decision.lifetime, permissions: decision.permissions, mcpOrigins: decision.mcpOrigins, sessions: new Set() };
           grants.set(key(origin, label), grant);
           return toAgent(origin, grant);
         });
@@ -76,10 +77,13 @@ export function makeReferenceDriver() {
         const scope = new Scope(grant, origin);
         const remote = found.get(grant.label);
         let output;
-        const readable = new ReadableStream({ start: (controller) => { output = controller; } });
+        let input;
+        let ended = false;
+        const readable = new ReadableStream({ start: (controller) => { output = controller; }, cancel: () => connection.finish('page') });
         let finished;
-        const closed = new Promise((resolve) => { finished = resolve; });
+        const closed = neverCloses ? new Promise(() => {}) : new Promise((resolve) => { finished = resolve; });
         remote.toPage = (text) => {
+          if (ended) return;
           const step = scope.fromAgent(text);
           if (step.forward !== undefined) output.enqueue(step.forward);
           if (step.reply !== undefined) remote.deliver(step.reply);
@@ -89,11 +93,16 @@ export function makeReferenceDriver() {
           }
         };
         const writable = new WritableStream({
+          start: (controller) => { input = controller; },
           write(text) {
+            if (ended) throw new DOMException('the connection is closed', 'InvalidStateError');
+            if (typeof text !== 'string') throw new TypeError('a message is a string');
             const step = scope.fromPage(text);
             if (step.forward !== undefined) remote.deliver(step.forward);
             if (step.reply !== undefined) output.enqueue(step.reply);
           },
+          close: () => connection.finish('page'),
+          abort: () => connection.finish('page'),
         });
         const connection = {
           agent,
@@ -102,9 +111,13 @@ export function makeReferenceDriver() {
           closed,
           grant,
           finish(reason) {
+            if (ended) return;
+            ended = true;
+            try { output.close(); } catch { /* a cancelled readable is closed already */ }
+            input.error(new DOMException('the connection is closed', 'InvalidStateError'));
             open.delete(connection);
             live.delete(connection);
-            finished({ reason });
+            finished?.({ reason });
           },
           close() {
             connection.finish('page');
@@ -137,6 +150,7 @@ export function makeReferenceDriver() {
   return {
     person,
     page,
+    timeoutMs,
     discover(label, { proven = true } = {}) {
       if (!found.has(label)) found.set(label, Object.assign(new Agent(), { proven }));
     },
