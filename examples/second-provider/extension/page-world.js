@@ -111,7 +111,11 @@
       finished = true;
       connections.delete(c);
       finishClosed({ reason });
-      reading.close();
+      try {
+        reading.close();
+      } catch {
+        // A cancelled readable is closed already.
+      }
       writing.error(new DOMException('the connection is closed', 'InvalidStateError'));
     };
     const closeFromPage = () => {
