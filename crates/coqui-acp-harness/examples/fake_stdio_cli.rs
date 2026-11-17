@@ -1,5 +1,5 @@
 //! A stand-in for `grok` and `agy` that behaves as the `acp_harness` contract agent does, for
-//! `acp-harness-check --program-agent` and the stdio provider's tests. It never calls a model.
+//! the contract check's `--program-agent` and the stdio provider's tests. It never calls a model.
 //!
 //! Which program it plays is told by its arguments, as the provider starts them: `agent stdio` is Grok, `acp` is
 //! Antigravity; `login [--oauth]` and `models` are Grok's. As an ACP agent it answers `initialize`,

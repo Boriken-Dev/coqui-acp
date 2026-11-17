@@ -251,8 +251,36 @@ fn a_usage_report_that_shows_the_environment_is_named() {
     );
 }
 
+/// The `check` example, `target/<profile>/examples/check`, built once for the run.
+fn example() -> &'static std::path::Path {
+    static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-p",
+                "coqui-acp-api",
+                "--features",
+                "contract",
+                "--example",
+                "check",
+            ])
+            .status()
+            .expect("cargo runs");
+        assert!(status.success());
+        let mut path = std::env::current_exe().expect("the test knows where it is");
+        path.pop();
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        path.join("examples")
+            .join(format!("check{}", std::env::consts::EXE_SUFFIX))
+    })
+}
+
 fn check(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_acp-account-check"))
+    Command::new(example())
+        .arg("account")
         .arg("--library")
         .arg(library())
         .args(args)

@@ -26,7 +26,7 @@
 //! updates. A provider that cannot import
 //! is run with [`Contract::imports`] off and must refuse with a reason.
 //!
-//! The `acp-harness-check` program runs the same suite on a library file or a source file, for a
+//! [`check`](crate::check) runs the same suite on a library file or a source file, for a
 //! provider written in any language Guatiao loads.
 
 mod account_provider;

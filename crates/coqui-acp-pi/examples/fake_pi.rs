@@ -1,5 +1,5 @@
 //! A stand-in for `pi --mode rpc` that behaves as the `acp_harness` contract agent does, in Pi's own JSONL dialect, for
-//! `acp-harness-check --program-agent` and the provider's tests. It never calls a model.
+//! the contract check's `--program-agent` and the provider's tests. It never calls a model.
 //!
 //! Its lines have the shapes of the recordings in `tests/fixtures/pi-1.5.2` (`get_state`, `get_available_models`,
 //! `prompt` and the events of a run, the extension dialog of the permission gate, `abort`). A prompt's text decides the

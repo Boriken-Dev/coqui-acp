@@ -16,7 +16,7 @@
 - `Requirement` and its vocabulary (`read_only`, `no_commands`, `answer_only`, `no_project_settings`, `no_project_mcp`, `files_under`, `read_only_paths`, `denied_paths`, `network`, `sandboxed_scripts`, `only_skills`), which only narrow: a harness refuses a name it does not know.
 - `WorkingRoots`: the one way a path is compared with the roots (no `..`, case on Windows, links followed).
 - The kinds as data, `include/coqui_acp_api.kinds.json`, the models' schemas, `include/coqui_acp_api.schemas.json`, and a Python module, `python/coqui_acp_api_kinds.py`, for providers with no Rust.
-- Feature `contract`: the suite every provider passes, as a module and as `acp-harness-check`, which runs it on a library or a source file in any language.
+- Feature `contract`: the suite every provider passes, as a module and as `check`, which runs it on a library or a source file in any language.
 - No dependency but Guatiao, its channel kinds and serde by default; no `unsafe`.
 
 ## Installation

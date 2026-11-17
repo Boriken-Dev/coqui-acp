@@ -1,4 +1,4 @@
-//! `acp-harness-check`, the contract as a program, run on the Rust echo's library file as a provider
+//! The contract as a program (the `check` example), run on the Rust echo's library file as a provider
 //! in another repository or language would run it.
 #![allow(
     clippy::std_instead_of_core,
@@ -22,8 +22,36 @@ fn library() -> std::path::PathBuf {
     ))
 }
 
+/// The `check` example, `target/<profile>/examples/check`, built once for the run.
+fn example() -> &'static std::path::Path {
+    static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-p",
+                "coqui-acp-api",
+                "--features",
+                "contract",
+                "--example",
+                "check",
+            ])
+            .status()
+            .expect("cargo runs");
+        assert!(status.success());
+        let mut path = std::env::current_exe().expect("the test knows where it is");
+        path.pop();
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        path.join("examples")
+            .join(format!("check{}", std::env::consts::EXE_SUFFIX))
+    })
+}
+
 fn check(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_acp-harness-check"))
+    Command::new(example())
+        .arg("harness")
         .arg("--library")
         .arg(library())
         .args(args)

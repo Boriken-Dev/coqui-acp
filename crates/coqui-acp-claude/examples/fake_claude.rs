@@ -1,5 +1,5 @@
 //! A stand-in for Claude Code that behaves as the `acp_harness` contract agent does, in Claude Code's own stream-json
-//! dialect, for `acp-harness-check --program-agent` and the provider's tests. It never calls a model.
+//! dialect, for the contract check's `--program-agent` and the provider's tests. It never calls a model.
 //!
 //! Its lines have the shapes of the recordings in `tests/fixtures/2.1.318` (`init`, `assistant`, `result`,
 //! `rate_limit_event`, `control_request` `can_use_tool`, the control answers). A prompt's text decides the turn:

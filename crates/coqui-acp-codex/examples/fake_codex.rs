@@ -1,5 +1,5 @@
 //! A stand-in for `codex app-server` that behaves as the `acp_harness` contract agent does, in the app server's own
-//! JSON-RPC dialect, for `acp-harness-check --program-agent` and the provider's tests. It never calls a model.
+//! JSON-RPC dialect, for the contract check's `--program-agent` and the provider's tests. It never calls a model.
 //!
 //! Its messages have the shapes of the recordings in `tests/fixtures/codex-0.166.0` (`initialize`, `model/list`,
 //! `thread/start`, `turn/start` and the notifications of a turn, `item/commandExecution/requestApproval`,
