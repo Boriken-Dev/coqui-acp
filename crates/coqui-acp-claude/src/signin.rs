@@ -154,7 +154,7 @@ fn plan(
             "`claude setup-token` needs a terminal and its prompts were not recorded, so this provider cannot run it",
         ));
     }
-    let catalog = accounts::catalog();
+    let catalog = accounts::offer();
     let Some(method) = catalog.logins.iter().find(|m| m.id == request.method) else {
         return Err(failure(
             Status::GUATIAO_ERR_BAD_VALUE,
@@ -282,7 +282,7 @@ fn web(
     dir: &(String, String),
 ) -> Result<LoginOutcome, ProviderError> {
     // The page is on the host the kind signs in at: what the command prints cannot send the person elsewhere.
-    let host = accounts::catalog()
+    let host = accounts::offer()
         .kind(produces)
         .and_then(|kind| kind.endpoints.iter().find(|slot| slot.purpose == AUTH))
         .and_then(|slot| slot.default.as_deref().and_then(host_of));
@@ -463,15 +463,18 @@ pub(crate) fn renew(
     request: &RenewRequest,
     spawner: Object<dyn ProcessSpawner>,
 ) -> Result<RenewReport, ProviderError> {
-    let grant = &accounts::resolved(&request.account)?;
-    let applied = accounts::plan(grant)?;
-    let catalog = accounts::catalog();
-    if !catalog.kind(&grant.kind).is_some_and(|kind| kind.renews) {
+    accounts::own(&request.account)?;
+    let grant = &request.account;
+    if !accounts::offer()
+        .kind(&grant.kind)
+        .is_some_and(|kind| kind.renews)
+    {
         return Err(failure(
             Status::GUATIAO_ERR_UNSUPPORTED,
             "Claude Code renews only a login it keeps in a configuration directory; this kind holds a credential that does not expire in a way that can be renewed",
         ));
     }
+    let applied = accounts::plan(grant)?;
     let spawner = Arc::new(spawner);
     let files = Files::new(Arc::clone(&spawner));
     if !files.available() {
@@ -481,7 +484,9 @@ pub(crate) fn renew(
         ));
     }
     let dir = applied.dir.clone().unwrap_or_default();
-    let hold = accounts.hold(
+    // The login is looked at as it is: a file the person or Claude Code lost is lost, and the grant's copy is not put
+    // back in its place.
+    let hold = accounts.observe(
         files,
         None,
         &grant.id,

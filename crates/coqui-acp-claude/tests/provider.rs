@@ -108,6 +108,8 @@ fn the_suite_inside() {
         .instantiate(&Value::from(settings))
         .expect("the settings are taken");
     let outcome = Contract::new("claude")
+        .logins(false)
+        .watches(false)
         .program_agent(true)
         .imports(cfg!(feature = "history"))
         .holds(vec![Requirement::new(NO_PROJECT_MCP)])
@@ -373,13 +375,19 @@ fn it_lists_the_account_kinds_it_measured_and_the_ways_to_sign_in() {
             "anthropic-auth-token"
         ]
     );
-    let methods: Vec<&str> = catalog.logins.iter().map(|m| m.id.as_str()).collect();
+    // The harness signs no one in and renews nothing; its account provider lists the ways to sign in.
+    assert!(catalog.logins.is_empty());
+    let login = catalog.kind("claude-login").expect("listed");
+    assert!(login.rotates && login.state_dir && !login.history_portable && !login.renews);
+    let offered = coqui_acp_claude::accounts::offer();
+    let methods: Vec<&str> = offered.logins.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(
         methods,
         ["subscription", "console", "api-key", "auth-token"]
     );
-    let login = catalog.kind("claude-login").expect("listed");
-    assert!(login.rotates && login.state_dir && !login.history_portable && login.renews);
+    let login = offered.kind("claude-login").expect("listed");
+    assert!(login.rotates && login.state_dir && login.renews);
+    assert!(offered.kind("harness-login").is_none());
     let key = catalog.kind("anthropic-api-key").expect("listed");
     assert!(!key.rotates && !key.state_dir && key.history_portable);
     let grant = coqui_acp_api::AccountRef::new("a", "no-such-kind");

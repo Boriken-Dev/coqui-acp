@@ -39,7 +39,8 @@ pub const PROFILE_SCOPE: &str = "user:profile";
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ReadOptions {
-    /// The OAuth API's address, in place of [`DEFAULT_ENDPOINT`]: for a test's stand-in. The token is sent there.
+    /// The OAuth API's address, in place of [`DEFAULT_ENDPOINT`]: for a test's stand-in or a network's own route. The
+    /// token is sent there. It is also where an API key or gateway token whose account names no `base_url` is read.
     pub endpoint: Option<String>,
     /// How long the read may take in all.
     pub timeout: Duration,
@@ -246,7 +247,11 @@ fn read_key(
             )
         })?;
     let custom = accounts::base_url(&grant.settings)?;
-    let base = custom.as_deref().unwrap_or(API).trim_end_matches('/');
+    let base = custom
+        .as_deref()
+        .or(options.endpoint.as_deref())
+        .unwrap_or(API)
+        .trim_end_matches('/');
     let bearer = format!("Bearer {secret}");
     let value = if grant.kind == API_KEY {
         secret

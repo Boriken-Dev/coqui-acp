@@ -7,7 +7,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::time::Duration;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -26,8 +25,8 @@ use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Reports, Serving, shared, takes_of};
 use coqui_acp_harness::{Settings, ThroughSpawner};
 
+use crate::accounts;
 use crate::{ClaudeAgent, ClaudeLaunch, ClaudeSession, ClaudeSettings};
-use crate::{accounts, signin};
 
 /// What a connection with `cache_lifetime` short sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and its sub-agent twin to.
 const SHORT_TTL: &str = "5m";
@@ -111,14 +110,6 @@ pub struct ProviderSettings {
     /// Whether a client may give a session MCP servers, which start programs.
     #[map(default = true)]
     pub client_mcp_servers: bool,
-    /// How often, in milliseconds, a connection on an account that keeps its login in a file looks at the file for a
-    /// renewal or a loss; 0 looks only when a call is made on the account and when the connection closes.
-    #[map(default = 30_000)]
-    pub renew_poll_ms: u64,
-    /// The longest, in milliseconds, a command Claude Code is asked to run for an account (`auth status`) may take;
-    /// 0 ends it at once.
-    #[map(default = 60_000)]
-    pub command_timeout_ms: u64,
 }
 
 impl Default for ProviderSettings {
@@ -137,8 +128,6 @@ impl Default for ProviderSettings {
             max_message_bytes: 64 * 1024 * 1024,
             allow_client_plugins: false,
             client_mcp_servers: true,
-            renew_poll_ms: 30_000,
-            command_timeout_ms: 60_000,
         }
     }
 }
@@ -159,7 +148,7 @@ pub struct ClaudeProvider {
     settings: ProviderSettings,
     /// What the connections learned of each account's usage.
     reports: Arc<Reports>,
-    /// What the provider knows of its accounts' files, and who hears of them.
+    /// What the provider knows of the files it placed for its accounts.
     accounts: Arc<Accounts>,
     /// The ids a host seeded with no history, which their first start makes sessions.
     fresh: crate::FreshSessions,
@@ -277,7 +266,8 @@ struct Applying {
 
 impl ClaudeProvider {
     /// Applies `account` to `launch`: the variables Claude Code is given, every credential variable removed first, and
-    /// the files of a login placed in the account's directory through `files`.
+    /// the files of a login placed in the account's directory through `files`. The keeper is let go of: what happens to
+    /// the files afterwards is for the account provider's watch to tell, and this provider tells nothing.
     ///
     /// # Errors
     ///
@@ -290,11 +280,13 @@ impl ClaudeProvider {
         launch: &mut ClaudeLaunch,
     ) -> Result<Applying, ProviderError> {
         let Some(grant) = account else {
+            drop(keeper);
             return Ok(Applying { hold: None });
         };
         let grant = &accounts::resolved(grant)?;
         let mut applied = accounts::plan(grant)?;
         if grant.kind == coqui_acp_api::HARNESS_LOGIN {
+            drop(keeper);
             return Ok(Applying { hold: None });
         }
         if applied.dir.is_some() && !files.available() {
@@ -319,12 +311,12 @@ impl ClaudeProvider {
             if launch.setting_sources.is_none() {
                 launch.setting_sources = Some(vec!["project".to_string(), "local".to_string()]);
             }
-            drop(keeper);
             return Ok(Applying { hold: None });
         }
+        drop(keeper);
         let hold = self.accounts.hold(
             files.clone(),
-            Some(keeper),
+            None,
             &grant.id,
             applied.dir.as_deref().unwrap_or_default(),
             grant.revision,
@@ -408,12 +400,7 @@ impl AcpHarness for ClaudeProvider {
         let plugins = self.settings.allow_client_plugins;
         let mut serving = Serving::new(settings, limit);
         if let Some(hold) = applying.hold {
-            let watcher = (self.settings.renew_poll_ms > 0)
-                .then(|| hold.watch(Duration::from_millis(self.settings.renew_poll_ms)));
-            serving = serving.ending(move || {
-                drop(watcher);
-                hold.finish();
-            });
+            serving = serving.ending(move || hold.finish());
         }
         let fresh = Arc::clone(&self.fresh);
         serving.open_shared(spawner, sink, move |spawn| {
@@ -558,7 +545,6 @@ impl AcpHarness for ClaudeProvider {
                 format!("Claude Code could not be asked: {error}"),
             ),
         };
-        // The last look: a refresh Claude Code made while it was asked is told before the call returns.
         if let Some(hold) = applying.hold {
             hold.finish();
         }
@@ -583,30 +569,23 @@ impl AcpHarness for ClaudeProvider {
 
     fn login(
         &self,
-        request: LoginRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        prompter: Object<dyn LoginPrompter>,
+        _request: LoginRequest,
+        _spawner: Object<dyn ProcessSpawner>,
+        _prompter: Object<dyn LoginPrompter>,
     ) -> Result<LoginOutcome, ProviderError> {
-        signin::login(
-            &OsString::from(&self.settings.executable),
-            Duration::from_millis(self.settings.command_timeout_ms),
-            &request,
-            spawner,
-            prompter,
-        )
+        Err(unsupported(
+            "this harness signs no one in: the `claude_accounts` account_provider does",
+        ))
     }
 
     fn renew(
         &self,
         request: RenewRequest,
-        spawner: Object<dyn ProcessSpawner>,
+        _spawner: Object<dyn ProcessSpawner>,
     ) -> Result<RenewReport, ProviderError> {
-        signin::renew(
-            &self.accounts,
-            &OsString::from(&self.settings.executable),
-            Duration::from_millis(self.settings.command_timeout_ms),
-            &request,
-            spawner,
-        )
+        accounts::check(&request.account.reference())?;
+        Err(unsupported(
+            "this harness renews no login: the `claude_accounts` account_provider does",
+        ))
     }
 }

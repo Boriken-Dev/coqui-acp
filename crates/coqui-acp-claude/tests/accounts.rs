@@ -1,5 +1,6 @@
-//! The Claude Code provider applying accounts, against the stand-in: what a start, a models call, a renewal and a
-//! sign-in do to its environment and its configuration directory, and that no credential reaches a command line.
+//! The Claude Code provider applying accounts, against the stand-in: what a start and a models call do to its
+//! environment and its configuration directory, and that no credential reaches a command line. Signing in, renewing and
+//! watching are the account provider's (`account_provider.rs`).
 #![allow(
     clippy::std_instead_of_core,
     clippy::std_instead_of_alloc,
@@ -52,7 +53,6 @@ fn scratch(name: &str) -> PathBuf {
 fn provider() -> ClaudeProvider {
     ClaudeProvider::new(ProviderSettings {
         executable: fake(),
-        renew_poll_ms: 100,
         ..ProviderSettings::default()
     })
 }
@@ -272,184 +272,6 @@ fn a_login_kind_writes_its_file_into_the_directory_and_points_claude_code_at_it(
 }
 
 #[test]
-fn a_login_the_connection_saw_renewed_is_reported_and_one_it_saw_blanked_is_lost() {
-    let provider = provider();
-    let dir = scratch("watch");
-    let text =
-        r#"{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1","expiresAt":4102444800000}}"#;
-    let grant = AccountGrant::new("acct", "claude-login")
-        .credentials(credentials_of(&[("credentials_file", text)]))
-        .state_dir(dir.to_string_lossy())
-        .revision(3);
-    let heard = Heard::default();
-    let (sender, received) = std::sync::mpsc::channel();
-    let channel = provider
-        .start(
-            StartRequest::builder().account(grant).build(),
-            spawner(&dir),
-            Sink(sender).into_object(),
-            heard.clone().into_object(),
-        )
-        .expect("it starts");
-    channel
-        .send(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#)
-        .expect("taken");
-    answer_to(&received, 1);
-    let rotated =
-        r#"{"claudeAiOauth":{"accessToken":"a2","refreshToken":"r2","expiresAt":4102444900000}}"#;
-    std::fs::write(dir.join(".credentials.json"), rotated).unwrap();
-    let waited = std::time::Instant::now();
-    while heard.renewed.lock().unwrap().is_empty() && waited.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    {
-        let renewed = heard.renewed.lock().unwrap();
-        assert_eq!(renewed.len(), 1);
-        assert_eq!(renewed[0].from_revision, 3);
-        assert_eq!(
-            renewed[0].credentials.expose().get("credentials_file"),
-            Some(rotated)
-        );
-        assert_eq!(
-            renewed[0].expires_at.as_deref(),
-            Some("2100-01-01T00:01:40Z")
-        );
-    }
-    // A refused refresh blanks both tokens: lost, never renewed.
-    std::fs::write(
-        dir.join(".credentials.json"),
-        r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":1}}"#,
-    )
-    .unwrap();
-    let waited = std::time::Instant::now();
-    while heard.lost.lock().unwrap().is_empty() && waited.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert_eq!(heard.lost.lock().unwrap().len(), 1);
-    assert_eq!(heard.renewed.lock().unwrap().len(), 1);
-    channel.close(0, "");
-    drop(channel);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-fn near_expiry() -> String {
-    let soon = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
-        + 60_000;
-    format!(
-        r#"{{"claudeAiOauth":{{"accessToken":"stand-in-access-1","refreshToken":"stand-in-refresh-1","expiresAt":{soon}}}}}"#
-    )
-}
-
-#[test]
-fn renew_refreshes_a_login_in_its_last_minutes_and_leaves_one_that_is_not_due() {
-    let provider = provider();
-    let dir = scratch("renew");
-    let grant = AccountGrant::new("acct", "claude-login")
-        .credentials(credentials_of(&[("credentials_file", &near_expiry())]))
-        .state_dir(dir.to_string_lossy())
-        .revision(2);
-    let report = provider
-        .renew(RenewRequest::new(grant.clone()), spawner(&dir))
-        .expect("renewed");
-    let credentials = report.credentials.expect("a new login");
-    let text = credentials
-        .expose()
-        .get("credentials_file")
-        .expect("the file")
-        .to_string();
-    assert!(text.contains("stand-in-access-2") && !text.contains("stand-in-access-1"));
-    assert!(report.expires_at.is_some() && report.not_renewed_because.is_none());
-
-    let far =
-        r#"{"claudeAiOauth":{"accessToken":"x","refreshToken":"y","expiresAt":4102444800000}}"#;
-    let other = scratch("renew-far");
-    let grant = AccountGrant::new("far", "claude-login")
-        .credentials(credentials_of(&[("credentials_file", far)]))
-        .state_dir(other.to_string_lossy());
-    let report = provider
-        .renew(RenewRequest::new(grant), spawner(&other))
-        .expect("answered");
-    assert!(report.credentials.is_none());
-    assert!(
-        report
-            .not_renewed_because
-            .is_some_and(|why| why.contains("five minutes"))
-    );
-    assert!(
-        log(&other).is_empty(),
-        "nothing was run for a login that is not due"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_dir_all(&other);
-}
-
-#[test]
-fn a_refused_refresh_is_a_lost_login_and_never_a_renewal() {
-    for scripted in ["refuse-blank", "refuse-delete"] {
-        let provider = provider();
-        let dir = scratch(scripted);
-        std::fs::write(dir.join("fake-refresh"), scripted).unwrap();
-        let grant = AccountGrant::new("acct", "claude-login")
-            .credentials(credentials_of(&[("credentials_file", &near_expiry())]))
-            .state_dir(dir.to_string_lossy());
-        let error = provider
-            .renew(RenewRequest::new(grant), spawner(&dir))
-            .expect_err("lost");
-        assert_eq!(error.status, Status::GUATIAO_ERR_GONE, "{scripted}");
-        assert!(!error.message().is_empty() && !error.message().contains("stand-in"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[test]
-fn a_kind_with_no_renewal_says_so() {
-    let dir = scratch("norenew");
-    let grant = AccountGrant::new("acct", "anthropic-api-key")
-        .credentials(credentials_of(&[("api_key", CANARY)]));
-    let error = provider()
-        .renew(RenewRequest::new(grant), spawner(&dir))
-        .expect_err("unsupported");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    assert!(!error.message().contains(CANARY));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_models_call_hears_a_rotation_and_leaves_no_credential_on_a_command_line() {
-    let provider = provider();
-    let dir = scratch("models");
-    let text =
-        r#"{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1","expiresAt":4102444800000}}"#;
-    let grant = AccountGrant::new("acct", "claude-login")
-        .credentials(credentials_of(&[("credentials_file", text)]))
-        .state_dir(dir.to_string_lossy());
-    let heard = Heard::default();
-    provider
-        .models(
-            ModelsRequest::new().account(grant.clone()),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    assert!(heard.renewed.lock().unwrap().is_empty());
-    let rotated =
-        r#"{"claudeAiOauth":{"accessToken":"a2","refreshToken":"r2","expiresAt":4102444900000}}"#;
-    std::fs::write(dir.join(".credentials.json"), rotated).unwrap();
-    provider
-        .models(
-            ModelsRequest::new().account(grant),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    assert_eq!(heard.renewed.lock().unwrap().len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn a_grant_the_kind_refuses_is_bad_value_and_a_directory_without_files_is_unsupported() {
     let provider = provider();
     let dir = scratch("refuse");
@@ -490,164 +312,6 @@ fn a_grant_the_kind_refuses_is_bad_value_and_a_directory_without_files_is_unsupp
     }
     let error = start(login, LocalSpawner::new().into_object());
     assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A person at a prompter: answers every secret with `secret` and records what it was shown.
-#[derive(Clone)]
-struct Person {
-    secret: String,
-    shown: Arc<Mutex<Vec<String>>>,
-}
-
-impl Person {
-    fn new(secret: &str) -> Self {
-        Self {
-            secret: secret.to_string(),
-            shown: Arc::default(),
-        }
-    }
-}
-
-impl LoginPrompter for Person {
-    fn say(&self, text: &str) -> Result<(), ProviderError> {
-        self.shown.lock().unwrap().push(text.to_string());
-        Ok(())
-    }
-
-    fn open_url(&self, open: OpenUrl) -> Result<(), ProviderError> {
-        self.shown.lock().unwrap().push(open.url);
-        Ok(())
-    }
-
-    fn ask(&self, form: LoginForm) -> Result<LoginAnswer, ProviderError> {
-        let schema = coqui_acp_harness::provider::to_json(&form.schema);
-        let mut secrets = Credentials::new();
-        for (name, property) in schema["properties"].as_object().expect("fields") {
-            assert_eq!(property["writeOnly"], true, "only secrets are asked");
-            secrets.insert(name.clone(), self.secret.clone());
-        }
-        Ok(LoginAnswer::new(
-            coqui_acp_api::guatiao::Value::from(coqui_acp_api::guatiao::Map::new()),
-            secrets,
-        ))
-    }
-
-    fn cancelled(&self) -> Result<bool, ProviderError> {
-        Ok(false)
-    }
-}
-
-fn login(
-    provider: &ClaudeProvider,
-    method: &str,
-    dir: &Path,
-    person: &Person,
-) -> Result<coqui_acp_api::LoginOutcome, ProviderError> {
-    provider.login(
-        LoginRequest::new(method, dir.to_string_lossy()).timeout_ms(300_000),
-        spawner(dir),
-        person.clone().into_object(),
-    )
-}
-
-#[test]
-fn a_subscription_sign_in_relays_the_page_and_the_code_and_reads_the_login_it_wrote() {
-    let dir = scratch("signin");
-    let person = Person::new(CANARY);
-    let outcome = login(&provider(), "subscription", &dir, &person).expect("signed in");
-    assert_eq!(outcome.kind, "claude-login");
-    assert!(outcome.checked && outcome.expires_at.is_some());
-    let file = outcome
-        .credentials
-        .expose()
-        .get("credentials_file")
-        .expect("the login")
-        .to_string();
-    assert!(file.contains("stand-in-access-1"));
-    let shown = person.shown.lock().unwrap().clone();
-    assert!(
-        shown
-            .iter()
-            .any(|s| s.starts_with("https://claude.com/cai/oauth/authorize?")),
-        "{shown:?}"
-    );
-    let commands = std::fs::read_to_string(dir.join("fake-claude.log")).unwrap();
-    assert!(
-        !commands.contains(CANARY),
-        "the code is in no command line or environment"
-    );
-    for entry in log(&dir) {
-        let seen = names(&entry);
-        for variable in [
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-        ] {
-            assert!(!seen.contains(&variable.to_string()));
-        }
-    }
-    // A code the sign-in refuses is a refused login that names no code and no page.
-    let refusing = scratch("signin-refused");
-    std::fs::write(refusing.join("fake-login"), "refuse").unwrap();
-    let error = login(&provider(), "console", &refusing, &person).expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
-    assert!(error.message().starts_with("login refused: "));
-    assert!(!error.message().contains(CANARY) && !error.message().contains("://"));
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_dir_all(&refusing);
-}
-
-#[test]
-fn a_key_or_token_is_checked_with_auth_status_and_never_put_on_a_command_line() {
-    for (method, kind, key) in [
-        ("api-key", "anthropic-api-key", "api_key"),
-        ("auth-token", "anthropic-auth-token", "auth_token"),
-    ] {
-        let dir = scratch(method);
-        let outcome = login(&provider(), method, &dir, &Person::new(CANARY)).expect("accepted");
-        assert_eq!(outcome.kind, kind);
-        assert!(outcome.checked);
-        assert_eq!(outcome.credentials.expose().get(key), Some(CANARY));
-        let commands = std::fs::read_to_string(dir.join("fake-claude.log")).unwrap();
-        assert!(!commands.contains(CANARY));
-        assert!(commands.contains("\"auth\"") && commands.contains("\"status\""));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[test]
-fn a_method_it_cannot_run_is_unsupported_with_the_reason_and_an_unknown_one_is_bad_value() {
-    let dir = scratch("methods");
-    let error = login(&provider(), "long-lived-token", &dir, &Person::new(CANARY))
-        .expect_err("unsupported");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    assert!(error.message().contains("terminal"));
-    let error =
-        login(&provider(), "no-such-method", &dir, &Person::new(CANARY)).expect_err("unknown");
-    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn renew_answers_a_login_newer_than_the_grant_as_the_renewal_it_is() {
-    let provider = provider();
-    let dir = scratch("newer");
-    let held =
-        r#"{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1","expiresAt":4102444800000}}"#;
-    let newer =
-        r#"{"claudeAiOauth":{"accessToken":"a2","refreshToken":"r2","expiresAt":4102444900000}}"#;
-    // The harness renewed the login after the host stored its copy: the directory holds the newer one.
-    std::fs::write(dir.join(".credentials.json"), newer).unwrap();
-    let grant = AccountGrant::new("acct", "claude-login")
-        .credentials(credentials_of(&[("credentials_file", held)]))
-        .state_dir(dir.to_string_lossy());
-    let report = provider
-        .renew(RenewRequest::new(grant), spawner(&dir))
-        .expect("answered");
-    let credentials = report.credentials.expect("the newer login is the renewal");
-    assert_eq!(credentials.expose().get("credentials_file"), Some(newer));
-    assert!(report.not_renewed_because.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -794,28 +458,6 @@ fn an_environment_kind_leaves_the_users_own_settings_out_unless_the_entry_says_o
     let _ = std::fs::remove_dir_all(&login_dir);
 }
 
-#[test]
-fn a_command_a_sign_in_started_is_ended_when_the_sign_in_is() {
-    let dir = scratch("late");
-    // `claude auth status` takes 2.5 s and leaves a mark when it ends.
-    std::fs::write(dir.join("fake-status-sleep"), "").unwrap();
-    let error = provider()
-        .login(
-            LoginRequest::new("api-key", dir.to_string_lossy()).timeout_ms(700),
-            spawner(&dir),
-            Person::new(CANARY).into_object(),
-        )
-        .expect_err("it ran out of time");
-    assert_eq!(error.status, Status::GUATIAO_ERR_GONE);
-    assert!(error.message().contains("timed out"));
-    std::thread::sleep(Duration::from_millis(3500));
-    assert!(
-        !dir.join("status-finished").exists(),
-        "the command outlived the sign-in"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[cfg(windows)]
 #[test]
 fn a_credential_variable_of_another_case_does_not_survive_on_windows() {
@@ -912,4 +554,75 @@ fn an_account_made_for_another_harness_starts_when_its_standard_is_accepted_and_
     );
     assert!(!said.contains(CANARY));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_harness_signs_no_one_in_renews_nothing_and_tells_its_keeper_nothing() {
+    let provider = provider();
+    let catalog = provider.accounts().expect("listed");
+    assert!(catalog.logins.is_empty());
+    assert!(catalog.kinds.iter().all(|kind| !kind.renews));
+    let dir = scratch("elsewhere");
+    let error = provider
+        .login(
+            LoginRequest::new("subscription", dir.to_string_lossy()),
+            spawner(&dir),
+            NoPrompter.into_object(),
+        )
+        .expect_err("not the harness's");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    let grant = AccountGrant::new("acct", "claude-login")
+        .credentials(credentials_of(&[(
+            "credentials_file",
+            &login_text("a1", "r1"),
+        )]))
+        .state_dir(dir.to_string_lossy());
+    let error = provider
+        .renew(RenewRequest::new(grant.clone()), spawner(&dir))
+        .expect_err("not the harness's");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    // A connection whose login the agent renews, and a models call after a rotation, tell the keeper nothing: the
+    // account provider's watch does.
+    let heard = Heard::default();
+    run_session(&provider, grant.clone(), &dir, &heard);
+    std::fs::write(dir.join(".credentials.json"), login_text("a2", "r2")).unwrap();
+    provider
+        .models(
+            ModelsRequest::new().account(grant),
+            spawner(&dir),
+            heard.clone().into_object(),
+        )
+        .expect("listed");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(heard.renewed.lock().unwrap().is_empty() && heard.lost.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn login_text(access: &str, refresh: &str) -> String {
+    format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":4102444800000}}}}"#
+    )
+}
+
+struct NoPrompter;
+
+impl LoginPrompter for NoPrompter {
+    fn say(&self, _text: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn open_url(&self, _open: OpenUrl) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn ask(&self, _form: LoginForm) -> Result<LoginAnswer, ProviderError> {
+        Err(ProviderError::new(
+            Status::GUATIAO_ERR_GONE,
+            "nobody to ask",
+        ))
+    }
+
+    fn cancelled(&self) -> Result<bool, ProviderError> {
+        Ok(true)
+    }
 }

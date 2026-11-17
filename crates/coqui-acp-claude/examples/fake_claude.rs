@@ -462,7 +462,7 @@ fn login_file(access: &str, refresh: &str, expires_ms: u64) -> Value {
         "refreshToken": refresh,
         "expiresAt": expires_ms,
         "refreshTokenExpiresAt": expires_ms + 86_400_000,
-        "scopes": ["user:inference"],
+        "scopes": ["user:inference", "user:profile"],
         "subscriptionType": "max",
         "subscriptionTypeSource": "stand-in",
         "rateLimitTier": "stand-in",
