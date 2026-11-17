@@ -222,6 +222,15 @@ test('a permission request goes to the person, or to the page only under that gr
   assert.ok(page.fromPage(rpc(9, 'session/set_mode', { sessionId: 'other', modeId: 'x' })).reply);
 });
 
+test('a forwarded session/cancel says which session it cancels, so the provider can cancel the permission requests of that session', () => {
+  const s = scope({ sessions: new Set(['s1']) });
+  assert.equal(s.fromPage(rpc(1, 'session/cancel', { sessionId: 's1' })).cancelled, 's1');
+  const refused = s.fromPage(rpc(2, 'session/cancel', { sessionId: 'other' }));
+  assert.equal(refused.cancelled, undefined);
+  assert.equal(refused.forward, undefined);
+  assert.equal(s.fromPage(rpc(3, 'session/prompt', { sessionId: 's1' })).cancelled, undefined);
+});
+
 const webMcp = (tools) => ({
   getTools: async () => tools,
   executeTool: async (tool, input) => `${tool.name}:${JSON.stringify(input)}`,

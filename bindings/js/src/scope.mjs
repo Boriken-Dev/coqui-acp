@@ -112,7 +112,10 @@ export class Scope {
     return OPEN_CATEGORIES.has(this.#optionCategories.get(params?.sessionId)?.get(params?.configId));
   }
 
-  /** A message from the page: `{forward}` for the agent, or `{reply}` for the page, or neither when it is dropped. */
+  /**
+   * A message from the page: `{forward}` for the agent, or `{reply}` for the page, or neither when it is dropped. A forwarded
+   * `session/cancel` also has `{cancelled}`, the session it is for.
+   */
   fromPage(text) {
     const message = parse(text);
     if (message === undefined || message.jsonrpc !== '2.0' || !validId(message.id)) {
@@ -140,9 +143,9 @@ export class Scope {
       return { forward: JSON.stringify({ ...clean, params: providerFolder ? rest : { ...rest, cwd: this.#grant.cwd } }) };
     }
     if (OWN_SESSION.has(method)) {
-      return this.#ownsSession(params)
-        ? { forward: JSON.stringify(clean) }
-        : refuse(METHOD_NOT_FOUND, 'not a session of this page');
+      if (!this.#ownsSession(params)) return refuse(METHOD_NOT_FOUND, 'not a session of this page');
+      // A cancel also ends the person's pending questions about that session: the provider closes their window and answers the agent.
+      return method === 'session/cancel' ? { forward: JSON.stringify(clean), cancelled: params.sessionId } : { forward: JSON.stringify(clean) };
     }
     const ungated = method === 'session/set_model' || (method === 'session/set_config_option' && this.#optionIsOpen(params));
     const allowed = ungated || (GATED_SETTINGS.has(method) && this.#grant.permissions === true);
