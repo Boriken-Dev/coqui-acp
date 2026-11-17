@@ -12,6 +12,9 @@ pub mod batch;
 pub mod contract;
 mod environment;
 pub mod files;
+#[cfg(feature = "reader")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reader")))]
+pub mod key_usage;
 mod kind;
 mod models;
 #[cfg(feature = "reader")]

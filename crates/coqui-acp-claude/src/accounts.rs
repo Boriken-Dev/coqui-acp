@@ -292,7 +292,9 @@ fn bad(why: &str) -> ProviderError {
 }
 
 /// The text setting `key` of `settings`: absent, or a plain `http(s)` address.
-fn base_url(settings: &coqui_acp_api::guatiao::Value) -> Result<Option<String>, ProviderError> {
+pub(crate) fn base_url(
+    settings: &coqui_acp_api::guatiao::Value,
+) -> Result<Option<String>, ProviderError> {
     let settings = guatiao_json(settings);
     let Some(object) = settings.as_object() else {
         return Err(bad("the account's settings are not an object"));

@@ -3,7 +3,9 @@
 //! This is the account's side, not the harness's: it takes an [`AccountGrant`] and reads the one document Claude
 //! Code's own `/usage` view reads, `GET /api/oauth/usage` on the OAuth API, with the login's access token. It starts
 //! no program and knows no session. Only a subscription login (and a long-lived token that carries the profile scope)
-//! has plan limits: a Console login, an API key and a gateway token answer [`UsageReport::unsupported`].
+//! has plan limits: a Console login answers [`UsageReport::unsupported`]. An API key or gateway token has none, and
+//! reports what it can instead: the rate-limit headers of Anthropic's model list and, behind a gateway's own
+//! `base_url`, the gateway's key information (see [`coqui_acp_api::key_usage`]).
 //!
 //! The access token is never renewed here, since renewing rotates the refresh token, which only the file's owner may
 //! store; an expired one is refused saying so. The token goes only to the OAuth API address, which the account's
@@ -16,9 +18,10 @@ use core::time::Duration;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::ProviderError;
+use coqui_acp_api::key_usage::{KeySources, read_key as read_key_sources};
 use coqui_acp_api::reader::{ReadError, get_json, now_seconds, rfc3339_seconds};
 use coqui_acp_api::usage::{Bucket, Coverage, Refill, Source, Status as Room, Unit};
-use coqui_acp_api::{AccountGrant, HARNESS_LOGIN, UsageReport};
+use coqui_acp_api::{AccountGrant, Credentials, HARNESS_LOGIN, UsageReport};
 use serde_json::Value;
 
 use crate::accounts::{self, API_KEY, AUTH_TOKEN, CONSOLE, FILE_KEY, LOGIN, OAUTH_TOKEN};
@@ -167,11 +170,7 @@ pub fn read_limits(
                 "a Console login is billed to an API organization, which has no plan limits",
             ));
         }
-        API_KEY | AUTH_TOKEN => {
-            return Ok(not_offered(
-                "an API key or gateway token is billed by use and has no plan limits",
-            ));
-        }
+        API_KEY | AUTH_TOKEN => return read_key(&grant, credentials, options, now),
         HARNESS_LOGIN => {
             return Ok(not_offered(
                 "the login Claude Code keeps for itself is not held by the host, which cannot read its limits",
@@ -214,6 +213,64 @@ pub fn read_limits(
         Err(why) => Err(error(
             Status::GUATIAO_ERR_INTERNAL,
             format!("Claude's usage could not be read: {why}"),
+        )),
+    }
+}
+
+/// The address Claude Code sends model requests to when the account names none.
+const API: &str = "https://api.anthropic.com";
+/// The API version the model list is asked under.
+const API_VERSION: &str = "2023-06-01";
+
+/// What an API key or gateway token says of itself: Anthropic's rate-limit headers on the model list (a free read), and
+/// a LiteLLM-style gateway's budget when the account's `base_url` names one. The key goes only to that `base_url`, where
+/// every request of the account goes.
+fn read_key(
+    grant: &AccountGrant,
+    credentials: &Credentials,
+    options: &ReadOptions,
+    now: i64,
+) -> Result<UsageReport, ProviderError> {
+    let (name, key) = if grant.kind == API_KEY {
+        ("api_key", "x-api-key")
+    } else {
+        ("auth_token", "Authorization")
+    };
+    let secret = credentials
+        .get(name)
+        .filter(|secret| !secret.is_empty() && credentials.keys().all(|each| each == name))
+        .ok_or_else(|| {
+            error(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the credential is missing or not the kind's",
+            )
+        })?;
+    let custom = accounts::base_url(&grant.settings)?;
+    let base = custom.as_deref().unwrap_or(API).trim_end_matches('/');
+    let bearer = format!("Bearer {secret}");
+    let value = if grant.kind == API_KEY {
+        secret
+    } else {
+        bearer.as_str()
+    };
+    let headers = [(key, value), ("anthropic-version", API_VERSION)];
+    let url = format!("{base}/v1/models?limit=1");
+    let mut sources = KeySources::new(&url, &headers, now).timeout(options.timeout);
+    if custom.is_some() {
+        sources = sources.gateway(base, secret);
+    }
+    match read_key_sources(&sources) {
+        Ok(mut report) => {
+            report.account = Some(grant.id.clone());
+            Ok(report)
+        }
+        Err(ReadError::Status(401 | 403)) => Err(error(
+            Status::GUATIAO_ERR_INTERNAL,
+            "the provider refused the key (status 401 or 403)",
+        )),
+        Err(why) => Err(error(
+            Status::GUATIAO_ERR_INTERNAL,
+            format!("the key's rate limits could not be read: {why}"),
         )),
     }
 }

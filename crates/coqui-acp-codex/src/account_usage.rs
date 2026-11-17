@@ -3,7 +3,8 @@
 //! This is the account's side, not the harness's: it takes an [`AccountGrant`] and reads the document Codex's own
 //! `account/rateLimits/read` reads, `GET <chatgpt_base_url>/wham/usage`, with the login's access token and its
 //! `ChatGPT-Account-Id`. It starts no program (not `codex app-server` either) and knows no session. An API key has no
-//! plan limits and answers [`UsageReport::unsupported`].
+//! plan limits, and reports what it can instead: the rate-limit headers of OpenAI's model list and, behind a gateway's own
+//! `openai_base_url`, the gateway's key information (see [`coqui_acp_api::key_usage`]).
 //!
 //! The access token is never renewed here, since renewing rotates the refresh token, which only the file's owner may
 //! store; an expired one is refused saying so. The token goes to the account's own `chatgpt_base_url`, where Codex
@@ -16,6 +17,7 @@ use core::time::Duration;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::ProviderError;
+use coqui_acp_api::key_usage::{KeySources, read_key as read_key_sources};
 use coqui_acp_api::reader::{ReadError, get_json, now_seconds};
 use coqui_acp_api::usage::Source;
 use coqui_acp_api::{AccountGrant, HARNESS_LOGIN, UsageReport};
@@ -82,6 +84,52 @@ impl Default for ReadOptions {
 
 fn error(status: Status, why: impl Into<String>) -> ProviderError {
     ProviderError::new(status, &why.into())
+}
+
+/// The address Codex sends model requests to when the account names no `openai_base_url`.
+const API: &str = "https://api.openai.com/v1";
+
+/// What an OpenAI API key says of itself: the rate-limit headers on the model list (a read that costs no tokens), and a
+/// LiteLLM-style gateway's budget when the account's `openai_base_url` names one. The key goes only to that address,
+/// where every request of the account goes.
+fn read_key(
+    grant: &AccountGrant,
+    options: &ReadOptions,
+    now: i64,
+) -> Result<UsageReport, ProviderError> {
+    let credentials = grant.credentials.expose();
+    let secret = credentials
+        .get("api_key")
+        .filter(|secret| !secret.is_empty() && credentials.keys().all(|each| each == "api_key"))
+        .ok_or_else(|| {
+            error(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the credential is missing or not the kind's",
+            )
+        })?;
+    let custom = accounts::endpoint(&grant.settings, "openai_base_url")?;
+    let base = custom.as_deref().unwrap_or(API).trim_end_matches('/');
+    let bearer = format!("Bearer {secret}");
+    let headers = [("Authorization", bearer.as_str())];
+    let url = format!("{base}/models");
+    let mut sources = KeySources::new(&url, &headers, now).timeout(options.timeout);
+    if custom.is_some() {
+        sources = sources.gateway(base, secret);
+    }
+    match read_key_sources(&sources) {
+        Ok(mut report) => {
+            report.account = Some(grant.id.clone());
+            Ok(report)
+        }
+        Err(ReadError::Status(401 | 403)) => Err(error(
+            Status::GUATIAO_ERR_INTERNAL,
+            "the provider refused the key (status 401 or 403)",
+        )),
+        Err(why) => Err(error(
+            Status::GUATIAO_ERR_INTERNAL,
+            format!("the key's rate limits could not be read: {why}"),
+        )),
+    }
 }
 
 fn not_offered(why: &str) -> UsageReport {
@@ -152,11 +200,7 @@ pub fn read_limits(
                 .ok_or_else(|| bad("the credential is missing or not the kind's"))?;
             (token.to_string(), claimed_account(token))
         }
-        API_KEY => {
-            return Ok(not_offered(
-                "an OpenAI API key is billed by use and has no plan limits",
-            ));
-        }
+        API_KEY => return read_key(&grant, options, now),
         HARNESS_LOGIN => {
             return Ok(not_offered(
                 "the login Codex keeps for itself is not held by the host, which cannot read its limits",

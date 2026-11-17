@@ -43,17 +43,42 @@ impl fmt::Display for ReadError {
 
 impl core::error::Error for ReadError {}
 
-/// Reads the JSON document at `url` with a `GET` carrying `headers`, within `timeout` as a whole. Redirects are not
-/// followed. The proxy settings of the environment apply, as they do to the program the account belongs to.
+/// What one `GET` answered: its status, its headers and, when the body was a JSON document, the document.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Exchange {
+    /// The status code.
+    pub status: u16,
+    /// The response headers, names lowercased, in the order sent. A header whose value is not text is left out.
+    pub headers: Vec<(String, String)>,
+    /// The body when it was a JSON document no larger than [`MAX_BODY_BYTES`], else `None`.
+    pub document: Option<Value>,
+}
+
+impl Exchange {
+    /// The value of the header `name` (any case), the first if it was sent more than once.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(each, _)| each.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// `GET`s `url` carrying `headers`, within `timeout` as a whole, and returns whatever status answered, with its headers:
+/// a refusal (a 429 for one) carries the figures a reader wants. Redirects are not followed. The proxy settings of the
+/// environment apply, as they do to the program the account belongs to.
 ///
 /// # Errors
 ///
-/// [`ReadError`], saying nothing of the request but its status.
-pub fn get_json(
+/// [`ReadError::BadAddress`], [`ReadError::Unreachable`] or [`ReadError::Malformed`]; never a status, which is in the
+/// [`Exchange`].
+pub fn get_exchange(
     url: &str,
     headers: &[(&str, &str)],
     timeout: Duration,
-) -> Result<Value, ReadError> {
+) -> Result<Exchange, ReadError> {
     let plain = url.len() > 8
         && (url.starts_with("https://") || url.starts_with("http://"))
         && !url.chars().any(|c| c.is_control() || c.is_whitespace());
@@ -77,10 +102,17 @@ pub fn get_json(
         }
         _ => ReadError::Unreachable,
     })?;
-    let code = response.status().as_u16();
-    if code != 200 {
-        return Err(ReadError::Status(code));
-    }
+    let status = response.status().as_u16();
+    let sent = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().ok()?.to_owned(),
+            ))
+        })
+        .collect();
     let mut body = Vec::new();
     response
         .body_mut()
@@ -88,10 +120,34 @@ pub fn get_json(
         .take(MAX_BODY_BYTES + 1)
         .read_to_end(&mut body)
         .map_err(|_| ReadError::Unreachable)?;
-    if body.len() as u64 > MAX_BODY_BYTES {
-        return Err(ReadError::Malformed);
+    let document = if body.len() as u64 > MAX_BODY_BYTES {
+        None
+    } else {
+        serde_json::from_slice(&body).ok()
+    };
+    Ok(Exchange {
+        status,
+        headers: sent,
+        document,
+    })
+}
+
+/// Reads the JSON document at `url` with a `GET` carrying `headers`, within `timeout` as a whole. Redirects are not
+/// followed. The proxy settings of the environment apply, as they do to the program the account belongs to.
+///
+/// # Errors
+///
+/// [`ReadError`], saying nothing of the request but its status.
+pub fn get_json(
+    url: &str,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<Value, ReadError> {
+    let exchange = get_exchange(url, headers, timeout)?;
+    if exchange.status != 200 {
+        return Err(ReadError::Status(exchange.status));
     }
-    serde_json::from_slice(&body).map_err(|_| ReadError::Malformed)
+    exchange.document.ok_or(ReadError::Malformed)
 }
 
 /// The time now, in Unix seconds.

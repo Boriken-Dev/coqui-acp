@@ -238,17 +238,12 @@ fn a_redirect_is_not_followed_so_the_token_goes_nowhere_else() {
 #[test]
 fn an_account_with_no_plan_limits_is_not_offered_and_nothing_is_sent() {
     let (addr, seen) = stand_in(vec![(200, None, document())]);
-    let grants = [
-        AccountGrant::new("c", CONSOLE)
-            .credentials(Credentials::from_iter([(
-                FILE_KEY,
-                login_file(PROFILE, LATER),
-            )]))
-            .state_dir("/some/dir"),
-        AccountGrant::new("k", API_KEY).credentials(Credentials::from_iter([("api_key", TOKEN)])),
-        AccountGrant::new("g", AUTH_TOKEN)
-            .credentials(Credentials::from_iter([("auth_token", TOKEN)])),
-    ];
+    let grants = [AccountGrant::new("c", CONSOLE)
+        .credentials(Credentials::from_iter([(
+            FILE_KEY,
+            login_file(PROFILE, LATER),
+        )]))
+        .state_dir("/some/dir")];
     for grant in grants {
         let report = read_limits(&grant, &options(addr)).expect("an answer");
         assert!(!report.supported, "{}", grant.kind);
@@ -266,4 +261,92 @@ fn a_grant_the_provider_refuses_is_refused_and_a_document_with_no_window_is_not_
     let report = read_limits(&login(&login_file(PROFILE, LATER)), &options(addr)).expect("answer");
     assert!(!report.supported);
     assert_eq!(seen.lock().expect("log").len(), 1);
+}
+
+fn key(kind: &str, secret: &str, base: SocketAddr) -> AccountGrant {
+    let name = if kind == API_KEY {
+        "api_key"
+    } else {
+        "auth_token"
+    };
+    AccountGrant::new("k", kind)
+        .credentials(Credentials::from_iter([(name, secret)]))
+        .settings(coqui_acp_harness::provider::schema(
+            &serde_json::json!({"base_url": format!("http://{base}")}),
+        ))
+}
+
+const RATE: &str = "anthropic-ratelimit-requests-limit: 50
+anthropic-ratelimit-requests-remaining: 7
+anthropic-ratelimit-requests-reset: 2026-11-16T20:00:00Z
+anthropic-ratelimit-tokens-limit: 40000
+anthropic-ratelimit-tokens-remaining: 0";
+
+#[test]
+fn an_api_key_reports_the_rate_limit_headers_of_the_model_list() {
+    let (addr, seen) = stand_in(vec![
+        (200, Some(RATE.to_string()), r#"{"data":[]}"#.to_string()),
+        (404, None, r#"{"error":"no such route"}"#.to_string()),
+    ]);
+    let report = read_limits(
+        &key(API_KEY, "sk-ant-api03-canary", addr),
+        &ReadOptions::new().now(NOW),
+    )
+    .expect("an answer");
+    assert!(report.supported);
+    assert_eq!(report.account.as_deref(), Some("k"));
+    let ids: Vec<&str> = report.buckets.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(ids, ["requests", "tokens"]);
+    assert_eq!(
+        (report.buckets[0].used, report.buckets[0].limit),
+        (Some(43), Some(50))
+    );
+    assert_eq!(report.buckets[1].status, Room::Exhausted);
+    let seen = seen.lock().expect("log");
+    assert!(seen[0].line.starts_with("GET /v1/models"));
+    assert_eq!(seen[0].header("x-api-key"), Some("sk-ant-api03-canary"));
+    assert!(seen[0].header("authorization").is_none());
+    assert!(seen[0].header("anthropic-version").is_some());
+}
+
+#[test]
+fn a_gateway_token_also_reports_the_gateways_budget() {
+    let info =
+        serde_json::json!({"info": {"spend": 2.5, "max_budget": 5.0, "rpm_limit": 30}}).to_string();
+    let (addr, seen) = stand_in(vec![
+        (200, None, r#"{"data":[]}"#.to_string()),
+        (200, None, info),
+    ]);
+    let report = read_limits(
+        &key(AUTH_TOKEN, "gw-canary", addr),
+        &ReadOptions::new().now(NOW),
+    )
+    .expect("an answer");
+    let ids: Vec<&str> = report.buckets.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(ids, ["budget", "rpm"]);
+    assert_eq!(report.buckets[0].limit, Some(5_000_000));
+    let seen = seen.lock().expect("log");
+    assert_eq!(seen[0].header("authorization"), Some("Bearer gw-canary"));
+    assert!(seen[1].line.starts_with("GET /key/info"));
+    assert_eq!(seen[1].header("authorization"), Some("Bearer gw-canary"));
+}
+
+#[test]
+fn a_key_that_reports_nothing_is_not_offered_and_a_refused_key_is_an_error() {
+    let (addr, _) = stand_in(vec![
+        (200, None, r#"{"data":[]}"#.to_string()),
+        (404, None, "{}".to_string()),
+    ]);
+    let report =
+        read_limits(&key(API_KEY, "k", addr), &ReadOptions::new().now(NOW)).expect("an answer");
+    assert!(!report.supported);
+    assert!(report.unsupported_because.is_some());
+
+    let (addr, _) = stand_in(vec![(401, None, "{}".to_string())]);
+    let error = read_limits(
+        &key(API_KEY, "sk-refused-canary", addr),
+        &ReadOptions::new().now(NOW),
+    )
+    .expect_err("refused");
+    assert!(error.message().contains("refused") && !error.message().contains("canary"));
 }
