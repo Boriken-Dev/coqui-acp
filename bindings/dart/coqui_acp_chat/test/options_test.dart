@@ -1,5 +1,7 @@
 // The agent's own choices, a model, a mode or an effort: set when the agent can take them, held while a turn runs and sent before
 // the next prompt, and refused in the agent's words.
+import 'dart:async';
+
 import 'package:coqui_acp/coqui_acp.dart';
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:test/test.dart';
@@ -136,6 +138,66 @@ void main() {
       await settle();
       expect(agent.calls, ['prompt:go', 'config:model=b', 'prompt:next']);
       expect(session.pendingChoices, isEmpty);
+      store.dispose();
+    },
+  );
+
+  test(
+    'held choices go together for the mode and the model, the effort after the model answers, and only a person\'s are reported',
+    () async {
+      final (:store, :session, :agent) = started();
+      session.applyOpened(
+        AcpOpenedSession('s1', {
+          'configOptions': [
+            _option('mode', 'mode', 'manual', ['manual', 'plan']),
+            _option('model', 'model', 'a', ['a', 'b']),
+            _option('effort', 'thought_level', 'low', ['low']),
+          ],
+        }),
+      );
+      final reported = <(OptionRole, String)>[];
+      session.onChoice = (role, value) => reported.add((role, value));
+      final modeGate = Completer<void>();
+      final modelGate = Completer<Map<String, dynamic>>();
+      agent.onSetConfig = (id, value) => switch (id) {
+        'model' => modelGate.future,
+        'mode' => modeGate.future.then((_) => <String, dynamic>{}),
+        _ => Future.value(<String, dynamic>{}),
+      };
+      session
+        ..holdChoice(const PendingChoice('effort', OptionRole.effort, 'high'))
+        ..holdChoice(const PendingChoice('model', OptionRole.model, 'b'))
+        ..holdChoice(
+          const PendingChoice('mode', OptionRole.mode, 'plan', byPerson: true),
+        );
+      final sent = session.send('go');
+      await settle();
+      expect(
+        agent.calls,
+        ['config:model=b', 'config:mode=plan'],
+        reason: 'both are in flight before either answers, and the effort waits',
+      );
+      modeGate.complete();
+      await settle();
+      expect(agent.calls, ['config:model=b', 'config:mode=plan']);
+      modelGate.complete({
+        'configOptions': [
+          _option('model', 'model', 'b', ['a', 'b']),
+          _option('effort', 'thought_level', 'low', ['low', 'high']),
+        ],
+      });
+      await sent;
+      expect(agent.calls, [
+        'config:model=b',
+        'config:mode=plan',
+        'config:effort=high',
+        'prompt:go',
+      ]);
+      expect(
+        reported,
+        [(OptionRole.mode, 'plan')],
+        reason: 'the model and effort were defaults',
+      );
       store.dispose();
     },
   );

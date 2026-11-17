@@ -1945,14 +1945,16 @@ class ChatSession extends ChatNotifier {
     return refused;
   }
 
-  /// Sends each choice made while a turn ran, and says what the agent would not take.
+  /// Sends each choice made while a turn ran, and says what the agent would not take. The mode and the model go together; the
+  /// effort and the other options follow once the model has answered, since the choices an option offers can depend on the model.
+  /// Only a choice a person made is reported through [onChoice].
   Future<void> _applyPending() async {
     if (_pending.isEmpty) return;
     final waiting = [..._pending.values];
     _pending.clear();
-    for (final choice in waiting) {
+    Future<void> send(PendingChoice choice) async {
       // `custom` only says what the agent is in: it is never chosen.
-      if (choice.role == OptionRole.mode && choice.value == 'custom') continue;
+      if (choice.role == OptionRole.mode && choice.value == 'custom') return;
       final option =
           _options
               .where(
@@ -1975,7 +1977,7 @@ class ChatSession extends ChatNotifier {
         _note(
           'The agent offers no $name of ${shortText(choice.value, limits) ?? 'that'} now, so it was not set.',
         );
-        continue;
+        return;
       }
       // A mode is sent even when it is the one shown: what shows may not be what is in effect.
       if (option.current != choice.value || choice.role == OptionRole.mode) {
@@ -1987,6 +1989,17 @@ class ChatSession extends ChatNotifier {
       if (took && choice.role == OptionRole.mode) _chosenMode = choice.value;
       if (took && choice.byPerson) onChoice?.call(choice.role, choice.value);
     }
+
+    bool first(PendingChoice choice) =>
+        choice.role == OptionRole.mode || choice.role == OptionRole.model;
+    await Future.wait([
+      for (final choice in waiting)
+        if (first(choice)) send(choice),
+    ]);
+    await Future.wait([
+      for (final choice in waiting)
+        if (!first(choice)) send(choice),
+    ]);
     _keepMode();
     notifyListeners();
   }
