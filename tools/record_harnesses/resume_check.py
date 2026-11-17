@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Resumes an imported session in the real command line tool, against a stand-in model, and prints what it sent the model.
 
-    python3 -I tools/record_harnesses/resume_check.py claude --codec coqui-acp-claude --history FILE [--text TEXT]
-    python3 -I tools/record_harnesses/resume_check.py codex  --codec coqui-acp-codex  --history FILE [--text TEXT]
+    python3 -I tools/record_harnesses/resume_check.py claude --codec target/debug/examples/serve_claude --history FILE [--text TEXT]
+    python3 -I tools/record_harnesses/resume_check.py codex  --codec target/debug/examples/serve_codex  --history FILE [--text TEXT]
 
-`--history` is a history in the standard format. The codec (the `coqui-acp-claude` or `coqui-acp-codex` program, built with its `history` feature; its
+`--history` is a history in the standard format. The codec (the `serve_claude` or `serve_codex` example, built with `--features history`; its
 `history import` subcommand) imports it into a home made from nothing under the root, the real tool resumes
 the session from that home and is given one more prompt, and the messages the stand-in model received for it are printed
 as JSON: the context the tool resumed with, which is what an import must get right. No model is reached, nothing is
@@ -115,7 +115,7 @@ def check_codex(args, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("harness", choices=["claude", "codex"])
-    parser.add_argument("--codec", required=True, help="the coqui-acp-claude or coqui-acp-codex program, built with --features history")
+    parser.add_argument("--codec", required=True, help="the serve_claude or serve_codex example, built with --features history")
     parser.add_argument("--history", required=True)
     parser.add_argument("--program", help="the tool, by default found on PATH")
     parser.add_argument("--id", default=SESSION, help="the session's UUID")

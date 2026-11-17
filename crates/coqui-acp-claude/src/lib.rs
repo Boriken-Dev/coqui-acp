@@ -8,6 +8,7 @@ mod account_provider;
 pub mod account_usage;
 pub mod accounts;
 mod agent;
+pub mod cli;
 #[cfg(feature = "history")]
 #[cfg_attr(docsrs, doc(cfg(feature = "history")))]
 pub mod history;

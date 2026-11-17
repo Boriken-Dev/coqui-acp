@@ -77,11 +77,15 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-## Command line
+## Arguments
+
+`coqui_acp_pi::cli::Args` is a `clap::Args` type for a host's command line to flatten in, and `cli::run(&args)` serves the
+agent on standard input and output. The crate runs no program of its own: `cargo run --example serve_pi -- --help` is a
+command line over them.
 
 ```sh
-coqui-acp-pi                                  # pi from PATH, its own defaults
-coqui-acp-pi --mode accept_edits --effort low
+cargo run --example serve_pi --                          # the default program from PATH, its own defaults
+cargo run --example serve_pi -- --mode accept_edits --effort low
 ```
 
 | Flag | Default | What |
@@ -100,7 +104,7 @@ coqui-acp-pi --mode accept_edits --effort low
 | `--working-root` | any | A directory a session's `cwd` and more directories must lie in, repeated for more |
 | `--allow-network-paths` | off | Take a network path as a session's `cwd` or more directories |
 
-Exit status: 0 when the client closes the connection, 1 when reading it failed, 2 for a wrong invocation.
+`run` answers 0 when the client closes the connection, or an `Err` saying why reading it failed.
 
 ## API overview
 

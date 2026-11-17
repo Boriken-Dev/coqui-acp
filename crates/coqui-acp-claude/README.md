@@ -84,12 +84,16 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-## Command line
+## Arguments
+
+`coqui_acp_claude::cli::Args` is a `clap::Args` type for a host's command line to flatten in, and `cli::run(&args)` serves the
+agent on standard input and output. The crate runs no program of its own: `cargo run --example serve_claude -- --help` is a
+command line over them.
 
 ```sh
-coqui-acp-claude                                   # claude from PATH, its own defaults
-coqui-acp-claude --model haiku --effort low        # what every session starts with
-coqui-acp-claude --setting-sources "" --strict-mcp-config
+cargo run --example serve_claude --                          # the default program from PATH, its own defaults
+cargo run --example serve_claude -- --model haiku --effort low
+cargo run --example serve_claude -- --setting-sources "" --strict-mcp-config
 ```
 
 | Flag | Default | What |
@@ -108,7 +112,7 @@ coqui-acp-claude --setting-sources "" --strict-mcp-config
 | `--no-permission-prompts` | off | Ask nothing on standard output: what nothing granted is refused where it is made |
 | `--allow-client-plugins` | off | Let a client load plugins, whose hooks and servers run unasked |
 
-Exit status: 0 when the client closes the connection, 1 when reading it failed, 2 for a wrong invocation.
+`run` answers 0 when the client closes the connection, or an `Err` saying why reading it failed.
 
 ## API overview
 

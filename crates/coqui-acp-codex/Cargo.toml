@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 keywords = ["acp", "agent", "codex", "app-server"]
-categories = ["development-tools", "command-line-utilities"]
+categories = ["development-tools"]
 exclude = [".*", "*.local.*"]
 # Nothing is published until the owner chooses a release.
 publish = false
@@ -23,10 +23,6 @@ default = []
 # Export and import of the harness's own session files in the standard history format.
 history = ["dep:coqui-acp-history"]
 
-[[bin]]
-name = "coqui-acp-codex"
-path = "src/main.rs"
-
 [dependencies]
 clap.workspace = true
 coqui-acp-api = { path = "../coqui-acp-api", features = ["reader"] }
@@ -39,7 +35,7 @@ coqui-acp = { path = "../coqui-acp" }
 # The tests move a session between the two harnesses.
 coqui-acp-claude = { path = "../coqui-acp-claude", features = ["history"] }
 coqui-acp-history = { path = "../coqui-acp-history" }
-# The contract suite and `acp-harness-check`, which hold the provider to the kind.
+# The contract suite, which holds the provider to the kind.
 coqui-acp-api = { path = "../coqui-acp-api", features = ["contract"] }
 guatiao = { workspace = true, features = ["provider", "load"] }
 guatiao-serde = { workspace = true, features = ["json"] }

@@ -1,4 +1,5 @@
-//! `coqui-acp-pi`: Pi as an Agent Client Protocol agent on standard input and output.
+//! Pi's agent as library code: its arguments as a `clap::Args` type and a [`run`] that serves ACP on standard input and
+//! output. A program that people run is the host's; `examples/serve_pi.rs` is one for this crate's tests.
 
 #![allow(
     clippy::std_instead_of_core,
@@ -8,89 +9,125 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::Parser;
-use coqui_acp_pi::harness::{Mode, Settings, serve};
-use coqui_acp_pi::{PiAgent, PiLaunch};
+use crate::harness::{Mode, Settings, serve};
+use crate::{PiAgent, PiLaunch};
 
 /// Serves Pi as an Agent Client Protocol agent on standard input and output, in ACP version 1 or 2, whichever the client
 /// asks for. Each session runs `pi --mode rpc` with a permission gate loaded, so that what the modes allow is asked
 /// through ACP. Diagnostics go to standard error.
-#[derive(Debug, Parser)]
-#[command(
-    name = "coqui-acp-pi",
-    version,
-    after_help = "Pi reads its own variables (PI_CODING_AGENT_DIR, ANTHROPIC_API_KEY and \
-    others) from the environment it is given."
-)]
-struct Cli {
-    #[cfg(feature = "history")]
-    #[command(subcommand)]
-    command: Option<Command>,
+///
+/// Pi reads its own variables (`PI_CODING_AGENT_DIR`, `ANTHROPIC_API_KEY` and others) from the environment it is given.
+#[derive(Debug, clap::Args)]
+pub struct Args {
     /// The Pi program. On Windows npm's shim is `pi.cmd`.
     #[arg(long, env = "COQUI_ACP_PI_EXECUTABLE", default_value = "pi")]
-    executable: OsString,
+    pub executable: OsString,
     /// A Node executable (an absolute path) that runs Pi's CLI `--script`, instead of an `--executable` on the PATH.
     #[arg(long, env = "COQUI_ACP_PI_NODE", requires = "script")]
-    node: Option<PathBuf>,
+    pub node: Option<PathBuf>,
     /// Pi's CLI script (an absolute path), which `--node` runs.
     #[arg(long, env = "COQUI_ACP_PI_SCRIPT", requires = "node")]
-    script: Option<PathBuf>,
+    pub script: Option<PathBuf>,
     /// The model every session starts with, as provider/id.
     #[arg(long)]
-    model: Option<String>,
+    pub model: Option<String>,
     /// The thinking level every session starts with, such as low or high.
     #[arg(long)]
-    effort: Option<String>,
+    pub effort: Option<String>,
     /// The mode every session starts in, and the loosest a client may choose: manual, accept_edits or plan.
     #[arg(long, value_parser = parse_mode)]
-    mode: Option<Mode>,
+    pub mode: Option<Mode>,
     /// Offer the Bypass mode: never ask.
     #[arg(long)]
-    allow_bypass: bool,
+    pub allow_bypass: bool,
     /// Ask before a tool that only reads, too, in Manual and Plan modes.
     #[arg(long)]
-    ask_for_reads: bool,
+    pub ask_for_reads: bool,
     /// Load only the permission gate: none of the person's own extensions and no MCP servers.
     #[arg(long)]
-    isolated: bool,
+    pub isolated: bool,
     /// A protected path pattern in gitignore syntax (`!` allows, a later line wins, `~/` is the home directory), repeated
     /// and in order; any replaces the recommended list.
     #[arg(long = "protected", value_name = "PATTERN", allow_hyphen_values = true)]
-    protected: Vec<String>,
+    pub protected: Vec<String>,
     /// Let a session work in a directory that holds the places credentials are kept in (a home directory).
     #[arg(long)]
-    allow_credential_roots: bool,
+    pub allow_credential_roots: bool,
     /// The highest ACP version answered.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=2))]
-    max_acp_version: u8,
+    pub max_acp_version: u8,
     /// Sessions at once.
     #[arg(long, default_value_t = 8)]
-    max_sessions: usize,
+    pub max_sessions: usize,
     /// A directory every session's `cwd` and more directories must lie in, repeated for more; none takes any.
     #[arg(long = "working-root", value_name = "DIRECTORY")]
-    working_roots: Vec<PathBuf>,
+    pub working_roots: Vec<PathBuf>,
     /// Take a network path (`\\host\share`) as a session's `cwd` or more directories.
     #[arg(long)]
-    allow_network_paths: bool,
+    pub allow_network_paths: bool,
 }
 
-/// What `coqui-acp-pi` does besides serving.
-#[cfg(feature = "history")]
-#[derive(Debug, clap::Subcommand)]
-enum Command {
-    /// Moves a session in and out of the standard history format (`docs/session-history.md`).
-    History {
-        #[command(subcommand)]
-        action: Action,
-    },
+fn parse_mode(id: &str) -> Result<Mode, String> {
+    Mode::from_id(id).ok_or_else(|| format!("{id} is not a mode"))
 }
 
+impl Args {
+    /// The settings the harness serves with.
+    #[must_use]
+    pub fn settings(&self) -> Settings {
+        let mut settings = Settings::new();
+        settings.max_version = self.max_acp_version;
+        settings.max_sessions = self.max_sessions;
+        settings.working_roots.clone_from(&self.working_roots);
+        settings.network_paths = self.allow_network_paths;
+        settings.on_notice = Some(Arc::new(|_, text: &str| {
+            eprintln!("coqui-acp-pi: {text}");
+        }));
+        settings
+    }
+
+    /// The agent, with these arguments as what each session starts with.
+    #[must_use]
+    pub fn agent(&self) -> PiAgent {
+        let mut defaults = PiLaunch::new(".");
+        defaults.executable.clone_from(&self.executable);
+        defaults.node.clone_from(&self.node);
+        defaults.script.clone_from(&self.script);
+        defaults.model.clone_from(&self.model);
+        defaults.effort.clone_from(&self.effort);
+        defaults.mode = self.mode;
+        defaults.allow_bypass = self.allow_bypass;
+        defaults.ask_for_reads = self.ask_for_reads;
+        defaults.isolated = self.isolated;
+        defaults.allow_credential_roots = self.allow_credential_roots;
+        defaults.protected = (!self.protected.is_empty()).then(|| self.protected.clone());
+        PiAgent::new().defaults(defaults)
+    }
+}
+
+/// Serves the agent on standard input and output until the client closes it.
+///
+/// # Errors
+///
+/// The connection failed; the message says how.
+pub fn run(args: &Args) -> Result<u8, String> {
+    serve(
+        Arc::new(args.agent()),
+        args.settings(),
+        std::io::stdin(),
+        std::io::stdout(),
+    )
+    .map(|()| 0)
+    .map_err(|error| error.to_string())
+}
+
+/// What the agent's history commands do: move a session in and out of the standard history format
+/// (`docs/session-history.md`).
 #[cfg(feature = "history")]
 #[derive(Debug, clap::Subcommand)]
-enum Action {
+pub enum History {
     /// Writes the session's history to standard output, as it is.
     Export {
         /// Pi's agent directory; by default `PI_CODING_AGENT_DIR`, else `.pi/agent` in the home directory.
@@ -117,38 +154,46 @@ enum Action {
     },
 }
 
+/// Runs one history command on standard input and output.
+///
+/// # Errors
+///
+/// Pi's agent directory is unknown, or the session or the history could not be read or written.
 #[cfg(feature = "history")]
-fn history_main(action: Action) -> Result<(), String> {
+pub fn run_history(action: &History) -> Result<u8, String> {
     use std::io::{Read, Write};
 
-    use coqui_acp_pi::history::{DEFAULT_MAX_BYTES, ImportOptions, export_file, import_file};
+    use crate::history::{DEFAULT_MAX_BYTES, ImportOptions, export_file, import_file};
 
-    let place = |agent_dir: Option<PathBuf>, cwd: &PathBuf| {
+    let place = |agent_dir: &Option<PathBuf>, cwd: &PathBuf| {
         let mut launch = PiLaunch::new(cwd);
         if let Some(dir) = agent_dir {
-            launch.env.insert("PI_CODING_AGENT_DIR".into(), dir.into());
+            launch
+                .env
+                .insert("PI_CODING_AGENT_DIR".into(), dir.clone().into());
         }
         launch
             .sessions_dir()
             .ok_or_else(|| "Pi's agent directory is unknown: pass --agent-dir".to_owned())
     };
     match action {
-        Action::Export { agent_dir, cwd, id } => {
-            let directory = place(agent_dir, &cwd)?;
-            let doc = export_file(&directory, &id, DEFAULT_MAX_BYTES)
+        History::Export { agent_dir, cwd, id } => {
+            let directory = place(agent_dir, cwd)?;
+            let doc = export_file(&directory, id, DEFAULT_MAX_BYTES)
                 .map_err(|error| error.to_string())?;
             let bytes = doc.to_vec().map_err(|error| error.to_string())?;
             std::io::stdout()
                 .write_all(&bytes)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            Ok(0)
         }
-        Action::Import {
+        History::Import {
             agent_dir,
             cwd,
             id,
             no_summary,
         } => {
-            let directory = place(agent_dir, &cwd)?;
+            let directory = place(agent_dir, cwd)?;
             let mut text = Vec::new();
             std::io::stdin()
                 .read_to_end(&mut text)
@@ -156,7 +201,7 @@ fn history_main(action: Action) -> Result<(), String> {
             let doc = coqui_acp_history::Document::from_slice(&text)
                 .map_err(|error| error.to_string())?;
             let options = ImportOptions::default().use_summary(!no_summary);
-            let imported = import_file(&directory, &cwd, &id, &doc, &options)
+            let imported = import_file(&directory, cwd, id, &doc, &options)
                 .map_err(|error| error.to_string())?;
             let lost: Vec<String> = imported
                 .report
@@ -165,61 +210,7 @@ fn history_main(action: Action) -> Result<(), String> {
                 .map(|loss| format!("{}:{}", loss.kind, loss.count))
                 .collect();
             eprintln!("imported; lost: [{}]", lost.join(", "));
-            Ok(())
-        }
-    }
-}
-
-fn parse_mode(id: &str) -> Result<Mode, String> {
-    Mode::from_id(id).ok_or_else(|| format!("{id} is not a mode"))
-}
-
-fn settings_of(cli: &Cli) -> Settings {
-    let mut settings = Settings::new();
-    settings.max_version = cli.max_acp_version;
-    settings.max_sessions = cli.max_sessions;
-    settings.working_roots.clone_from(&cli.working_roots);
-    settings.network_paths = cli.allow_network_paths;
-    settings.on_notice = Some(Arc::new(|_, text: &str| eprintln!("coqui-acp-pi: {text}")));
-    settings
-}
-
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    #[cfg(feature = "history")]
-    if let Some(Command::History { action }) = cli.command {
-        return match history_main(action) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("coqui-acp-pi: {error}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    let settings = settings_of(&cli);
-    let mut defaults = PiLaunch::new(".");
-    defaults.executable = cli.executable;
-    defaults.node = cli.node;
-    defaults.script = cli.script;
-    defaults.model = cli.model;
-    defaults.effort = cli.effort;
-    defaults.mode = cli.mode;
-    defaults.allow_bypass = cli.allow_bypass;
-    defaults.ask_for_reads = cli.ask_for_reads;
-    defaults.isolated = cli.isolated;
-    defaults.allow_credential_roots = cli.allow_credential_roots;
-    defaults.protected = (!cli.protected.is_empty()).then(|| cli.protected.clone());
-    let agent = PiAgent::new().defaults(defaults);
-    match serve(
-        Arc::new(agent),
-        settings,
-        std::io::stdin(),
-        std::io::stdout(),
-    ) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("coqui-acp-pi: {error}");
-            ExitCode::FAILURE
+            Ok(0)
         }
     }
 }
@@ -228,7 +219,13 @@ fn main() -> ExitCode {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, settings_of};
+    use super::Args;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: Args,
+    }
 
     #[test]
     fn the_command_line_is_well_formed() {
@@ -237,13 +234,9 @@ mod tests {
 
     #[test]
     fn what_a_host_narrows_on_the_command_line_reaches_the_settings() {
-        let settings = settings_of(&Cli::parse_from([
-            "coqui-acp-pi",
-            "--working-root",
-            "/w",
-            "--working-root",
-            "/x",
-        ]));
+        let settings = Cli::parse_from(["pi", "--working-root", "/w", "--working-root", "/x"])
+            .args
+            .settings();
         assert_eq!(settings.working_roots.len(), 2);
         assert!(!settings.network_paths);
     }
