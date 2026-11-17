@@ -114,7 +114,7 @@ pub struct Serve {
     /// Serve WebTransport on this UDP port too; needs `--tls-identity`, and the in-band proof.
     #[arg(long)]
     pub webtransport_port: Option<u16>,
-    /// A browser origin allowed in, as scheme://host[:port]. Repeat for more. A non-browser client sends none. With none listed, no origin is checked.
+    /// A browser origin allowed in, as `scheme://host[:port]`. Repeat for more. A non-browser client sends none. With none listed, no origin is checked.
     #[arg(long = "origin")]
     pub origins: Vec<String>,
     /// A source network allowed to connect at all, like 10.6.0.0/16. Repeat for more. With any listed, everything else is
