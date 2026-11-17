@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
-    Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter, LoginRequest,
-    ModelInfo, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport, RenewRequest,
-    Requirement, SessionExport, SessionImport, StartRequest, UnknownKind, UsageQuery, UsageReport,
+    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
+    ExportPage, HarnessInfo, ImportReport, ModelInfo, ModelListing, ModelsRequest, Narrowing,
+    ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, UnknownKind,
+    UsageQuery, UsageReport,
 };
 use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, Watched, same_name};
@@ -231,10 +231,8 @@ impl PiProvider {
         &self,
         account: Option<&AccountGrant>,
         spawner: &Arc<Object<dyn ProcessSpawner>>,
-        keeper: Object<dyn AccountKeeper>,
         launch: &mut PiLaunch,
     ) -> Result<Option<Hold>, ProviderError> {
-        drop(keeper);
         let Some(grant) = account else {
             return Ok(None);
         };
@@ -303,7 +301,6 @@ impl AcpHarness for PiProvider {
         request: StartRequest,
         spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
         if let Some(why) = narrow(&request.requirements)? {
             return Err(unsupported(&why));
@@ -311,7 +308,7 @@ impl AcpHarness for PiProvider {
         Self::local(&spawner)?;
         let mut launch = self.launch(request.environment.expose());
         let spawner = Arc::new(spawner);
-        let hold = self.apply(request.account.as_ref(), &spawner, keeper, &mut launch)?;
+        let hold = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
         let mut settings = Settings::new();
         settings.max_sessions = usize::try_from(self.settings.max_sessions).unwrap_or(usize::MAX);
         settings.max_requests = usize::try_from(self.settings.max_requests).unwrap_or(usize::MAX);
@@ -363,7 +360,6 @@ impl AcpHarness for PiProvider {
         &self,
         session: SessionImport,
         spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
         if let Some(account) = &session.account {
             known(&DEF, &account.reference())?;
@@ -385,7 +381,6 @@ impl AcpHarness for PiProvider {
         &self,
         export: SessionExport,
         spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
         if let Some(account) = &export.account {
             known(&DEF, &account.reference())?;
@@ -407,11 +402,10 @@ impl AcpHarness for PiProvider {
         &self,
         request: ModelsRequest,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
         let mut launch = self.launch(request.environment.expose());
         let spawner = Arc::new(spawner);
-        let hold = self.apply(request.account.as_ref(), &spawner, keeper, &mut launch)?;
+        let hold = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
         let spawn = ThroughSpawner::shared(spawner);
         let listing = match PiSession::read_models(&launch, &spawn, PiSettings::new()) {
             Ok(models) if models.is_empty() => {
@@ -458,30 +452,9 @@ impl AcpHarness for PiProvider {
         &self,
         query: UsageQuery,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
-        drop((spawner, keeper));
+        drop(spawner);
         Self::glance(query.account.as_ref())?;
         Ok(UsageReport::unsupported("Pi reports no usage allowances"))
-    }
-
-    fn login(
-        &self,
-        _request: LoginRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-        _prompter: Object<dyn LoginPrompter>,
-    ) -> Result<LoginOutcome, ProviderError> {
-        Err(unsupported(DEF.login_unsupported))
-    }
-
-    fn renew(
-        &self,
-        request: RenewRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<RenewReport, ProviderError> {
-        apply(&DEF, &request.account)?;
-        Err(unsupported(
-            "this harness renews no login: the `pi_accounts` account_provider answers for it",
-        ))
     }
 }

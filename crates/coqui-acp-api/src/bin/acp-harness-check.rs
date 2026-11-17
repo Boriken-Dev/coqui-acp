@@ -13,8 +13,6 @@
 //!                       `--holds none` says it holds none
 //! --message-limit N     the largest message it takes, when it has a limit
 //! --no-imports          it imports no session, and must refuse import_session with a reason
-//! --no-logins           it offers no login method, lists none, and must refuse login with a reason
-//! --no-watches          it leaves watching an account's login to an account_provider, and its keeper hears nothing
 //! --account KIND        run the account checks on this kind of account alone
 //! --program-agent       the provider starts its harness's own program, which the checker's spawner then
 //!                       starts for real: name a stand-in for it in --settings
@@ -49,8 +47,6 @@ struct Args {
     holds: Vec<Requirement>,
     message_limit: Option<usize>,
     no_imports: bool,
-    no_logins: bool,
-    no_watches: bool,
     account: Option<String>,
     program_agent: bool,
     holds_none: bool,
@@ -78,8 +74,6 @@ fn parse() -> Result<Args, String> {
                 );
             }
             "--no-imports" => args.no_imports = true,
-            "--no-logins" => args.no_logins = true,
-            "--no-watches" => args.no_watches = true,
             "--program-agent" => args.program_agent = true,
             "--account" => args.account = Some(value()?),
             "--holds" => {
@@ -275,12 +269,6 @@ fn main() -> ExitCode {
     }
     if args.no_imports {
         contract = contract.imports(false);
-    }
-    if args.no_watches {
-        contract = contract.watches(false);
-    }
-    if args.no_logins {
-        contract = contract.logins(false);
     }
     if let Some(kind) = &args.account {
         contract = contract.account(kind.clone());

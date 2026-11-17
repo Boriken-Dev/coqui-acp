@@ -163,8 +163,6 @@ fn the_suite_inside() {
         let outcome = Contract::new(format!("stdio {harness} {kind}"))
             .program_agent(true)
             .imports(false)
-            .logins(false)
-            .watches(false)
             .holds(Vec::new())
             .account(kind)
             .run(&provider);
@@ -174,18 +172,6 @@ fn the_suite_inside() {
     drop(registry);
     if let Err(failures) = outcome {
         panic!("{failures}");
-    }
-}
-
-struct Keeper;
-
-impl AccountKeeper for Keeper {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
     }
 }
 
@@ -211,12 +197,7 @@ fn start_and_close(provider: &StdioProvider, request: StartRequest, dir: &Path) 
     let (sender, received) = mpsc::channel();
     let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().files(dir).into_object();
     let channel = provider
-        .start(
-            request,
-            spawner,
-            Sink(sender).into_object(),
-            Keeper.into_object(),
-        )
+        .start(request, spawner, Sink(sender).into_object())
         .expect("it starts");
     channel
         .send(
@@ -509,59 +490,13 @@ impl LoginPrompter for NoPrompter {
     }
 }
 
-/// The harness signs no one in, renews nothing and tells its keeper nothing; its account provider does all three.
+/// The harness lists no way to sign in and renews nothing: its account provider does both.
 #[test]
-fn the_harness_signs_no_one_in_renews_nothing_and_tells_its_keeper_nothing() {
+fn the_harness_lists_no_login_and_no_renewal() {
     let provider = provider(StdioHarness::Grok);
     let catalog = provider.accounts().expect("listed");
     assert!(catalog.logins.is_empty());
     assert!(catalog.kinds.iter().all(|kind| !kind.renews));
-    let dir = scratch("silent");
-    let unsupported = u32::from(coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED);
-    let error = provider
-        .login(
-            coqui_acp_api::LoginRequest::new("device", dir.to_str().expect("text")),
-            LocalSpawner::new().files(&dir).into_object(),
-            NoPrompter.into_object(),
-        )
-        .expect_err("not the harness's");
-    assert_eq!(u32::from(error.status), unsupported);
-    let whole = r#"{"account_id":"mine"}"#;
-    let grant = AccountGrant::new("an-account", "grok-login")
-        .credentials(Credentials::from_iter([("auth_json", whole)]))
-        .state_dir(dir.to_str().expect("text"));
-    let error = provider
-        .renew(
-            coqui_acp_api::RenewRequest::new(grant.clone()),
-            LocalSpawner::new().files(&dir).into_object(),
-        )
-        .expect_err("not the harness's");
-    assert_eq!(u32::from(error.status), unsupported);
-    // A connection whose login the agent renews, and a models call after a rotation, tell the keeper nothing: the
-    // account provider's watch does.
-    let heard = std::sync::Arc::new(std::sync::Mutex::new((0, 0)));
-    let (sender, _received) = mpsc::channel();
-    let channel = provider
-        .start(
-            StartRequest::builder().account(grant.clone()).build(),
-            LocalSpawner::new().files(&dir).into_object(),
-            Sink(sender).into_object(),
-            Recording(std::sync::Arc::clone(&heard)).into_object(),
-        )
-        .expect("it starts");
-    std::fs::write(dir.join("auth.json"), r#"{"account_id":"mine","n":2}"#).expect("a renewal");
-    provider
-        .models(
-            coqui_acp_api::ModelsRequest::new().account(grant),
-            LocalSpawner::new().files(&dir).into_object(),
-            Recording(std::sync::Arc::clone(&heard)).into_object(),
-        )
-        .expect("models answers");
-    channel.close(0, "");
-    drop(channel);
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(*heard.lock().expect("lock"), (0, 0));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -13,12 +13,10 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeper, AccountLoss, AccountRef, AccountRenewal,
-    AcpHarness, Channel, ChannelSink, Environment, ExportPage, FileInfo, HarnessInfo, ImportReport,
-    LoginOutcome, LoginPrompter, LoginRequest, ModelListing, ModelsRequest, ProcessSpawner,
-    RenewReport, RenewRequest, Requirement, SecretBytes, SessionExport, SessionImport,
-    SessionQuery, Source, SpawnSpec, SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery,
-    UsageReport, UsageSupport,
+    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
+    ExportPage, FileInfo, HarnessInfo, ImportReport, LoginMethodInfo, ModelListing, ModelsRequest,
+    ProcessSpawner, Requirement, SecretBytes, SessionExport, SessionImport, SessionQuery, Source,
+    SpawnSpec, SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery, UsageReport, UsageSupport,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -81,7 +79,7 @@ fn what_a_provider_leaves_out_has_its_default() {
         None
     );
     let models = harness
-        .models(ModelsRequest::new(), spawner(), keeper())
+        .models(ModelsRequest::new(), spawner())
         .expect("answered");
     assert!(models.known);
     assert_eq!(models.models[0].id, "echo");
@@ -127,23 +125,6 @@ fn instance(registry: &Registry, settings: Map) -> Arc<dyn AcpHarness> {
 
 fn spawner() -> Object<dyn ProcessSpawner> {
     LocalSpawner.into_object()
-}
-
-fn keeper() -> Object<dyn AccountKeeper> {
-    Hears.into_object()
-}
-
-/// A keeper that hears nothing.
-struct Hears;
-
-impl AccountKeeper for Hears {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
-    }
 }
 
 /// A spawner nobody uses: the echo starts nothing.
@@ -212,32 +193,28 @@ fn a_history_moves_between_harnesses() {
     );
     let first = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let report = here
-        .import_session(SessionImport::new(first, "/", history), spawner(), keeper())
+        .import_session(SessionImport::new(first, "/", history), spawner())
         .expect("seeded");
     assert_eq!(report.seeded_from.map(|point| point.line), Some(2));
     assert!(report.losses.is_empty() && !report.compacted);
     let exported = here
-        .export_session(SessionExport::new(first, "/"), spawner(), keeper())
+        .export_session(SessionExport::new(first, "/"), spawner())
         .expect("exported");
     assert_eq!(exported.next, None, "a short history is one page");
     let exported = exported.text;
     let second = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     there
-        .import_session(
-            SessionImport::new(second, "/", exported.clone()),
-            spawner(),
-            keeper(),
-        )
+        .import_session(SessionImport::new(second, "/", exported.clone()), spawner())
         .expect("seeded elsewhere");
     assert_eq!(
         there
-            .export_session(SessionExport::new(second, "/"), spawner(), keeper())
+            .export_session(SessionExport::new(second, "/"), spawner())
             .expect("exported")
             .text,
         exported
     );
     let missing = there
-        .export_session(SessionExport::new(first, "/"), spawner(), keeper())
+        .export_session(SessionExport::new(first, "/"), spawner())
         .expect_err("another harness's session is not this one's");
     assert_eq!(missing.status, Status::GUATIAO_ERR_NOT_FOUND);
 }
@@ -253,7 +230,6 @@ fn a_harness_that_cannot_import_refuses_with_a_reason() {
         .import_session(
             SessionImport::new("0f8fad5b-d9cb-469f-a165-70867728950e", "/", ""),
             spawner(),
-            keeper(),
         )
         .expect_err("it cannot import");
     assert_eq!(refused.status, Status::GUATIAO_ERR_UNSUPPORTED);
@@ -293,7 +269,6 @@ fn an_echo_that_reports_no_usage_says_so_with_a_reason() {
         .usage(
             UsageQuery::new().account(AccountGrant::new("pool/alice", "harness-login")),
             spawner(),
-            keeper(),
         )
         .expect("answered");
     assert!(!report.supported && report.buckets.is_empty());
@@ -310,6 +285,8 @@ struct Disagrees {
     hides_in_describe: bool,
     /// Puts a credential of the account it was given into the refusal it answers.
     leaks: bool,
+    /// Lists a login method in its catalog.
+    lists_login: bool,
 }
 
 impl AcpHarness for Disagrees {
@@ -322,7 +299,13 @@ impl AcpHarness for Disagrees {
     }
 
     fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
-        self.inner.accounts()
+        let mut catalog = self.inner.accounts()?;
+        if self.lists_login {
+            catalog
+                .logins
+                .push(LoginMethodInfo::new("any", "Any", "echo-key"));
+        }
+        Ok(catalog)
     }
 
     fn start(
@@ -330,7 +313,6 @@ impl AcpHarness for Disagrees {
         request: StartRequest,
         spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
         let credential = request.account.as_ref().and_then(|grant| {
             grant
@@ -340,7 +322,7 @@ impl AcpHarness for Disagrees {
                 .next()
                 .map(|(_, v)| v.clone())
         });
-        match (self.inner.start(request, spawner, sink, keeper), credential) {
+        match (self.inner.start(request, spawner, sink), credential) {
             (Err(refused), Some(credential)) if self.leaks => Err(ProviderError::new(
                 refused.status,
                 &format!("{} {credential}", refused.message()),
@@ -366,30 +348,27 @@ impl AcpHarness for Disagrees {
         &self,
         session: SessionImport,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
-        self.inner.import_session(session, spawner, keeper)
+        self.inner.import_session(session, spawner)
     }
 
     fn export_session(
         &self,
         export: SessionExport,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
-        self.inner.export_session(export, spawner, keeper)
+        self.inner.export_session(export, spawner)
     }
 
     fn usage(
         &self,
         query: UsageQuery,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
         if self.hides_in_describe {
-            return self.inner.usage(query, spawner, keeper);
+            return self.inner.usage(query, spawner);
         }
-        drop((query, spawner, keeper));
+        drop((query, spawner));
         Ok(UsageReport::unsupported("it says it has none"))
     }
 
@@ -397,26 +376,8 @@ impl AcpHarness for Disagrees {
         &self,
         request: ModelsRequest,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
-        self.inner.models(request, spawner, keeper)
-    }
-
-    fn login(
-        &self,
-        request: LoginRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        prompter: Object<dyn LoginPrompter>,
-    ) -> Result<LoginOutcome, ProviderError> {
-        self.inner.login(request, spawner, prompter)
-    }
-
-    fn renew(
-        &self,
-        request: RenewRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<RenewReport, ProviderError> {
-        self.inner.renew(request, spawner)
+        self.inner.models(request, spawner)
     }
 }
 
@@ -433,6 +394,7 @@ fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
             inner: Arc::clone(&inner),
             hides_in_describe,
             leaks: false,
+            lists_login: false,
         };
         let failures = Contract::new("a provider that disagrees with itself")
             .run(&harness)
@@ -453,6 +415,7 @@ fn the_contract_names_a_provider_that_says_a_credential() {
         inner: instance(&registry, Map::new()),
         hides_in_describe: false,
         leaks: true,
+        lists_login: false,
     };
     let failures = Contract::new("a provider that says a credential")
         .run(&harness)
@@ -461,28 +424,23 @@ fn the_contract_names_a_provider_that_says_a_credential() {
     assert!(said.contains("saying nothing of its credentials"), "{said}");
 }
 
-/// Logins off: the catalog lists none, `login` is unsupported, and the suite agrees.
+/// A harness lists no way to sign in: that is an account provider's.
 #[test]
-fn an_echo_without_logins_holds_to_the_contract() {
+fn the_contract_names_a_harness_that_lists_a_login_method() {
     let registry = registry();
-    let mut settings = Map::new();
-    settings.set("logins", false);
-    let harness = instance(&registry, settings);
-    assert!(harness.accounts().expect("answered").logins.is_empty());
-    if let Err(failures) = Contract::new("an echo with no login")
-        .logins(false)
-        .message_limit(1 << 20)
-        .run(&*harness)
-    {
-        panic!("{failures}");
-    }
-    // The suite holds a provider that lists methods to say it offers some.
-    let failures = Contract::new("an echo with logins, run as if it had none")
-        .logins(false)
-        .run(&*instance(&registry, Map::new()))
-        .expect_err("the catalog lists methods");
+    let harness = Disagrees {
+        inner: instance(&registry, Map::new()),
+        hides_in_describe: false,
+        leaks: false,
+        lists_login: true,
+    };
+    let failures = Contract::new("a harness that lists a login method")
+        .run(&harness)
+        .expect_err("the catalog lists a method");
     assert!(
-        failures.to_string().contains("logins are off"),
+        failures
+            .to_string()
+            .contains("signing in is an account provider's"),
         "{failures}"
     );
 }

@@ -16,9 +16,8 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{FromValue, Map, Status, ToValue, Value};
 use coqui_acp_api::{
-    AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, CacheLifetime, Channel, ChannelSink,
-    HarnessNotice, NO_PROJECT_MCP, NoticeKind, ProcessSpawner, READ_ONLY, Requirement,
-    StartRequest,
+    AcpHarness, CacheLifetime, Channel, ChannelSink, HarnessNotice, NO_PROJECT_MCP, NoticeKind,
+    ProcessSpawner, READ_ONLY, Requirement, StartRequest,
 };
 use coqui_acp_claude::{ClaudeProvider, ProviderSettings, SettingSource};
 use coqui_acp_harness::{LocalSpawner, Mode};
@@ -108,8 +107,6 @@ fn the_suite_inside() {
         .instantiate(&Value::from(settings))
         .expect("the settings are taken");
     let outcome = Contract::new("claude")
-        .logins(false)
-        .watches(false)
         .program_agent(true)
         .imports(cfg!(feature = "history"))
         .holds(vec![Requirement::new(NO_PROJECT_MCP)])
@@ -118,18 +115,6 @@ fn the_suite_inside() {
     drop(registry);
     if let Err(failures) = outcome {
         panic!("{failures}");
-    }
-}
-
-struct Keeper;
-
-impl AccountKeeper for Keeper {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
     }
 }
 
@@ -191,12 +176,7 @@ fn connect_through(
 ) {
     let (sender, received) = mpsc::channel();
     let channel = provider
-        .start(
-            request,
-            spawner,
-            Sink(sender).into_object(),
-            Keeper.into_object(),
-        )
+        .start(request, spawner, Sink(sender).into_object())
         .expect("it starts");
     let send =
         |message: serde_json::Value| channel.send(message.to_string().as_bytes()).expect("taken");
@@ -315,23 +295,17 @@ fn it_holds_what_it_can_and_refuses_the_rest_with_the_reason() {
 fn what_it_does_not_do_yet_is_refused_unsupported_with_a_reason() {
     let provider = provider();
     let spawner = || -> Object<dyn ProcessSpawner> { LocalSpawner::new().into_object() };
-    let keeper = || -> Object<dyn AccountKeeper> { Keeper.into_object() };
     let id = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let error = provider
         .import_session(
             coqui_acp_api::SessionImport::new(id, "/", String::new()),
             spawner(),
-            keeper(),
         )
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
     assert!(!error.message().is_empty());
     let error = provider
-        .export_session(
-            coqui_acp_api::SessionExport::new(id, "/"),
-            spawner(),
-            keeper(),
-        )
+        .export_session(coqui_acp_api::SessionExport::new(id, "/"), spawner())
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
 }
@@ -342,11 +316,7 @@ fn a_usage_read_for_an_account_checks_the_grant_like_a_start_does() {
     // A login with no credential or directory is not a grant the kind takes.
     let account = coqui_acp_api::AccountGrant::new("a", "claude-login");
     let error = provider()
-        .usage(
-            coqui_acp_api::UsageQuery::new().account(account),
-            spawner(),
-            Keeper.into_object(),
-        )
+        .usage(coqui_acp_api::UsageQuery::new().account(account), spawner())
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
     let error = provider()
@@ -354,7 +324,6 @@ fn a_usage_read_for_an_account_checks_the_grant_like_a_start_does() {
             coqui_acp_api::UsageQuery::new()
                 .account(coqui_acp_api::AccountGrant::new("a", "no-such-kind")),
             spawner(),
-            Keeper.into_object(),
         )
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
@@ -561,7 +530,6 @@ fn models_lists_the_recorded_models_with_versions_and_efforts_and_no_turn() {
         .models(
             coqui_acp_api::ModelsRequest::new().environment(environment),
             LocalSpawner::new().into_object(),
-            Keeper.into_object(),
         )
         .expect("answered");
     assert!(listing.known, "{listing:?}");
@@ -691,7 +659,6 @@ fn listing_of(
     .models(
         coqui_acp_api::ModelsRequest::new().environment(environment),
         LocalSpawner::new().into_object(),
-        Keeper.into_object(),
     )
     .expect("answered")
 }

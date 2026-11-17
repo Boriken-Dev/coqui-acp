@@ -7,14 +7,12 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, Credentials,
-    ModelsRequest, ProcessSpawner, StartRequest,
+    AccountGrant, AcpHarness, ChannelSink, Credentials, ModelsRequest, ProcessSpawner, StartRequest,
 };
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
 use coqui_acp_harness::LocalSpawner;
@@ -57,24 +55,6 @@ fn provider() -> CodexProvider {
 
 fn spawner(dir: &Path) -> Object<dyn ProcessSpawner> {
     LocalSpawner::new().files(dir).into_object()
-}
-
-#[derive(Clone, Default)]
-struct Heard {
-    renewed: Arc<Mutex<Vec<AccountRenewal>>>,
-    lost: Arc<Mutex<Vec<AccountLoss>>>,
-}
-
-impl AccountKeeper for Heard {
-    fn renewed(&self, renewal: AccountRenewal) -> Result<(), ProviderError> {
-        self.renewed.lock().unwrap().push(renewal);
-        Ok(())
-    }
-
-    fn lost(&self, loss: AccountLoss) -> Result<(), ProviderError> {
-        self.lost.lock().unwrap().push(loss);
-        Ok(())
-    }
 }
 
 struct Sink(std::sync::mpsc::Sender<serde_json::Value>);
@@ -124,14 +104,13 @@ fn names(entry: &serde_json::Value) -> Vec<String> {
 }
 
 /// Opens a connection on `grant` and one thread, then closes it.
-fn run_session(provider: &CodexProvider, grant: AccountGrant, dir: &Path, heard: &Heard) {
+fn run_session(provider: &CodexProvider, grant: AccountGrant, dir: &Path) {
     let (sender, received) = std::sync::mpsc::channel();
     let channel = provider
         .start(
             StartRequest::builder().account(grant).build(),
             spawner(dir),
             Sink(sender).into_object(),
-            heard.clone().into_object(),
         )
         .expect("it starts");
     let send =
@@ -162,7 +141,7 @@ fn a_chatgpt_login_is_written_into_the_home_with_the_store_set_to_a_file() {
         .settings(coqui_acp_harness::provider::schema(
             &serde_json::json!({"chatgpt_base_url": "https://gateway.example/backend"}),
         ));
-    run_session(&provider, grant, &dir, &Heard::default());
+    run_session(&provider, grant, &dir);
     assert_eq!(
         std::fs::read_to_string(dir.join("auth.json")).unwrap(),
         LOGIN_FILE
@@ -192,8 +171,7 @@ fn a_key_is_saved_by_codex_login_on_standard_input_and_not_saved_again() {
         .credentials(credentials_of(&[("api_key", CANARY)]))
         .state_dir(dir.to_string_lossy());
     // The host's own environment names a key: it does not reach Codex.
-    let heard = Heard::default();
-    run_session(&provider, grant.clone(), &dir, &heard);
+    run_session(&provider, grant.clone(), &dir);
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("auth.json")).unwrap()).unwrap();
     assert_eq!(saved["OPENAI_API_KEY"], CANARY);
@@ -203,7 +181,7 @@ fn a_key_is_saved_by_codex_login_on_standard_input_and_not_saved_again() {
             .iter()
             .any(|e| e["args"] == serde_json::json!(["login", "--with-api-key"]))
     );
-    run_session(&provider, grant, &dir, &heard);
+    run_session(&provider, grant, &dir);
     let logins = log(&dir)
         .iter()
         .filter(|e| e["args"] == serde_json::json!(["login", "--with-api-key"]))
@@ -227,7 +205,6 @@ fn a_grant_the_kind_refuses_is_bad_value_and_a_home_without_files_is_unsupported
                 StartRequest::builder().account(grant).build(),
                 spawner,
                 Sink(std::sync::mpsc::channel().0).into_object(),
-                Heard::default().into_object(),
             )
             .map(|_| ())
             .expect_err("refused")
@@ -267,12 +244,7 @@ fn started_with(
         .environment(environment)
         .build();
     let channel = provider
-        .start(
-            request,
-            spawner(dir),
-            Sink(sender).into_object(),
-            Heard::default().into_object(),
-        )
+        .start(request, spawner(dir), Sink(sender).into_object())
         .expect("it starts");
     channel
         .send(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#)
@@ -329,11 +301,7 @@ fn a_token_is_saved_once_for_a_home_however_often_the_account_is_used() {
         .state_dir(dir.to_string_lossy());
     for _ in 0..3 {
         provider
-            .models(
-                ModelsRequest::new().account(grant.clone()),
-                spawner(&dir),
-                Heard::default().into_object(),
-            )
+            .models(ModelsRequest::new().account(grant.clone()), spawner(&dir))
             .expect("listed");
     }
     let saves = log(&dir)
@@ -361,35 +329,5 @@ fn a_credential_variable_of_another_case_does_not_survive_on_windows() {
             .any(|n| n.eq_ignore_ascii_case("OPENAI_API_KEY")),
         "{entry}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_connection_and_a_models_call_tell_their_keeper_nothing() {
-    let provider = provider();
-    let dir = scratch("silent");
-    let grant = AccountGrant::new("acct", "codex-chatgpt")
-        .credentials(credentials_of(&[("auth_file", LOGIN_FILE)]))
-        .state_dir(dir.to_string_lossy());
-    // A connection whose login the agent renews, and a models call after a rotation, tell the keeper nothing: the
-    // account provider's watch does.
-    let heard = Heard::default();
-    run_session(&provider, grant.clone(), &dir, &heard);
-    for refresh in ["refresh-8", "refresh-9"] {
-        std::fs::write(
-            dir.join("auth.json"),
-            LOGIN_FILE.replace("refresh-1", refresh),
-        )
-        .unwrap();
-        provider
-            .models(
-                ModelsRequest::new().account(grant.clone()),
-                spawner(&dir),
-                heard.clone().into_object(),
-            )
-            .expect("listed");
-    }
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(heard.renewed.lock().unwrap().is_empty() && heard.lost.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

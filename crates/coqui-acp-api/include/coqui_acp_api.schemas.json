@@ -2718,7 +2718,7 @@
             },
             "renews": {
               "type": "boolean",
-              "description": "[`renew`](crate::AcpHarness::renew) can renew it with no model turn.",
+              "description": "[`renew`](crate::AccountProvider::renew) can renew it with no model turn.",
               "default": false
             },
             "notices": {
@@ -3104,7 +3104,7 @@
       },
       "renews": {
         "type": "boolean",
-        "description": "[`renew`](crate::AcpHarness::renew) can renew it with no model turn.",
+        "description": "[`renew`](crate::AccountProvider::renew) can renew it with no model turn.",
         "default": false
       },
       "notices": {
@@ -3688,7 +3688,7 @@
             },
             "renews": {
               "type": "boolean",
-              "description": "[`renew`](crate::AcpHarness::renew) can renew it with no model turn.",
+              "description": "[`renew`](crate::AccountProvider::renew) can renew it with no model turn.",
               "default": false
             },
             "notices": {

@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, Environment,
-    ProcessSpawner, SessionExport, SessionImport, StartRequest,
+    AcpHarness, ChannelSink, Environment, ProcessSpawner, SessionExport, SessionImport,
+    StartRequest,
 };
 use coqui_acp_claude::{ClaudeProvider, ProviderSettings};
 use coqui_acp_harness::LocalSpawner;
@@ -27,18 +27,6 @@ use serde_json::{Value, json};
 use support::Scratch;
 
 const ID: &str = "5d1c2a77-3b4e-4f60-9a81-0c2b7d9e1f35";
-
-struct Keeper;
-
-impl AccountKeeper for Keeper {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
-    }
-}
 
 struct Sink(mpsc::Sender<Value>);
 
@@ -77,9 +65,7 @@ fn history(provider: &ClaudeProvider, work: &str, environment: &Environment) -> 
         if let Some(after) = &after {
             ask = ask.after(after.clone());
         }
-        let page = provider
-            .export_session(ask, spawner(), Keeper.into_object())
-            .expect("a page");
+        let page = provider.export_session(ask, spawner()).expect("a page");
         joined.push_str(&page.text);
         match page.next {
             Some(next) => after = Some(next),
@@ -126,7 +112,6 @@ fn a_seeded_empty_session_is_resumed_prompted_and_exported_under_its_uuid() {
         .import_session(
             SessionImport::new(ID, &work_text, String::new()).environment(environment.clone()),
             spawner(),
-            Keeper.into_object(),
         )
         .expect("an empty seed");
     assert!(report.seeded_from.is_none());
@@ -138,12 +123,7 @@ fn a_seeded_empty_session_is_resumed_prompted_and_exported_under_its_uuid() {
             .environment(environment.clone())
             .build();
         let channel = provider
-            .start(
-                request,
-                spawner(),
-                Sink(sender).into_object(),
-                Keeper.into_object(),
-            )
+            .start(request, spawner(), Sink(sender).into_object())
             .expect("it starts");
         let send = |message: Value| channel.send(message.to_string().as_bytes()).expect("taken");
         send(

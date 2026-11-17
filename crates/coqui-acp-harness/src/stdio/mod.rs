@@ -17,10 +17,9 @@ use core::time::Duration;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
-    Environment, ExportPage, HarnessInfo, HistoryLoss, ImportReport, LoginOutcome, LoginPrompter,
-    LoginRequest, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport,
-    RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SpawnSpec, StartRequest,
+    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
+    ExportPage, HarnessInfo, HistoryLoss, ImportReport, ModelListing, ModelsRequest, Narrowing,
+    ProcessSpawner, Requirement, SeedPoint, SessionExport, SessionImport, SpawnSpec, StartRequest,
     UsageQuery, UsageReport, WorkingRoots,
 };
 use coqui_acp_history::replay::{Replay, ReplaySettings};
@@ -301,9 +300,7 @@ impl AcpHarness for StdioProvider {
         request: StartRequest,
         spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
-        drop(keeper);
         if let Some(why) = refuse_requirements(&request.requirements)? {
             return Err(unsupported(&why));
         }
@@ -357,7 +354,6 @@ impl AcpHarness for StdioProvider {
         &self,
         session: SessionImport,
         _spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
         if let Some(grant) = &session.account {
             accounts::known(self.def(), &grant.reference())?;
@@ -447,7 +443,6 @@ impl AcpHarness for StdioProvider {
         &self,
         export: SessionExport,
         _spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
         if let Some(grant) = &export.account {
             accounts::known(self.def(), &grant.reference())?;
@@ -466,9 +461,8 @@ impl AcpHarness for StdioProvider {
         &self,
         request: ModelsRequest,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
-        drop((spawner, keeper));
+        drop(spawner);
         self.glance(request.account.as_ref())?;
         Ok(ModelListing::unknown(
             "the agent lists its models in its session, not before it",
@@ -479,34 +473,11 @@ impl AcpHarness for StdioProvider {
         &self,
         query: UsageQuery,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
-        drop((spawner, keeper));
+        drop(spawner);
         self.glance(query.account.as_ref())?;
         Ok(UsageReport::unsupported(
             "this harness reports no usage outside a turn",
-        ))
-    }
-
-    fn login(
-        &self,
-        _request: LoginRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-        _prompter: Object<dyn LoginPrompter>,
-    ) -> Result<LoginOutcome, ProviderError> {
-        Err(unsupported(
-            "this harness signs no one in: the `stdio_accounts` account_provider does",
-        ))
-    }
-
-    fn renew(
-        &self,
-        request: RenewRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<RenewReport, ProviderError> {
-        accounts::known(self.def(), &request.account.reference())?;
-        Err(unsupported(
-            "this harness renews no login: the `stdio_accounts` account_provider does",
         ))
     }
 }

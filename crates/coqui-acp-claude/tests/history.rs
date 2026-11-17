@@ -370,32 +370,15 @@ fn a_session_is_written_where_resume_finds_it_and_never_over_one() {
 
 mod through_the_provider {
     use super::*;
-    use coqui_acp_api::guatiao::library::{Object, ProviderError};
+    use coqui_acp_api::guatiao::library::Object;
     use coqui_acp_api::{
-        AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, Environment, ProcessSpawner,
-        SessionExport, SessionImport, line_too_large,
+        AcpHarness, Environment, ProcessSpawner, SessionExport, SessionImport, line_too_large,
     };
     use coqui_acp_claude::{ClaudeProvider, ProviderSettings};
     use coqui_acp_harness::LocalSpawner;
 
-    struct Keeper;
-
-    impl AccountKeeper for Keeper {
-        fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-            Ok(())
-        }
-
-        fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-            Ok(())
-        }
-    }
-
     fn spawner() -> Object<dyn ProcessSpawner> {
         LocalSpawner::new().into_object()
-    }
-
-    fn keeper() -> Object<dyn AccountKeeper> {
-        Keeper.into_object()
     }
 
     #[test]
@@ -416,7 +399,6 @@ mod through_the_provider {
                 SessionImport::new(id, work.to_string_lossy(), String::new())
                     .environment(environment.clone()),
                 spawner(),
-                keeper(),
             )
         };
         assert!(
@@ -431,7 +413,6 @@ mod through_the_provider {
                 SessionExport::new(empty_id, work.to_string_lossy())
                     .environment(environment.clone()),
                 spawner(),
-                keeper(),
             )
             .expect("an empty history");
         assert_eq!(header_only.text.lines().count(), 1);
@@ -443,7 +424,6 @@ mod through_the_provider {
             provider.import_session(
                 SessionImport::new(ID, &work_text, text).environment(environment.clone()),
                 spawner(),
-                keeper(),
             )
         };
         let report = seed(text.clone()).expect("imported");
@@ -460,9 +440,7 @@ mod through_the_provider {
             if let Some(after) = &after {
                 ask = ask.after(after.clone());
             }
-            let page = provider
-                .export_session(ask, spawner(), keeper())
-                .expect("a page");
+            let page = provider.export_session(ask, spawner()).expect("a page");
             assert!(page.text.len() <= 3000 && page.text.ends_with('\n'));
             joined.push_str(&page.text);
             match page.next {
@@ -484,7 +462,6 @@ mod through_the_provider {
                     .environment(environment.clone())
                     .max_bytes(20),
                 spawner(),
-                keeper(),
             )
             .expect_err("too small");
         assert!(line_too_large(small.message()).is_some());
@@ -493,7 +470,6 @@ mod through_the_provider {
             .export_session(
                 SessionExport::new(other, &work_text).environment(environment),
                 spawner(),
-                keeper(),
             )
             .expect_err("no such session");
         assert_eq!(

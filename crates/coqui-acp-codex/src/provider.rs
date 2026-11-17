@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
-    Environment, ExportPage, HarnessInfo, ImportReport, LoginOutcome, LoginPrompter, LoginRequest,
-    ModelInfo, ModelListing, ModelsRequest, Narrowing, ProcessSpawner, RenewReport, RenewRequest,
-    Requirement, SessionExport, SessionImport, StartRequest, UnknownKind, UsageQuery, UsageReport,
+    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
+    ExportPage, HarnessInfo, ImportReport, ModelInfo, ModelListing, ModelsRequest, Narrowing,
+    ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, UnknownKind,
+    UsageQuery, UsageReport,
 };
 use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, fingerprint, same_name};
@@ -220,15 +220,12 @@ impl CodexProvider {
         &self,
         account: Option<&AccountGrant>,
         spawner: &Arc<Object<dyn ProcessSpawner>>,
-        keeper: Object<dyn AccountKeeper>,
         launch: &mut CodexLaunch,
     ) -> Result<Applying, ProviderError> {
         let Some(grant) = account else {
-            drop(keeper);
             return Ok(Applying { hold: None });
         };
         let Some(mut applied) = accounts::plan(grant)? else {
-            drop(keeper);
             return Ok(Applying { hold: None });
         };
         let files = Files::new(Arc::clone(spawner));
@@ -287,7 +284,6 @@ impl CodexProvider {
                     .insert(applied.dir.clone(), print);
             }
         }
-        drop(keeper);
         if applied.watched.is_empty() {
             return Ok(Applying { hold: None });
         }
@@ -340,7 +336,6 @@ impl AcpHarness for CodexProvider {
         request: StartRequest,
         spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
         let (mut launch, refusal) =
             self.launch(request.environment.expose(), &request.requirements)?;
@@ -348,7 +343,7 @@ impl AcpHarness for CodexProvider {
             return Err(unsupported(&why));
         }
         let spawner = Arc::new(spawner);
-        let applying = self.apply(request.account.as_ref(), &spawner, keeper, &mut launch)?;
+        let applying = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
         let account_id = request.account.as_ref().map(|account| account.id.clone());
         let mut settings = Settings::new();
         settings.max_sessions = usize::try_from(self.settings.max_sessions).unwrap_or(usize::MAX);
@@ -405,7 +400,6 @@ impl AcpHarness for CodexProvider {
         &self,
         session: SessionImport,
         spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
         if let Some(account) = &session.account {
             accounts::plan(account)?;
@@ -427,7 +421,6 @@ impl AcpHarness for CodexProvider {
         &self,
         export: SessionExport,
         spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
         if let Some(account) = &export.account {
             accounts::plan(account)?;
@@ -449,11 +442,10 @@ impl AcpHarness for CodexProvider {
         &self,
         request: ModelsRequest,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
         let (mut launch, _) = self.launch(request.environment.expose(), &[])?;
         let spawner = Arc::new(spawner);
-        let applying = self.apply(request.account.as_ref(), &spawner, keeper, &mut launch)?;
+        let applying = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
         let spawn = ThroughSpawner::shared(spawner);
         let listing = match CodexSession::read_models(&launch, &spawn, CodexSettings::new()) {
             Ok(ModelRead {
@@ -501,11 +493,10 @@ impl AcpHarness for CodexProvider {
         &self,
         query: UsageQuery,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
         let (mut launch, _) = self.launch(query.environment.expose(), &[])?;
         let spawner = Arc::new(spawner);
-        let applying = self.apply(query.account.as_ref(), &spawner, keeper, &mut launch)?;
+        let applying = self.apply(query.account.as_ref(), &spawner, &mut launch)?;
         let id = query.account.as_ref().map(|account| account.id.as_str());
         let spawn = ThroughSpawner::shared(spawner);
         // Codex answers with no turn: ask it. A login with no allowances answers with an error, and nothing is reported.
@@ -517,27 +508,5 @@ impl AcpHarness for CodexProvider {
             hold.finish();
         }
         Ok(report)
-    }
-
-    fn login(
-        &self,
-        _request: LoginRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-        _prompter: Object<dyn LoginPrompter>,
-    ) -> Result<LoginOutcome, ProviderError> {
-        Err(unsupported(
-            "this harness signs no one in: the `codex_accounts` account_provider does",
-        ))
-    }
-
-    fn renew(
-        &self,
-        request: RenewRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<RenewReport, ProviderError> {
-        accounts::check(&request.account.reference())?;
-        Err(unsupported(
-            "this harness renews no login: the `codex_accounts` account_provider does",
-        ))
     }
 }

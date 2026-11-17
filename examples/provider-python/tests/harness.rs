@@ -30,9 +30,8 @@ mod with_python {
     use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
     use coqui_acp_api::guatiao::{List, Map, Secret, Status, Value};
     use coqui_acp_api::{
-        AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, FileInfo,
-        ModelsRequest, ProcessSpawner, SecretBytes, SessionQuery, Source, SpawnSpec,
-        SpawnedProcess, SpawnerInfo, UsageQuery,
+        AccountGrant, AcpHarness, FileInfo, ModelsRequest, ProcessSpawner, SecretBytes,
+        SessionQuery, Source, SpawnSpec, SpawnedProcess, SpawnerInfo, UsageQuery,
     };
 
     use super::support::{guatiao, manifest_dir, python, source};
@@ -92,23 +91,6 @@ mod with_python {
 
     fn unused_spawner() -> Object<dyn ProcessSpawner> {
         Unused.into_object()
-    }
-
-    /// A keeper that hears nothing.
-    struct Hears;
-
-    impl AccountKeeper for Hears {
-        fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-            Ok(())
-        }
-
-        fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-            Ok(())
-        }
-    }
-
-    fn keeper() -> Object<dyn AccountKeeper> {
-        Hears.into_object()
     }
 
     fn kinds_crate() -> PathBuf {
@@ -177,7 +159,7 @@ mod with_python {
             None
         );
         let models = harness
-            .models(ModelsRequest::new(), unused_spawner(), keeper())
+            .models(ModelsRequest::new(), unused_spawner())
             .expect("answered");
         assert!(models.known);
         assert_eq!(models.models[0].id, "echo");
@@ -192,7 +174,6 @@ mod with_python {
             .usage(
                 UsageQuery::new().account(AccountGrant::new("pool/alice", "harness-login")),
                 unused_spawner(),
-                keeper(),
             )
             .expect("answered");
         assert!(!report.supported && report.unsupported_because.is_some());
@@ -224,29 +205,11 @@ mod with_python {
         );
     }
 
-    /// With its logins off, the Python echo lists none and refuses `login`, and the suite agrees.
+    /// The Python echo lists no login method: signing in is an account provider's.
     #[test]
-    fn the_python_echo_without_logins_holds_to_the_contract() {
-        let (registry, _) = loaded();
-        let offer = registry
-            .offer::<dyn AcpHarness>("acp_echo_harness_echo_harness")
-            .expect("the source offers it")
-            .expect("its table is the Rust-declared kind");
-        let mut settings = Map::new();
-        settings.set("logins", false);
-        let harness: Arc<dyn AcpHarness> = Arc::new(
-            offer
-                .instantiate(&Value::from(settings))
-                .expect("the settings fit the schema"),
-        );
+    fn the_python_echo_lists_no_login_method() {
+        let (_registry, harness) = loaded();
         assert!(harness.accounts().expect("answered").logins.is_empty());
-        if let Err(failures) = Contract::new("the Python echo without logins")
-            .logins(false)
-            .message_limit(1 << 20)
-            .run(&*harness)
-        {
-            panic!("{failures}");
-        }
     }
 
     #[test]

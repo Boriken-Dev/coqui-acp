@@ -158,7 +158,7 @@ Accounts (each harness's `DEF` is data; the catalog, the schemas and the checks 
 | grok | `grok-oidc` | `auth_json` (optional) | `GROK_OIDC_ISSUER`, `GROK_OIDC_CLIENT_ID`, `GROK_HOME`, `auth.json`; settings `issuer`, `client_id`, `proxy_base_url` | yes | yes | `grok models` |
 | antigravity | none beyond `harness-login` | | | | | |
 
-The harness lists no login method and no kind renews (`accounts::catalog`); its `login` and `renew` answer `UNSUPPORTED` saying the account provider does, and `models` and `usage` only check the grant. The account provider (below) lists the methods.
+The harness lists no login method and no kind renews (`accounts::catalog`); it has no `login` or `renew` and takes no keeper, and `models` and `usage` only check the grant. The account provider (below) lists the methods.
 
 Login methods (Grok only): `device` (`grok login`, steps `open_url` with the code, remote), `browser` (`grok login --oauth`, loopback so not remote), `api-key` (asks for the key, checks it with `grok models`, `checked`). A sign-in runs the CLI in the login's directory on a thread of its own, so a cancel or the timeout answers `GUATIAO_ERR_GONE` (`login cancelled`, `login timed out`) within two seconds with the program killed; a key the CLI did not accept is `GUATIAO_ERR_BAD_VALUE` `login refused: ...` with no word of the CLI's output; the key is never in an argument. Every other `login` is `GUATIAO_ERR_UNSUPPORTED`: Antigravity's `agy acp --login`, whose prompts, token location and Credential Manager use were not measured; Grok's identity-provider sign-in, which needs a provider to answer. `grok-external` (`GROK_AUTH_PROVIDER_COMMAND`, a program named in settings) is not a kind until the owner decides.
 

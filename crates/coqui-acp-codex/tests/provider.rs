@@ -8,14 +8,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use coqui_acp_api::ChannelSink;
 use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{FromValue, Map, Status, ToValue, Value};
 use coqui_acp_api::{
-    AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ModelsRequest, ProcessSpawner,
-    READ_ONLY, Requirement, UsageQuery,
+    AcpHarness, ModelsRequest, ProcessSpawner, READ_ONLY, Requirement, UsageQuery,
 };
-use coqui_acp_api::{ChannelSink, LoginPrompter};
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
 use coqui_acp_harness::{LocalSpawner, Mode};
 use guatiao_serde::Presentation;
@@ -58,18 +57,6 @@ fn provider() -> CodexProvider {
         executable: fake(),
         ..ProviderSettings::default()
     })
-}
-
-struct Keeper;
-
-impl AccountKeeper for Keeper {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
-    }
 }
 
 fn spawner() -> Object<dyn ProcessSpawner> {
@@ -120,8 +107,6 @@ fn the_suite_inside() {
         .instantiate(&Value::from(settings))
         .expect("the settings are taken");
     let outcome = Contract::new("codex")
-        .logins(false)
-        .watches(false)
         .program_agent(true)
         .imports(cfg!(feature = "history"))
         .holds(Vec::new())
@@ -168,12 +153,7 @@ fn nothing_is_held_and_read_only_is_refused_with_why_it_is_not_the_sandbox_alone
         .requirement(Requirement::new(READ_ONLY))
         .build();
     let (sender, _received) = std::sync::mpsc::channel();
-    let started = provider.start(
-        request,
-        spawner(),
-        Sink(sender).into_object(),
-        Keeper.into_object(),
-    );
+    let started = provider.start(request, spawner(), Sink(sender).into_object());
     assert!(matches!(started, Err(error) if error.status == Status::GUATIAO_ERR_UNSUPPORTED));
 }
 
@@ -223,54 +203,9 @@ fn a_usage_read_for_an_account_checks_the_grant_like_a_start_does() {
         .usage(
             UsageQuery::new().account(coqui_acp_api::AccountGrant::new("a", "codex-chatgpt")),
             spawner(),
-            Keeper.into_object(),
         )
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
-}
-
-#[test]
-fn the_harness_signs_no_one_in_and_renews_nothing() {
-    let dir = scratch("elsewhere");
-    let error = provider()
-        .login(
-            coqui_acp_api::LoginRequest::new("chatgpt", dir.to_string_lossy()),
-            spawner(),
-            Prompter.into_object(),
-        )
-        .expect_err("not the harness's");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    let grant = coqui_acp_api::AccountGrant::new("a", "codex-chatgpt")
-        .credentials(coqui_acp_api::Credentials::from_iter([("auth_file", "x")]))
-        .state_dir(dir.to_string_lossy());
-    let error = provider()
-        .renew(coqui_acp_api::RenewRequest::new(grant), spawner())
-        .expect_err("not the harness's");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-struct Prompter;
-
-impl LoginPrompter for Prompter {
-    fn say(&self, _text: &str) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn open_url(&self, _open: coqui_acp_api::OpenUrl) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn ask(
-        &self,
-        _form: coqui_acp_api::LoginForm,
-    ) -> Result<coqui_acp_api::LoginAnswer, ProviderError> {
-        Err(ProviderError::new(Status::GUATIAO_ERR_GONE, "nobody"))
-    }
-
-    fn cancelled(&self) -> Result<bool, ProviderError> {
-        Ok(true)
-    }
 }
 
 #[test]
@@ -287,7 +222,6 @@ fn it_lists_models_and_reads_usage_through_the_spawner_it_is_given() {
             .models(
                 ModelsRequest::new().environment(environment.clone()),
                 spawner(),
-                Keeper.into_object(),
             )
             .expect("answered");
         assert!(listing.known, "{listing:?}");
@@ -296,11 +230,7 @@ fn it_lists_models_and_reads_usage_through_the_spawner_it_is_given() {
         assert_eq!(listing.models[0].default_effort.as_deref(), Some("low"));
         assert!(listing.models[0].is_default);
         let report = provider()
-            .usage(
-                UsageQuery::new().environment(environment),
-                spawner(),
-                Keeper.into_object(),
-            )
+            .usage(UsageQuery::new().environment(environment), spawner())
             .expect("answered");
         assert!(report.supported && !report.buckets.is_empty(), "{report:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -333,12 +263,7 @@ fn modes_offered(settings: ProviderSettings, dir: &Path) -> Vec<String> {
         )
         .build();
     let channel = CodexProvider::new(settings)
-        .start(
-            request,
-            spawner(),
-            Frames(sender).into_object(),
-            Keeper.into_object(),
-        )
+        .start(request, spawner(), Frames(sender).into_object())
         .expect("it starts");
     let ask = |id: u64, method: &str, params: serde_json::Value| {
         let message =
@@ -449,11 +374,7 @@ fn listing_of(
         executable,
         ..ProviderSettings::default()
     })
-    .models(
-        ModelsRequest::new().environment(environment),
-        spawner(),
-        Keeper.into_object(),
-    )
+    .models(ModelsRequest::new().environment(environment), spawner())
     .expect("answered")
 }
 

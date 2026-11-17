@@ -13,8 +13,8 @@ use std::time::Duration;
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, Channel, ChannelSink, Environment,
-    ImportReport, ProcessSpawner, SessionExport, SessionImport, StartRequest,
+    AcpHarness, Channel, ChannelSink, Environment, ImportReport, ProcessSpawner, SessionExport,
+    SessionImport, StartRequest,
 };
 use coqui_acp_harness::LocalSpawner;
 use coqui_acp_harness::stdio::{StdioHarness, StdioProvider, StdioSettings};
@@ -45,18 +45,6 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-struct Keeper;
-
-impl AccountKeeper for Keeper {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
-    }
-}
-
 struct Sink(mpsc::Sender<Value>);
 
 impl ChannelSink for Sink {
@@ -79,10 +67,6 @@ fn spawner() -> Object<dyn ProcessSpawner> {
     LocalSpawner::new().into_object()
 }
 
-fn keeper() -> Object<dyn AccountKeeper> {
-    Keeper.into_object()
-}
-
 fn import(
     provider: &StdioProvider,
     session: &str,
@@ -92,7 +76,6 @@ fn import(
     provider.import_session(
         SessionImport::new(session, dir.to_str().expect("text"), history),
         spawner(),
-        keeper(),
     )
 }
 
@@ -129,7 +112,7 @@ impl Connection {
             .environment(environment)
             .build();
         let channel = provider
-            .start(request, spawner(), Sink(sender).into_object(), keeper())
+            .start(request, spawner(), Sink(sender).into_object())
             .expect("it starts");
         let mut connection = Self {
             channel,
@@ -215,7 +198,6 @@ fn an_antigravity_session_is_not_read_out_of_the_agent_and_the_refusal_says_why(
         .export_session(
             SessionExport::new(SESSION, dir.to_str().expect("text")),
             spawner(),
-            keeper(),
         )
         .expect_err("refused");
     assert_eq!(status_of(&refused), Status::GUATIAO_ERR_UNSUPPORTED);
@@ -231,7 +213,6 @@ fn an_antigravity_session_is_not_read_out_of_the_agent_and_the_refusal_says_why(
         .export_session(
             SessionExport::new(SESSION, dir.to_str().expect("text")),
             spawner(),
-            keeper(),
         )
         .expect_err("refused");
     assert_eq!(status_of(&refused), Status::GUATIAO_ERR_UNSUPPORTED);

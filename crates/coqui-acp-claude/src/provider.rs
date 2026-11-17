@@ -13,10 +13,9 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, CacheChoice,
-    CacheLifetime, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport,
-    LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ModelsRequest, Narrowing,
-    ProcessSpawner, RenewReport, RenewRequest, Requirement, SessionExport, SessionImport,
+    AccountCatalog, AccountGrant, AccountRef, AcpHarness, CacheChoice, CacheLifetime, Channel,
+    ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport, ModelInfo, ModelListing,
+    ModelsRequest, Narrowing, ProcessSpawner, Requirement, SessionExport, SessionImport,
     StartRequest, UnknownKind, UsageQuery, UsageReport,
 };
 use coqui_acp_harness::Mode;
@@ -266,8 +265,8 @@ struct Applying {
 
 impl ClaudeProvider {
     /// Applies `account` to `launch`: the variables Claude Code is given, every credential variable removed first, and
-    /// the files of a login placed in the account's directory through `files`. The keeper is let go of: what happens to
-    /// the files afterwards is for the account provider's watch to tell, and this provider tells nothing.
+    /// the files of a login placed in the account's directory through `files`. What happens to the files afterwards
+    /// is for the account provider's watch to tell, and this provider tells nothing.
     ///
     /// # Errors
     ///
@@ -276,17 +275,14 @@ impl ClaudeProvider {
         &self,
         account: Option<&AccountGrant>,
         files: &Files,
-        keeper: Object<dyn AccountKeeper>,
         launch: &mut ClaudeLaunch,
     ) -> Result<Applying, ProviderError> {
         let Some(grant) = account else {
-            drop(keeper);
             return Ok(Applying { hold: None });
         };
         let grant = &accounts::resolved(grant)?;
         let mut applied = accounts::plan(grant)?;
         if grant.kind == coqui_acp_api::HARNESS_LOGIN {
-            drop(keeper);
             return Ok(Applying { hold: None });
         }
         if applied.dir.is_some() && !files.available() {
@@ -313,7 +309,6 @@ impl ClaudeProvider {
             }
             return Ok(Applying { hold: None });
         }
-        drop(keeper);
         let hold = self.accounts.hold(
             files.clone(),
             None,
@@ -365,7 +360,6 @@ impl AcpHarness for ClaudeProvider {
         request: StartRequest,
         spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
         let (mut launch, refusal) = self.launch(
             request.environment.expose(),
@@ -377,7 +371,7 @@ impl AcpHarness for ClaudeProvider {
         }
         let spawner = Arc::new(spawner);
         let files = Files::new(Arc::clone(&spawner));
-        let applying = self.apply(request.account.as_ref(), &files, keeper, &mut launch)?;
+        let applying = self.apply(request.account.as_ref(), &files, &mut launch)?;
         drop(files);
         let account_id = request.account.as_ref().map(|account| account.id.clone());
         let mut settings = Settings::new();
@@ -438,7 +432,6 @@ impl AcpHarness for ClaudeProvider {
         &self,
         session: SessionImport,
         spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
         if let Some(account) = &session.account {
             accounts::plan(account)?;
@@ -460,7 +453,6 @@ impl AcpHarness for ClaudeProvider {
         &self,
         export: SessionExport,
         spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
         if let Some(account) = &export.account {
             accounts::plan(account)?;
@@ -482,13 +474,12 @@ impl AcpHarness for ClaudeProvider {
         &self,
         request: ModelsRequest,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
         let (mut launch, _) =
             self.launch(request.environment.expose(), CacheLifetime::Default, &[])?;
         let spawner = Arc::new(spawner);
         let files = Files::new(Arc::clone(&spawner));
-        let applying = self.apply(request.account.as_ref(), &files, keeper, &mut launch)?;
+        let applying = self.apply(request.account.as_ref(), &files, &mut launch)?;
         drop(files);
         let spawn = ThroughSpawner::shared(spawner);
         let listing = match ClaudeSession::start(&launch, &spawn, ClaudeSettings::new(), |_| true) {
@@ -555,7 +546,6 @@ impl AcpHarness for ClaudeProvider {
         &self,
         query: UsageQuery,
         _spawner: Object<dyn ProcessSpawner>,
-        _keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
         // Claude Code learns usage only during a turn: this is what the connections last saw.
         if let Some(account) = &query.account {
@@ -565,27 +555,5 @@ impl AcpHarness for ClaudeProvider {
         Ok(self
             .reports
             .report(&self.support(), account.as_ref().map(|a| a.id.as_str())))
-    }
-
-    fn login(
-        &self,
-        _request: LoginRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-        _prompter: Object<dyn LoginPrompter>,
-    ) -> Result<LoginOutcome, ProviderError> {
-        Err(unsupported(
-            "this harness signs no one in: the `claude_accounts` account_provider does",
-        ))
-    }
-
-    fn renew(
-        &self,
-        request: RenewRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<RenewReport, ProviderError> {
-        accounts::check(&request.account.reference())?;
-        Err(unsupported(
-            "this harness renews no login: the `claude_accounts` account_provider does",
-        ))
     }
 }

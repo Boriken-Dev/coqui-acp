@@ -15,8 +15,7 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, Credentials,
-    Environment, ProcessSpawner, RenewRequest, StartRequest,
+    AccountGrant, AcpHarness, ChannelSink, Credentials, Environment, ProcessSpawner, StartRequest,
 };
 use coqui_acp_harness::LocalSpawner;
 use coqui_acp_pi::{PiProvider, ProviderSettings};
@@ -132,8 +131,6 @@ fn the_suite_inside() {
     let outcome = Contract::new(format!("pi {kind}"))
         .program_agent(true)
         .imports(cfg!(feature = "history"))
-        .logins(false)
-        .watches(false)
         .holds(Vec::new())
         .account(kind)
         .run(&provider);
@@ -141,18 +138,6 @@ fn the_suite_inside() {
     drop(registry);
     if let Err(failures) = outcome {
         panic!("{failures}");
-    }
-}
-
-struct Keeper;
-
-impl AccountKeeper for Keeper {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
     }
 }
 
@@ -206,12 +191,7 @@ fn start_and_close_inner(provider: &PiProvider, request: StartRequest, dir: &Pat
     let (sender, received) = mpsc::channel();
     let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().files(dir).into_object();
     let channel = provider
-        .start(
-            request,
-            spawner,
-            Sink(sender).into_object(),
-            Keeper.into_object(),
-        )
+        .start(request, spawner, Sink(sender).into_object())
         .expect("it starts");
     // The session works beside the directory holding Pi's credentials, not over it.
     let work = dir.join("work");
@@ -327,7 +307,6 @@ fn a_pi_key_names_only_a_provider_variable() {
         StartRequest::builder().account(grant).build(),
         LocalSpawner::new().files(&dir).into_object(),
         Sink(sender).into_object(),
-        Keeper.into_object(),
     );
     let Err(error) = refused else {
         panic!("a variable that is no provider's was taken");
@@ -369,46 +348,6 @@ fn a_sign_in_is_placed_in_pis_directory_and_the_hosts_keys_are_cleared() {
     assert_eq!(
         std::fs::read_to_string(dir.join("auth.json")).expect("placed"),
         "{\"anthropic\": {\"type\": \"oauth\"}}"
-    );
-    remove(&dir);
-}
-
-/// Pi refreshes its own sign-in and the account provider answers for it: the harness only checks the grant.
-#[test]
-fn the_harness_renews_nothing_and_checks_the_grant_first() {
-    let dir = scratch("renew");
-    let grant = AccountGrant::new("a-pi-key", "pi-api-key")
-        .credentials(Credentials::from_iter([("api_key", "k")]))
-        .state_dir(dir.to_str().expect("text"));
-    let mut settings = Map::new();
-    settings.set("variable", Value::from("GROQ_API_KEY"));
-    let grant = grant.settings(Value::from(settings));
-    let error = provider()
-        .renew(
-            RenewRequest::new(grant),
-            LocalSpawner::new().files(&dir).into_object(),
-        )
-        .expect_err("unsupported");
-    assert_eq!(
-        error.status,
-        coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED
-    );
-    assert!(
-        error.message().contains("account_provider"),
-        "{}",
-        error.message()
-    );
-    // A grant the kind refuses is refused before the answer.
-    let bare = AccountGrant::new("a", "pi-oauth").state_dir(dir.to_str().expect("text"));
-    let error = provider()
-        .renew(
-            RenewRequest::new(bare),
-            LocalSpawner::new().files(&dir).into_object(),
-        )
-        .expect_err("refused");
-    assert_eq!(
-        error.status,
-        coqui_acp_api::guatiao::Status::GUATIAO_ERR_BAD_VALUE
     );
     remove(&dir);
 }

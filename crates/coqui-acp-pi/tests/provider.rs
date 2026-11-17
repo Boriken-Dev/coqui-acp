@@ -13,9 +13,8 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
-    AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, LoginPrompter,
-    ModelsRequest, ProcessSpawner, READ_ONLY, Requirement, SpawnSpec, SpawnedProcess, SpawnerInfo,
-    StartRequest, UsageQuery,
+    AcpHarness, ChannelSink, ModelsRequest, ProcessSpawner, READ_ONLY, Requirement, SpawnSpec,
+    SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery,
 };
 use coqui_acp_harness::{LocalSpawner, Mode};
 use coqui_acp_pi::{PiProvider, ProviderSettings};
@@ -59,18 +58,6 @@ fn provider() -> PiProvider {
         executable: fake(),
         ..ProviderSettings::default()
     })
-}
-
-struct Keeper;
-
-impl AccountKeeper for Keeper {
-    fn renewed(&self, _renewal: AccountRenewal) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn lost(&self, _loss: AccountLoss) -> Result<(), ProviderError> {
-        Ok(())
-    }
 }
 
 struct Sink(mpsc::Sender<serde_json::Value>);
@@ -134,8 +121,6 @@ fn the_suite_inside() {
     let outcome = Contract::new("pi")
         .program_agent(true)
         .imports(cfg!(feature = "history"))
-        .logins(false)
-        .watches(false)
         .holds(Vec::new())
         .run(&harness);
     drop(harness);
@@ -194,7 +179,6 @@ fn nothing_is_held_and_each_requirement_is_refused_by_name() {
             .build(),
         spawner(),
         Sink(sender).into_object(),
-        Keeper.into_object(),
     );
     assert!(matches!(started, Err(error) if error.status == Status::GUATIAO_ERR_UNSUPPORTED));
 }
@@ -250,7 +234,6 @@ fn a_spawner_that_runs_programs_elsewhere_is_refused_because_the_gate_is_a_local
         StartRequest::new(),
         Remote(spawner()).into_object(),
         Sink(sender).into_object(),
-        Keeper.into_object(),
     ) else {
         panic!("a remote spawner was taken");
     };
@@ -290,21 +273,6 @@ fn it_lists_the_account_kinds_it_moved_from_the_stdio_provider_and_no_login() {
 }
 
 #[test]
-fn a_sign_in_and_a_renewal_answer_unsupported_with_a_reason() {
-    let provider = provider();
-    let prompter = Prompter.into_object();
-    let error = provider
-        .login(
-            coqui_acp_api::LoginRequest::new("anything", ""),
-            spawner(),
-            prompter,
-        )
-        .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    assert!(error.message().contains("terminal"), "{}", error.message());
-}
-
-#[test]
 #[cfg(not(feature = "history"))]
 fn an_import_and_an_export_answer_unsupported_with_a_reason_without_the_history_feature() {
     use coqui_acp_api::{SessionExport, SessionImport};
@@ -313,13 +281,11 @@ fn an_import_and_an_export_answer_unsupported_with_a_reason_without_the_history_
     let imported = provider.import_session(
         SessionImport::new("3a3a3a3a-3a3a-4a3a-8a3a-3a3a3a3a3a3a", "/w", ""),
         spawner(),
-        Keeper.into_object(),
     );
     assert!(matches!(imported, Err(error) if error.status == Status::GUATIAO_ERR_UNSUPPORTED));
     let exported = provider.export_session(
         SessionExport::new("3a3a3a3a-3a3a-4a3a-8a3a-3a3a3a3a3a3a", "/w"),
         spawner(),
-        Keeper.into_object(),
     );
     assert!(matches!(exported, Err(error) if error.status == Status::GUATIAO_ERR_UNSUPPORTED));
 }
@@ -335,7 +301,6 @@ fn models_come_from_pi_with_no_turn_and_usage_is_unsupported() {
         .models(
             ModelsRequest::new().environment(environment.clone()),
             spawner(),
-            Keeper.into_object(),
         )
         .expect("answered");
     assert!(listing.known, "{listing:?}");
@@ -353,11 +318,7 @@ fn models_come_from_pi_with_no_turn_and_usage_is_unsupported() {
             .is_some_and(|text| text.contains("reasoning"))
     );
     let report = provider()
-        .usage(
-            UsageQuery::new().environment(environment),
-            spawner(),
-            Keeper.into_object(),
-        )
+        .usage(UsageQuery::new().environment(environment), spawner())
         .expect("answered");
     assert!(!report.supported, "{report:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -377,29 +338,6 @@ fn the_settings_are_read_by_id_and_a_mode_that_is_none_is_refused() {
     assert_eq!(settings_from("{}").unwrap().executable, "pi");
 }
 
-struct Prompter;
-
-impl LoginPrompter for Prompter {
-    fn say(&self, _text: &str) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn open_url(&self, _open: coqui_acp_api::OpenUrl) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn ask(
-        &self,
-        _form: coqui_acp_api::LoginForm,
-    ) -> Result<coqui_acp_api::LoginAnswer, ProviderError> {
-        Err(ProviderError::new(Status::GUATIAO_ERR_GONE, "nobody"))
-    }
-
-    fn cancelled(&self) -> Result<bool, ProviderError> {
-        Ok(true)
-    }
-}
-
 #[test]
 fn the_default_model_carries_its_thinking_levels_and_the_others_none() {
     let dir = scratch("models-efforts");
@@ -408,11 +346,7 @@ fn the_default_model_carries_its_thinking_levels_and_the_others_none() {
             .into_iter()
             .collect();
     let listing = provider()
-        .models(
-            ModelsRequest::new().environment(environment),
-            spawner(),
-            Keeper.into_object(),
-        )
+        .models(ModelsRequest::new().environment(environment), spawner())
         .expect("answered");
     let fast = &listing.models[0];
     let think = &listing.models[1];

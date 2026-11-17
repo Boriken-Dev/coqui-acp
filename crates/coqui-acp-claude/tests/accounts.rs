@@ -8,15 +8,12 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, Credentials,
-    LoginAnswer, LoginForm, LoginPrompter, LoginRequest, ModelsRequest, OpenUrl, ProcessSpawner,
-    RenewRequest, StartRequest,
+    AccountGrant, AcpHarness, ChannelSink, Credentials, ProcessSpawner, StartRequest,
 };
 use coqui_acp_claude::{ClaudeProvider, ProviderSettings};
 use coqui_acp_harness::LocalSpawner;
@@ -61,25 +58,6 @@ fn spawner(dir: &Path) -> Object<dyn ProcessSpawner> {
     LocalSpawner::new().files(dir).into_object()
 }
 
-/// A keeper that remembers what it was told.
-#[derive(Clone, Default)]
-struct Heard {
-    renewed: Arc<Mutex<Vec<AccountRenewal>>>,
-    lost: Arc<Mutex<Vec<AccountLoss>>>,
-}
-
-impl AccountKeeper for Heard {
-    fn renewed(&self, renewal: AccountRenewal) -> Result<(), ProviderError> {
-        self.renewed.lock().unwrap().push(renewal);
-        Ok(())
-    }
-
-    fn lost(&self, loss: AccountLoss) -> Result<(), ProviderError> {
-        self.lost.lock().unwrap().push(loss);
-        Ok(())
-    }
-}
-
 struct Sink(std::sync::mpsc::Sender<serde_json::Value>);
 
 impl ChannelSink for Sink {
@@ -105,17 +83,12 @@ fn answer_to(
     }
 }
 
-/// Opens a connection on `grant` and one session, then closes it; the heard keeper has what it was told.
-fn run_session(provider: &ClaudeProvider, grant: AccountGrant, dir: &Path, heard: &Heard) {
+/// Opens a connection on `grant` and one session, then closes it.
+fn run_session(provider: &ClaudeProvider, grant: AccountGrant, dir: &Path) {
     let (sender, received) = std::sync::mpsc::channel();
     let request = StartRequest::builder().account(grant).build();
     let channel = provider
-        .start(
-            request,
-            spawner(dir),
-            Sink(sender).into_object(),
-            heard.clone().into_object(),
-        )
+        .start(request, spawner(dir), Sink(sender).into_object())
         .expect("it starts");
     let send =
         |message: serde_json::Value| channel.send(message.to_string().as_bytes()).expect("taken");
@@ -182,12 +155,7 @@ fn an_environment_kind_sets_its_variable_and_removes_every_other_credential_vari
             .environment(environment)
             .build();
         let channel = provider
-            .start(
-                request,
-                spawner(&dir),
-                Sink(sender).into_object(),
-                Heard::default().into_object(),
-            )
+            .start(request, spawner(&dir), Sink(sender).into_object())
             .expect("it starts");
         channel
             .send(
@@ -250,8 +218,7 @@ fn a_login_kind_writes_its_file_into_the_directory_and_points_claude_code_at_it(
     let grant = AccountGrant::new("acct", "claude-login")
         .credentials(credentials_of(&[("credentials_file", &text)]))
         .state_dir(dir.to_string_lossy());
-    let heard = Heard::default();
-    run_session(&provider, grant, &dir, &heard);
+    run_session(&provider, grant, &dir);
     assert_eq!(
         std::fs::read_to_string(dir.join(".credentials.json")).unwrap(),
         text
@@ -267,7 +234,6 @@ fn a_login_kind_writes_its_file_into_the_directory_and_points_claude_code_at_it(
             .unwrap()
             .contains(CANARY)
     );
-    assert!(heard.renewed.lock().unwrap().is_empty() && heard.lost.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -276,14 +242,12 @@ fn a_grant_the_kind_refuses_is_bad_value_and_a_directory_without_files_is_unsupp
     let provider = provider();
     let dir = scratch("refuse");
     let sink = || Sink(std::sync::mpsc::channel().0).into_object();
-    let keeper = || Heard::default().into_object();
     let start = |grant: AccountGrant, spawner: Object<dyn ProcessSpawner>| {
         provider
             .start(
                 StartRequest::builder().account(grant).build(),
                 spawner,
                 sink(),
-                keeper(),
             )
             .map(|_| ())
             .expect_err("refused")
@@ -328,12 +292,7 @@ fn started_with(
         .environment(environment)
         .build();
     let channel = provider
-        .start(
-            request,
-            spawner(dir),
-            Sink(sender).into_object(),
-            Heard::default().into_object(),
-        )
+        .start(request, spawner(dir), Sink(sender).into_object())
         .expect("it starts");
     channel
         .send(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#)
@@ -503,7 +462,6 @@ fn an_account_made_for_another_harness_starts_when_its_standard_is_accepted_and_
                 .build(),
             spawner(&dir),
             Sink(sender).into_object(),
-            Heard::default().into_object(),
         )
         .expect("it starts");
     channel
@@ -539,7 +497,6 @@ fn an_account_made_for_another_harness_starts_when_its_standard_is_accepted_and_
         StartRequest::builder().account(openai).build(),
         spawner(&dir),
         Sink(sender).into_object(),
-        Heard::default().into_object(),
     );
     let Err(error) = refused else {
         panic!("an account of a standard Claude Code does not take started");
@@ -557,72 +514,8 @@ fn an_account_made_for_another_harness_starts_when_its_standard_is_accepted_and_
 }
 
 #[test]
-fn the_harness_signs_no_one_in_renews_nothing_and_tells_its_keeper_nothing() {
-    let provider = provider();
-    let catalog = provider.accounts().expect("listed");
+fn the_harness_lists_no_login_and_no_renewal() {
+    let catalog = provider().accounts().expect("listed");
     assert!(catalog.logins.is_empty());
     assert!(catalog.kinds.iter().all(|kind| !kind.renews));
-    let dir = scratch("elsewhere");
-    let error = provider
-        .login(
-            LoginRequest::new("subscription", dir.to_string_lossy()),
-            spawner(&dir),
-            NoPrompter.into_object(),
-        )
-        .expect_err("not the harness's");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    let grant = AccountGrant::new("acct", "claude-login")
-        .credentials(credentials_of(&[(
-            "credentials_file",
-            &login_text("a1", "r1"),
-        )]))
-        .state_dir(dir.to_string_lossy());
-    let error = provider
-        .renew(RenewRequest::new(grant.clone()), spawner(&dir))
-        .expect_err("not the harness's");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    // A connection whose login the agent renews, and a models call after a rotation, tell the keeper nothing: the
-    // account provider's watch does.
-    let heard = Heard::default();
-    run_session(&provider, grant.clone(), &dir, &heard);
-    std::fs::write(dir.join(".credentials.json"), login_text("a2", "r2")).unwrap();
-    provider
-        .models(
-            ModelsRequest::new().account(grant),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(heard.renewed.lock().unwrap().is_empty() && heard.lost.lock().unwrap().is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-fn login_text(access: &str, refresh: &str) -> String {
-    format!(
-        r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":4102444800000}}}}"#
-    )
-}
-
-struct NoPrompter;
-
-impl LoginPrompter for NoPrompter {
-    fn say(&self, _text: &str) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn open_url(&self, _open: OpenUrl) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn ask(&self, _form: LoginForm) -> Result<LoginAnswer, ProviderError> {
-        Err(ProviderError::new(
-            Status::GUATIAO_ERR_GONE,
-            "nobody to ask",
-        ))
-    }
-
-    fn cancelled(&self) -> Result<bool, ProviderError> {
-        Ok(true)
-    }
 }

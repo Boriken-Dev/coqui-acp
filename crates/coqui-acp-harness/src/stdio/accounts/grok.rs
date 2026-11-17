@@ -425,7 +425,7 @@ fn api_key(ctx: &Ctx<'_>, program: &str, dir: &str) -> Result<LoginOutcome, Prov
 ///
 /// # Errors
 ///
-/// As [`AcpHarness::login`](coqui_acp_api::AcpHarness::login).
+/// As [`AccountProvider::login`](coqui_acp_api::AccountProvider::login).
 pub fn sign_in(
     program: alloc::string::String,
     request: LoginRequest,

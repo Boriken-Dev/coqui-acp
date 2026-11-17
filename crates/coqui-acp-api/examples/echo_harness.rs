@@ -8,9 +8,8 @@
 //! one through the spawner, to show the specification a real provider's would carry.
 //!
 //! It takes accounts of two kinds besides the harness's own: `echo-login`, a login kept in a file
-//! of the account's directory that it watches and tells the keeper of when it changes, and
-//! `echo-key`, a key in a variable. Its login methods are scripted (`scripted`, `waiting`,
-//! `api-key`); the setting `logins = false` offers none.
+//! of the account's directory, and `echo-key`, a key in a variable. It signs in, renews and watches
+//! nothing: that is the echo account provider's.
 //!
 //! With the setting `usage = "scripted"` it also reports usage, as the contract documents: `quota P`
 //! reports two buckets, `limit` refuses the turn with a limit hit, and every turn spends fixed tokens.
@@ -22,9 +21,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status, ToValue};
@@ -34,13 +33,11 @@ use coqui_acp_api::usage::{
     UsageReport, UsageSupport,
 };
 use coqui_acp_api::{
-    ASK, AccountCatalog, AccountGrant, AccountKeeper, AccountKindInfo, AccountLoss, AccountRef,
-    AccountRenewal, AcpHarness, Channel, ChannelSink, Credentials, EndpointSlot, Environment,
-    ExportPage, HARNESS_LOGIN, HarnessInfo, ImportReport, LINE_TOO_LARGE, LoginForm,
-    LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest, MODEL_API, ModelInfo, ModelListing,
-    ModelsRequest, NO_COMMANDS, Narrowing, OPEN_URL, OpenUrl, ProcessSpawner, READ_ONLY,
-    RenewReport, RenewRequest, Requirement, SecretBytes, SeedPoint, SessionExport, SessionImport,
-    SpawnSpec, SpawnedProcess, StartRequest, USER_CODE, WorkingRoots, is_account_id, is_session_id,
+    AccountCatalog, AccountGrant, AccountKindInfo, AccountRef, AcpHarness, Channel, ChannelSink,
+    EndpointSlot, Environment, ExportPage, HARNESS_LOGIN, HarnessInfo, ImportReport,
+    LINE_TOO_LARGE, MODEL_API, ModelInfo, ModelListing, ModelsRequest, NO_COMMANDS, Narrowing,
+    ProcessSpawner, READ_ONLY, Requirement, SecretBytes, SeedPoint, SessionExport, SessionImport,
+    SpawnSpec, SpawnedProcess, StartRequest, WorkingRoots, is_account_id, is_session_id,
 };
 use serde_json::{Value, json};
 
@@ -103,12 +100,6 @@ struct EchoSettings {
     /// Whether it imports and exports sessions; when not, it refuses both, saying why.
     #[map(default = true)]
     imports: bool,
-    /// Whether it offers login methods; when not, it lists none and refuses `login`.
-    #[map(default = true)]
-    logins: bool,
-    /// How often, in milliseconds, a running connection looks at its account's file.
-    #[map(default = 30_000)]
-    renew_poll_ms: u64,
 }
 
 /// The header of the history the echo writes and reads: the standard format's name and the one
@@ -363,8 +354,6 @@ struct EchoHarness {
     next: Arc<AtomicU64>,
     /// What its connections reported, for `usage`.
     reports: Reports,
-    /// The files of the accounts it runs.
-    accounts: Accounts,
 }
 
 impl EchoHarness {
@@ -374,7 +363,6 @@ impl EchoHarness {
             sessions: Arc::default(),
             next: Arc::new(AtomicU64::new(1)),
             reports: Arc::default(),
-            accounts: Arc::new(Registry::new()),
         }
     }
 
@@ -384,34 +372,21 @@ impl EchoHarness {
             title: "Echo".into(),
             max_message_bytes: 1 << 20,
             imports: true,
-            logins: true,
-            renew_poll_ms: 30_000,
         })
     }
 }
 
 impl EchoHarness {
-    /// Applies `grant`, when there is one, for the length of a call: `keeper` listens for the
-    /// account until the call is over, then is let go.
+    /// Applies `grant`, when there is one, for the length of a call.
     fn applied(
         &self,
         grant: Option<&AccountGrant>,
         spawner: &Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<(), ProviderError> {
-        let sub = Sub::of(keeper);
-        let result = match grant {
-            Some(grant) => apply(
-                &catalog(self.settings.logins),
-                &self.accounts,
-                grant,
-                spawner,
-                &sub,
-            ),
+        match grant {
+            Some(grant) => apply(&catalog(), grant, spawner),
             None => Ok(()),
-        };
-        sub.release();
-        result
+        }
     }
 
     /// Refuses, with the reason, when this echo is configured to keep no session for a host.
@@ -462,7 +437,7 @@ impl AcpHarness for EchoHarness {
     }
 
     fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
-        Ok(catalog(self.settings.logins))
+        Ok(catalog())
     }
 
     fn start(
@@ -470,22 +445,15 @@ impl AcpHarness for EchoHarness {
         request: StartRequest,
         spawner: Object<dyn ProcessSpawner>,
         sink: Object<dyn ChannelSink>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
-        let catalog = catalog(self.settings.logins);
+        let catalog = catalog();
         let mut hold = Hold::none();
-        hold.poll = Duration::from_millis(self.settings.renew_poll_ms.max(1));
         let account_id = request.account.as_ref().map(|grant| grant.id.clone());
-        let sub = Sub::of(keeper);
-        hold.sub = Some(Arc::clone(&sub));
         if let Some(grant) = &request.account {
-            apply(&catalog, &self.accounts, grant, &spawner, &sub)?;
+            apply(&catalog, grant, &spawner)?;
             // A notional program, so the specification a real provider's would carry is seen; a
             // spawner that refuses it changes nothing.
             hold.process = spawner.spawn(notional(&catalog, grant)).ok();
-            if grant.kind == FILE_KIND {
-                hold.watched = Some((key_of(grant), Arc::clone(&self.accounts)));
-            }
         }
         if let Some(why) = refusal_of(&request.requirements)? {
             return Err(ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, &why));
@@ -522,12 +490,7 @@ impl AcpHarness for EchoHarness {
         account: Option<AccountRef>,
     ) -> Result<Option<String>, ProviderError> {
         if let Some(account) = account {
-            read_account(
-                &catalog(self.settings.logins),
-                &account.id,
-                &account.kind,
-                &account.settings,
-            )?;
+            read_account(&catalog(), &account.id, &account.kind, &account.settings)?;
         }
         refusal_of(&requirements)
     }
@@ -540,9 +503,8 @@ impl AcpHarness for EchoHarness {
         &self,
         session: SessionImport,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ImportReport, ProviderError> {
-        self.applied(session.account.as_ref(), &spawner, keeper)?;
+        self.applied(session.account.as_ref(), &spawner)?;
         drop(spawner);
         self.keeps_sessions()?;
         if !is_session_id(&session.session_id) {
@@ -574,9 +536,8 @@ impl AcpHarness for EchoHarness {
         &self,
         export: SessionExport,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ExportPage, ProviderError> {
-        self.applied(export.account.as_ref(), &spawner, keeper)?;
+        self.applied(export.account.as_ref(), &spawner)?;
         drop(spawner);
         self.keeps_sessions()?;
         let sessions = lock(&self.sessions);
@@ -626,9 +587,8 @@ impl AcpHarness for EchoHarness {
         &self,
         request: ModelsRequest,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
-        self.applied(request.account.as_ref(), &spawner, keeper)?;
+        self.applied(request.account.as_ref(), &spawner)?;
         Ok(ModelListing::of(vec![ModelInfo::new("echo")]))
     }
 
@@ -636,9 +596,8 @@ impl AcpHarness for EchoHarness {
         &self,
         query: UsageQuery,
         spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
-        self.applied(query.account.as_ref(), &spawner, keeper)?;
+        self.applied(query.account.as_ref(), &spawner)?;
         drop(spawner);
         let account = query.account.as_ref().map(|grant| grant.id.clone());
         if self.settings.usage != EchoUsage::Scripted {
@@ -656,111 +615,6 @@ impl AcpHarness for EchoHarness {
             report.account = account;
             report
         }))
-    }
-
-    fn login(
-        &self,
-        request: LoginRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        prompter: Object<dyn LoginPrompter>,
-    ) -> Result<LoginOutcome, ProviderError> {
-        if !self.settings.logins {
-            return Err(ProviderError::new(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "this echo is configured to offer no login method",
-            ));
-        }
-        if !catalog(true).logins.iter().any(|m| m.id == request.method) {
-            return Err(bad("the echo has no such login method"));
-        }
-        let deadline = Instant::now() + Duration::from_millis(request.timeout_ms);
-        let spawner = Arc::new(spawner);
-        // The notional CLI, so that a cancel has a tree to kill.
-        let mut cli_spec = SpawnSpec::new("echo-login-cli").cwd(&request.state_dir);
-        cli_spec.remove_environment = catalog(true).credential_variables;
-        let cli: Cli = Arc::new(Mutex::new(spawner.spawn(cli_spec).ok()));
-        let signing = Signing {
-            deadline,
-            prompter: Arc::new(prompter),
-            cli: Arc::clone(&cli),
-        };
-        // The login runs on a thread of its own, so that the answer comes at the deadline even when
-        // a prompter call has not returned; the thread lets go of what it holds when it does.
-        let (tx, rx) = mpsc::channel();
-        let worker = Arc::clone(&spawner);
-        let method = request.method.clone();
-        let timeout_ms = request.timeout_ms;
-        let thread = std::thread::Builder::new()
-            .name("echo_login".into())
-            .spawn(move || {
-                let mut signing = signing;
-                let result = run_login(&method, timeout_ms, &mut signing, &worker);
-                drop(signing);
-                drop(worker);
-                let _ = tx.send(result);
-            })
-            .map_err(|_| {
-                ProviderError::new(Status::GUATIAO_ERR_INTERNAL, "no thread to sign in on")
-            })?;
-        track(thread);
-        let result = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(result) => result,
-            Err(_) => Err(ended(false)),
-        };
-        kill_cli(&cli);
-        result
-    }
-
-    fn renew(
-        &self,
-        request: RenewRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<RenewReport, ProviderError> {
-        let catalog = catalog(self.settings.logins);
-        let grant = request.account;
-        read_grant(&catalog, &grant, &spawner)?;
-        if !catalog.kind(&grant.kind).is_some_and(|k| k.renews) {
-            return Err(ProviderError::new(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "this kind cannot be renewed without a model turn",
-            ));
-        }
-        // A login that is blank or gone is lost, whatever the grant says: nothing is renewed from it.
-        let key = key_of(&grant);
-        let lost = |why: &str| {
-            let _ = watch_file(&self.accounts, &key, &spawner);
-            ProviderError::new(Status::GUATIAO_ERR_GONE, why)
-        };
-        if spawner.file_info(FILE)?.is_none() {
-            return Err(lost("the login file is gone"));
-        }
-        let mut text = spawner.read_file(FILE, FILE_MAX)?.expose().to_text();
-        if text.trim().is_empty() {
-            return Err(lost("the login file is blank"));
-        }
-        text.push_str("#renewed");
-        spawner.write_file(
-            FILE,
-            Secret::new(SecretBytes::new(text.clone().into_bytes())),
-            true,
-        )?;
-        {
-            let mut files = held(&self.accounts);
-            let entry = files.entry(key).or_insert_with(|| AccountFile {
-                path: FILE.to_owned(),
-                last: String::new(),
-                seen: Seen::Present,
-                revision: grant.revision,
-                sequence: 0,
-            });
-            entry.last.clone_from(&text);
-            entry.seen = Seen::Present;
-        }
-        let mut credentials = Credentials::new();
-        credentials.insert(FILE_KEY, text);
-        let mut report = RenewReport::renewed(credentials);
-        report.expires_at = Some("2099-01-01T00:00:00Z".into());
-        Ok(report)
     }
 }
 
@@ -866,14 +720,7 @@ fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, mut agent: Agent, m
         }
         Ok::<(), (u32, String)>(())
     };
-    let mut next_look = Instant::now() + hold.poll;
     let status = loop {
-        // On a deadline of its own, so that steady traffic cannot starve the look.
-        if hold.watched.is_some() && Instant::now() >= next_look {
-            hold.tick();
-            next_look = Instant::now() + hold.poll;
-        }
-        let mut look_due = false;
         let message = {
             let mut inner = queue.lock();
             loop {
@@ -884,29 +731,12 @@ fn deliver(mut sink: Object<dyn ChannelSink>, queue: &Queue, mut agent: Agent, m
                 if inner.closed {
                     break None;
                 }
-                if hold.watched.is_some() {
-                    let left = next_look.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        look_due = true;
-                        break None;
-                    }
-                    inner = queue
-                        .arrived
-                        .wait_timeout(inner, left)
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .0;
-                } else {
-                    inner = queue
-                        .arrived
-                        .wait(inner)
-                        .unwrap_or_else(PoisonError::into_inner);
-                }
+                inner = queue
+                    .arrived
+                    .wait(inner)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
         };
-        if look_due {
-            // The deadline came: the look is at the top of the loop.
-            continue;
-        }
         let Some(message) = message else {
             // The host closed: every turn still running ends, answered, before `closed`, which
             // passes the host's reason on.
@@ -1373,7 +1203,7 @@ guatiao::providers!(
 // ---------------------------------------------------------------------------------------------
 
 /// The kind with a file credential: the login the echo keeps in `auth.json` of the account's
-/// directory, which rotates and which the echo watches.
+/// directory.
 const FILE_KIND: &str = "echo-login";
 /// The kind with a credential in a variable.
 const KEY_KIND: &str = "echo-key";
@@ -1383,11 +1213,6 @@ const FILE: &str = "auth.json";
 const FILE_KEY: &str = "auth_file";
 /// The variables the echo reads for a credential.
 const VARIABLES: [&str; 2] = ["ECHO_API_KEY", "ECHO_TOKEN"];
-/// The most a credential file may be.
-const FILE_MAX: u64 = 1 << 20;
-/// How far a file system's clock may lag the instance's: a file changed this close before the
-/// instance began still counts as changed since.
-const FILE_CLOCK_SLACK_MS: i64 = 50;
 
 fn schema(json: &Value) -> guatiao::Value {
     guatiao_serde::from_serde(json.clone()).expect("a schema is a value")
@@ -1402,7 +1227,7 @@ fn credential() -> Value {
 }
 
 /// What the echo takes as an account.
-fn catalog(logins: bool) -> AccountCatalog {
+fn catalog() -> AccountCatalog {
     let mut catalog = AccountCatalog::new();
     let url = json!({"type": "string", "format": "uri"});
     let mut file = AccountKindInfo::new(FILE_KIND, "Echo login");
@@ -1438,142 +1263,11 @@ fn catalog(logins: bool) -> AccountCatalog {
     key.history_portable = true;
     catalog.kinds.extend([file, key]);
     catalog.credential_variables = VARIABLES.iter().map(|v| (*v).to_owned()).collect();
-    if logins {
-        let mut scripted = LoginMethodInfo::new("scripted", "Scripted", FILE_KIND);
-        scripted.steps = vec![ASK.into(), OPEN_URL.into(), USER_CODE.into()];
-        scripted.remote = true;
-        scripted.inputs = schema(&json!({
-            "type": "object",
-            "properties": {"email": {"type": "string", "default": "person@example.invalid"}},
-        }));
-        let mut waiting = LoginMethodInfo::new("waiting", "Waiting for a page", FILE_KIND);
-        waiting.steps = vec![OPEN_URL.into()];
-        let mut api_key = LoginMethodInfo::new("api-key", "A key", KEY_KIND);
-        api_key.steps = vec![ASK.into()];
-        catalog.logins = vec![scripted, waiting, api_key];
-    }
     catalog
 }
 
 fn bad(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why)
-}
-
-/// What the echo last saw of an account's file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Seen {
-    Present,
-    Blank,
-    Gone,
-}
-
-struct AccountFile {
-    path: String,
-    /// The last content it held, the one the host knows or the file's own since.
-    last: String,
-    seen: Seen,
-    /// The revision of the grant the file was written for.
-    revision: u64,
-    /// What has happened to the account, renewals and losses together: counted here, once.
-    sequence: u64,
-}
-
-/// A keeper that is live for an account: its call or its connection holds it, and lets go of the
-/// object (`release`) before it answers or calls `closed`.
-struct Sub {
-    keeper: Mutex<Option<Object<dyn AccountKeeper>>>,
-}
-
-impl Sub {
-    fn of(keeper: Object<dyn AccountKeeper>) -> Arc<Self> {
-        Arc::new(Self {
-            keeper: Mutex::new(Some(keeper)),
-        })
-    }
-
-    fn release(&self) {
-        drop(
-            self.keeper
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take(),
-        );
-    }
-}
-
-/// The files of the accounts an instance runs, and who is listening for each.
-struct Registry {
-    files: Mutex<BTreeMap<String, AccountFile>>,
-    subs: Mutex<BTreeMap<String, Vec<Weak<Sub>>>>,
-    /// When the instance began, in Unix milliseconds: a file changed since is newer than any
-    /// grant the host holds.
-    started_ms: i64,
-}
-
-type Accounts = Arc<Registry>;
-
-impl Registry {
-    fn new() -> Self {
-        let started_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|since| i64::try_from(since.as_millis()).ok())
-            .unwrap_or(0);
-        Self {
-            files: Mutex::new(BTreeMap::new()),
-            subs: Mutex::new(BTreeMap::new()),
-            started_ms,
-        }
-    }
-}
-
-fn held(accounts: &Accounts) -> MutexGuard<'_, BTreeMap<String, AccountFile>> {
-    accounts
-        .files
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-}
-
-/// `sub` listens for the account under `key` from now until it is dropped.
-fn subscribe(accounts: &Accounts, key: &str, sub: &Arc<Sub>) {
-    let mut subs = accounts.subs.lock().unwrap_or_else(PoisonError::into_inner);
-    let list = subs.entry(key.to_owned()).or_default();
-    list.retain(|w| w.strong_count() > 0);
-    list.push(Arc::downgrade(sub));
-}
-
-enum Event {
-    Renewed(AccountRenewal),
-    Lost(AccountLoss),
-}
-
-/// Tells every keeper live for the account, not the first to ask.
-fn tell(accounts: &Accounts, key: &str, event: &Event) {
-    let live: Vec<Arc<Sub>> = {
-        let mut subs = accounts.subs.lock().unwrap_or_else(PoisonError::into_inner);
-        let list = subs.entry(key.to_owned()).or_default();
-        list.retain(|w| w.strong_count() > 0);
-        list.iter().filter_map(Weak::upgrade).collect()
-    };
-    for sub in live {
-        let keeper = sub.keeper.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(keeper) = keeper.as_ref() {
-            let _ = match event {
-                Event::Renewed(renewal) => keeper.renewed(renewal.clone()),
-                Event::Lost(loss) => keeper.lost(loss.clone()),
-            };
-        }
-    }
-}
-
-/// What the echo keeps an account's file under: the same account in another directory is another
-/// file.
-fn key_of(grant: &AccountGrant) -> String {
-    format!(
-        "{}\0{}",
-        grant.id,
-        grant.state_dir.as_deref().unwrap_or_default()
-    )
 }
 
 /// Checks an account's id, kind, settings and credentials, without touching a spawner.
@@ -1643,128 +1337,24 @@ fn read_grant(
     Ok(())
 }
 
-/// Looks at the account's file and tells every live keeper what happened to it behind the host's
-/// back: a changed file is renewed, a blank or deleted one lost. What is seen is recorded under
-/// the lock before anyone is told, so two lookers never report one change twice.
-fn watch_file(
-    accounts: &Accounts,
-    key: &str,
-    spawner: &Object<dyn ProcessSpawner>,
-) -> Result<(), ProviderError> {
-    let id = key.split('\0').next().unwrap_or(key).to_owned();
-    let Some(path) = held(accounts).get(key).map(|entry| entry.path.clone()) else {
-        return Ok(());
-    };
-    let now = if spawner.file_info(&path)?.is_none() {
-        None
-    } else {
-        Some(spawner.read_file(&path, FILE_MAX)?.expose().to_text())
-    };
-    let event = {
-        let mut files = held(accounts);
-        let Some(entry) = files.get_mut(key) else {
-            return Ok(());
-        };
-        let loss = |entry: &mut AccountFile, seen: Seen, why: &str| {
-            if entry.seen == seen {
-                return None;
-            }
-            entry.seen = seen;
-            entry.sequence += 1;
-            Some(Event::Lost(AccountLoss::new(&id, entry.sequence, why)))
-        };
-        match now {
-            None => loss(entry, Seen::Gone, "the login file is gone"),
-            Some(text) if text.trim().is_empty() => {
-                loss(entry, Seen::Blank, "the login file is blank")
-            }
-            Some(text) => {
-                entry.seen = Seen::Present;
-                if text == entry.last {
-                    None
-                } else {
-                    entry.last.clone_from(&text);
-                    entry.sequence += 1;
-                    let mut credentials = Credentials::new();
-                    credentials.insert(FILE_KEY, text);
-                    Some(Event::Renewed(AccountRenewal::new(
-                        &id,
-                        entry.revision,
-                        entry.sequence,
-                        credentials,
-                    )))
-                }
-            }
-        }
-    };
-    if let Some(event) = event {
-        tell(accounts, key, &event);
-    }
-    Ok(())
-}
-
-/// Records the account's credential file, and puts the grant's copy there unless the file is newer
-/// than this instance and says something else: then the file is the host's news, and the lookup
-/// that follows reports it.
-fn put_file(
-    accounts: &Accounts,
-    grant: &AccountGrant,
-    spawner: &Object<dyn ProcessSpawner>,
-) -> Result<(), ProviderError> {
-    if grant.kind != FILE_KIND {
-        return Ok(());
-    }
-    let key = key_of(grant);
-    let text = grant
-        .credentials
-        .expose()
-        .get(FILE_KEY)
-        .unwrap_or_default()
-        .to_owned();
-    let recorded = held(accounts).contains_key(&key);
-    let existing = spawner.file_info(FILE)?;
-    let keep = match (&existing, recorded) {
-        (Some(info), false) => info.modified_ms + FILE_CLOCK_SLACK_MS >= accounts.started_ms,
-        _ => false,
-    };
-    if existing.is_none() || (!recorded && !keep) {
-        spawner.write_file(
-            FILE,
-            Secret::new(SecretBytes::new(text.clone().into_bytes())),
-            true,
-        )?;
-    }
-    let mut files = held(accounts);
-    let entry = files.entry(key).or_insert_with(|| AccountFile {
-        path: FILE.to_owned(),
-        last: text.clone(),
-        seen: Seen::Present,
-        revision: grant.revision,
-        sequence: 0,
-    });
-    entry.revision = grant.revision;
-    if existing.is_none() {
-        entry.last = text;
-        entry.seen = Seen::Present;
-    }
-    Ok(())
-}
-
-/// Applies `grant` for a call that runs the harness: `sub` listens for the account, its file is
-/// first read for what changed, then recorded and written when it is not there, and read again.
+/// Applies `grant` for a call that runs the harness: the credential file of a file kind is
+/// written into the account's directory.
 fn apply(
     catalog: &AccountCatalog,
-    accounts: &Accounts,
     grant: &AccountGrant,
     spawner: &Object<dyn ProcessSpawner>,
-    sub: &Arc<Sub>,
 ) -> Result<(), ProviderError> {
     read_grant(catalog, grant, spawner)?;
-    let key = key_of(grant);
-    subscribe(accounts, &key, sub);
-    watch_file(accounts, &key, spawner)?;
-    put_file(accounts, grant, spawner)?;
-    watch_file(accounts, &key, spawner)
+    if grant.kind == FILE_KIND {
+        let text = grant
+            .credentials
+            .expose()
+            .get(FILE_KEY)
+            .unwrap_or_default()
+            .to_owned();
+        spawner.write_file(FILE, Secret::new(SecretBytes::new(text.into_bytes())), true)?;
+    }
+    Ok(())
 }
 
 /// The program the echo notionally starts on an account: its specification carries what a real
@@ -1789,199 +1379,27 @@ fn notional(catalog: &AccountCatalog, grant: &AccountGrant) -> SpawnSpec {
     spec
 }
 
-/// What a connection keeps of the objects it was handed, so that a change to the account's file is
-/// told while it runs and everything is let go before `closed`.
+/// What a connection keeps of the objects it was handed, so that everything is let go before
+/// `closed`.
 struct Hold {
     spawner: Option<Object<dyn ProcessSpawner>>,
-    sub: Option<Arc<Sub>>,
     /// The notional program; killed when the connection ends.
     process: Option<Object<dyn SpawnedProcess>>,
-    /// The account's key and files, for an account with a file.
-    watched: Option<(String, Accounts)>,
-    /// How often the file is looked at.
-    poll: Duration,
 }
 
 impl Hold {
     fn none() -> Self {
         Self {
             spawner: None,
-            sub: None,
             process: None,
-            watched: None,
-            poll: Duration::from_secs(30),
         }
     }
 
-    /// Looks at the account's file once.
-    fn tick(&self) {
-        if let (Some((key, accounts)), Some(spawner)) = (&self.watched, &self.spawner) {
-            let _ = watch_file(accounts, key, spawner);
-        }
-    }
-
-    /// Looks once more, ends the program and lets go of every object.
+    /// Ends the program and lets go of every object.
     fn release(&mut self) {
-        self.tick();
         if let Some(process) = self.process.take() {
             let _ = process.kill();
         }
-        if let Some(sub) = self.sub.take() {
-            sub.release();
-        }
         self.spawner = None;
     }
-}
-
-/// How a login ends early.
-fn ended(cancelled: bool) -> ProviderError {
-    ProviderError::new(
-        Status::GUATIAO_ERR_GONE,
-        if cancelled {
-            "login cancelled"
-        } else {
-            "login timed out"
-        },
-    )
-}
-
-type Cli = Arc<Mutex<Option<Object<dyn SpawnedProcess>>>>;
-
-/// Ends the notional CLI and everything it started.
-fn kill_cli(cli: &Cli) {
-    let process = cli.lock().unwrap_or_else(PoisonError::into_inner).take();
-    if let Some(process) = process {
-        let _ = process.kill();
-    }
-}
-
-/// A login in progress: its deadline, the prompter and the notional CLI whose tree a cancel kills.
-struct Signing {
-    deadline: Instant,
-    prompter: Arc<Object<dyn LoginPrompter>>,
-    cli: Cli,
-}
-
-impl Signing {
-    /// Ends the login with GONE when the person cancelled or the time is up.
-    fn check(&mut self) -> Result<(), ProviderError> {
-        let cancelled = self.prompter.cancelled().unwrap_or(true);
-        if cancelled || Instant::now() >= self.deadline {
-            return Err(self.stop(cancelled));
-        }
-        Ok(())
-    }
-
-    fn stop(&mut self, cancelled: bool) -> ProviderError {
-        kill_cli(&self.cli);
-        ended(cancelled)
-    }
-
-    /// Runs one prompter call: GONE from it is the person cancelling.
-    fn prompt<T>(
-        &mut self,
-        call: impl FnOnce(&Object<dyn LoginPrompter>) -> Result<T, ProviderError>,
-    ) -> Result<T, ProviderError> {
-        match call(&self.prompter) {
-            Ok(answer) => {
-                self.check()?;
-                Ok(answer)
-            }
-            Err(error) if error.status == Status::GUATIAO_ERR_GONE => Err(self.stop(true)),
-            Err(error) => Err(error),
-        }
-    }
-}
-
-/// The login itself, on a thread of its own so that the caller can answer at the deadline.
-fn run_login(
-    method: &str,
-    timeout_ms: u64,
-    signing: &mut Signing,
-    spawner: &Object<dyn ProcessSpawner>,
-) -> Result<LoginOutcome, ProviderError> {
-    signing.check()?;
-    let form = |title: &str, field: &str| {
-        LoginForm::new(
-            title,
-            schema(&json!({
-                "type": "object",
-                "properties": {field: credential()},
-                "required": [field],
-            })),
-        )
-    };
-    let refused = |why: &str| bad(&format!("login refused: {why}"));
-    let outcome = match method {
-        "scripted" => {
-            signing.prompt(|p| p.say("Signing in as the echo does"))?;
-            let mut open = OpenUrl::new("https://echo.example/device");
-            open.user_code = Some("ECHO-0000".into());
-            open.expires_ms = Some(timeout_ms);
-            signing.prompt(|p| p.open_url(open))?;
-            let answer = signing.prompt(|p| p.ask(form("Paste the code", "code")))?;
-            let code = answer
-                .secrets
-                .expose()
-                .get("code")
-                .unwrap_or_default()
-                .to_owned();
-            if code.is_empty() || code == "refuse-me" {
-                return Err(refused("the echo does not take that code"));
-            }
-            let text = format!("{{\"token\":\"{code}\"}}");
-            spawner.write_file(
-                "auth.json",
-                Secret::new(SecretBytes::new(text.into_bytes())),
-                true,
-            )?;
-            let read = spawner.read_file("auth.json", FILE_MAX)?;
-            let mut credentials = Credentials::new();
-            credentials.insert(FILE_KEY, read.expose().to_text());
-            let mut outcome = LoginOutcome::new(FILE_KIND, credentials);
-            outcome.label = Some("person@example.invalid".into());
-            outcome.expires_at = Some("2099-01-01T00:00:00Z".into());
-            outcome.checked = true;
-            outcome
-        }
-        "waiting" => {
-            signing.prompt(|p| p.say("Waiting for the page"))?;
-            let open = OpenUrl::new("https://echo.example/browser");
-            signing.prompt(|p| p.open_url(open))?;
-            // The person finishes in the browser; the CLI would then print.
-            let until = Instant::now() + Duration::from_millis(400);
-            while Instant::now() < until {
-                signing.check()?;
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            let text = String::from("{\"token\":\"from-the-browser\"}");
-            spawner.write_file(
-                "auth.json",
-                Secret::new(SecretBytes::new(text.clone().into_bytes())),
-                true,
-            )?;
-            let mut credentials = Credentials::new();
-            credentials.insert(FILE_KEY, text);
-            let mut outcome = LoginOutcome::new(FILE_KIND, credentials);
-            outcome.checked = true;
-            outcome
-        }
-        _ => {
-            let answer = signing.prompt(|p| p.ask(form("Paste the key", "api_key")))?;
-            let key = answer
-                .secrets
-                .expose()
-                .get("api_key")
-                .unwrap_or_default()
-                .to_owned();
-            if key.is_empty() || key == "refuse-me" {
-                return Err(refused("the echo does not take that key"));
-            }
-            let mut credentials = Credentials::new();
-            credentials.insert("api_key", key);
-            LoginOutcome::new(KEY_KIND, credentials)
-        }
-    };
-    signing.check()?;
-    Ok(outcome)
 }
