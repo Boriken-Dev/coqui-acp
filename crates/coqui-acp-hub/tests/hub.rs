@@ -500,7 +500,10 @@ fn a_policy_refuses_a_client_and_limits_another() {
         .connect(Client::new("x").role("banned"))
         .unwrap_err();
     assert_eq!(refused, coqui_acp_hub::HubError::Refused("banned".into()));
-    assert_eq!(rig.hub.connect(Client::new("a").subject("person-7")), Ok(()));
+    assert_eq!(
+        rig.hub.connect(Client::new("a").subject("person-7")),
+        Ok(())
+    );
     assert!(
         rig.hub.connect(Client::new("a")).is_err(),
         "duplicate identity"
