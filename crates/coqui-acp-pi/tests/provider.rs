@@ -135,6 +135,7 @@ fn the_suite_inside() {
         .program_agent(true)
         .imports(cfg!(feature = "history"))
         .logins(false)
+        .watches(false)
         .holds(Vec::new())
         .run(&harness);
     drop(harness);

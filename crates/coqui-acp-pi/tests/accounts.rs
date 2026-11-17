@@ -133,6 +133,7 @@ fn the_suite_inside() {
         .program_agent(true)
         .imports(cfg!(feature = "history"))
         .logins(false)
+        .watches(false)
         .holds(Vec::new())
         .account(kind)
         .run(&provider);
@@ -372,9 +373,9 @@ fn a_sign_in_is_placed_in_pis_directory_and_the_hosts_keys_are_cleared() {
     remove(&dir);
 }
 
-/// Pi refreshes its own sign-in, so there is nothing for the provider to renew.
+/// Pi refreshes its own sign-in and the account provider answers for it: the harness only checks the grant.
 #[test]
-fn a_renewal_is_unsupported_for_both_kinds_and_checks_the_grant_first() {
+fn the_harness_renews_nothing_and_checks_the_grant_first() {
     let dir = scratch("renew");
     let grant = AccountGrant::new("a-pi-key", "pi-api-key")
         .credentials(Credentials::from_iter([("api_key", "k")]))
@@ -393,7 +394,7 @@ fn a_renewal_is_unsupported_for_both_kinds_and_checks_the_grant_first() {
         coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED
     );
     assert!(
-        error.message().contains("not renewed"),
+        error.message().contains("account_provider"),
         "{}",
         error.message()
     );

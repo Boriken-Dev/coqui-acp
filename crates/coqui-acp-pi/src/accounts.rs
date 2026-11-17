@@ -3,8 +3,6 @@
 //! `PI_CODING_AGENT_DIR` places `auth.json`, the settings and the sessions. Pi's own sign-in (`/login`, `pi auth login`)
 //! needs a terminal, so this provider lists no login method: an API key account is made from its settings.
 
-use alloc::vec::Vec;
-
 use coqui_acp_api::AccountCatalog;
 use coqui_acp_api::standard;
 use coqui_acp_harness::stdio::accounts::{
@@ -231,7 +229,7 @@ pub static DEF: HarnessDef = HarnessDef {
 /// What the provider lists as the accounts Pi takes: the two kinds, and no login method.
 #[must_use]
 pub fn catalog() -> AccountCatalog {
-    accounts::catalog(&DEF, Vec::new())
+    accounts::catalog(&DEF)
 }
 
 #[cfg(test)]

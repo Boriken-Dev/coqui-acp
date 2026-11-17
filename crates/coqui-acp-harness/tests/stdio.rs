@@ -1,5 +1,6 @@
-//! The stdio provider, held to the `acp_harness` kind against a stand-in for Grok and Antigravity: every kind and
-//! login method of each, and what the stand-in saw of the arguments and the environment.
+//! The stdio provider, held to the `acp_harness` kind, and its account provider, held to the `account_provider` kind,
+//! against a stand-in for Grok and Antigravity: every kind and login method of each, and what the stand-in saw of the
+//! arguments and the environment.
 #![allow(
     clippy::std_instead_of_core,
     clippy::std_instead_of_alloc,
@@ -11,15 +12,18 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use coqui_acp_api::contract::Contract;
+use coqui_acp_api::contract::{AccountContract, Contract};
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, Credentials,
-    Environment, ProcessSpawner, StartRequest,
+    AccountGrant, AccountKeeper, AccountLoss, AccountProvider, AccountRenewal, AcpHarness,
+    ChannelSink, Credentials, Environment, LoginPrompter, ProcessSpawner, StartRequest,
+    WatchRequest,
 };
 use coqui_acp_harness::LocalSpawner;
-use coqui_acp_harness::stdio::{StdioHarness, StdioProvider, StdioSettings};
+use coqui_acp_harness::stdio::{
+    StdioAccountSettings, StdioAccounts, StdioHarness, StdioProvider, StdioSettings,
+};
 
 /// The credential the contract suite grants, which no argument list or environment may carry.
 const CANARY: &str = "coqui-acp-contract-canary-6b1d";
@@ -58,8 +62,8 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Runs the suite for one kind of one harness in a process of its own, whose environment names the stand-in's home and
 /// log, so that no test sets a variable of this one. Answers what the stand-in logged.
-fn run_suite(harness: &str, kind: &str, logins: bool) -> String {
-    let dir = scratch(&format!("{harness}-{kind}"));
+fn run_suite(side: &str, harness: &str, kind: &str, logins: bool) -> String {
+    let dir = scratch(&format!("{side}-{harness}-{kind}"));
     let log = dir.join("fake.log");
     let out = Command::new(std::env::current_exe().expect("the test knows itself"))
         .args([
@@ -73,6 +77,7 @@ fn run_suite(harness: &str, kind: &str, logins: bool) -> String {
         .env("USERPROFILE", &dir)
         .env("ACP_HARNESS_CHECK_HOME", &dir)
         .env("COQUI_ACP_FAKE_STDIO_LOG", &log)
+        .env("STDIO_CASE_SIDE", side)
         .env("STDIO_CASE_HARNESS", harness)
         .env("STDIO_CASE_KIND", kind)
         .env("STDIO_CASE_LOGINS", if logins { "1" } else { "0" })
@@ -92,28 +97,37 @@ fn run_suite(harness: &str, kind: &str, logins: bool) -> String {
         !logged.contains(CANARY),
         "{harness} {kind}: the stand-in's log holds a credential"
     );
+    // An account provider starts the program only for a sign-in or a renewal, which a kind may have neither of.
     assert!(
-        logged.lines().count() > 0,
+        side == "accounts" || logged.lines().count() > 0,
         "{harness} {kind}: the stand-in was never started"
     );
     logged
 }
 
 #[test]
-fn grok_keeps_every_rule_of_the_kind_for_each_kind_and_login() {
+fn grok_keeps_every_rule_of_the_kind_for_each_kind() {
     for kind in ["harness-login", "grok-login", "xai-api-key", "grok-oidc"] {
-        run_suite("grok", kind, true);
+        run_suite("harness", "grok", kind, false);
     }
 }
 
 #[test]
 fn antigravity_keeps_every_rule_of_the_kind() {
-    run_suite("antigravity", "harness-login", false);
+    run_suite("harness", "antigravity", "harness-login", false);
+}
+
+#[test]
+fn grok_accounts_keep_every_rule_of_the_account_kind_for_each_kind_and_login() {
+    for kind in ["grok-login", "xai-api-key", "grok-oidc"] {
+        run_suite("accounts", "grok", kind, true);
+    }
 }
 
 #[test]
 #[ignore = "run by the tests that set its environment"]
 fn the_suite_inside() {
+    let side = std::env::var("STDIO_CASE_SIDE").expect("a side");
     let harness = std::env::var("STDIO_CASE_HARNESS").expect("a harness");
     let kind = std::env::var("STDIO_CASE_KIND").expect("a kind");
     let logins = std::env::var("STDIO_CASE_LOGINS").as_deref() == Ok("1");
@@ -124,20 +138,39 @@ fn the_suite_inside() {
     let mut settings = Map::new();
     settings.set("harness", Value::from(harness.as_str()));
     settings.set("executable", Value::from(fake().as_str()));
-    let provider = registry
-        .offer::<dyn AcpHarness>("stdio")
-        .expect("the library offers it")
-        .expect("its table is this kind")
-        .instantiate(&Value::from(settings))
-        .expect("the settings are taken");
-    let outcome = Contract::new(format!("stdio {harness} {kind}"))
-        .program_agent(true)
-        .imports(false)
-        .logins(logins)
-        .holds(Vec::new())
-        .account(kind)
-        .run(&provider);
-    drop(provider);
+    let outcome = if side == "accounts" {
+        settings.set("renew_poll_ms", 100);
+        let provider = registry
+            .offer::<dyn AccountProvider>("stdio_accounts")
+            .expect("the library offers it")
+            .expect("its table is this kind")
+            .instantiate(&Value::from(settings))
+            .expect("the settings are taken");
+        let outcome = AccountContract::new(format!("stdio accounts {harness} {kind}"))
+            .logins(logins)
+            .account(kind)
+            .program(true)
+            .run(&provider);
+        drop(provider);
+        outcome
+    } else {
+        let provider = registry
+            .offer::<dyn AcpHarness>("stdio")
+            .expect("the library offers it")
+            .expect("its table is this kind")
+            .instantiate(&Value::from(settings))
+            .expect("the settings are taken");
+        let outcome = Contract::new(format!("stdio {harness} {kind}"))
+            .program_agent(true)
+            .imports(false)
+            .logins(false)
+            .watches(false)
+            .holds(Vec::new())
+            .account(kind)
+            .run(&provider);
+        drop(provider);
+        outcome
+    };
     drop(registry);
     if let Err(failures) = outcome {
         panic!("{failures}");
@@ -360,6 +393,13 @@ fn inherited_inside() {
     );
 }
 
+fn accounts_of(harness: StdioHarness) -> StdioAccounts {
+    let mut settings = StdioAccountSettings::new(harness);
+    settings.executable = Some(fake());
+    settings.renew_poll_ms = 50;
+    StdioAccounts::new(settings)
+}
+
 /// A renewal that leaves the login of another account in the file is refused and undone; one that keeps the account is
 /// answered.
 #[test]
@@ -374,10 +414,12 @@ fn a_renewal_that_changes_whose_login_it_is_is_refused() {
         if swap {
             std::fs::write(dir.join("swap_identity"), "").expect("a marker");
         }
+        // The harness placed the login in the directory, as it does when it starts on the account.
+        std::fs::write(dir.join("auth.json"), mine).expect("the login");
         let grant = AccountGrant::new("an-account", "grok-login")
             .credentials(Credentials::from_iter([("auth_json", mine)]))
             .state_dir(dir.to_str().expect("text"));
-        let answer = provider(StdioHarness::Grok).renew(
+        let answer = accounts_of(StdioHarness::Grok).renew(
             coqui_acp_api::RenewRequest::new(grant),
             LocalSpawner::new().files(&dir).into_object(),
         );
@@ -389,7 +431,7 @@ fn a_renewal_that_changes_whose_login_it_is_is_refused() {
             assert_eq!(
                 std::fs::read_to_string(dir.join("auth.json")).expect("the file"),
                 mine,
-                "the grant's copy was not put back"
+                "the grant's copy was put back"
             );
         } else {
             let report = answer.expect("a renewal of the same account is answered");
@@ -418,13 +460,86 @@ impl AccountKeeper for Recording {
 fn a_half_written_login_is_never_reported_as_a_renewal() {
     let dir = scratch("half");
     let heard = std::sync::Arc::new(std::sync::Mutex::new((0, 0)));
+    let whole = r#"{"account_id":"mine"}"#;
+    std::fs::write(dir.join("auth.json"), whole).expect("the login");
     let grant = AccountGrant::new("an-account", "grok-login")
-        .credentials(Credentials::from_iter([(
-            "auth_json",
-            r#"{"account_id":"mine"}"#,
-        )]))
+        .credentials(Credentials::from_iter([("auth_json", whole)]))
         .state_dir(dir.to_str().expect("text"));
+    let watch = accounts_of(StdioHarness::Grok)
+        .watch(
+            WatchRequest::new(grant),
+            LocalSpawner::new().files(&dir).into_object(),
+            Recording(std::sync::Arc::clone(&heard)).into_object(),
+        )
+        .expect("watched");
+    std::fs::write(dir.join("auth.json"), r#"{"account_id":"mi"#).expect("a half file");
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        heard.lock().expect("lock").0,
+        0,
+        "a half-written file was a renewal"
+    );
+    watch.stop().expect("stopped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+struct NoPrompter;
+
+impl LoginPrompter for NoPrompter {
+    fn say(&self, _text: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn open_url(&self, _open: coqui_acp_api::OpenUrl) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn ask(
+        &self,
+        _form: coqui_acp_api::LoginForm,
+    ) -> Result<coqui_acp_api::LoginAnswer, ProviderError> {
+        Err(ProviderError::new(
+            coqui_acp_api::guatiao::Status::GUATIAO_ERR_GONE,
+            "nobody to ask",
+        ))
+    }
+
+    fn cancelled(&self) -> Result<bool, ProviderError> {
+        Ok(true)
+    }
+}
+
+/// The harness signs no one in, renews nothing and tells its keeper nothing; its account provider does all three.
+#[test]
+fn the_harness_signs_no_one_in_renews_nothing_and_tells_its_keeper_nothing() {
     let provider = provider(StdioHarness::Grok);
+    let catalog = provider.accounts().expect("listed");
+    assert!(catalog.logins.is_empty());
+    assert!(catalog.kinds.iter().all(|kind| !kind.renews));
+    let dir = scratch("silent");
+    let unsupported = u32::from(coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED);
+    let error = provider
+        .login(
+            coqui_acp_api::LoginRequest::new("device", dir.to_str().expect("text")),
+            LocalSpawner::new().files(&dir).into_object(),
+            NoPrompter.into_object(),
+        )
+        .expect_err("not the harness's");
+    assert_eq!(u32::from(error.status), unsupported);
+    let whole = r#"{"account_id":"mine"}"#;
+    let grant = AccountGrant::new("an-account", "grok-login")
+        .credentials(Credentials::from_iter([("auth_json", whole)]))
+        .state_dir(dir.to_str().expect("text"));
+    let error = provider
+        .renew(
+            coqui_acp_api::RenewRequest::new(grant.clone()),
+            LocalSpawner::new().files(&dir).into_object(),
+        )
+        .expect_err("not the harness's");
+    assert_eq!(u32::from(error.status), unsupported);
+    // A connection whose login the agent renews, and a models call after a rotation, tell the keeper nothing: the
+    // account provider's watch does.
+    let heard = std::sync::Arc::new(std::sync::Mutex::new((0, 0)));
     let (sender, _received) = mpsc::channel();
     let channel = provider
         .start(
@@ -434,21 +549,39 @@ fn a_half_written_login_is_never_reported_as_a_renewal() {
             Recording(std::sync::Arc::clone(&heard)).into_object(),
         )
         .expect("it starts");
-    std::fs::write(dir.join("auth.json"), r#"{"account_id":"mi"#).expect("a half file");
+    std::fs::write(dir.join("auth.json"), r#"{"account_id":"mine","n":2}"#).expect("a renewal");
     provider
         .models(
             coqui_acp_api::ModelsRequest::new().account(grant),
             LocalSpawner::new().files(&dir).into_object(),
-            Keeper.into_object(),
+            Recording(std::sync::Arc::clone(&heard)).into_object(),
         )
         .expect("models answers");
-    assert_eq!(
-        heard.lock().expect("lock").0,
-        0,
-        "a half-written file was a renewal"
-    );
     channel.close(0, "");
     drop(channel);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(*heard.lock().expect("lock"), (0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn antigravity_has_no_account_to_keep_and_says_why_it_signs_no_one_in() {
+    let accounts = accounts_of(StdioHarness::Antigravity);
+    let offer = accounts.offers().expect("offers");
+    assert!(offer.kinds.is_empty() && offer.logins.is_empty());
+    let dir = scratch("agy");
+    let error = accounts
+        .login(
+            coqui_acp_api::LoginRequest::new("device", dir.to_str().expect("text")),
+            LocalSpawner::new().files(&dir).into_object(),
+            NoPrompter.into_object(),
+        )
+        .expect_err("no sign-in");
+    assert_eq!(
+        u32::from(error.status),
+        u32::from(coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED)
+    );
+    assert!(error.message().contains("agy acp --login"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -10,7 +10,7 @@ use coqui_acp_api::guatiao::library::ProviderError;
 use coqui_acp_api::guatiao::{Secret, Status};
 use coqui_acp_api::{
     Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountRef,
-    EndpointSlot, Environment, HARNESS_LOGIN, LoginMethodInfo,
+    EndpointSlot, Environment, HARNESS_LOGIN,
 };
 use serde_json::{Map, Value, json};
 
@@ -18,6 +18,9 @@ use crate::provider::{credential, schema};
 
 pub mod antigravity;
 pub mod grok;
+mod keeping;
+
+pub use keeping::Keeping;
 
 /// The longest text a setting or a credential may be.
 const MAX_TEXT: usize = 1 << 20;
@@ -209,7 +212,7 @@ impl KindDef {
         })
     }
 
-    fn info(&self) -> AccountKindInfo {
+    pub(crate) fn info(&self) -> AccountKindInfo {
         let mut info = AccountKindInfo::new(self.id, self.title);
         info.description = self.description.to_string();
         info.settings = schema(&self.schema());
@@ -237,9 +240,10 @@ impl KindDef {
     }
 }
 
-/// The catalog of `def`, with these login methods.
+/// The catalog of `def`: what the harness takes as an account. It signs no one in and renews nothing, so it lists no
+/// login method and no kind renews: an account provider ([`Keeping`]) does both.
 #[must_use]
-pub fn catalog(def: &HarnessDef, logins: Vec<LoginMethodInfo>) -> AccountCatalog {
+pub fn catalog(def: &HarnessDef) -> AccountCatalog {
     let mut catalog = AccountCatalog::new();
     if let Some(own) = def.own_standard
         && let Some(login) = catalog
@@ -249,7 +253,11 @@ pub fn catalog(def: &HarnessDef, logins: Vec<LoginMethodInfo>) -> AccountCatalog
     {
         login.provides = alloc::vec![own.to_string()];
     }
-    catalog.kinds.extend(def.kinds.iter().map(KindDef::info));
+    catalog.kinds.extend(def.kinds.iter().map(|kind| {
+        let mut info = kind.info();
+        info.renews = false;
+        info
+    }));
     catalog.accepts = def
         .accepts
         .iter()
@@ -259,7 +267,6 @@ pub fn catalog(def: &HarnessDef, logins: Vec<LoginMethodInfo>) -> AccountCatalog
             accepted
         })
         .collect();
-    catalog.logins = logins;
     catalog.credential_variables = def.variables.iter().map(|v| (*v).to_string()).collect();
     catalog
 }
@@ -293,7 +300,7 @@ pub fn known<'a>(
         return Ok(Some(kind));
     }
     // An account of an accepted standard has no kind of this harness's until `apply` reads its credential.
-    catalog(def, Vec::new()).accepts_reference(account)?;
+    catalog(def).accepts_reference(account)?;
     Ok(None)
 }
 
@@ -310,7 +317,7 @@ pub fn resolve_grant(
     if grant.kind == HARNESS_LOGIN {
         return Ok(grant.clone());
     }
-    crate::provider::resolve(&catalog(def, Vec::new()), grant)
+    crate::provider::resolve(&catalog(def), grant)
 }
 
 /// A credential file to look at while the account is in use.
@@ -571,7 +578,7 @@ mod standards_tests {
 
     #[test]
     fn grok_lists_what_it_provides_and_accepts() {
-        let catalog = catalog(&grok::DEF, Vec::new());
+        let catalog = catalog(&grok::DEF);
         assert_eq!(
             catalog.kind(grok::LOGIN).expect("login").provides,
             [standard::GROK]
@@ -649,7 +656,7 @@ mod standards_tests {
 
     #[test]
     fn antigravitys_own_login_provides_its_standard_and_nothing_else_is_taken() {
-        let catalog = catalog(&antigravity::DEF, Vec::new());
+        let catalog = catalog(&antigravity::DEF);
         assert_eq!(catalog.kinds.len(), 1);
         assert_eq!(
             catalog.kind(HARNESS_LOGIN).expect("own").provides,

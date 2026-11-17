@@ -1,0 +1,297 @@
+//! The Pi account provider: the sign-in Pi's own `/login` wrote is watched for a change nobody told the host of, and the
+//! provider keeps every rule of the kind. It signs no one in, renews nothing and has no plan limits to read.
+#![allow(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    reason = "a test names what it uses from std"
+)]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use coqui_acp_api::contract::AccountContract;
+use coqui_acp_api::guatiao::Status;
+use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
+use coqui_acp_api::guatiao::{Map, Value};
+use coqui_acp_api::{
+    AccountGrant, AccountKeeper, AccountLoss, AccountProvider, AccountRenewal, AccountUsageQuery,
+    Credentials, LoginAnswer, LoginForm, LoginPrompter, LoginRequest, OpenUrl, ProcessSpawner,
+    RenewRequest, WatchRequest,
+};
+use coqui_acp_harness::LocalSpawner;
+use coqui_acp_pi::{AccountSettings, PiAccounts};
+
+const CANARY: &str = "coqui-acp-contract-canary-6b1d";
+
+fn library() -> PathBuf {
+    let tests = std::env::current_exe().expect("the test knows where it is");
+    tests
+        .parent()
+        .and_then(Path::parent)
+        .expect("a test binary is in target/<profile>/deps")
+        .join("examples")
+        .join(format!(
+            "{}pi_provider{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ))
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "coqui-acp-pi-accounts-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    dir
+}
+
+fn provider() -> PiAccounts {
+    PiAccounts::new(AccountSettings { renew_poll_ms: 100 })
+}
+
+fn spawner(dir: &Path) -> Object<dyn ProcessSpawner> {
+    LocalSpawner::new().files(dir).into_object()
+}
+
+/// A keeper that remembers what it was told.
+#[derive(Clone, Default)]
+struct Heard {
+    renewed: Arc<Mutex<Vec<AccountRenewal>>>,
+    lost: Arc<Mutex<Vec<AccountLoss>>>,
+}
+
+impl AccountKeeper for Heard {
+    fn renewed(&self, renewal: AccountRenewal) -> Result<(), ProviderError> {
+        self.renewed.lock().unwrap().push(renewal);
+        Ok(())
+    }
+
+    fn lost(&self, loss: AccountLoss) -> Result<(), ProviderError> {
+        self.lost.lock().unwrap().push(loss);
+        Ok(())
+    }
+}
+
+fn wait_for(what: impl Fn() -> bool) {
+    let waited = std::time::Instant::now();
+    while !what() && waited.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+struct NoPrompter;
+
+impl LoginPrompter for NoPrompter {
+    fn say(&self, _text: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn open_url(&self, _open: OpenUrl) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn ask(&self, _form: LoginForm) -> Result<LoginAnswer, ProviderError> {
+        Err(ProviderError::new(
+            Status::GUATIAO_ERR_GONE,
+            "nobody to ask",
+        ))
+    }
+
+    fn cancelled(&self) -> Result<bool, ProviderError> {
+        Ok(true)
+    }
+}
+
+fn sign_in(dir: &Path, text: &str) -> AccountGrant {
+    AccountGrant::new("a-sign-in", "pi-oauth")
+        .credentials(Credentials::from_iter([("auth_json", text)]))
+        .state_dir(dir.to_string_lossy())
+}
+
+#[test]
+fn a_watch_tells_a_sign_in_pi_renewed_and_one_deleted_is_lost() {
+    let provider = provider();
+    let dir = scratch("watch");
+    let before = r#"{"anthropic":{"type":"oauth","refresh":"r1"}}"#;
+    // The harness placed the sign-in before the watch began.
+    std::fs::write(dir.join("auth.json"), before).unwrap();
+    let heard = Heard::default();
+    let watch = provider
+        .watch(
+            WatchRequest::new(sign_in(&dir, before).revision(4)),
+            spawner(&dir),
+            heard.clone().into_object(),
+        )
+        .expect("watched");
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(heard.renewed.lock().unwrap().is_empty() && heard.lost.lock().unwrap().is_empty());
+    let after = r#"{"anthropic":{"type":"oauth","refresh":"r2"}}"#;
+    std::fs::write(dir.join("auth.json"), after).unwrap();
+    wait_for(|| !heard.renewed.lock().unwrap().is_empty());
+    {
+        let renewed = heard.renewed.lock().unwrap();
+        assert_eq!(renewed.len(), 1);
+        assert_eq!(renewed[0].from_revision, 4);
+        assert_eq!(
+            renewed[0].credentials.expose().get("auth_json"),
+            Some(after)
+        );
+    }
+    std::fs::remove_file(dir.join("auth.json")).unwrap();
+    wait_for(|| !heard.lost.lock().unwrap().is_empty());
+    assert_eq!(heard.lost.lock().unwrap().len(), 1);
+    watch.stop().expect("stopped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_watch_never_puts_the_grants_copy_back_and_tells_a_sign_in_that_is_gone_at_once() {
+    let provider = provider();
+    let dir = scratch("gone");
+    let heard = Heard::default();
+    let watch = provider
+        .watch(
+            WatchRequest::new(sign_in(&dir, r#"{"anthropic":{}}"#)),
+            spawner(&dir),
+            heard.clone().into_object(),
+        )
+        .expect("watched");
+    wait_for(|| !heard.lost.lock().unwrap().is_empty());
+    assert_eq!(heard.lost.lock().unwrap().len(), 1);
+    assert!(!dir.join("auth.json").exists());
+    watch.stop().expect("stopped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn it_signs_no_one_in_renews_nothing_and_reads_no_limits() {
+    let provider = provider();
+    let dir = scratch("none");
+    let error = provider
+        .login(
+            LoginRequest::new("anything", dir.to_string_lossy()),
+            spawner(&dir),
+            NoPrompter.into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    assert!(error.message().contains("terminal"), "{}", error.message());
+    let grant = sign_in(&dir, r#"{"anthropic":{}}"#);
+    let error = provider
+        .renew(RenewRequest::new(grant.clone()), spawner(&dir))
+        .expect_err("unsupported");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    assert!(
+        error.message().contains("model turn"),
+        "{}",
+        error.message()
+    );
+    let usage = provider
+        .usage(
+            AccountUsageQuery::new(grant),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(!usage.supported && usage.unsupported_because.is_some());
+    assert_eq!(usage.account.as_deref(), Some("a-sign-in"));
+    // A grant the kind refuses is refused before the answer.
+    let bare = AccountGrant::new("a", "pi-oauth").state_dir(dir.to_string_lossy());
+    let error = provider
+        .renew(RenewRequest::new(bare), spawner(&dir))
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_key_is_no_account_it_keeps_and_neither_is_another_providers_kind() {
+    let provider = provider();
+    let dir = scratch("foreign");
+    let offer = provider.offers().expect("offered");
+    let ids: Vec<&str> = offer.kinds.iter().map(|kind| kind.id.as_str()).collect();
+    assert_eq!(ids, ["pi-oauth"]);
+    assert!(offer.logins.is_empty() && offer.usage.is_empty());
+    let key = AccountGrant::new("k", "pi-api-key")
+        .credentials(Credentials::from_iter([("api_key", CANARY)]))
+        .state_dir(dir.to_string_lossy());
+    let foreign = AccountGrant::new("a", "someone-elses-kind")
+        .provides(["pi"])
+        .credentials(Credentials::from_iter([("auth_json", CANARY)]))
+        .state_dir(dir.to_string_lossy());
+    for grant in [key, foreign] {
+        let error = provider
+            .watch(
+                WatchRequest::new(grant.clone()),
+                spawner(&dir),
+                Heard::default().into_object(),
+            )
+            .map(|_| ())
+            .expect_err("not its kind");
+        assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+        let error = provider
+            .usage(
+                AccountUsageQuery::new(grant),
+                spawner(&dir),
+                Heard::default().into_object(),
+            )
+            .expect_err("not its kind");
+        assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+        assert!(!error.message().contains(CANARY));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The suite, run in a process of its own whose home is the suite's, so that no test sets a variable of this one.
+#[test]
+fn the_provider_keeps_every_rule_of_the_kind() {
+    let dir = scratch("contract");
+    let out = Command::new(std::env::current_exe().expect("the test knows itself"))
+        .args([
+            "--exact",
+            "the_suite_inside",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("HOME", &dir)
+        .env("USERPROFILE", &dir)
+        .env("ACP_HARNESS_CHECK_HOME", &dir)
+        .env_remove("PI_CODING_AGENT_DIR")
+        .output()
+        .expect("the test runs itself");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[ignore = "run by the test that sets its environment"]
+fn the_suite_inside() {
+    let mut registry = Registry::new("coqui-acp-pi-tests", "1.0");
+    registry
+        .load_file(&library())
+        .expect("the library loads once cargo built it");
+    let mut settings = Map::new();
+    settings.set("renew_poll_ms", 100);
+    let provider = registry
+        .offer::<dyn AccountProvider>("pi_accounts")
+        .expect("the library offers it")
+        .expect("its table is this kind")
+        .instantiate(&Value::from(settings))
+        .expect("the settings are taken");
+    let outcome = AccountContract::new("pi").logins(false).run(&provider);
+    drop(provider);
+    drop(registry);
+    if let Err(failures) = outcome {
+        panic!("{failures}");
+    }
+}

@@ -3,9 +3,8 @@
 //!
 //! The host's messages go to the program a line each and its lines come back as messages; what the
 //! provider adds is the account: it removes every credential variable of the harness from what it starts, sets the chosen
-//! kind's, places the login file in the account's directory, watches it and tells the host's keeper when the harness
-//! renews or loses the login, renews it with no model turn where the harness can, and runs the harness's own sign-in.
-//! The kinds of each harness are tables in [`accounts`].
+//! kind's and places the login file in the account's directory. Signing in, renewing and watching the login are the
+//! account provider's ([`StdioAccounts`]). The kinds of each harness are tables in [`accounts`].
 //!
 //! A session's id must be a UUID, as the kind says: the provider does not translate the program's ids.
 
@@ -27,17 +26,15 @@ use coqui_acp_api::{
 use coqui_acp_history::replay::{Replay, ReplaySettings};
 use coqui_acp_history::{Document, HistoryError, RedactionSettings, Redactor};
 
-use std::ffi::OsString;
+use crate::account::{Accounts, Files, Hold, Watched};
 
-use crate::ThroughSpawner;
-use crate::account::{Accounts, DEFAULT_POLL_MS, Files, Hold, Watched};
-use crate::cli;
-use crate::process::Launch;
-
+mod account_provider;
 pub mod accounts;
 mod login;
 mod relay;
 mod replay;
+
+pub use account_provider::{StdioAccountSettings, StdioAccounts};
 
 use accounts::{Applied, HarnessDef};
 
@@ -73,13 +70,6 @@ pub struct StdioSettings {
     /// The highest ACP version the harness is said to answer: 1 or 2.
     #[map(default = 1)]
     pub max_acp_version: u64,
-    /// How often the account's login file is looked at while a connection runs, in milliseconds; 0 looks only at calls and
-    /// at close.
-    #[map(default = 30_000)]
-    pub renew_poll_ms: u64,
-    /// How long a command of the harness's own (a renewal) may run before it is ended, in milliseconds.
-    #[map(default = 60_000)]
-    pub command_timeout_ms: u64,
     /// Requests one connection may have in hand at once: a client that sends more is held back until the sink has taken
     /// answers.
     #[map(default = 32)]
@@ -122,8 +112,6 @@ impl StdioSettings {
             harness,
             executable: None,
             max_acp_version: 1,
-            renew_poll_ms: DEFAULT_POLL_MS,
-            command_timeout_ms: 60_000,
             max_requests: 32,
             max_message_bytes: 64 * 1024 * 1024,
             replay_max_bytes: 0,
@@ -150,6 +138,7 @@ impl StdioSettings {
 )]
 pub struct StdioProvider {
     settings: StdioSettings,
+    /// What the provider knows of the files it placed for its accounts.
     accounts: Arc<Accounts>,
     /// Sessions imported by replay, shared by every connection.
     replays: Arc<replay::Replays>,
@@ -214,16 +203,13 @@ impl StdioProvider {
             .unwrap_or_else(|| self.def().program.to_string())
     }
 
-    fn poll(&self) -> Duration {
-        Duration::from_millis(self.settings.renew_poll_ms)
-    }
-
     /// Reads `grant` against the harness, and answers what applies it; `None` for `harness-login`.
     fn applied(grant: &AccountGrant, def: &HarnessDef) -> Result<Option<Applied>, ProviderError> {
         accounts::apply(def, grant)
     }
 
-    /// Takes the hold on the account's login file for a call or a connection, when the kind has one.
+    /// Takes the hold on the account's login file for a connection, when the kind has one: the grant's copy is placed
+    /// there. What happens to the file afterwards is for the account provider's watch to tell.
     ///
     /// # Errors
     ///
@@ -233,7 +219,6 @@ impl StdioProvider {
         grant: &AccountGrant,
         applied: &Applied,
         spawner: &Arc<Object<dyn ProcessSpawner>>,
-        keeper: Option<Object<dyn AccountKeeper>>,
     ) -> Result<Option<Hold>, ProviderError> {
         let files = Files::new(Arc::clone(spawner));
         if applied.needs_files && !files.available() {
@@ -248,7 +233,7 @@ impl StdioProvider {
         self.accounts
             .hold(
                 files,
-                keeper,
+                None,
                 &grant.id,
                 dir,
                 grant.revision,
@@ -258,24 +243,10 @@ impl StdioProvider {
             .map(Some)
     }
 
-    /// What a call that runs nothing does for an account: reads it, and looks at its login file so that a renewal or a
-    /// loss that happened since is told.
-    fn glance(
-        &self,
-        account: Option<&AccountGrant>,
-        spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
-    ) -> Result<(), ProviderError> {
-        let Some(grant) = account else {
-            return Ok(());
-        };
-        let Some(applied) = Self::applied(grant, self.def())? else {
-            return Ok(());
-        };
-        let spawner = Arc::new(spawner);
-        if let Some(hold) = self.hold(grant, &applied, &spawner, Some(keeper))? {
-            let _ = hold.look();
-            hold.finish();
+    /// Reads the account of a call that runs nothing, so that a grant the kind refuses is refused as it is everywhere.
+    fn glance(&self, account: Option<&AccountGrant>) -> Result<(), ProviderError> {
+        if let Some(grant) = account {
+            Self::applied(grant, self.def())?;
         }
         Ok(())
     }
@@ -322,11 +293,7 @@ impl AcpHarness for StdioProvider {
     }
 
     fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
-        let logins = match self.settings.harness {
-            StdioHarness::Grok => accounts::grok::logins(),
-            StdioHarness::Antigravity => Vec::new(),
-        };
-        Ok(accounts::catalog(self.def(), logins))
+        Ok(accounts::catalog(self.def()))
     }
 
     fn start(
@@ -336,6 +303,7 @@ impl AcpHarness for StdioProvider {
         sink: Object<dyn ChannelSink>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<Object<dyn Channel>, ProviderError> {
+        drop(keeper);
         if let Some(why) = refuse_requirements(&request.requirements)? {
             return Err(unsupported(&why));
         }
@@ -345,9 +313,7 @@ impl AcpHarness for StdioProvider {
         };
         let spawner = Arc::new(spawner);
         let hold = match (&request.account, &applied) {
-            (Some(grant), Some(applied)) => self
-                .hold(grant, applied, &spawner, Some(keeper))?
-                .map(|hold| (hold, self.poll())),
+            (Some(grant), Some(applied)) => self.hold(grant, applied, &spawner)?,
             _ => None,
         };
         let spec = self.spec(
@@ -502,7 +468,8 @@ impl AcpHarness for StdioProvider {
         spawner: Object<dyn ProcessSpawner>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError> {
-        self.glance(request.account.as_ref(), spawner, keeper)?;
+        drop((spawner, keeper));
+        self.glance(request.account.as_ref())?;
         Ok(ModelListing::unknown(
             "the agent lists its models in its session, not before it",
         ))
@@ -514,7 +481,8 @@ impl AcpHarness for StdioProvider {
         spawner: Object<dyn ProcessSpawner>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<UsageReport, ProviderError> {
-        self.glance(query.account.as_ref(), spawner, keeper)?;
+        drop((spawner, keeper));
+        self.glance(query.account.as_ref())?;
         Ok(UsageReport::unsupported(
             "this harness reports no usage outside a turn",
         ))
@@ -522,145 +490,23 @@ impl AcpHarness for StdioProvider {
 
     fn login(
         &self,
-        request: LoginRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        prompter: Object<dyn LoginPrompter>,
+        _request: LoginRequest,
+        _spawner: Object<dyn ProcessSpawner>,
+        _prompter: Object<dyn LoginPrompter>,
     ) -> Result<LoginOutcome, ProviderError> {
-        match self.settings.harness {
-            StdioHarness::Grok => {
-                accounts::grok::sign_in(self.program_name(), request, spawner, prompter)
-            }
-            StdioHarness::Antigravity => Err(unsupported(self.def().login_unsupported)),
-        }
+        Err(unsupported(
+            "this harness signs no one in: the `stdio_accounts` account_provider does",
+        ))
     }
 
     fn renew(
         &self,
         request: RenewRequest,
-        spawner: Object<dyn ProcessSpawner>,
+        _spawner: Object<dyn ProcessSpawner>,
     ) -> Result<RenewReport, ProviderError> {
-        let def = self.def();
-        let grant = accounts::resolve_grant(def, &request.account)?;
-        let Some(applied) = Self::applied(&grant, def)? else {
-            return Err(unsupported(
-                "the harness's own login is the harness's to renew",
-            ));
-        };
-        let kind = def.kind(&grant.kind).ok_or_else(|| {
-            ProviderError::new(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "this harness takes no account of that kind",
-            )
-        })?;
-        let args = match (kind.renews, def.renew_args) {
-            (true, Some(args)) => args,
-            _ => return Err(unsupported(kind.renew_unsupported)),
-        };
-        let spawner = Arc::new(spawner);
-        let Some(hold) = self.hold(&grant, &applied, &spawner, None)? else {
-            return Err(unsupported(kind.renew_unsupported));
-        };
-        let renewed = self.renew_with(&hold, &spawner, &grant, &applied, args);
-        hold.finish();
-        renewed
-    }
-}
-
-impl StdioProvider {
-    fn renew_with(
-        &self,
-        hold: &Hold,
-        spawner: &Arc<Object<dyn ProcessSpawner>>,
-        grant: &AccountGrant,
-        applied: &Applied,
-        args: &[&str],
-    ) -> Result<RenewReport, ProviderError> {
-        let gone = |why: String| ProviderError::new(Status::GUATIAO_ERR_GONE, &why);
-        let lost = |hold: &Hold| -> Option<String> {
-            let found = hold.look().ok()?;
-            found.lost.into_iter().next().or_else(|| hold.lost())
-        };
-        if let Some(why) = lost(hold) {
-            return Err(gone(why));
-        }
-        let mut launch = Launch::new(self.program_name()).args(args.iter().copied());
-        for (name, value) in applied.environment.expose().iter() {
-            launch = launch.env(name.as_str(), value.as_str());
-        }
-        launch.remove_env = self.def().variables.iter().map(OsString::from).collect();
-        let done = cli::run(
-            &ThroughSpawner::shared(Arc::clone(spawner)),
-            &launch,
-            None,
-            Duration::from_millis(self.settings.command_timeout_ms),
-            4096,
-        )
-        .map_err(|_| {
-            ProviderError::new(
-                Status::GUATIAO_ERR_INTERNAL,
-                "the renewal's program could not be started",
-            )
-        })?;
-        if !done.succeeded() {
-            return Err(ProviderError::new(
-                Status::GUATIAO_ERR_INTERNAL,
-                if done.timed_out {
-                    "the renewal's program did not finish in time"
-                } else {
-                    "the renewal's program did not succeed"
-                },
-            ));
-        }
-        self.refuse_another_account(spawner, grant, applied)?;
-        let found = hold.look()?;
-        if let Some(why) = found.lost.into_iter().next().or_else(|| hold.lost()) {
-            return Err(gone(why));
-        }
-        match found.renewed.into_iter().next_back() {
-            Some((credentials, expires)) => {
-                let mut report = RenewReport::default();
-                report.credentials = Some(credentials);
-                report.expires_at = expires;
-                Ok(report)
-            }
-            None => Ok(RenewReport::unchanged(
-                "the login is not near its end, so the harness left it as it was",
-            )),
-        }
-    }
-
-    /// A renewal that left the login of another account in the file is undone: the grant's copy is put back, and the
-    /// renewal is refused. Only a file that says whose login it is can be told apart.
-    fn refuse_another_account(
-        &self,
-        spawner: &Arc<Object<dyn ProcessSpawner>>,
-        grant: &AccountGrant,
-        applied: &Applied,
-    ) -> Result<(), ProviderError> {
-        let Some(watched) = applied.watched else {
-            return Ok(());
-        };
-        let Some(mine) = grant
-            .credentials
-            .expose()
-            .get(watched.key)
-            .and_then(accounts::identity_of)
-        else {
-            return Ok(());
-        };
-        let files = Files::new(Arc::clone(spawner));
-        let Ok(Some(now)) = files.read(watched.path) else {
-            return Ok(());
-        };
-        if accounts::identity_of(&now).is_some_and(|theirs| theirs != mine) {
-            if let Some(old) = grant.credentials.expose().get(watched.key) {
-                let _ = files.write(watched.path, old);
-            }
-            return Err(ProviderError::new(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the renewed login belongs to another account",
-            ));
-        }
-        Ok(())
+        accounts::known(self.def(), &request.account.reference())?;
+        Err(unsupported(
+            "this harness renews no login: the `stdio_accounts` account_provider does",
+        ))
     }
 }

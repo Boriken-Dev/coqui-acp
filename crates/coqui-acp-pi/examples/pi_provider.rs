@@ -7,7 +7,7 @@
 )]
 
 use coqui_acp_api::guatiao::{self, Status};
-use coqui_acp_pi::PiProvider;
+use coqui_acp_pi::{PiAccounts, PiProvider};
 
 // The library's say in being unloaded: busy while a thread of its connections still runs.
 extern "C" fn unload() -> Status {
@@ -17,6 +17,6 @@ extern "C" fn unload() -> Status {
 guatiao::providers!(
     id = "coqui_acp_pi",
     version = env!("CARGO_PKG_VERSION"),
-    providers = [PiProvider],
+    providers = [PiProvider, PiAccounts],
     unload = unload
 );

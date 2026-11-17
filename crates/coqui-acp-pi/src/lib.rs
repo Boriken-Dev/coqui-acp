@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod account_provider;
 pub mod account_usage;
 pub mod accounts;
 mod agent;
@@ -26,6 +27,7 @@ use core::fmt;
 use core::time::Duration;
 use std::io;
 
+pub use account_provider::{AccountSettings, PiAccounts};
 pub use agent::{DEFAULT, PiAgent};
 pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned};
 pub use gate::{GATE_SOURCE, GUARD_SOURCE, Gate};
