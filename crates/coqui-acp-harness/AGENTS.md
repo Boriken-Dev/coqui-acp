@@ -326,6 +326,9 @@ pub const OPTION_ID: &str = "mode"
 pub fn option(current: Mode, offered: &[Mode]) -> ConfigOption          // category `mode`; values in `Mode::ALL` order; `current` is listed even when not offered
 pub fn chosen(value: &str, offered: &[Mode]) -> Result<Mode, String>    // the reason, for `HarnessError::Refused`
 pub const fn looseness(self) -> u8                                       // 0 for Plan up to 4 for Bypass, loosest last
+pub const ACCESS_META: &str = "dev.boriken.coqui.acp/access"   // a session request's `_meta` key: {"sandbox": "none"|"workspace"|"read-only", "network": bool, "approvals": "ask"|"edits"|"never"}; a part left out is STANDARD's
+pub struct Access { pub sandbox: Sandbox, pub network: bool, pub approvals: Approvals }   // ToValue, FromValue, Schema, Copy; Default = Access::STANDARD (no sandbox, network on, ask)
+pub fn Access::from_json(&Value) -> Result<Access, String>;  pub fn Access::from_meta(&Map) -> Result<Option<Access>, String>;  pub fn Access::to_json(self) -> Value
 pub fn up_to(loosest: Option<Mode>, allow_bypass: bool) -> Vec<Mode>    // the host's mode and every stricter one; None: Plan only; Bypass only if allowed
 pub fn widened(base: &[Mode], named: &[Mode], allow_bypass: bool) -> Vec<Mode>   // `base` and the modes a host named, Bypass only if allowed
 pub const CUSTOM: &str = "custom"

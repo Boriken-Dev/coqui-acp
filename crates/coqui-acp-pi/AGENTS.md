@@ -26,6 +26,7 @@ pub struct PiLaunch {
     pub additional_directories: Vec<PathBuf>,  // where a write's old content may be read from, besides cwd
     pub working_roots: Vec<PathBuf>,           // replaces cwd and more directories as those; empty takes them
     pub mode: Option<Mode>,                    // the start mode and the loosest a client may choose; Manual when None
+    pub access: Option<Access>,                // None; with `mode` unset, `start_mode()` is Plan for a read-only sandbox, else Manual, Accept edits or Bypass by approvals. Pi has no sandbox or network setting: those two are not applied
     pub allow_bypass: bool,                    // false: the Bypass mode is not offered
     pub modes: Option<Vec<Mode>>,              // those named widen the start mode and stricter ones (Bypass still needs allow_bypass; Auto is never offered)
     pub ask_for_reads: bool,                   // Manual and Plan ask before read, grep, find and ls too
@@ -205,6 +206,8 @@ pub struct ProviderSettings {                                        // ToValue,
     pub script: Option<String>,          // None; Pi's CLI script, absolute
     pub model: Option<String>, pub effort: Option<String>,
     pub mode: Option<Mode>,              // None: manual
+    pub access: Option<Access>,          // None
+    pub allow_client_access: bool,       // false: a session's `_meta` access is ignored unless true
     pub allow_bypass: bool,              // false
     pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `plan`, `bypass`
     pub ask_for_reads: bool,             // false

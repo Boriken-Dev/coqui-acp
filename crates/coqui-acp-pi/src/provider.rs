@@ -19,11 +19,11 @@ use coqui_acp_api::{
     ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, UnknownKind,
     UsageQuery, UsageReport,
 };
-use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, Watched, same_name};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
 use coqui_acp_harness::stdio::accounts::{Applied, apply, known, login_usable};
+use coqui_acp_harness::{Access, Mode};
 use coqui_acp_harness::{Settings, ThroughSpawner};
 
 use crate::accounts::{self, DEF};
@@ -50,6 +50,12 @@ pub struct ProviderSettings {
     /// The mode every session starts in, and the loosest a client may choose unless `modes` names more: `manual` when
     /// absent.
     pub mode: Option<Mode>,
+    /// The access every session starts with when `mode` is absent, in the words every harness shares: a read-only sandbox
+    /// starts in Plan, else the approvals decide the mode. Pi has no sandbox and no network setting.
+    pub access: Option<Access>,
+    /// Whether a client may give a session its own access through `_meta` (`dev.boriken.coqui.acp/access`).
+    #[map(default = false)]
+    pub allow_client_access: bool,
     /// Whether the Bypass mode may be chosen: nothing is asked.
     #[map(default = false)]
     pub allow_bypass: bool,
@@ -96,6 +102,8 @@ impl Default for ProviderSettings {
             model: None,
             effort: None,
             mode: None,
+            access: None,
+            allow_client_access: false,
             allow_bypass: false,
             modes: None,
             ask_for_reads: false,
@@ -178,6 +186,7 @@ impl PiProvider {
         launch.model.clone_from(&self.settings.model);
         launch.effort.clone_from(&self.settings.effort);
         launch.mode = self.settings.mode;
+        launch.access = self.settings.access;
         launch.allow_bypass = self.settings.allow_bypass;
         launch.modes.clone_from(&self.settings.modes);
         launch.ask_for_reads = self.settings.ask_for_reads;
@@ -327,8 +336,14 @@ impl AcpHarness for PiProvider {
         if let Some(hold) = hold {
             serving = serving.ending(move || hold.finish());
         }
+        let client_access = self.settings.allow_client_access;
         serving.open_shared(spawner, sink, move |spawn| {
-            Ok(shared(PiAgent::new().defaults(launch).spawn(spawn)))
+            Ok(shared(
+                PiAgent::new()
+                    .client_access(client_access)
+                    .defaults(launch)
+                    .spawn(spawn),
+            ))
         })
     }
 

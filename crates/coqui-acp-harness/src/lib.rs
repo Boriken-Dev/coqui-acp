@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod access;
 #[cfg(feature = "kind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
 pub mod account;
@@ -31,6 +32,7 @@ pub mod stdio;
 pub mod stream;
 pub mod version;
 
+pub use access::{ACCESS_META, Access, Approvals, Sandbox};
 pub use acp::{
     AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, McpServer,
     McpTransport, Open, OpenRequest, OptionValue, Settings, Takes, UsageTracker, serve,

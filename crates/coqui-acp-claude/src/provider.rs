@@ -18,10 +18,10 @@ use coqui_acp_api::{
     ModelsRequest, Narrowing, ProcessSpawner, Requirement, SessionExport, SessionImport,
     StartRequest, UnknownKind, UsageQuery, UsageReport,
 };
-use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, same_name};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Reports, Serving, shared, takes_of};
+use coqui_acp_harness::{Access, Mode};
 use coqui_acp_harness::{Settings, ThroughSpawner};
 
 use crate::accounts;
@@ -79,6 +79,13 @@ pub struct ProviderSettings {
     /// The permission mode every session starts in, and the loosest a client may choose: `default`, `acceptEdits`,
     /// `auto`, `plan` or `bypassPermissions`. Claude Code's own default, which is `default`, when absent.
     pub permission_mode: Option<String>,
+    /// The access every session starts with, in the words every harness shares: the sandbox, the network and the approvals,
+    /// turned into a permission mode (when `permission_mode` is absent) and Claude Code's sandbox settings. Absent, Claude
+    /// Code's own configuration decides.
+    pub access: Option<Access>,
+    /// Whether a client may give a session its own access through `_meta` (`dev.boriken.coqui.acp/access`).
+    #[map(default = false)]
+    pub allow_client_access: bool,
     /// Whether the Bypass mode may be chosen: Claude Code started with `--allow-dangerously-skip-permissions`.
     #[map(default = false)]
     pub allow_bypass: bool,
@@ -118,6 +125,8 @@ impl Default for ProviderSettings {
             model: None,
             effort: None,
             permission_mode: None,
+            access: None,
+            allow_client_access: false,
             allow_bypass: false,
             modes: None,
             setting_sources: None,
@@ -193,6 +202,7 @@ impl ClaudeProvider {
         launch
             .permission_mode
             .clone_from(&self.settings.permission_mode);
+        launch.access = self.settings.access;
         launch.allow_bypass = self.settings.allow_bypass;
         launch.modes.clone_from(&self.settings.modes);
         launch.setting_sources = self.settings.setting_sources.as_ref().map(|sources| {
@@ -392,6 +402,7 @@ impl AcpHarness for ClaudeProvider {
         }));
         let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
         let plugins = self.settings.allow_client_plugins;
+        let client_access = self.settings.allow_client_access;
         let mut serving = Serving::new(settings, limit);
         if let Some(hold) = applying.hold {
             serving = serving.ending(move || hold.finish());
@@ -403,7 +414,8 @@ impl AcpHarness for ClaudeProvider {
                     .fresh_sessions(fresh)
                     .defaults(launch)
                     .spawn(spawn)
-                    .client_plugins(plugins),
+                    .client_plugins(plugins)
+                    .client_access(client_access),
             ))
         })
     }

@@ -32,6 +32,7 @@ pub struct PiAgent {
     spawn: Arc<dyn Spawn>,
     settings: PiSettings,
     version: Arc<OnceLock<Option<String>>>,
+    client_access: bool,
 }
 
 impl core::fmt::Debug for PiAgent {
@@ -58,7 +59,16 @@ impl PiAgent {
             spawn: Arc::new(PlainSpawn),
             settings: PiSettings::new(),
             version: Arc::new(OnceLock::new()),
+            client_access: false,
         }
+    }
+
+    /// Whether a client may give a session its own access through `_meta` ([`coqui_acp_harness::ACCESS_META`]), which
+    /// replaces the launch's. Default false: the access is the host's.
+    #[must_use]
+    pub const fn client_access(mut self, allowed: bool) -> Self {
+        self.client_access = allowed;
+        self
     }
 
     /// What every session starts with; a session's own parts are added to it.
@@ -145,6 +155,12 @@ impl PiAgent {
         launch
             .additional_directories
             .extend(request.additional_directories.iter().cloned());
+        if self.client_access
+            && let Some(access) = coqui_acp_harness::Access::from_meta(&request.meta)
+                .map_err(HarnessError::Refused)?
+        {
+            launch.access = Some(access);
+        }
         Ok(launch)
     }
 }

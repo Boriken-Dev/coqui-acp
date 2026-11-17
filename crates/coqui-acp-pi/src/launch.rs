@@ -9,7 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use coqui_acp_harness::acp::within_roots;
-use coqui_acp_harness::{Launch, Mode};
+use coqui_acp_harness::{Access, Approvals, Launch, Mode, Sandbox};
 
 use crate::{Error, paths};
 
@@ -63,7 +63,11 @@ pub struct PiLaunch {
     pub working_roots: Vec<PathBuf>,
     /// The mode a session starts in, and the loosest a client may choose; Manual when absent.
     pub mode: Option<Mode>,
-    /// Whether the Bypass mode is offered. A launch whose `mode` is Bypass needs it.
+    /// The harness-neutral access a session starts with, when `mode` is not named: a read-only sandbox starts in Plan,
+    /// else the approvals decide (Ask Manual, Edits Accept edits, Never Bypass). Pi has no sandbox and no network
+    /// setting, and the gate asks about paths outside the session's directories in every mode but Bypass.
+    pub access: Option<Access>,
+    /// Whether the Bypass mode is offered. A launch whose start mode is Bypass needs it.
     pub allow_bypass: bool,
     /// The modes a client may choose, besides the mode and every stricter one. Bypass needs `allow_bypass`; Auto is never
     /// offered.
@@ -104,6 +108,7 @@ impl fmt::Debug for PiLaunch {
             .field("model", &self.model)
             .field("effort", &self.effort)
             .field("mode", &self.mode)
+            .field("access", &self.access)
             .field("allow_bypass", &self.allow_bypass)
             .field("env", &self.env.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
@@ -262,6 +267,7 @@ impl PiLaunch {
             additional_directories: Vec::new(),
             working_roots: Vec::new(),
             mode: None,
+            access: None,
             allow_bypass: false,
             modes: None,
             ask_for_reads: false,
@@ -279,7 +285,15 @@ impl PiLaunch {
     /// The mode a session starts in.
     #[must_use]
     pub fn start_mode(&self) -> Mode {
-        self.mode.unwrap_or(Mode::Manual)
+        self.mode.unwrap_or_else(|| match self.access {
+            Some(access) if access.sandbox == Sandbox::ReadOnly => Mode::Plan,
+            Some(access) => match access.approvals {
+                Approvals::Edits => Mode::AcceptEdits,
+                Approvals::Never => Mode::Bypass,
+                _ => Mode::Manual,
+            },
+            None => Mode::Manual,
+        })
     }
 
     /// The directories calls may use freely.

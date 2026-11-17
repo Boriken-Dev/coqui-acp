@@ -40,6 +40,7 @@ pub struct ClaudeAgent {
     settings: ClaudeSettings,
     version: Arc<OnceLock<Option<String>>>,
     client_plugins: bool,
+    client_access: bool,
     fresh: FreshSessions,
 }
 
@@ -72,6 +73,7 @@ impl ClaudeAgent {
             settings: ClaudeSettings::new(),
             version: Arc::new(OnceLock::new()),
             client_plugins: false,
+            client_access: false,
             fresh: FreshSessions::default(),
         }
     }
@@ -97,6 +99,14 @@ impl ClaudeAgent {
     #[must_use]
     pub const fn client_plugins(mut self, allowed: bool) -> Self {
         self.client_plugins = allowed;
+        self
+    }
+
+    /// Whether a client may give a session its own access through `_meta` ([`coqui_acp_harness::ACCESS_META`]), which
+    /// replaces the launch's. Default false: the access is the host's.
+    #[must_use]
+    pub const fn client_access(mut self, allowed: bool) -> Self {
+        self.client_access = allowed;
         self
     }
 
@@ -214,6 +224,14 @@ impl ClaudeAgent {
                 .map_err(HarnessError::Refused)?;
         }
         launch.plugin_dirs.extend(plugins);
+        let asked = if self.client_access {
+            coqui_acp_harness::Access::from_meta(&request.meta).map_err(HarnessError::Refused)?
+        } else {
+            None
+        };
+        if asked.is_some() {
+            launch.access = asked;
+        }
         Ok(launch)
     }
 }
@@ -309,8 +327,7 @@ impl Harness for ClaudeAgent {
         // Claude Code's mode is its own: told by its `system` lines and by an "allow always" that switches it, so what
         // the client shows follows it.
         let configured = launch
-            .permission_mode
-            .clone()
+            .effective_permission_mode()
             .unwrap_or_else(|| "default".to_string());
         state.observe(&session.permission_mode().unwrap_or(configured));
         let allowed = Arc::clone(&state);
@@ -398,7 +415,7 @@ fn permission_mode_of(mode: Mode) -> &'static str {
 /// only when the launch allows it, whatever mode it was started in.
 fn offered_for(launch: &ClaudeLaunch) -> Vec<Mode> {
     let configured = launch
-        .permission_mode
+        .effective_permission_mode()
         .as_deref()
         .map_or(Some(Mode::Manual), mode_of);
     mode::widened(

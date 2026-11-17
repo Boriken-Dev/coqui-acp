@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use coqui_acp_harness::{Launch, McpServer, McpTransport};
+use coqui_acp_harness::{Access, Approvals, Launch, McpServer, McpTransport, Sandbox};
 use serde_json::{Map, Value, json};
 
 /// Which session Claude Code opens.
@@ -61,6 +61,10 @@ pub struct ClaudeLaunch {
     pub permission_prompts: bool,
     /// The permission mode: `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`, `auto` or `manual`.
     pub permission_mode: Option<String>,
+    /// The harness-neutral access a session starts with: [`ClaudeLaunch::effective_permission_mode`] turns its approvals
+    /// into a permission mode (when `permission_mode` is not named), and its sandbox and network into Claude Code's sandbox
+    /// settings, given with `--settings`.
+    pub access: Option<Access>,
     /// Whether the session may be switched to `bypassPermissions` (`--allow-dangerously-skip-permissions`). Claude Code
     /// takes that mode mid-session only when it was started allowing it; off, the bypass mode is not offered.
     pub allow_bypass: bool,
@@ -99,6 +103,7 @@ impl core::fmt::Debug for ClaudeLaunch {
             .field("plugin_dirs", &self.plugin_dirs)
             .field("permission_prompts", &self.permission_prompts)
             .field("permission_mode", &self.permission_mode)
+            .field("access", &self.access)
             .field("allow_bypass", &self.allow_bypass)
             .field("modes", &self.modes)
             .field("setting_sources", &self.setting_sources)
@@ -127,6 +132,7 @@ impl ClaudeLaunch {
             plugin_dirs: Vec::new(),
             permission_prompts: true,
             permission_mode: None,
+            access: None,
             allow_bypass: false,
             modes: None,
             setting_sources: None,
@@ -148,6 +154,50 @@ impl ClaudeLaunch {
         }
     }
 
+    /// The permission mode the session starts in: the named one, else what the access amounts to: `plan` for a read-only
+    /// sandbox, else `default` for Ask, `acceptEdits` for Edits and `bypassPermissions` for Never.
+    #[must_use]
+    pub fn effective_permission_mode(&self) -> Option<String> {
+        if let Some(mode) = &self.permission_mode {
+            return Some(mode.clone());
+        }
+        let access = self.access?;
+        Some(
+            match (access.sandbox, access.approvals) {
+                (Sandbox::ReadOnly, _) => "plan",
+                (_, Approvals::Edits) => "acceptEdits",
+                (_, Approvals::Never) => "bypassPermissions",
+                _ => "default",
+            }
+            .to_string(),
+        )
+    }
+
+    /// Claude Code's sandbox settings for the access, as the JSON `--settings` takes; `None` when it asks for none. A
+    /// workspace sandbox turns Claude Code's own on, with no retry outside it. With the network off, only the hosts a
+    /// settings file allows are reached and none is asked about (`strictAllowlist`, no `allowedDomains`); with no sandbox
+    /// that is the sandbox's network side alone (`filesystem.disabled`). A read-only sandbox is the `plan` mode: Claude
+    /// Code's sandbox has no switch that forbids every write.
+    #[must_use]
+    pub fn access_settings(&self) -> Option<Value> {
+        let access = self.access?;
+        let workspace = access.sandbox == Sandbox::Workspace;
+        if !workspace && access.network {
+            return None;
+        }
+        let mut sandbox = Map::new();
+        sandbox.insert("enabled".into(), json!(true));
+        if workspace {
+            sandbox.insert("allowUnsandboxedCommands".into(), json!(false));
+        } else {
+            sandbox.insert("filesystem".into(), json!({"disabled": true}));
+        }
+        if !access.network {
+            sandbox.insert("network".into(), json!({"strictAllowlist": true}));
+        }
+        Some(json!({ "sandbox": sandbox }))
+    }
+
     /// The command line and environment: stream-json both ways on standard input and output, the person's messages
     /// echoed back, and permission prompts asked on standard output as control requests.
     #[must_use]
@@ -166,7 +216,8 @@ impl ClaudeLaunch {
             args.push("--permission-prompts=host".into());
             args.push("--permission-prompt-tool=stdio".into());
         }
-        if self.allow_bypass {
+        let permission_mode = self.effective_permission_mode();
+        if self.allow_bypass || permission_mode.as_deref() == Some("bypassPermissions") {
             args.push("--allow-dangerously-skip-permissions".into());
         }
         if self.partial_messages {
@@ -187,8 +238,11 @@ impl ClaudeLaunch {
         if let Some(prompt) = &self.append_system_prompt {
             flag("append-system-prompt", prompt);
         }
-        if let Some(mode) = &self.permission_mode {
+        if let Some(mode) = &permission_mode {
             flag("permission-mode", mode);
+        }
+        if let Some(settings) = self.access_settings() {
+            flag("settings", &settings.to_string());
         }
         if let Some(sources) = &self.setting_sources {
             flag("setting-sources", &sources.join(","));

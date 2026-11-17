@@ -26,6 +26,7 @@ pub struct ClaudeLaunch {
     pub plugin_dirs: Vec<PathBuf>,
     pub permission_prompts: bool,          // true: --permission-prompts=host --permission-prompt-tool=stdio
     pub permission_mode: Option<String>,
+    pub access: Option<Access>,            // None; with it, `effective_permission_mode()` (plan for read-only, else default/acceptEdits/bypassPermissions by approvals; `permission_mode` wins) and `access_settings()` (`--settings` JSON: a workspace sandbox sets sandbox.enabled and no unsandboxed retry; network off sets sandbox.network.strictAllowlist, with sandbox.filesystem.disabled when there is no sandbox)
     pub allow_bypass: bool,                // false: no `--allow-dangerously-skip-permissions`, and no Bypass mode offered
     pub modes: Option<Vec<Mode>>,          // those named widen the launch's mode and stricter ones (Bypass still needs allow_bypass)
     pub setting_sources: Option<Vec<String>>,   // None: Claude Code's default; Some(empty): none
@@ -187,6 +188,8 @@ pub fn ClaudeProvider::new(settings: ProviderSettings) -> ClaudeProvider  // als
 pub struct ProviderSettings {                                        // ToValue, FromValue, Schema, Default; every field defaults
     pub executable: String,              // "claude": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>, pub permission_mode: Option<String>,
+    pub access: Option<Access>,          // None
+    pub allow_client_access: bool,       // false: a session's `_meta` access is ignored unless true (then it replaces `access`)
     pub allow_bypass: bool,              // false
     pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen the permission mode's own and every stricter one (Bypass still needs allow_bypass, and is left out without it)
     pub setting_sources: Option<Vec<SettingSource>>,   // None: Claude Code's default; `user`, `project`, `local`; an empty list loads none (`--setting-sources=`)

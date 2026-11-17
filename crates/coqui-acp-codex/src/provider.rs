@@ -19,10 +19,10 @@ use coqui_acp_api::{
     ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, UnknownKind,
     UsageQuery, UsageReport,
 };
-use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, fingerprint, same_name};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Reports, Serving, shared, takes_of};
+use coqui_acp_harness::{Access, Mode};
 use coqui_acp_harness::{Settings, ThroughSpawner};
 
 use crate::{CodexAgent, CodexLaunch, CodexSession, CodexSettings, ModelRead};
@@ -45,6 +45,13 @@ pub struct ProviderSettings {
     /// The sandbox every session starts in: `read-only`, `workspace-write` or `danger-full-access`. Codex's own when
     /// absent.
     pub sandbox: Option<String>,
+    /// The access every session starts with, in the words every harness shares: the sandbox, the network and the approvals,
+    /// turned into Codex's approval policy, sandbox and the workspace sandbox's network setting. Absent, only `approval_policy`
+    /// and `sandbox` above decide, and Codex's own configuration where they are absent too.
+    pub access: Option<Access>,
+    /// Whether a client may give a session its own access through `_meta` (`dev.boriken.coqui.acp/access`).
+    #[map(default = false)]
+    pub allow_client_access: bool,
     /// Whether the Bypass mode may be chosen: never ask, no sandbox.
     #[map(default = false)]
     pub allow_bypass: bool,
@@ -82,6 +89,8 @@ impl Default for ProviderSettings {
             effort: None,
             approval_policy: None,
             sandbox: None,
+            access: None,
+            allow_client_access: false,
             allow_bypass: false,
             modes: None,
             max_acp_version: 2,
@@ -160,6 +169,7 @@ impl CodexProvider {
             .approval_policy
             .clone_from(&self.settings.approval_policy);
         launch.sandbox.clone_from(&self.settings.sandbox);
+        launch.access = self.settings.access;
         launch.allow_bypass = self.settings.allow_bypass;
         launch.modes.clone_from(&self.settings.modes);
         for (name, value) in environment.iter() {
@@ -367,9 +377,11 @@ impl AcpHarness for CodexProvider {
             serving = serving.ending(move || hold.finish());
         }
         let seeds = Arc::clone(&self.seeds);
+        let client_access = self.settings.allow_client_access;
         serving.open_shared(spawner, sink, move |spawn| {
             Ok(shared(
                 CodexAgent::new()
+                    .client_access(client_access)
                     .seeded_sessions(seeds)
                     .defaults(launch)
                     .spawn(spawn),

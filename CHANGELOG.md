@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `coqui_acp_harness::Access` (`Sandbox` none, workspace or read-only; `network`; `Approvals` ask, edits or never; `Access::STANDARD` is no sandbox, the network on, ask) and the `_meta` key `dev.boriken.coqui.acp/access`: one access in words every harness shares. `coqui-acp-codex` turns it into the approval policy (`untrusted`, `on-request`, `never`), the sandbox (`danger-full-access`, `workspace-write`, `read-only`) and the workspace sandbox's `network_access` (`CodexLaunch::apply_access`); `coqui-acp-claude` into the permission mode (`default`, `acceptEdits`, `bypassPermissions`, `plan` for a read-only sandbox) and Claude Code's sandbox settings through `--settings` (`ClaudeLaunch::effective_permission_mode`, `access_settings`); `coqui-acp-pi` into the mode its gate starts in (`PiLaunch::start_mode`). Each provider's settings take `access` and `allow_client_access` (a client's own `_meta` access replaces it; default false); `CodexAgent`, `ClaudeAgent` and `PiAgent` take `client_access(bool)`. With no access given, nothing is sent and each command line's own settings decide, as before.
+
 ### Changed
 
 - `coqui-acp-claude`, `coqui-acp-codex`, `coqui-acp-pi`, `coqui-acp-history` and `coqui-acp-api` are libraries with no program of their own: the agents' arguments are `cli::Args` (a `clap::Args` type) and `cli::run(&Args)` serves the agent on standard input and output (their `history` commands are `cli::History` and `cli::run_history`); `coqui-acp-history`'s commands are `cli::Command` and `cli::run`, behind feature `cli`; and `acp-harness-check` and `acp-account-check` are `check::HarnessCheck`, `check::AccountCheck`, `check::run_harness` and `check::run_account`, behind feature `contract`. A host that wants `--program-agent` names the program that runs the check again in a home of its own (`HarnessCheck::again`). Each crate's `examples/` keeps a command line over them for its tests (`serve_claude`, `serve_codex`, `serve_pi`, `history`, `check`).

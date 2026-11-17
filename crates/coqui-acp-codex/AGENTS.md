@@ -24,6 +24,7 @@ pub struct CodexLaunch {
     pub working_roots: Vec<PathBuf>,           // a resumed thread's own directory must lie in one; empty takes any
     pub approval_policy: Option<String>,       // untrusted, on-failure, on-request, never
     pub sandbox: Option<String>,               // read-only, workspace-write, danger-full-access
+    pub access: Option<Access>,                // None; `apply_access(access)` fills approval_policy (ask untrusted, edits on-request, never never), sandbox (none danger-full-access, workspace workspace-write, read-only read-only) and thread_config sandbox_workspace_write.network_access (workspace only), each one the launch does not name itself
     pub allow_bypass: bool,                    // false: the Bypass mode is not offered
     pub modes: Option<Vec<Mode>>,              // those named widen the host's mode and stricter ones (Bypass still needs allow_bypass)
     pub thread_config: Map<String, Value>,     // merged into the thread's config, as given
@@ -198,6 +199,8 @@ pub struct ProviderSettings {                                        // ToValue,
     pub executable: String,              // "codex": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>,
     pub approval_policy: Option<String>, pub sandbox: Option<String>,
+    pub access: Option<Access>,          // None
+    pub allow_client_access: bool,       // false: a session's `_meta` access is ignored unless true
     pub allow_bypass: bool,              // false
     pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen what approval_policy and sandbox amount to and every stricter mode (Bypass still needs allow_bypass, and is left out without it)
     pub max_acp_version: u64,            // 2 (1 or 2)
