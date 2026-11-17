@@ -142,7 +142,7 @@ pub(crate) fn login(
     prompter: Object<dyn LoginPrompter>,
 ) -> Result<LoginOutcome, ProviderError> {
     let spawner = Arc::new(spawner);
-    if !accounts::catalog()
+    if !accounts::offer()
         .logins
         .iter()
         .any(|method| method.id == request.method)
@@ -492,7 +492,8 @@ pub(crate) fn renew(
     request: &RenewRequest,
     spawner: Object<dyn ProcessSpawner>,
 ) -> Result<RenewReport, ProviderError> {
-    let grant = &accounts::resolved(&request.account)?;
+    accounts::own(&request.account)?;
+    let grant = &request.account;
     let applied = accounts::plan(grant)?;
     let Some(applied) = applied.filter(|_| grant.kind == CHATGPT) else {
         return Err(failure(
@@ -509,7 +510,9 @@ pub(crate) fn renew(
         ));
     }
     configure(&files)?;
-    let hold = accounts.hold(
+    // The login is looked at as it is: a file the person or Codex lost is lost, and the grant's copy is not put back
+    // in its place.
+    let hold = accounts.observe(
         files,
         None,
         &grant.id,

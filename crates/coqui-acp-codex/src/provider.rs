@@ -68,12 +68,8 @@ pub struct ProviderSettings {
     /// Whether a client may give a session MCP servers, which start programs.
     #[map(default = true)]
     pub client_mcp_servers: bool,
-    /// How often, in milliseconds, a connection on an account that keeps its login in a file looks at the file for a
-    /// renewal or a loss; 0 looks only when a call is made on the account and when the connection closes.
-    #[map(default = 30_000)]
-    pub renew_poll_ms: u64,
-    /// The longest, in milliseconds, a command Codex is asked to run for an account (`login`) may take; 0 ends it at
-    /// once.
+    /// The longest, in milliseconds, a command Codex is asked to run to save an account's key or token (`login`) may
+    /// take; 0 ends it at once.
     #[map(default = 60_000)]
     pub command_timeout_ms: u64,
 }
@@ -93,7 +89,6 @@ impl Default for ProviderSettings {
             max_requests: 32,
             max_message_bytes: 64 * 1024 * 1024,
             client_mcp_servers: true,
-            renew_poll_ms: 30_000,
             command_timeout_ms: 60_000,
         }
     }
@@ -115,7 +110,7 @@ pub struct CodexProvider {
     settings: ProviderSettings,
     /// What the account's readings and the connections learned of its usage.
     reports: Arc<Reports>,
-    /// What the provider knows of its accounts' files, and who hears of them.
+    /// What the provider knows of the files it placed for its accounts.
     accounts: Arc<Accounts>,
     /// For each home a key or token was saved in, a fingerprint of it.
     saved: std::sync::Mutex<alloc::collections::BTreeMap<String, u64>>,
@@ -213,7 +208,9 @@ impl CodexProvider {
     }
 
     /// Applies `account` to `launch`: the variables Codex is given, every credential variable removed first, the
-    /// files of a login placed in the account's home through `files`, and a key or token saved by `codex login`.
+    /// files of a login placed in the account's home through `files`, and a key or token saved by `codex login`. The
+    /// keeper is let go of: what happens to the files afterwards is for the account provider's watch to tell, and this
+    /// provider tells nothing.
     ///
     /// # Errors
     ///
@@ -227,9 +224,11 @@ impl CodexProvider {
         launch: &mut CodexLaunch,
     ) -> Result<Applying, ProviderError> {
         let Some(grant) = account else {
+            drop(keeper);
             return Ok(Applying { hold: None });
         };
         let Some(mut applied) = accounts::plan(grant)? else {
+            drop(keeper);
             return Ok(Applying { hold: None });
         };
         let files = Files::new(Arc::clone(spawner));
@@ -288,13 +287,13 @@ impl CodexProvider {
                     .insert(applied.dir.clone(), print);
             }
         }
+        drop(keeper);
         if applied.watched.is_empty() {
-            drop(keeper);
             return Ok(Applying { hold: None });
         }
         let hold = self.accounts.hold(
             files,
-            Some(keeper),
+            None,
             &grant.id,
             &applied.dir,
             grant.revision,
@@ -370,12 +369,7 @@ impl AcpHarness for CodexProvider {
         let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
         let mut serving = Serving::new(settings, limit);
         if let Some(hold) = applying.hold {
-            let watcher = (self.settings.renew_poll_ms > 0)
-                .then(|| hold.watch(Duration::from_millis(self.settings.renew_poll_ms)));
-            serving = serving.ending(move || {
-                drop(watcher);
-                hold.finish();
-            });
+            serving = serving.ending(move || hold.finish());
         }
         let seeds = Arc::clone(&self.seeds);
         serving.open_shared(spawner, sink, move |spawn| {
@@ -497,7 +491,6 @@ impl AcpHarness for CodexProvider {
                 format!("Codex could not be asked: {error}"),
             ),
         };
-        // The last look: a refresh Codex made while it was asked is told before the call returns.
         if let Some(hold) = applying.hold {
             hold.finish();
         }
@@ -528,24 +521,23 @@ impl AcpHarness for CodexProvider {
 
     fn login(
         &self,
-        request: LoginRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        prompter: Object<dyn LoginPrompter>,
+        _request: LoginRequest,
+        _spawner: Object<dyn ProcessSpawner>,
+        _prompter: Object<dyn LoginPrompter>,
     ) -> Result<LoginOutcome, ProviderError> {
-        signin::login(
-            &self.executable(),
-            self.command_limit(),
-            &request,
-            spawner,
-            prompter,
-        )
+        Err(unsupported(
+            "this harness signs no one in: the `codex_accounts` account_provider does",
+        ))
     }
 
     fn renew(
         &self,
         request: RenewRequest,
-        spawner: Object<dyn ProcessSpawner>,
+        _spawner: Object<dyn ProcessSpawner>,
     ) -> Result<RenewReport, ProviderError> {
-        signin::renew(&self.accounts, &self.executable(), &request, spawner)
+        accounts::check(&request.account.reference())?;
+        Err(unsupported(
+            "this harness renews no login: the `codex_accounts` account_provider does",
+        ))
     }
 }

@@ -12,8 +12,9 @@ use coqui_acp_api::guatiao::library::ProviderError;
 use coqui_acp_api::guatiao::{Status, Wipe};
 use coqui_acp_api::standard::{CODEX, OPENAI_API};
 use coqui_acp_api::{
-    ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountRef,
-    EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL, PASTE_CODE, USER_CODE,
+    ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountOffer,
+    AccountRef, EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL, PASTE_CODE,
+    USER_CODE,
 };
 use coqui_acp_harness::account::{Watched, jwt_expiry};
 use coqui_acp_harness::provider::{credential, resolve, schema, to_json};
@@ -87,9 +88,8 @@ fn method(id: &str, title: &str, description: &str, produces: &str) -> LoginMeth
     method
 }
 
-/// What the provider takes as an account.
-#[must_use]
-pub fn catalog() -> AccountCatalog {
+/// Every kind and sign-in method Codex's accounts have, as the account provider lists them and the harness takes them.
+fn full() -> AccountCatalog {
     let mut catalog = AccountCatalog::new();
 
     let mut chatgpt = kind(
@@ -188,6 +188,47 @@ pub fn catalog() -> AccountCatalog {
     catalog.accepts = accepts();
     catalog.credential_variables = VARIABLES.iter().map(|v| (*v).to_string()).collect();
     catalog
+}
+
+/// What the harness takes as an account: the kinds it applies and the standards it accepts. It signs no one in and
+/// renews nothing: the account provider ([`offer`]) does.
+#[must_use]
+pub fn catalog() -> AccountCatalog {
+    let mut catalog = full();
+    catalog.logins.clear();
+    for kind in &mut catalog.kinds {
+        kind.renews = false;
+    }
+    catalog
+}
+
+/// What the account provider offers: the kinds of account it makes (the harness's own login, which it cannot sign in
+/// to, left out), the ways to sign in, and the kinds whose plan usage it reads.
+#[must_use]
+pub fn offer() -> AccountOffer {
+    let full = full();
+    let mut offer = AccountOffer::new();
+    offer.kinds = full
+        .kinds
+        .into_iter()
+        .filter(|kind| kind.id != HARNESS_LOGIN)
+        .collect();
+    offer.logins = full.logins;
+    offer.usage = [CHATGPT, ACCESS_TOKEN, API_KEY]
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect();
+    offer
+}
+
+/// Why an account is not one the account provider keeps: `BAD_VALUE` for an id that is not one or a kind it does not
+/// list. Nothing of another standard is taken: a harness applies those, the provider makes its own.
+pub(crate) fn own(grant: &AccountGrant) -> Result<(), ProviderError> {
+    grant.check_id()?;
+    if offer().kind(&grant.kind).is_none() {
+        return Err(bad("this provider keeps no account of that kind"));
+    }
+    Ok(())
 }
 
 /// The standards Codex starts on, and how each is applied: a Codex login (`auth.json` in `CODEX_HOME`, or an access token

@@ -120,6 +120,8 @@ fn the_suite_inside() {
         .instantiate(&Value::from(settings))
         .expect("the settings are taken");
     let outcome = Contract::new("codex")
+        .logins(false)
+        .watches(false)
         .program_agent(true)
         .imports(cfg!(feature = "history"))
         .holds(Vec::new())
@@ -188,22 +190,19 @@ fn it_lists_the_account_kinds_it_measured_and_refuses_what_it_does_not_apply() {
             "codex-access-token"
         ]
     );
-    let methods: Vec<&str> = catalog.logins.iter().map(|m| m.id.as_str()).collect();
+    // The harness signs no one in and renews nothing; its account provider lists the ways to sign in.
+    assert!(catalog.logins.is_empty());
+    let chatgpt = catalog.kind("codex-chatgpt").expect("listed");
+    assert!(chatgpt.rotates && chatgpt.state_dir && !chatgpt.history_portable && !chatgpt.renews);
+    let offered = coqui_acp_codex::accounts::offer();
+    let methods: Vec<&str> = offered.logins.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(
         methods,
         ["chatgpt", "chatgpt-device", "api-key", "access-token"]
     );
-    let chatgpt = catalog.kind("codex-chatgpt").expect("listed");
-    assert!(chatgpt.rotates && chatgpt.state_dir && !chatgpt.history_portable && chatgpt.renews);
-    // A sign-in with no directory to run in is refused.
-    let error = provider()
-        .login(
-            coqui_acp_api::LoginRequest::new("chatgpt", ""),
-            spawner(),
-            Prompter.into_object(),
-        )
-        .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let chatgpt = offered.kind("codex-chatgpt").expect("listed");
+    assert!(chatgpt.rotates && chatgpt.state_dir && chatgpt.renews);
+    assert!(offered.kind("harness-login").is_none());
 }
 
 struct Sink(std::sync::mpsc::Sender<Vec<u8>>);
@@ -228,6 +227,27 @@ fn a_usage_read_for_an_account_checks_the_grant_like_a_start_does() {
         )
         .expect_err("refused");
     assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+}
+
+#[test]
+fn the_harness_signs_no_one_in_and_renews_nothing() {
+    let dir = scratch("elsewhere");
+    let error = provider()
+        .login(
+            coqui_acp_api::LoginRequest::new("chatgpt", dir.to_string_lossy()),
+            spawner(),
+            Prompter.into_object(),
+        )
+        .expect_err("not the harness's");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    let grant = coqui_acp_api::AccountGrant::new("a", "codex-chatgpt")
+        .credentials(coqui_acp_api::Credentials::from_iter([("auth_file", "x")]))
+        .state_dir(dir.to_string_lossy());
+    let error = provider()
+        .renew(coqui_acp_api::RenewRequest::new(grant), spawner())
+        .expect_err("not the harness's");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 struct Prompter;

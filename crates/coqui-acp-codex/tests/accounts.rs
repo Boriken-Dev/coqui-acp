@@ -14,8 +14,7 @@ use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
     AccountGrant, AccountKeeper, AccountLoss, AccountRenewal, AcpHarness, ChannelSink, Credentials,
-    LoginAnswer, LoginForm, LoginPrompter, LoginRequest, ModelsRequest, OpenUrl, ProcessSpawner,
-    RenewRequest, StartRequest,
+    ModelsRequest, ProcessSpawner, StartRequest,
 };
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
 use coqui_acp_harness::LocalSpawner;
@@ -52,7 +51,6 @@ fn scratch(name: &str) -> PathBuf {
 fn provider() -> CodexProvider {
     CodexProvider::new(ProviderSettings {
         executable: fake(),
-        renew_poll_ms: 100,
         ..ProviderSettings::default()
     })
 }
@@ -220,128 +218,6 @@ fn a_key_is_saved_by_codex_login_on_standard_input_and_not_saved_again() {
 }
 
 #[test]
-fn a_login_the_connection_saw_renewed_is_reported_and_one_it_saw_deleted_is_lost() {
-    let provider = provider();
-    let dir = scratch("watch");
-    let grant = AccountGrant::new("acct", "codex-chatgpt")
-        .credentials(credentials_of(&[("auth_file", LOGIN_FILE)]))
-        .state_dir(dir.to_string_lossy())
-        .revision(5);
-    let heard = Heard::default();
-    let (sender, received) = std::sync::mpsc::channel();
-    let channel = provider
-        .start(
-            StartRequest::builder().account(grant).build(),
-            spawner(&dir),
-            Sink(sender).into_object(),
-            heard.clone().into_object(),
-        )
-        .expect("it starts");
-    channel
-        .send(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#)
-        .expect("taken");
-    answer_to(&received, 1);
-    let rotated = LOGIN_FILE.replace("stand-in-refresh-1", "stand-in-refresh-2");
-    std::fs::write(dir.join("auth.json"), &rotated).unwrap();
-    let waited = std::time::Instant::now();
-    while heard.renewed.lock().unwrap().is_empty() && waited.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    {
-        let renewed = heard.renewed.lock().unwrap();
-        assert_eq!(renewed.len(), 1);
-        assert_eq!(renewed[0].from_revision, 5);
-        assert_eq!(
-            renewed[0].credentials.expose().get("auth_file"),
-            Some(rotated.as_str())
-        );
-    }
-    std::fs::remove_file(dir.join("auth.json")).unwrap();
-    let waited = std::time::Instant::now();
-    while heard.lost.lock().unwrap().is_empty() && waited.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert_eq!(heard.lost.lock().unwrap().len(), 1);
-    assert_eq!(heard.renewed.lock().unwrap().len(), 1);
-    channel.close(0, "");
-    drop(channel);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn renew_refreshes_the_login_and_a_refused_refresh_is_lost() {
-    let provider = provider();
-    let dir = scratch("renew");
-    let grant = AccountGrant::new("acct", "codex-chatgpt")
-        .credentials(credentials_of(&[("auth_file", LOGIN_FILE)]))
-        .state_dir(dir.to_string_lossy());
-    let report = provider
-        .renew(RenewRequest::new(grant.clone()), spawner(&dir))
-        .expect("renewed");
-    let text = report
-        .credentials
-        .expect("a new login")
-        .expose()
-        .get("auth_file")
-        .expect("the file")
-        .to_string();
-    assert!(text.contains("stand-in-refresh-2") && !text.contains("stand-in-refresh-1"));
-    for scripted in ["refuse-blank", "refuse-delete"] {
-        let refusing = scratch(scripted);
-        std::fs::write(refusing.join("fake-refresh"), scripted).unwrap();
-        let grant = AccountGrant::new("acct", "codex-chatgpt")
-            .credentials(credentials_of(&[("auth_file", LOGIN_FILE)]))
-            .state_dir(refusing.to_string_lossy());
-        let error = provider
-            .renew(RenewRequest::new(grant), spawner(&refusing))
-            .expect_err("lost");
-        assert_eq!(error.status, Status::GUATIAO_ERR_GONE, "{scripted}");
-        assert!(!error.message().contains("stand-in"));
-        let _ = std::fs::remove_dir_all(&refusing);
-    }
-    let key = AccountGrant::new("k", "codex-api-key")
-        .credentials(credentials_of(&[("api_key", CANARY)]))
-        .state_dir(dir.to_string_lossy());
-    let error = provider
-        .renew(RenewRequest::new(key), spawner(&dir))
-        .expect_err("unsupported");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_models_call_hears_a_rotation() {
-    let provider = provider();
-    let dir = scratch("models");
-    let grant = AccountGrant::new("acct", "codex-chatgpt")
-        .credentials(credentials_of(&[("auth_file", LOGIN_FILE)]))
-        .state_dir(dir.to_string_lossy());
-    let heard = Heard::default();
-    provider
-        .models(
-            ModelsRequest::new().account(grant.clone()),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    assert!(heard.renewed.lock().unwrap().is_empty());
-    std::fs::write(
-        dir.join("auth.json"),
-        LOGIN_FILE.replace("refresh-1", "refresh-9"),
-    )
-    .unwrap();
-    provider
-        .models(
-            ModelsRequest::new().account(grant),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    assert_eq!(heard.renewed.lock().unwrap().len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn a_grant_the_kind_refuses_is_bad_value_and_a_home_without_files_is_unsupported() {
     let provider = provider();
     let dir = scratch("refuse");
@@ -375,274 +251,6 @@ fn a_grant_the_kind_refuses_is_bad_value_and_a_home_without_files_is_unsupported
     }
     let error = start(login, LocalSpawner::new().into_object());
     assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[derive(Clone)]
-struct Person {
-    secret: String,
-    shown: Arc<Mutex<Vec<String>>>,
-    codes: Arc<Mutex<Vec<Option<String>>>>,
-    /// What the person pastes when asked for the address, one for each time, `{valid}` standing for the callback of
-    /// the page they were shown; when none is left, that callback.
-    addresses: Arc<Mutex<std::collections::VecDeque<String>>>,
-    /// The title of each form the sign-in put to the person.
-    titles: Arc<Mutex<Vec<String>>>,
-    /// A person whose browser comes back to Codex by itself, and who never answers the address form.
-    never: bool,
-}
-
-impl Person {
-    fn new(secret: &str) -> Self {
-        Self {
-            secret: secret.to_string(),
-            shown: Arc::default(),
-            codes: Arc::default(),
-            addresses: Arc::default(),
-            titles: Arc::default(),
-            never: false,
-        }
-    }
-
-    fn pasting(secret: &str, addresses: &[&str]) -> Self {
-        let person = Self::new(secret);
-        person
-            .addresses
-            .lock()
-            .unwrap()
-            .extend(addresses.iter().map(ToString::to_string));
-        person
-    }
-
-    /// The callback the browser would end on after the page it was shown.
-    fn valid(&self) -> String {
-        let shown = self.shown.lock().unwrap();
-        let page = shown
-            .iter()
-            .find(|url| url.contains("redirect_uri"))
-            .expect("the page");
-        let port = page.split("localhost%3A").nth(1).expect("a port");
-        let port: String = port.chars().take_while(char::is_ascii_digit).collect();
-        format!(
-            "http://127.0.0.1:{port}/auth/callback?code=stand-in-code&scope=openid+profile&state=stand-in-state"
-        )
-    }
-}
-
-impl LoginPrompter for Person {
-    fn say(&self, text: &str) -> Result<(), ProviderError> {
-        self.shown.lock().unwrap().push(text.to_string());
-        Ok(())
-    }
-
-    fn open_url(&self, open: OpenUrl) -> Result<(), ProviderError> {
-        self.shown.lock().unwrap().push(open.url);
-        self.codes.lock().unwrap().push(open.user_code);
-        Ok(())
-    }
-
-    fn ask(&self, form: LoginForm) -> Result<LoginAnswer, ProviderError> {
-        let schema = coqui_acp_harness::provider::to_json(&form.schema);
-        self.titles.lock().unwrap().push(form.title.clone());
-        let mut secrets = Credentials::new();
-        for (name, property) in schema["properties"].as_object().expect("fields") {
-            assert_eq!(property["writeOnly"], true, "only secrets are asked");
-            if name == "address" {
-                if self.never {
-                    std::thread::sleep(Duration::from_secs(4));
-                    return Err(ProviderError::new(Status::GUATIAO_ERR_GONE, "gone"));
-                }
-                let pasted = self.addresses.lock().unwrap().pop_front();
-                let pasted = pasted.unwrap_or_else(|| "{valid}".to_string());
-                let other = self.valid().replace("stand-in-state", "somebody-elses");
-                secrets.insert(
-                    name.clone(),
-                    pasted
-                        .replace("{other}", &other)
-                        .replace("{valid}", &self.valid()),
-                );
-                continue;
-            }
-            secrets.insert(name.clone(), self.secret.clone());
-        }
-        Ok(LoginAnswer::new(
-            coqui_acp_api::guatiao::Value::from(coqui_acp_api::guatiao::Map::new()),
-            secrets,
-        ))
-    }
-
-    fn cancelled(&self) -> Result<bool, ProviderError> {
-        Ok(false)
-    }
-}
-
-fn login(
-    method: &str,
-    dir: &Path,
-    person: &Person,
-) -> Result<coqui_acp_api::LoginOutcome, ProviderError> {
-    provider().login(
-        LoginRequest::new(method, dir.to_string_lossy()).timeout_ms(300_000),
-        spawner(dir),
-        person.clone().into_object(),
-    )
-}
-
-#[test]
-fn both_chatgpt_sign_ins_relay_the_page_and_the_device_code_and_read_the_login_they_wrote() {
-    for (method, wants_code) in [("chatgpt", false), ("chatgpt-device", true)] {
-        let dir = scratch(&format!("in-{method}"));
-        let person = Person::new(CANARY);
-        let outcome =
-            login(method, &dir, &person).unwrap_or_else(|e| panic!("{method}: {}", e.message()));
-        assert_eq!(outcome.kind, "codex-chatgpt");
-        assert!(outcome.checked);
-        let file = outcome
-            .credentials
-            .expose()
-            .get("auth_file")
-            .expect("the login")
-            .to_string();
-        assert!(file.contains("stand-in-refresh-1"));
-        let shown = person.shown.lock().unwrap().clone();
-        assert!(
-            shown
-                .iter()
-                .any(|s| s.starts_with("https://auth.openai.com/")),
-            "{method}: {shown:?}"
-        );
-        let codes = person.codes.lock().unwrap().clone();
-        assert_eq!(
-            codes,
-            [wants_code.then(|| "ABCD-12345".to_string())],
-            "{method}"
-        );
-        if method == "chatgpt" {
-            let seen = std::fs::read_to_string(dir.join("fake-callback")).unwrap();
-            assert_eq!(seen.trim(), "callback accepted");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[test]
-fn a_browser_sign_in_is_finished_from_the_pasted_address_and_it_is_in_no_message() {
-    let dir = scratch("paste");
-    let person = Person::new(CANARY);
-    let outcome = login("chatgpt", &dir, &person).expect("signed in");
-    assert!(outcome.checked);
-    let titles = person.titles.lock().unwrap().clone();
-    assert_eq!(titles.len(), 1, "{titles:?}");
-    assert!(titles[0].contains("paste the address your browser ends on"));
-    assert!(titles[0].contains("http://127.0.0.1:"), "{titles:?}");
-    let shown = person.shown.lock().unwrap().join("\n");
-    for text in titles.iter().chain([&shown]) {
-        assert!(!text.contains("stand-in-code"), "{text}");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn an_address_that_is_not_the_waiting_callback_is_refused_with_a_reason_and_asked_again() {
-    let dir = scratch("refuse");
-    let person = Person::pasting(
-        CANARY,
-        &[
-            "https://127.0.0.1:1/auth/callback?code=stand-in-code&state=stand-in-state",
-            "http://evil.example:1455/auth/callback?code=stand-in-code&state=stand-in-state",
-            "{valid}&state=again",
-        ],
-    );
-    login("chatgpt", &dir, &person).expect_err("three refused in a row");
-    let titles = person.titles.lock().unwrap().clone();
-    assert_eq!(titles.len(), 3, "{titles:?}");
-    assert!(
-        titles[1].starts_with("That address was not taken: "),
-        "{titles:?}"
-    );
-    assert!(titles[2].contains("127.0.0.1"), "{titles:?}");
-    for title in &titles {
-        assert!(
-            !title.contains("evil.example") && !title.contains("stand-in-code"),
-            "{title}"
-        );
-    }
-    // Nothing that was refused reached the login server.
-    assert!(!dir.join("fake-callback").exists());
-    let _ = std::fs::remove_dir_all(&dir);
-
-    let dir = scratch("refuse-then");
-    let person = Person::pasting(
-        CANARY,
-        &["http://127.0.0.1:1/auth/callback?code=stand-in-code&state=stand-in-state"],
-    );
-    let outcome = login("chatgpt", &dir, &person).expect("the second address is the callback");
-    assert!(outcome.checked);
-    assert_eq!(person.titles.lock().unwrap().len(), 2);
-    let seen = std::fs::read_to_string(dir.join("fake-callback")).unwrap();
-    assert_eq!(seen.trim(), "callback accepted");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-#[test]
-fn the_state_of_another_sign_in_is_refused_and_never_requested() {
-    let dir = scratch("state");
-    let person = Person::pasting(CANARY, &["{other}", "{valid}"]);
-    login("chatgpt", &dir, &person).expect("the second address is the callback");
-    let titles = person.titles.lock().unwrap().clone();
-    assert!(titles[1].contains("state differs"), "{titles:?}");
-    let seen = std::fs::read_to_string(dir.join("fake-callback")).unwrap();
-    assert_eq!(
-        seen.trim(),
-        "callback accepted",
-        "the other state reached the login server"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_browser_on_this_machine_finishes_the_sign_in_without_the_address() {
-    let dir = scratch("local");
-    std::fs::write(dir.join("fake-login"), "local").unwrap();
-    let mut person = Person::new(CANARY);
-    person.never = true;
-    let started = std::time::Instant::now();
-    let outcome = login("chatgpt", &dir, &person).expect("signed in");
-    assert!(outcome.checked);
-    assert!(
-        started.elapsed() < Duration::from_secs(4),
-        "it waited for the form"
-    );
-    assert!(!dir.join("fake-callback").exists());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_key_or_token_is_saved_on_standard_input_and_a_refused_one_names_neither_secret_nor_page() {
-    for (method, kind, key, flag) in [
-        ("api-key", "codex-api-key", "api_key", "--with-api-key"),
-        (
-            "access-token",
-            "codex-access-token",
-            "access_token",
-            "--with-access-token",
-        ),
-    ] {
-        let dir = scratch(&format!("in-{method}"));
-        let outcome = login(method, &dir, &Person::new(CANARY)).expect("accepted");
-        assert_eq!(outcome.kind, kind);
-        assert_eq!(outcome.credentials.expose().get(key), Some(CANARY));
-        let text = std::fs::read_to_string(dir.join("fake-codex.log")).unwrap();
-        assert!(!text.contains(CANARY));
-        assert!(text.contains(flag));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    let dir = scratch("refused");
-    let error = login("access-token", &dir, &Person::new("bad-token-value")).expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
-    assert!(error.message().starts_with("login refused: "));
-    assert!(error.message().contains("JWT") && !error.message().contains("bad-token-value"));
-    let error = login("no-such-method", &dir, &Person::new(CANARY)).expect_err("unknown");
-    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -713,44 +321,6 @@ fn no_endpoint_or_refresh_lever_of_the_host_reaches_codex_beside_an_account() {
 }
 
 #[test]
-fn a_command_a_sign_in_started_is_ended_when_the_sign_in_is() {
-    let dir = scratch("late");
-    // `codex login --with-api-key` takes 2.5 s and then writes the key.
-    std::fs::write(dir.join("fake-login"), "sleep").unwrap();
-    let error = provider()
-        .login(
-            LoginRequest::new("api-key", dir.to_string_lossy()).timeout_ms(700),
-            spawner(&dir),
-            Person::new(CANARY).into_object(),
-        )
-        .expect_err("it ran out of time");
-    assert_eq!(error.status, Status::GUATIAO_ERR_GONE);
-    std::thread::sleep(Duration::from_millis(3500));
-    assert!(
-        !dir.join("auth.json").exists(),
-        "the command outlived the sign-in and wrote the key"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_refusal_that_quotes_part_of_the_key_shows_none_of_it() {
-    let dir = scratch("echo");
-    std::fs::write(dir.join("fake-login"), "echo").unwrap();
-    let key = "sk-live-abcdef0123456789";
-    let error = provider()
-        .login(
-            LoginRequest::new("api-key", dir.to_string_lossy()).timeout_ms(300_000),
-            spawner(&dir),
-            Person::new(key).into_object(),
-        )
-        .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
-    assert_eq!(error.message(), "login refused: it was not accepted");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn a_token_is_saved_once_for_a_home_however_often_the_account_is_used() {
     let provider = provider();
     let dir = scratch("once");
@@ -774,56 +344,6 @@ fn a_token_is_saved_once_for_a_home_however_often_the_account_is_used() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-const JWT_FILE: &str = r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"i","access_token":"eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.","refresh_token":"stand-in-refresh-2","account_id":"acct-A"}}"#;
-
-#[test]
-fn a_renewal_says_when_the_access_token_ends_and_one_for_another_account_is_refused() {
-    let provider = provider();
-    let dir = scratch("identity");
-    let grant = AccountGrant::new("acct", "codex-chatgpt")
-        .credentials(credentials_of(&[(
-            "auth_file",
-            &JWT_FILE.replace("stand-in-refresh-2", "stand-in-refresh-1"),
-        )]))
-        .state_dir(dir.to_string_lossy());
-    let heard = Heard::default();
-    provider
-        .models(
-            ModelsRequest::new().account(grant.clone()),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    std::fs::write(dir.join("auth.json"), JWT_FILE).unwrap();
-    provider
-        .models(
-            ModelsRequest::new().account(grant.clone()),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    {
-        let renewed = heard.renewed.lock().unwrap();
-        assert_eq!(renewed.len(), 1);
-        assert_eq!(
-            renewed[0].expires_at.as_deref(),
-            Some("2100-01-01T00:00:00Z")
-        );
-    }
-    // Someone else's login in the home is no renewal of this account.
-    std::fs::write(dir.join("auth.json"), JWT_FILE.replace("acct-A", "acct-B")).unwrap();
-    provider
-        .models(
-            ModelsRequest::new().account(grant),
-            spawner(&dir),
-            heard.clone().into_object(),
-        )
-        .expect("listed");
-    assert_eq!(heard.renewed.lock().unwrap().len(), 1);
-    assert_eq!(heard.lost.lock().unwrap().len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[cfg(windows)]
 #[test]
 fn a_credential_variable_of_another_case_does_not_survive_on_windows() {
@@ -841,5 +361,35 @@ fn a_credential_variable_of_another_case_does_not_survive_on_windows() {
             .any(|n| n.eq_ignore_ascii_case("OPENAI_API_KEY")),
         "{entry}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_connection_and_a_models_call_tell_their_keeper_nothing() {
+    let provider = provider();
+    let dir = scratch("silent");
+    let grant = AccountGrant::new("acct", "codex-chatgpt")
+        .credentials(credentials_of(&[("auth_file", LOGIN_FILE)]))
+        .state_dir(dir.to_string_lossy());
+    // A connection whose login the agent renews, and a models call after a rotation, tell the keeper nothing: the
+    // account provider's watch does.
+    let heard = Heard::default();
+    run_session(&provider, grant.clone(), &dir, &heard);
+    for refresh in ["refresh-8", "refresh-9"] {
+        std::fs::write(
+            dir.join("auth.json"),
+            LOGIN_FILE.replace("refresh-1", refresh),
+        )
+        .unwrap();
+        provider
+            .models(
+                ModelsRequest::new().account(grant.clone()),
+                spawner(&dir),
+                heard.clone().into_object(),
+            )
+            .expect("listed");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(heard.renewed.lock().unwrap().is_empty() && heard.lost.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

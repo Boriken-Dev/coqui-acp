@@ -7,7 +7,7 @@
 )]
 
 use coqui_acp_api::guatiao::{self, Status};
-use coqui_acp_codex::CodexProvider;
+use coqui_acp_codex::{CodexAccounts, CodexProvider};
 
 // The library's say in being unloaded: busy while a thread of its connections still runs.
 extern "C" fn unload() -> Status {
@@ -17,6 +17,6 @@ extern "C" fn unload() -> Status {
 guatiao::providers!(
     id = "coqui_acp_codex",
     version = env!("CARGO_PKG_VERSION"),
-    providers = [CodexProvider],
+    providers = [CodexProvider, CodexAccounts],
     unload = unload
 );
