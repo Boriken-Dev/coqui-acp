@@ -7,7 +7,6 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use std::ffi::OsString;
@@ -20,7 +19,7 @@ use coqui_acp_api::{
     AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest, ProcessSpawner,
     RenewReport, RenewRequest, WatchRequest,
 };
-use coqui_acp_harness::account::{Accounts, Files, Hold, Watcher};
+use coqui_acp_harness::account::{Accounts, Files, Watching};
 
 use crate::account_usage::{ReadOptions, read_limits};
 use crate::{accounts, signin};
@@ -133,44 +132,6 @@ fn unsupported(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, why)
 }
 
-/// A watch of one account: it looks at the account's files until it is stopped or dropped.
-struct Watching {
-    hold: Hold,
-    watcher: Mutex<Option<Watcher>>,
-    ended: AtomicBool,
-}
-
-impl Watching {
-    fn end(&self) {
-        if self.ended.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let watcher = self
-            .watcher
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(watcher) = watcher {
-            watcher.stop();
-        }
-        // The last look, then the keeper and the spawner are let go of.
-        self.hold.finish();
-    }
-}
-
-impl AccountWatch for Watching {
-    fn stop(&self) -> Result<(), ProviderError> {
-        self.end();
-        Ok(())
-    }
-}
-
-impl Drop for Watching {
-    fn drop(&mut self) {
-        self.end();
-    }
-}
-
 impl AccountProvider for CodexAccounts {
     fn describe(&self) -> Result<AccountProviderInfo, ProviderError> {
         let mut info = AccountProviderInfo::new("Codex accounts");
@@ -239,14 +200,10 @@ impl AccountProvider for CodexAccounts {
             grant.credentials.expose(),
             applied.watched.clone(),
         )?;
-        let watcher = (self.settings.renew_poll_ms > 0)
-            .then(|| hold.watch(Duration::from_millis(self.settings.renew_poll_ms)));
-        Ok(Watching {
+        Ok(Watching::begin(
             hold,
-            watcher: Mutex::new(watcher),
-            ended: AtomicBool::new(false),
-        }
-        .into_object())
+            Duration::from_millis(self.settings.renew_poll_ms),
+        ))
     }
 
     fn usage(

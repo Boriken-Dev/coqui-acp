@@ -49,7 +49,8 @@ use base64::Engine;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{Secret, Status, Wipe};
 use coqui_acp_api::{
-    AccountKeeper, AccountLoss, AccountRenewal, Credentials, FileInfo, ProcessSpawner, SecretBytes,
+    AccountKeeper, AccountLoss, AccountRenewal, AccountWatch, Credentials, FileInfo,
+    ProcessSpawner, SecretBytes,
 };
 
 /// The most a credential file may hold, in bytes.
@@ -1212,6 +1213,53 @@ impl Watcher {
 }
 
 impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// The watch an account provider hands the host: a [`Hold`] looked at every poll until it is stopped or dropped.
+#[derive(Debug)]
+pub struct Watching {
+    hold: Hold,
+    watcher: Mutex<Option<Watcher>>,
+    ended: AtomicBool,
+}
+
+impl Watching {
+    /// Watches `hold` every `poll`; a `poll` of zero looks only when the watch begins and ends.
+    #[must_use]
+    pub fn begin(hold: Hold, poll: Duration) -> Object<dyn AccountWatch> {
+        let watcher = (!poll.is_zero()).then(|| hold.watch(poll));
+        Self {
+            hold,
+            watcher: Mutex::new(watcher),
+            ended: AtomicBool::new(false),
+        }
+        .into_object()
+    }
+
+    fn end(&self) {
+        if self.ended.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let watcher = lock(&self.watcher).take();
+        if let Some(watcher) = watcher {
+            watcher.stop();
+        }
+        // The last look, then the keeper and the spawner are let go of.
+        self.hold.finish();
+    }
+}
+
+impl AccountWatch for Watching {
+    fn stop(&self) -> Result<(), ProviderError> {
+        self.end();
+        Ok(())
+    }
+}
+
+impl Drop for Watching {
     fn drop(&mut self) {
         self.end();
     }
