@@ -61,7 +61,7 @@ dictionary AcpAgent {
   required DOMString source; // "dns-sd", "manual", "paired", "local"
   required AcpIdentity identity;
   required AcpOffers offers;
-  required DOMString status; // "available", "unreachable", "unknown"
+  required DOMString status; // "available", "unreachable", "unknown"; see Fields the provider fills in
   required AcpScopeInfo scope;
 };
 
@@ -84,7 +84,7 @@ dictionary AcpClosed { required DOMString reason; };   // "page", "agent", "navi
 
 Messages are strings, so a WebAssembly module or a Dart program crosses into JavaScript with the type it already has, and ACP's own libraries, which take a pair of streams, need only a parse and a stringify around them.
 
-Errors are `DOMException`s: `NotAllowedError` for no grant, for an agent the provider no longer knows, for a refusal, for choosing nothing, or for no user activation; `NotFoundError` only from the registry, for a `provider` no provider answers to; `NetworkError` when an agent cannot be reached. An error never says which of "no such agent" and "not granted" applies, so a page cannot probe for agents.
+Errors are `DOMException`s: `NotAllowedError` for no grant, for an agent the provider no longer knows, for a refusal, for choosing nothing, or for no user activation; `NotFoundError` only from the registry, for a `provider` no provider answers to; `NetworkError` when an agent cannot be reached; `AbortError` when the `signal` of `connect()` ended the wait. An error never says which of "no such agent" and "not granted" applies, so a page cannot probe for agents.
 
 ### Rules for the page API
 
@@ -95,6 +95,43 @@ Errors are `DOMException`s: `NotAllowedError` for no grant, for an agent the pro
 - `connect()` never prompts. A connection belongs to its document: navigating, closing the tab, or `revoke` closes it at once, with the reason in `closed`.
 - A provider's `uuid` is the same for every page and every install of that build. Different per install, it would be an identifier every site could read.
 - `id` differs per origin, so two sites cannot match their agents by it. `identity.peer` does not differ, and the person is told that the site will see it.
+
+### Behaviour the interfaces leave open
+
+What a second provider has to do the same way, or a page cannot tell which one it has.
+
+**`request()`**
+
+- The provider reads transient activation where the page cannot forge it: in the extension's content script, a world of its own, as `navigator.userActivation.isActive` at the moment the page's request arrives there. A service worker cannot see activation and a page's own world can lie about it, so every message other than `request` is passed on as not activated. Activation is checked and not consumed, so the browser's own window for it (a few seconds) bounds what one click can start, and the next rule keeps that to one window.
+- A tab MUST have at most one request window open, and an origin SHOULD. A `request()` made while one is open rejects at once with `NotAllowedError`, without a second window.
+- The window closes and `request()` rejects with `NotAllowedError` when the person closes it, when the page's document goes (navigation, tab closed, its connection to the provider ends) and after 120 seconds with no answer. A provider MUST NOT make a grant for a document that has gone.
+- `acpVersions` is a hint for the window, which may say that an agent offers none of those versions. A provider MAY ignore it, and MUST NOT hide an agent from the person or decide what the page learns by it: the version is settled by `initialize`.
+
+**Grants**
+
+- A grant of lifetime `once` belongs to the tab it was made in: that tab's documents of the origin see it, across reloads, and no other tab does, which asks for its own. It ends when the tab closes or the browser ends. `always` serves every tab of the origin until revoked.
+- A grant is for one origin and one agent. For an agent with a verified peer, the agent is its key. An agent with none (a local one, one added by URL) is the provider's own record of it, made when the person added it: another address with no key is another agent, and removing the record ends its grants.
+- `request()` for an agent the origin already holds replaces that grant: the same `id`, the sessions kept, the lifetime, folder, `permissions` and `mcpOrigins` the person has just chosen. The new terms apply to connections already open at once, so a person who takes `permissions` away does not wait for a reconnect, and `agentschange` fires.
+- `revoke()` of an `id` the origin holds nothing for resolves with no effect and no error, as revoking twice does, so a page cannot probe with it. Otherwise it ends the grant's connections with `revoked` before it resolves.
+- `agents()` of the registry is each provider's list, in the order they registered. If one provider's rejects, so does the registry's, with that error and no partial list, so a provider SHOULD answer `agents()` with a list, however it is placed.
+
+**Fields the provider fills in**
+
+- `status` is a hint. `agents()` MUST NOT contact the agent, since that tells it which pages a person visits, so it is `unknown` unless the provider already knows: `available` while one of its connections to the agent is open, `unreachable` after a connection failed.
+- `offers.transports` lists the transports the provider can try, as lower case tokens (`websocket`, `webtransport`) in its order of preference. It is not a promise, and a page ignores a token it does not know.
+- `identity.method` is `null` when `identity.verified` is false.
+
+**Connections**
+
+- `connect(agent, { signal })`: the signal ends only the wait for the connection. Aborting it before the connection is open rejects with `AbortError`, whatever the signal's `reason`, and stops what was being opened; a signal already aborted rejects at once with nothing started. Once `connect()` has resolved the signal does nothing, so a timeout signal cannot cut a live connection.
+- `readable` carries each message from the agent as one string, in order, none dropped for a slow reader. It ends, cleanly and not with an error, whenever the connection ends for any reason, after the messages already queued.
+- `closed` resolves once, with the reason, at the moment `readable` ends. It never rejects.
+- `close()`, `writable.close()`, `writable.abort()` and `readable.cancel()` are the same act: they end the connection with the reason `page`, and doing it again does nothing.
+- A write after the connection has ended rejects with `InvalidStateError`, and sends nothing.
+- A write of anything but a string rejects with `TypeError` and errors the writable, so no later write succeeds. Nothing was sent, and the connection stays open until `close()` or its readable's end.
+- The `closed` reasons: `page` when the page ended it; `navigation` when its document went (navigated, tab closed, or `pagehide`); `revoked` when its grant ended, whoever ended it; `agent` when the agent ended it in order, with its close; `failed` for any other end: a link cut with no close from the agent, the provider restarting, or its worker stopping.
+
+**The back/forward cache.** A page restored from it is alive, but the provider's connection to it is not. A provider MUST therefore end the document's connections with `navigation` on `pagehide`, whether or not the page is kept, and not rely on its port disconnecting, which a restored page would never learn of: its `closed` would never resolve. What a restored page can do next (whether `agents()` reaches the provider again, and what a call that was in flight when the page was stored does) is **unspecified**, because no provider has been run through a real restore.
 
 ### Why `document.acp`
 
@@ -114,9 +151,19 @@ A provider may arrive after the page has loaded, for instance when the person cl
 
 Every provider reveals that it is installed, to every page it is injected into. So a provider SHOULD inject only where the person has allowed it (see [extensions](#a-provider-as-an-extension)).
 
+### The registry's binding parts
+
+**Revision 1.** The registry is shared by every provider in a page, whichever arrived first, so what follows is exact, and a provider that cannot import `bindings/js/src/registry.mjs` (a declared content script cannot be a module) restates it. A provider SHOULD say in a comment beside its copy that it restates revision 1; a change to any point below is a new revision, listed here. The `version` member of the registry is the page API's, not this number.
+
+1. **Where it lives.** The window holds the registry under `Symbol.for('coqui-acp.registry')`, defined with `Object.defineProperty(window, symbol, { value })`, and `document.acp` is `Object.defineProperty(document, 'acp', { value: registry, enumerable: true })`: neither can be assigned over or deleted. The provider decides whether a registry exists by the symbol on the window and never by the property, since markup can shadow `document.acp` and a value there that is not ours is replaced.
+2. **Its members.** A frozen object: `version` (1); `providers`, a frozen array of each provider's `info` in the order they registered; `agents()`, `request(options)`, `connect(agent, options)`, `revoke(agent)`; `onagentschange` (an accessor that keeps a function and otherwise `null`), `addEventListener` and `removeEventListener` for `agentschange`; and `register(provider)`, which only providers call. A page that calls it adds a provider to its own view and to nothing else.
+3. **A provider's shape.** `{ info, agents(), request(options), connect(agent, options), revoke(agent), addEventListener? }`, where `info` is `{ uuid, name, rdns, icon? }`. Every agent it returns, and the `agent` of every connection, MUST have `provider === info.uuid`: the registry sends `connect` and `revoke` to a provider by that field alone, so an agent without it can never be reached. A provider that has `addEventListener` is heard for `agentschange`, which the registry repeats to its own listeners and to `onagentschange`.
+4. **Routing.** `request` goes to the provider named by `options.provider`, else to the first that registered, and rejects with `NotFoundError` when none has that `uuid`. `connect` and `revoke` go to the provider named by `agent.provider` and reject with `NotFoundError` when none has it. A provider is handed the options as the page gave them.
+5. **Announcing.** Every `register` dispatches `acp:ready` on `window`, a `CustomEvent` whose `detail.acp` is the registry, and the registry answers every `acp:request` on `window` with the same.
+
 ## Scope
 
-A provider MUST apply this to every message before it reaches the agent. It parses the JSON and forwards **its own serialization of what it parsed**, so a parser's disagreement over duplicate keys cannot reach the agent. A message that is not one JSON-RPC object is refused.
+A provider MUST apply this to every message before it reaches the agent. It parses the JSON and forwards **its own serialization of what it parsed**, so a parser's disagreement over duplicate keys cannot reach the agent. A message that is not one JSON-RPC object, or whose `id` is neither a string, `null` nor an integer a number can hold exactly (at most 2^53 - 1), is refused. What reaches the agent is that serialization, so a number JSON allows and a double cannot hold changes: `1e400` becomes `null`, and an integer past 2^53 loses its last digits. A page that needs one exactly sends it as a string.
 
 | From the page | Result |
 | --- | --- |
@@ -131,21 +178,25 @@ A provider MUST apply this to every message before it reaches the agent. It pars
 
 - **`cwd`** is the grant's, chosen by the person. Without one, `session/new` is refused. A provider whose agent works in a folder the provider's side makes (a host that gives each site its own scratch folder) may instead mark the grant `folder: "provider"`: the page's `cwd` is then removed from `session/new`, `session/load` and `session/resume` and never reaches the agent, and the provider MUST supply the folder itself in the same message, from what the browser reported of the page and never from the page. Everything else in the table holds.
 - **Everything else in a session request** is removed: a page may send `sessionId` (to reopen one of its sessions) and `mcpServers`, and nothing more. `additionalDirectories`, which an agent may make writable without asking, `systemPrompt` and any other field are the person's or the provider's to give, never a page's. `replayFrom` passes, since it only replays a session the page opened. This holds for every grant, `permissions` included: a page that may answer the agent's questions still cannot add directories. A provider's own application, which the provider marks with `own` on the grant itself and never at a person's or a page's say, passes the rest.
-- **`mcpServers`** may hold only `type` `http`, `sse` or `acp`. Anything else, above all an entry with a `command`, is refused whole. An `http` or `sse` URL MUST be `https` and have the page's origin or one in the grant's `mcpOrigins`, because the agent connects from its own network and sends the given headers there.
+- **`mcpServers`** may hold only `type` `http`, `sse` or `acp`. Anything else, above all an entry with a `command`, is refused whole. An `http` or `sse` URL MUST be `https` and have the page's origin or one in the grant's `mcpOrigins`, because the agent connects from its own network and sends the given headers there. So a page on `http://localhost` cannot name itself, nor list itself in `mcpOrigins`, which holds only `https` origins: it uses an `acp` entry, or an `https` address that reaches its server.
 - **`_meta`** is removed from every message, since an agent may give it private meaning.
 
 | From the agent | Result |
 | --- | --- |
 | A response | forwarded |
 | `session/update` | forwarded for a session of this origin; dropped otherwise |
-| `session/request_permission` | **answered by the person in the provider's window, and not shown to the page**; refused when nobody answers in time. Forwarded only if the grant has `permissions` |
-| Any other request naming a session of another origin | refused |
+| `session/request_permission` | **answered by the person in the provider's window, and not shown to the page**; cancelled when nobody answers in time (below). Forwarded only if the grant has `permissions` |
+| Any other request naming a session this origin did not open | refused |
 | Any other request or notification (`fs/*`, `terminal/*`, `mcp/message`) | forwarded: it asks the page, and reaches nothing of the person's |
+
+- **A session this origin did not open** is another origin's, one nobody here opened, or none at all in a message whose method starts with `session/`. A request of the agent about one is answered `-32601` by the provider, to the agent, and a notification about one is dropped. Neither reaches the page. A response is always forwarded.
+- **A permission request** the page may not answer is put to the person, who sees the agent's own options. The answer to the agent is the result `{ "outcome": { "outcome": "cancelled" } }`, which ACP defines, and not an error, when the person closes the window, when 120 seconds have passed with no answer, and when the page's `session/cancel` for that session is forwarded, which also closes the window: ACP requires that answer. A connection that ends sends none, since there is no one to send it to. Requests wait one window at a time, in the order they came, and a provider MAY cancel without asking those past a bound it chooses.
+- **`authenticate`** is refused for every page. Signing in to an agent is the person's, done with the agent or in the provider's own window before a page's session, and a page that is told the agent needs it (the agent's own error, forwarded as it came) can only tell the person. This contract gives a page no way to ask for it.
 
 **Resuming.** A page that reloads, or opens again, may keep going: it remembers the agent's `id` and the ACP session id itself, finds the agent in `agents()`, connects, sends `initialize` as on any connection, and then `session/resume` or `session/load` with that session id, with no new prompt. This works as long as the grant lasts and the session still exists at the agent. An agent that no longer has it answers with its own error, and the page starts a new one.
 
 - A provider MUST remember which sessions an origin opened with an agent for as long as the grant lasts, and MUST forget them when the grant ends. A session id another origin opened is refused, whether or not the page knows it: knowing an id is not permission to read a person's history.
-- A grant of lifetime `once` lasts until the tab closes, across reloads. `always` lasts until revoked.
+- A grant of lifetime `once` lasts until the tab closes, across reloads, and `always` until revoked: [what each reaches](#behaviour-the-interfaces-leave-open) is settled above.
 - A connection, by contrast, ends with its document, so **a turn in progress through a provider ends when the page does**. Whether its session can be resumed is up to the agent. Work that must outlive a tab belongs on a connection the page does not hold.
 
 `permissions` is a grant the person gives only with the words "this site can approve what the agent does for you". It lets the site answer the agent's permission requests and change its mode, so it suits an agent whose damage is bounded. It is never the default, and a provider MAY refuse it for an agent that runs on the person's own computer as the person.
@@ -263,7 +314,7 @@ The contract is the page API and the DNS-SD record, so any language can take par
 
 Passing these shows a provider keeps pages in their place. It does not show it proves agents: one that proves nothing, and reports every agent as `verified: false`, can conform, and a page may refuse every agent it offers.
 
-`bindings/js/src/conformance.mjs` runs these against any provider, given a small driver that plays the person, a page's origin and an agent. A provider conforms when all pass.
+`bindings/js/src/conformance.mjs` runs these against any provider, given a small driver that plays the person, a page's origin and an agent. A provider conforms when all pass. Every check has a time bound, 10 seconds unless the driver gives another, and a provider that does not answer in it fails that check by name: one that never closes a connection fails `revoke` and does not hang the run. The driver's `answerNext` names the grant's `lifetime` (`once`, the default, or `always`) with the rest of the person's answer. The rules above for `request()`, grants and connections that no check below runs are not tested here yet, and are no less binding.
 
 | Id | A provider must |
 | --- | --- |
