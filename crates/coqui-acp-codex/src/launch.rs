@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use coqui_acp_harness::{Access, Approvals, Launch, McpServer, McpTransport, Sandbox};
+use coqui_acp_harness::{Access, Launch, McpServer, McpTransport, Target};
 use serde_json::{Map, Value, json};
 
 /// Which thread Codex opens.
@@ -162,31 +162,18 @@ impl CodexLaunch {
     /// kept.
     pub fn apply_access(&mut self, access: Access) {
         self.access = Some(access);
+        let words = access.translate(Target::Codex);
         if self.sandbox.is_none() {
-            self.sandbox = Some(
-                match access.sandbox {
-                    Sandbox::Workspace => "workspace-write",
-                    Sandbox::ReadOnly => "read-only",
-                    _ => "danger-full-access",
-                }
-                .to_string(),
-            );
+            self.sandbox = words.sandbox.word.map(str::to_string);
         }
         if self.approval_policy.is_none() {
-            self.approval_policy = Some(
-                match access.approvals {
-                    Approvals::Edits => "on-request",
-                    Approvals::Never => "never",
-                    _ => "untrusted",
-                }
-                .to_string(),
-            );
+            self.approval_policy = words.approvals.word.map(str::to_string);
         }
-        if access.sandbox == Sandbox::Workspace {
+        if let Some(open) = words.network.word {
             let mut table = own_table(&self.thread_config, "sandbox_workspace_write");
             table
                 .entry("network_access")
-                .or_insert_with(|| json!(access.network));
+                .or_insert_with(|| json!(open == "true"));
             self.thread_config
                 .insert("sandbox_workspace_write".into(), Value::Object(table));
         }

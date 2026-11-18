@@ -32,7 +32,7 @@ pub mod stdio;
 pub mod stream;
 pub mod version;
 
-pub use access::{ACCESS_META, Access, Approvals, Sandbox};
+pub use access::{ACCESS_META, Access, Approvals, Part, Sandbox, Target, Translation};
 pub use acp::{
     AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, McpServer,
     McpTransport, Open, OpenRequest, OptionValue, Settings, Takes, UsageTracker, serve,

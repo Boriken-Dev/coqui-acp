@@ -9,7 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use coqui_acp_harness::acp::within_roots;
-use coqui_acp_harness::{Access, Approvals, Launch, Mode, Sandbox};
+use coqui_acp_harness::{Access, Launch, Mode, Target};
 
 use crate::{Error, paths};
 
@@ -285,14 +285,11 @@ impl PiLaunch {
     /// The mode a session starts in.
     #[must_use]
     pub fn start_mode(&self) -> Mode {
-        self.mode.unwrap_or_else(|| match self.access {
-            Some(access) if access.sandbox == Sandbox::ReadOnly => Mode::Plan,
-            Some(access) => match access.approvals {
-                Approvals::Edits => Mode::AcceptEdits,
-                Approvals::Never => Mode::Bypass,
-                _ => Mode::Manual,
-            },
-            None => Mode::Manual,
+        self.mode.unwrap_or_else(|| {
+            self.access
+                .and_then(|access| access.translate(Target::Pi).mode())
+                .and_then(Mode::from_id)
+                .unwrap_or(Mode::Manual)
         })
     }
 

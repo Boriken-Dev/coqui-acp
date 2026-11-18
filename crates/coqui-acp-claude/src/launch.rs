@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use coqui_acp_harness::{Access, Approvals, Launch, McpServer, McpTransport, Sandbox};
+use coqui_acp_harness::{Access, Launch, McpServer, McpTransport, Target};
 use serde_json::{Map, Value, json};
 
 /// Which session Claude Code opens.
@@ -161,16 +161,8 @@ impl ClaudeLaunch {
         if let Some(mode) = &self.permission_mode {
             return Some(mode.clone());
         }
-        let access = self.access?;
-        Some(
-            match (access.sandbox, access.approvals) {
-                (Sandbox::ReadOnly, _) => "plan",
-                (_, Approvals::Edits) => "acceptEdits",
-                (_, Approvals::Never) => "bypassPermissions",
-                _ => "default",
-            }
-            .to_string(),
-        )
+        let mode = self.access?.translate(Target::Claude).mode()?;
+        Some(mode.to_string())
     }
 
     /// Claude Code's sandbox settings for the access, as the JSON `--settings` takes; `None` when it asks for none. A
@@ -180,21 +172,7 @@ impl ClaudeLaunch {
     /// Code's sandbox has no switch that forbids every write.
     #[must_use]
     pub fn access_settings(&self) -> Option<Value> {
-        let access = self.access?;
-        let workspace = access.sandbox == Sandbox::Workspace;
-        if !workspace && access.network {
-            return None;
-        }
-        let mut sandbox = Map::new();
-        sandbox.insert("enabled".into(), json!(true));
-        if workspace {
-            sandbox.insert("allowUnsandboxedCommands".into(), json!(false));
-        } else {
-            sandbox.insert("filesystem".into(), json!({"disabled": true}));
-        }
-        if !access.network {
-            sandbox.insert("network".into(), json!({"strictAllowlist": true}));
-        }
+        let sandbox = self.access?.translate(Target::Claude).json()?;
         Some(json!({ "sandbox": sandbox }))
     }
 

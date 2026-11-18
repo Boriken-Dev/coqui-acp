@@ -11,6 +11,10 @@ use serde_json::{Map, Value, json};
 
 use coqui_acp_api::guatiao::{FromValue, Schema, ToValue};
 
+mod words;
+
+pub use words::{Part, Target, Translation};
+
 /// The `_meta` key of a session request that holds an [`Access`], as JSON: `{"sandbox": "none", "network": true,
 /// "approvals": "ask"}`; a part left out is [`Access::STANDARD`]'s.
 pub const ACCESS_META: &str = "dev.boriken.coqui.acp/access";

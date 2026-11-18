@@ -329,6 +329,10 @@ pub const fn looseness(self) -> u8                                       // 0 fo
 pub const ACCESS_META: &str = "dev.boriken.coqui.acp/access"   // a session request's `_meta` key: {"sandbox": "none"|"workspace"|"read-only", "network": bool, "approvals": "ask"|"edits"|"never"}; a part left out is STANDARD's
 pub struct Access { pub sandbox: Sandbox, pub network: bool, pub approvals: Approvals }   // ToValue, FromValue, Schema, Copy; Default = Access::STANDARD (no sandbox, network on, ask)
 pub fn Access::from_json(&Value) -> Result<Access, String>;  pub fn Access::from_meta(&Map) -> Result<Option<Access>, String>;  pub fn Access::to_json(self) -> Value
+pub enum Target { Claude, Codex, Pi, Grok, Antigravity }   // non_exhaustive; Target::ALL; .harness() -> the AOS id ("claude-code", "codex", "pi", "grok", "antigravity"); Target::from_harness(&str)
+pub const fn Access::translate(self, Target) -> Translation   // the one table: every launch and every report reads it
+pub struct Translation { pub sandbox: Part, pub network: Part, pub approvals: Part }   // .mode() -> Option<&str> (the sandbox's word, `plan` when read-only, else the approvals'), .args() -> Vec<&str>, .env() -> Vec<(&str, &str)>, .json() -> Option<Map> (the parts' JSON objects, shallow-merged)
+pub struct Part { pub word: Option<&'static str>, pub args: &'static [&'static str], pub env: &'static [(&'static str, &'static str)], pub json: Option<&'static str>, pub said: Result<&'static str, &'static str> }   // .applies(); an Err `said` (why the harness cannot express it) passes nothing. word: Codex's sandbox/approval policy, Claude Code's and Pi's mode, Codex's `network_access` ("true"/"false"); json: Claude Code's `--settings` sandbox object, Grok's session `_meta`
 pub fn up_to(loosest: Option<Mode>, allow_bypass: bool) -> Vec<Mode>    // the host's mode and every stricter one; None: Plan only; Bypass only if allowed
 pub fn widened(base: &[Mode], named: &[Mode], allow_bypass: bool) -> Vec<Mode>   // `base` and the modes a host named, Bypass only if allowed
 pub const CUSTOM: &str = "custom"
