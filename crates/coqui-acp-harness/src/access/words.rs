@@ -22,16 +22,19 @@ pub enum Target {
     Grok,
     /// Antigravity, started as `agy acp`.
     Antigravity,
+    /// OpenCode, started as `opencode acp`.
+    OpenCode,
 }
 
 impl Target {
     /// Every target.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
         Self::Pi,
         Self::Grok,
         Self::Antigravity,
+        Self::OpenCode,
     ];
 
     /// The AOS harness id the target goes by.
@@ -43,6 +46,7 @@ impl Target {
             Self::Pi => "pi",
             Self::Grok => "grok",
             Self::Antigravity => "antigravity",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -206,6 +210,7 @@ impl Access {
             Target::Pi => pi(self),
             Target::Grok => grok(self),
             Target::Antigravity => antigravity(self),
+            Target::OpenCode => opencode(self),
         }
     }
 }
@@ -385,6 +390,51 @@ const fn antigravity(access: Access) -> Translation {
     }
 }
 
+/// OpenCode's `OPENCODE_PERMISSION`, a JSON object of tool -> `allow`, `ask` or `deny` it reads when it starts. A tool set to
+/// `deny` is not offered to the model at all.
+const fn opencode(access: Access) -> Translation {
+    let sandbox = match access.sandbox {
+        Sandbox::Unrestricted => Part::said("OpenCode has no sandbox"),
+        Sandbox::ReadOnly => Part::env(
+            &[("OPENCODE_PERMISSION", r#"{"edit":"deny"}"#)],
+            "OpenCode's edit permission set to deny (OPENCODE_PERMISSION), which takes its edit and write tools away; its commands are not restricted",
+        ),
+        _ => Part::cannot(
+            "OpenCode has no sandbox: its external_directory rule asks about paths outside the session's directory unless approvals are never",
+        ),
+    };
+    let network = if access.network {
+        Part::said("OpenCode has no network setting; it is on")
+    } else {
+        Part::cannot("OpenCode has no network setting")
+    };
+    let approvals = match (access.sandbox, access.approvals) {
+        (Sandbox::ReadOnly, _) => {
+            Part::cannot("a read-only sandbox denies every edit, so nothing is asked about one")
+        }
+        (_, Approvals::Edits) => Part::env(
+            &[("OPENCODE_PERMISSION", r#"{"edit":"allow","bash":"ask"}"#)],
+            "OpenCode's edit permission allow and bash permission ask (OPENCODE_PERMISSION)",
+        ),
+        (_, Approvals::Never) => Part::env(
+            &[(
+                "OPENCODE_PERMISSION",
+                r#"{"edit":"allow","bash":"allow","read":"allow","external_directory":"allow","doom_loop":"allow"}"#,
+            )],
+            "OpenCode's permissions all allow, none asks (OPENCODE_PERMISSION)",
+        ),
+        _ => Part::env(
+            &[("OPENCODE_PERMISSION", r#"{"edit":"ask","bash":"ask"}"#)],
+            "OpenCode's edit and bash permissions ask (OPENCODE_PERMISSION)",
+        ),
+    };
+    Translation {
+        sandbox,
+        network,
+        approvals,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;
@@ -450,6 +500,10 @@ mod tests {
         assert_eq!(standard(Target::Grok).env(), vec![("GROK_SANDBOX", "off")]);
         assert_eq!(standard(Target::Grok).json(), None);
         assert!(standard(Target::Antigravity).args().is_empty());
+        assert_eq!(
+            standard(Target::OpenCode).env(),
+            vec![("OPENCODE_PERMISSION", r#"{"edit":"ask","bash":"ask"}"#)]
+        );
     }
 
     #[test]
@@ -481,6 +535,39 @@ mod tests {
         );
         assert!(agy.env().is_empty());
         assert_eq!(agy.json(), None);
+    }
+
+    #[test]
+    fn opencode_takes_its_permissions_as_one_variable() {
+        let permission = |sandbox, approvals| {
+            let mut access = Access::STANDARD;
+            access.sandbox = sandbox;
+            access.approvals = approvals;
+            let translation = access.translate(Target::OpenCode);
+            let env = translation.env();
+            assert_eq!(env.len(), 1, "{access:?}: {env:?}");
+            assert_eq!(env[0].0, "OPENCODE_PERMISSION");
+            serde_json::from_str::<Value>(env[0].1).expect("a JSON object")
+        };
+        assert_eq!(
+            permission(Sandbox::Workspace, Approvals::Edits),
+            serde_json::json!({"edit": "allow", "bash": "ask"})
+        );
+        assert_eq!(
+            permission(Sandbox::Unrestricted, Approvals::Never)["external_directory"],
+            "allow"
+        );
+        // A read-only sandbox denies edits whatever the approvals are, and says nothing else about them.
+        for approvals in [Approvals::Ask, Approvals::Edits, Approvals::Never] {
+            assert_eq!(
+                permission(Sandbox::ReadOnly, approvals),
+                serde_json::json!({"edit": "deny"})
+            );
+        }
+        let mut access = Access::STANDARD;
+        access.sandbox = Sandbox::ReadOnly;
+        assert!(!access.translate(Target::OpenCode).approvals.applies());
+        assert_eq!(access.translate(Target::OpenCode).mode(), None);
     }
 
     #[test]
