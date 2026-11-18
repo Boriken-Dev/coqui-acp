@@ -14,7 +14,8 @@ pub const API_KEY: &str = "pi-api-key";
 /// The kind of a sign-in kept in `auth.json`.
 pub const OAUTH: &str = "pi-oauth";
 
-/// The variables Pi reads a provider's key from. A key account names one.
+/// The variables Pi reads a provider's key from: what a form suggests for a key account's `variable`, which may name any
+/// other variable (a provider a later Pi adds).
 const KEY_VARIABLES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_OAUTH_TOKEN",
@@ -157,8 +158,8 @@ pub static DEF: HarnessDef = HarnessDef {
                 name: "variable",
                 required: true,
                 url: false,
-                choices: KEY_VARIABLES,
-                suggestions: &[],
+                choices: &[],
+                suggestions: KEY_VARIABLES,
             }],
             state_dir: true,
             rotates: false,
@@ -166,7 +167,8 @@ pub static DEF: HarnessDef = HarnessDef {
             renews: false,
             endpoints: &[],
             notices: &[
-                "the credential is in the environment of every program the agent runs",
+                "the credential is in the environment of every program the agent runs, in the variable the account names",
+                "Pi uses it only where it reads that variable: a provider's own key variable",
                 "the account has a Pi directory of its own, without the person's settings",
             ],
             credential_variables: &[],
@@ -306,6 +308,57 @@ mod tests {
                 "{standard}"
             );
             assert!(!alloc::format!("{applied:?}").contains(CANARY));
+        }
+    }
+
+    #[test]
+    fn a_key_account_names_any_variable_and_the_form_only_suggests() {
+        let info = catalog().kind(API_KEY).expect("key").settings.clone();
+        let variable = &coqui_acp_harness::provider::to_json(&info)["properties"]["variable"];
+        assert_eq!(variable["examples"], serde_json::json!(KEY_VARIABLES));
+        assert!(variable.get("enum").is_none(), "{variable}");
+        let key = |name: &str| {
+            AccountGrant::new("a", API_KEY)
+                .settings(coqui_acp_harness::provider::schema(
+                    &serde_json::json!({"variable": name}),
+                ))
+                .credentials(Credentials::from_iter([("api_key", CANARY)]))
+                .state_dir("/some/dir")
+        };
+        for name in [
+            "GROQ_API_KEY",
+            "ACME_GATEWAY_KEY",
+            "lower_1",
+            "PATH",
+            "LD_PRELOAD",
+        ] {
+            let applied = apply(&DEF, &key(name))
+                .unwrap_or_else(|error| panic!("{name} refused: {}", error.message()))
+                .expect("a kind");
+            let names: Vec<String> = applied
+                .environment
+                .expose()
+                .names()
+                .map(ToString::to_string)
+                .collect();
+            assert!(names.contains(&name.to_string()), "{name}: {names:?}");
+            assert!(!alloc::format!("{applied:?}").contains(CANARY));
+        }
+        for bad in [
+            "",
+            "1ST",
+            "A=B",
+            "TWO WORDS",
+            "KEY-NAME",
+            "AOS_X",
+            "aos_x",
+            "T_OVERLAY_ROOT",
+            "t_overlay_state",
+        ] {
+            let Err(error) = apply(&DEF, &key(bad)) else {
+                panic!("{bad:?} was taken");
+            };
+            assert!(!error.message().contains(CANARY));
         }
     }
 

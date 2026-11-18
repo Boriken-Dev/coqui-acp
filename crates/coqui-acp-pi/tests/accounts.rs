@@ -292,26 +292,52 @@ fn a_pi_key_goes_in_the_variable_named_by_its_setting() {
     remove(&dir);
 }
 
-/// A variable the Pi key setting does not list is refused, so a setting cannot name `PATH`.
+/// A Pi key names any variable a shell takes, a provider's own or not, and Pi gets the key in that one.
 #[test]
-fn a_pi_key_names_only_a_provider_variable() {
-    let dir = scratch("path");
-    let mut settings = Map::new();
-    settings.set("variable", Value::from("PATH"));
-    let grant = AccountGrant::new("a-pi-key", "pi-api-key")
-        .settings(Value::from(settings))
-        .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
-        .state_dir(dir.to_str().expect("text"));
-    let (sender, _received) = mpsc::channel();
-    let refused = provider().start(
-        StartRequest::builder().account(grant).build(),
-        LocalSpawner::new().files(&dir).into_object(),
-        Sink(sender).into_object(),
-    );
-    let Err(error) = refused else {
-        panic!("a variable that is no provider's was taken");
+fn a_pi_key_names_any_variable_but_the_hosts_own() {
+    let dir = scratch("any-variable");
+    let log = dir.join("fake.log");
+    let environment: Environment = [("COQUI_ACP_FAKE_PI_LOG", log.to_str().expect("text"))]
+        .into_iter()
+        .collect();
+    let key = |variable: &str| {
+        let mut settings = Map::new();
+        settings.set("variable", Value::from(variable));
+        AccountGrant::new("a-pi-key", "pi-api-key")
+            .settings(Value::from(settings))
+            .credentials(Credentials::from_iter([("api_key", "pi-key-value-77c1")]))
+            .state_dir(dir.to_str().expect("text"))
     };
-    assert_eq!(u32::from(error.status), 7, "{}", error.message());
+    // One no provider of Pi lists reaches Pi as it is named.
+    let request = StartRequest::builder()
+        .environment(environment)
+        .account(key("ACME_GATEWAY_KEY"))
+        .build();
+    start_and_close(&provider(), request, &dir);
+    let entries = logged(&log);
+    let names = names_of(entries.last().expect("a start"));
+    assert!(has(&names, "ACME_GATEWAY_KEY"), "{names:?}");
+    // What is no variable name, and what the host owns, is refused as a bad value.
+    for bad in [
+        "",
+        "1ST_KEY",
+        "TWO WORDS",
+        "A=B",
+        "AOS_OVERLAY_NAME",
+        "team_overlay_root",
+    ] {
+        let (sender, _received) = mpsc::channel();
+        let refused = provider().start(
+            StartRequest::builder().account(key(bad)).build(),
+            LocalSpawner::new().files(&dir).into_object(),
+            Sink(sender).into_object(),
+        );
+        let Err(error) = refused else {
+            panic!("{bad:?} was taken");
+        };
+        assert_eq!(u32::from(error.status), 7, "{bad:?}: {}", error.message());
+        assert!(!error.message().contains("pi-key-value-77c1"));
+    }
     remove(&dir);
 }
 
