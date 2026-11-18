@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::Secret;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
@@ -51,7 +52,7 @@ pub struct OpenCodeSettings {
     #[map(default = 67_108_864)]
     pub max_message_bytes: u64,
     /// How many bytes of an imported history the first prompt of a session carries, as context the agent reads, when the
-    /// history cannot be written into the account's data folder (no account, no folder, no private files). 0, the
+    /// history cannot be written into OpenCode's store (no private files in the account's folder, or a spawner that runs programs elsewhere). 0, the
     /// default, replays nothing: a replay sends the history to the agent's model, so it is a choice.
     #[map(default = 0)]
     pub replay_max_bytes: u64,
@@ -317,6 +318,93 @@ fn error(status: Status, why: &str) -> ProviderError {
     ProviderError::new(status, why)
 }
 
+/// The file `opencode import` reads, where it was put, and what takes it away when this is dropped.
+struct Placed {
+    /// The path the program is given.
+    path: String,
+    cleanup: Cleanup,
+}
+
+enum Cleanup {
+    /// A file in the account's folder, removed through the spawner that put it there.
+    Account(Files, String),
+    /// A folder made for the import alone, removed with what is in it.
+    Folder(PathBuf),
+}
+
+impl Placed {
+    /// `text` at `name` in the account's folder `folder`, through the spawner's private files.
+    fn in_account(
+        spawner: &Arc<Object<dyn ProcessSpawner>>,
+        folder: &str,
+        name: &str,
+        text: &str,
+    ) -> Result<Self, ProviderError> {
+        let files = Files::new(Arc::clone(spawner));
+        if !files.available() {
+            return Err(error(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "this spawner has no private files to put the session's file in",
+            ));
+        }
+        files.write(name, text)?;
+        Ok(Self {
+            path: alloc::format!("{}/{name}", folder.trim_end_matches(['/', '\\'])),
+            cleanup: Cleanup::Account(files, name.to_owned()),
+        })
+    }
+
+    /// `text` at `name` in a new folder of this machine's temporary files, made for this import and closed to others.
+    fn in_own_folder(
+        spawner: &Arc<Object<dyn ProcessSpawner>>,
+        name: &str,
+        text: &str,
+    ) -> Result<Self, ProviderError> {
+        if !spawner.describe()?.local {
+            return Err(error(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "this spawner runs programs on another machine, which cannot read a file made here, and there is no account folder to put the session's file in",
+            ));
+        }
+        let failed = |_| {
+            error(
+                Status::GUATIAO_ERR_INTERNAL,
+                "the session's file could not be written",
+            )
+        };
+        let folder = std::env::temp_dir().join(alloc::format!(
+            "coqui-acp-opencode-{}",
+            uuid::Uuid::new_v4()
+        ));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        // Not recursive: the folder is made here and is new, or the call fails.
+        builder.create(&folder).map_err(failed)?;
+        // Dropped on a failure from here on, so that the folder never outlives the call.
+        let placed = Self {
+            path: folder.join(name).to_string_lossy().into_owned(),
+            cleanup: Cleanup::Folder(folder.clone()),
+        };
+        coqui_acp_api::PrivateDir::new(folder).write(name, text.as_bytes(), true)?;
+        Ok(placed)
+    }
+}
+
+impl Drop for Placed {
+    fn drop(&mut self) {
+        match &self.cleanup {
+            Cleanup::Account(files, name) => {
+                let _ = files.remove(name);
+            }
+            Cleanup::Folder(folder) => {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+}
+
 /// The `Imported session: <id>` line `opencode import` prints, and the id.
 fn imported_id(output: &str) -> Option<&str> {
     output
@@ -482,16 +570,19 @@ impl StdioProvider {
         Ok(document)
     }
 
-    /// Writes `session`'s history into the account's data folder as a session of OpenCode's own: the file `opencode import`
-    /// reads is made there through the spawner and the program is run on it in the session's working directory (the
-    /// directory it gives the session), and the file is removed again. The session is then `ses_` and the UUID's hex digits
-    /// ([`opencode_history::native_id_of`]), which the relay turns back into the UUID for the host.
+    /// Writes `session`'s history into OpenCode's store as a session of its own: the file `opencode import` reads is made and
+    /// the program is run on it in the session's working directory (the directory it gives the session), and the file is
+    /// removed again. The store is the account's data folder when the account keeps one, whose private files the file is put
+    /// in through the spawner; with no account, or one that keeps none (the machine's own sign-in), it is the one the
+    /// program finds from the environment, and the file is made in a folder for this import alone, closed to others and
+    /// removed with the file, which only a spawner that runs on this machine can use. The session is then `ses_` and the
+    /// UUID's hex digits ([`opencode_history::native_id_of`]), which the relay turns back into the UUID for the host.
     ///
     /// # Errors
     ///
-    /// `GUATIAO_ERR_UNSUPPORTED` with no account or no private files to put the file in; `GUATIAO_ERR_BAD_VALUE` for an id
-    /// that is not a UUID or a history this provider cannot read; `GUATIAO_ERR_INTERNAL` when the program does not take
-    /// the file.
+    /// `GUATIAO_ERR_UNSUPPORTED` with no private files in the account's folder to put the file in, or, with no folder of the
+    /// account's, a spawner that runs programs elsewhere; `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID or a history
+    /// this provider cannot read; `GUATIAO_ERR_INTERNAL` when the program does not take the file.
     pub(super) fn import_opencode(
         &self,
         session: &SessionImport,
@@ -499,56 +590,43 @@ impl StdioProvider {
         spawner: Object<dyn ProcessSpawner>,
     ) -> Result<ImportReport, ProviderError> {
         let def = self.def();
-        let Some(grant) = &session.account else {
-            return Err(error(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "a session is written into the data folder of an account, and this one has no account",
-            ));
-        };
-        let Some(applied) = accounts::apply(def, grant)? else {
-            return Err(error(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "this account keeps no data folder of its own to write a session into",
-            ));
-        };
-        let Some(folder) = grant.state_dir.as_deref() else {
-            return Err(error(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "this account has no data folder of its own to write a session into",
-            ));
+        let account = match &session.account {
+            Some(grant) => accounts::apply(def, grant)?.map(|applied| (grant, applied)),
+            None => None,
         };
         let imported =
             opencode_import::import(history, &session.session_id, &session.working_directory)
                 .map_err(|why| error(Status::GUATIAO_ERR_BAD_VALUE, &why))?;
         let spawner = Arc::new(spawner);
-        let files = Files::new(Arc::clone(&spawner));
-        if !files.available() {
-            return Err(error(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "this spawner has no private files to put the session's file in",
-            ));
-        }
         let name = alloc::format!("imports/{}.json", imported.native_id);
-        files.write(&name, &imported.text)?;
+        let placed = match &account {
+            Some((grant, _)) => {
+                let Some(folder) = grant.state_dir.as_deref() else {
+                    return Err(error(
+                        Status::GUATIAO_ERR_UNSUPPORTED,
+                        "this account has no data folder of its own to write a session into",
+                    ));
+                };
+                Placed::in_account(&spawner, folder, &name, &imported.text)?
+            }
+            None => Placed::in_own_folder(&spawner, &name, &imported.text)?,
+        };
         let launch = self
             .opencode_launch(
-                [
-                    "import".to_owned(),
-                    alloc::format!("{}/{name}", folder.trim_end_matches(['/', '\\'])),
-                ],
+                ["import".to_owned(), placed.path.clone()],
                 session.environment.expose(),
-                Some(&applied),
+                account.as_ref().map(|(_, applied)| applied),
             )
             .cwd(&session.working_directory);
         let done = cli::run(
-            &ThroughSpawner::shared(spawner),
+            &ThroughSpawner::shared(Arc::clone(&spawner)),
             &launch,
             None,
             EXPORT_LIMIT,
             EXPORT_MAX_BYTES,
         );
         // The file holds the history: it goes whatever came of the import.
-        let _ = files.remove(&name);
+        drop(placed);
         let done = done.map_err(|_| {
             error(
                 Status::GUATIAO_ERR_INTERNAL,

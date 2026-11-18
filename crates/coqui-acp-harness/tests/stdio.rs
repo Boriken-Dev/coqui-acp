@@ -196,6 +196,9 @@ fn the_suite_inside() {
         let outcome = Contract::new(format!("stdio {harness} {kind}"))
             .program_agent(true)
             .imports(false)
+            // OpenCode writes a session into the store its environment names (the home's data folder, for the stand-in),
+            // which the stand-in cannot hold a session of the protocol's making in; the others seed none.
+            .imports_into_a_store(own || harness == "opencode")
             .holds(Vec::new())
             .account(kind)
             .run(&provider);

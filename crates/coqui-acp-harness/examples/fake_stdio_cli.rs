@@ -100,11 +100,20 @@ fn directory(name: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// OpenCode's data folder: `XDG_DATA_HOME`, or `.local/share` of the home, which is where the real program puts it with no
+/// `XDG_DATA_HOME` on every system measured (macOS's `Library` is not used).
+fn data_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+            Some(PathBuf::from(home).join(".local").join("share"))
+        })
+}
+
 /// The fixture folder of OpenCode's sessions, when the data folder has one.
 fn store() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var_os("XDG_DATA_HOME")?)
-        .join("opencode")
-        .join("fixture");
+    let dir = data_home()?.join("opencode").join("fixture");
     dir.is_dir().then_some(dir)
 }
 
@@ -189,7 +198,7 @@ fn export(id: &str) -> ! {
 /// file (ids that start `ses`, `msg` and `prt`, the keys it needs), and the session's directory is the working directory
 /// of this process, as the real program's is.
 fn import(file: &str) -> ! {
-    let Some(base) = std::env::var_os("XDG_DATA_HOME") else {
+    let Some(base) = data_home() else {
         eprintln!("no data folder");
         exit(3);
     };
@@ -252,7 +261,7 @@ fn import(file: &str) -> ! {
         }
     }
     let id = info["id"].as_str().unwrap_or_default().to_owned();
-    let folder = PathBuf::from(base).join("opencode").join("fixture");
+    let folder = base.join("opencode").join("fixture");
     let _ = std::fs::create_dir_all(&folder);
     let directory = std::env::current_dir()
         .map(|dir| dir.to_string_lossy().into_owned())

@@ -709,6 +709,14 @@ fn sessions(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Out
         let refused = import(harness, &fresh_uuid(), &place.root, "")?;
         return match refused {
             Err((UNSUPPORTED, why)) if !why.trim().is_empty() => Ok(()),
+            Ok(report) if contract.store_imports => {
+                ensure!(
+                    report.seeded_from.is_none(),
+                    "an empty seed said it started at {:?}",
+                    report.seeded_from
+                );
+                Ok(())
+            }
             Err((code, why)) => Err(format!(
                 "a harness that cannot import refused with {code} ({why:?}), not UNSUPPORTED with a reason"
             )),

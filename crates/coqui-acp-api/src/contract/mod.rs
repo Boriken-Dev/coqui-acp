@@ -24,7 +24,9 @@
 //! session, exports what its sessions said in the standard format (a header line with `version`
 //! and a `digest`, then the turns) in pages of whole lines, and `session/load` replays a session's
 //! updates. A provider that cannot import
-//! is run with [`Contract::imports`] off and must refuse with a reason.
+//! is run with [`Contract::imports`] off and must refuse with a reason; one that imports only into the store its
+//! program keeps (a program that has a command that takes a session in, and no way to seed one it did not make through
+//! the protocol) is also run with [`Contract::imports_into_a_store`], and may then seed an empty history instead.
 //!
 //! [`check`](crate::check) runs the same suite on a library file or a source file, for a
 //! provider written in any language Guatiao loads.
@@ -58,6 +60,7 @@ pub struct Contract {
     holds: Vec<Requirement>,
     message_limit: Option<usize>,
     imports: bool,
+    store_imports: bool,
     account: Option<String>,
     program_agent: bool,
 }
@@ -108,6 +111,7 @@ impl Contract {
             holds: alloc::vec![Requirement::new(READ_ONLY), Requirement::new(NO_COMMANDS)],
             message_limit: None,
             imports: true,
+            store_imports: false,
             account: None,
             program_agent: false,
         }
@@ -137,6 +141,16 @@ impl Contract {
     /// `import_session` with `GUATIAO_ERR_UNSUPPORTED` and a reason.
     pub const fn imports(mut self, imports: bool) -> Self {
         self.imports = imports;
+        self
+    }
+
+    /// For a provider run with [`imports`](Self::imports) off that writes a session into the store its program keeps: the
+    /// seed of an empty history with no account may then succeed (and report no point it started at) instead of being
+    /// refused `GUATIAO_ERR_UNSUPPORTED`; any other answer fails. The session's round trip through the program is the
+    /// provider's own tests', since the suite's stand-in cannot make a session through the protocol that the
+    /// store would hold.
+    pub const fn imports_into_a_store(mut self, store_imports: bool) -> Self {
+        self.store_imports = store_imports;
         self
     }
 

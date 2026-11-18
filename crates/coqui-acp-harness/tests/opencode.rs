@@ -1034,38 +1034,97 @@ fn a_history_is_written_into_the_accounts_folder_and_the_session_is_the_hosts_uu
     let _ = std::fs::remove_dir_all(&work);
 }
 
-/// With nowhere to write the session it is not written, and the reason is the account's; only when the provider is set
-/// to replay does it fall back, and then the history is context in a prompt.
+/// With no account the session goes into the store the environment names, through a file made in a folder of this
+/// import's own, which is removed with the file; the program is run on it in the session's directory.
 #[test]
-fn a_session_with_no_account_folder_is_refused_or_replayed_as_the_provider_is_set() {
-    let work = scratch("import-no-account");
-    let spawner =
-        || -> Object<dyn ProcessSpawner> { LocalSpawner::new().files(&work).into_object() };
-    let refused = provider()
+fn a_session_with_no_account_is_written_into_the_environments_store_through_a_folder_of_its_own() {
+    let store = scratch("import-own-store");
+    let work = scratch("import-own-work");
+    let log = store.join("fake.log");
+    let environment: Environment = [
+        ("COQUI_ACP_FAKE_STDIO_LOG", text(&log)),
+        ("XDG_DATA_HOME", text(&store)),
+    ]
+    .into_iter()
+    .collect();
+    let report = provider()
         .import_session(
-            SessionImport::new(HOST_ID, text(&work), claude_history()),
-            spawner(),
+            SessionImport::new(HOST_ID, text(&work), claude_history()).environment(environment),
+            LocalSpawner::new().into_object(),
         )
-        .expect_err("no account to write into");
-    assert_eq!(
-        u32::from(refused.status),
-        u32::from(Status::GUATIAO_ERR_UNSUPPORTED)
-    );
+        .expect("imported with no account");
     assert!(
-        refused.message().contains("no account"),
-        "{}",
-        refused.message()
+        !report.replayed(),
+        "it is a session of OpenCode's, not a replay"
     );
-    // Not a UUID: refused whatever else is so.
+    let entries = logged(&log);
+    let entry = entries.last().expect("a run");
+    assert_eq!(entry["args"][0], json!("import"));
+    let file = Path::new(entry["args"][1].as_str().expect("a path"));
+    assert!(file.is_absolute(), "{file:?}");
+    assert!(
+        file.ends_with(format!("imports/{STORED_ID}.json")),
+        "{file:?}"
+    );
+    let folder = file.parent().and_then(Path::parent).expect("its folder");
+    assert!(
+        folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("coqui-acp-opencode-")),
+        "{folder:?}"
+    );
+    assert_ne!(folder, store, "the file is not in the store");
+    assert!(!folder.exists(), "the folder of the import is removed");
+    assert_eq!(
+        std::fs::canonicalize(entry["cwd"].as_str().expect("a directory")).ok(),
+        std::fs::canonicalize(&work).ok()
+    );
+    assert_eq!(entry["directories"]["XDG_DATA_HOME"], json!(text(&store)));
+    // The history that was in the file is the session's.
+    let stored = fixtures(&store).join(format!("{STORED_ID}.json"));
+    let session: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&stored).expect("stored")).expect("JSON");
+    assert_eq!(
+        session["turns"],
+        json!([["list the files", "two files"], ["thanks", "welcome"]])
+    );
+    // A history that is no UUID's is refused whatever else is so.
     let bad = provider()
         .import_session(
-            SessionImport::new("ses_abc", text(&work), claude_history()).account(key_grant(&work)),
-            spawner(),
+            SessionImport::new("ses_abc", text(&work), claude_history()),
+            LocalSpawner::new().into_object(),
         )
         .expect_err("not a UUID");
     assert_eq!(
         u32::from(bad.status),
         u32::from(Status::GUATIAO_ERR_BAD_VALUE)
+    );
+    let _ = std::fs::remove_dir_all(&store);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// An account's folder with no private files to put the file in is not written into, and the reason is the spawner's; only
+/// when the provider is set to replay does it fall back, and then the history is context in a prompt.
+#[test]
+fn a_session_with_no_private_files_for_the_accounts_folder_is_refused_or_replayed_as_the_provider_is_set()
+ {
+    let work = scratch("import-no-files");
+    let spawner = || -> Object<dyn ProcessSpawner> { LocalSpawner::new().into_object() };
+    let refused = provider()
+        .import_session(
+            SessionImport::new(HOST_ID, text(&work), claude_history()).account(key_grant(&work)),
+            spawner(),
+        )
+        .expect_err("nowhere to put the file");
+    assert_eq!(
+        u32::from(refused.status),
+        u32::from(Status::GUATIAO_ERR_UNSUPPORTED)
+    );
+    assert!(
+        refused.message().contains("private files"),
+        "{}",
+        refused.message()
     );
     let mut settings = OpenCodeSettings::new();
     settings.executable = Some(fake());
@@ -1073,7 +1132,7 @@ fn a_session_with_no_account_folder_is_refused_or_replayed_as_the_provider_is_se
     let replaying = OpenCodeProvider::new(settings);
     let report = replaying
         .import_session(
-            SessionImport::new(HOST_ID, text(&work), claude_history()),
+            SessionImport::new(HOST_ID, text(&work), claude_history()).account(key_grant(&work)),
             spawner(),
         )
         .expect("replayed");

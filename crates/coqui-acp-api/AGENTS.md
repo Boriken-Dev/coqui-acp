@@ -456,7 +456,7 @@ Every method takes and answers plain data; `start` also takes the spawner and th
 ```rust
 pub struct contract::Contract;   // #[must_use]
 Contract::new(name) .version(u16 /* 1 */) .holds(Vec<Requirement> /* read_only, no_commands */) .message_limit(bytes)
-    .imports(bool /* true */)  .account(kind)  .program_agent(bool /* false */)
+    .imports(bool /* true */)  .imports_into_a_store(bool /* false */)  .account(kind)  .program_agent(bool /* false */)
     .run(&dyn AcpHarness) -> Result<(), contract::Failures>
 contract::spawner_files(&dyn ProcessSpawner, root: &Path) -> Result<(), contract::Failures>   // a host's spawner, in its directory
 #[non_exhaustive] pub struct contract::Failure { pub check: &'static str, pub message: String }
