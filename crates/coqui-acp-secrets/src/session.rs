@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use coqui_acp::secret::{Capability, IdentityId, Prover, SecretValue, Verifier};
+use coqui_acp::secret::{Capability, IdentityId, Prover, Verifier};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -53,7 +53,7 @@ struct State {
 
 struct Entry {
     field: String,
-    value: SecretValue,
+    value: Zeroizing<Vec<u8>>,
     made: u64,
 }
 
@@ -104,7 +104,7 @@ impl Core {
     /// Keeps the opened secrets under new handles: `(field, handle)`. Refused when the session ended meanwhile.
     pub(crate) fn store(
         &self,
-        secrets: impl IntoIterator<Item = (String, SecretValue)>,
+        secrets: impl IntoIterator<Item = (String, Zeroizing<Vec<u8>>)>,
         settings: &Settings,
         now: u64,
     ) -> Result<Vec<(String, String)>, Error> {
@@ -158,7 +158,7 @@ impl Core {
         state
             .handles
             .get(handle)
-            .map(|entry| Zeroizing::new(entry.value.expose().to_vec()))
+            .map(|entry| Zeroizing::new(entry.value.to_vec()))
             .ok_or(Error::UnknownHandle)
     }
 
@@ -171,7 +171,7 @@ impl Core {
             state
                 .handles
                 .iter()
-                .map(|(handle, entry)| (handle.as_str(), entry.value.expose())),
+                .map(|(handle, entry)| (handle.as_str(), entry.value.as_slice())),
             settings.scrub_min_piece,
         )
     }

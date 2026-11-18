@@ -18,7 +18,9 @@ mod text;
 mod tools;
 
 pub use error::Error;
-pub use host::{Action, Approval, Decision, Event, FOLDER_NOTICE, Frontend, Mode};
+pub use host::{
+    Action, Approval, Decision, Event, FOLDER_NOTICE, Frontend, KEEP_FIELD, Keep, Mode,
+};
 pub use run::{
     CommandLine, CommandOutput, CommandSpec, Launch, Process, ProcessRunner, Runner, Started,
     Starter, set_starter,

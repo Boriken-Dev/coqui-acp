@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use zeroize::Zeroizing;
+
 use coqui_acp::secret::{
     Capability, IdentityId, RequestParams, RequestReply, ShowDeliver, ShowDone, ShowOpen,
     ShowOpened,
@@ -51,6 +53,49 @@ pub trait Frontend: Send + Sync {
     /// that has a permission decider answers from the same one here; the default is [`Mode::Ask`].
     fn mode(&self) -> Mode {
         Mode::Ask
+    }
+
+    /// The value the frontend already holds for the secret question `field`, so a request whose every question is a secret one it
+    /// holds is answered without putting anything to the person. A frontend that remembers what the person typed, or reads a vault
+    /// of theirs, answers here; the default holds nothing. It is called on the thread of the tool call and must not wait on the
+    /// person.
+    fn recall(&self, _field: &str) -> Option<Zeroizing<Vec<u8>>> {
+        None
+    }
+
+    /// The ways the person may choose to have a secret they type kept, the first being what the form starts on. When this is not
+    /// empty the form carries one more question, [`KEEP_FIELD`], offering them, and the answer is handed to
+    /// [`Frontend::remember`] with each value typed. The default offers none.
+    fn keeps(&self) -> Vec<Keep> {
+        Vec::new()
+    }
+
+    /// A secret the person typed, with the id of the [`Keep`] they chose. Not called when the form offered none. A failure is the
+    /// frontend's to report: the value is already the session's.
+    fn remember(&self, _field: &str, _value: &[u8], _keep: &str) {}
+}
+
+/// The name of the question the form carries when the frontend offers [`Keep`]s. An agent's own question of that name is refused.
+pub const KEEP_FIELD: &str = "_keep";
+
+/// One way a typed secret may be kept, as the form offers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Keep {
+    /// What the frontend is told when the person picks it.
+    pub id: String,
+    /// What the form calls it.
+    pub label: String,
+}
+
+impl Keep {
+    /// The way `id`, called `label`.
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+        }
     }
 }
 
@@ -216,6 +261,15 @@ pub enum Event {
     Shown {
         /// The session.
         session_id: String,
+    },
+    /// A request was answered from what the frontend already held, without asking the person.
+    Recalled {
+        /// The session.
+        session_id: String,
+        /// The handle.
+        handle: String,
+        /// The field it answers.
+        secret: String,
     },
     /// A session ended and its secrets were cleared.
     Ended {

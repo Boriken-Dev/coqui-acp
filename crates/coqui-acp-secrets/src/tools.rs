@@ -10,7 +10,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::files::shown;
-use crate::host::FOLDER_NOTICE;
+use crate::host::{FOLDER_NOTICE, KEEP_FIELD, Keep};
 use crate::run::{CommandLine, CommandSpec};
 use crate::session::{Core, Inner};
 use crate::{Action, Approval, Error, Event, program};
@@ -60,6 +60,31 @@ impl fmt::Debug for SessionTools {
             .field("secrets", &self.core.handle_count())
             .finish_non_exhaustive()
     }
+}
+
+/// `schema` with the question that offers `keeps` added, answered by default with the first.
+fn with_keep(schema: &str, keeps: &[Keep]) -> Result<String, Error> {
+    let mut value: Value =
+        serde_json::from_str(schema).map_err(|_| Error::Arguments("the schema is not JSON"))?;
+    let root = value
+        .as_object_mut()
+        .ok_or(Error::Arguments("the schema is not an object"))?;
+    let options: Vec<Value> = keeps
+        .iter()
+        .map(|keep| json!({"const": keep.id, "title": keep.label}))
+        .collect();
+    let first = keeps
+        .first()
+        .map(|keep| keep.id.clone())
+        .unwrap_or_default();
+    root.get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .ok_or(Error::Arguments("the schema has no properties"))?
+        .insert(
+            KEEP_FIELD.to_owned(),
+            json!({"type": "string", "title": "Keep it", "oneOf": options, "default": first}),
+        );
+    Ok(value.to_string())
 }
 
 const REQUEST: &str = "secret_request";
@@ -212,7 +237,7 @@ impl SessionTools {
     fn request(&self, args: &Value) -> Result<Value, Error> {
         let settings = &self.inner.settings;
         self.require(self.core.capability.request, "secret requests")?;
-        let ask = Ask::read(args, settings, false)?;
+        let mut ask = Ask::read(args, settings, false)?;
         let form = Form::parse_text(&ask.schema, &settings.limits)?;
         let secrets = form.fields.iter().filter(|field| field.secret).count();
         if secrets == 0 {
@@ -222,6 +247,18 @@ impl SessionTools {
         }
         self.core.check_room(secrets, settings, self.inner.now())?;
         let _busy = self.core.busy()?;
+        if let Some(held) = self.recalled(&form)? {
+            return Ok(held);
+        }
+        let keeps = self.core.frontend.keeps();
+        if !keeps.is_empty() {
+            if form.field(KEEP_FIELD).is_some() {
+                return Err(Error::Arguments(
+                    "the name _keep is the host's own question: ask it under another name",
+                ));
+            }
+            ask.schema = with_keep(&ask.schema, &keeps)?;
+        }
         let request_id = Uuid::new_v4().to_string();
         let context = Context {
             session_id: self.core.id.clone(),
@@ -263,7 +300,7 @@ impl SessionTools {
             return Ok(json!({"status": status}));
         };
         let now = self.inner.now();
-        let opened = receiver.open_values(
+        let mut opened = receiver.open_values(
             &self.inner.verifier,
             &self.core.owner,
             &plain,
@@ -271,7 +308,28 @@ impl SessionTools {
             &auth,
             now,
         )?;
-        let made = self.core.store(opened.secrets, settings, now)?;
+        let kept = if keeps.is_empty() {
+            None
+        } else {
+            let chosen = opened
+                .plain
+                .remove(KEEP_FIELD)
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .filter(|chosen| keeps.iter().any(|keep| &keep.id == chosen))
+                .ok_or(Error::Arguments("the way to keep it was not one offered"))?;
+            Some(chosen)
+        };
+        let typed: Vec<(String, Zeroizing<Vec<u8>>)> = opened
+            .secrets
+            .iter()
+            .map(|(field, value)| (field.clone(), Zeroizing::new(value.expose().to_vec())))
+            .collect();
+        let made = self.core.store(typed.iter().cloned(), settings, now)?;
+        if let Some(kept) = &kept {
+            for (field, value) in &typed {
+                self.core.frontend.remember(field, value, kept);
+            }
+        }
         let mut handles = Map::new();
         for (field, handle) in made {
             self.inner.emit(&Event::Stored {
@@ -282,6 +340,37 @@ impl SessionTools {
             handles.insert(field, Value::String(handle));
         }
         Ok(json!({"status": "accepted", "plain": opened.plain, "handles": handles}))
+    }
+
+    /// The answer to a request whose every question is a secret one the frontend holds already, or `None` when the person has to be
+    /// asked: a plain question, or a secret the frontend does not hold, needs them.
+    fn recalled(&self, form: &Form) -> Result<Option<Value>, Error> {
+        if form.fields.iter().any(|field| !field.secret) {
+            return Ok(None);
+        }
+        let mut held = Vec::new();
+        for field in &form.fields {
+            let name = &field.field.name;
+            match self.core.frontend.recall(name) {
+                Some(value) => held.push((name.clone(), value)),
+                None => return Ok(None),
+            }
+        }
+        let made = self
+            .core
+            .store(held, &self.inner.settings, self.inner.now())?;
+        let mut handles = Map::new();
+        for (field, handle) in made {
+            self.inner.emit(&Event::Recalled {
+                session_id: self.core.id.clone(),
+                handle: handle.clone(),
+                secret: field.clone(),
+            });
+            handles.insert(field, Value::String(handle));
+        }
+        Ok(Some(
+            json!({"status": "accepted", "plain": {}, "handles": handles}),
+        ))
     }
 
     fn admit(&self, id: &str, now: u64) -> Result<(), Error> {

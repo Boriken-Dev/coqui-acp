@@ -33,8 +33,16 @@ pub trait Frontend: Send + Sync {
     fn show_open(&self, open: &ShowOpen) -> Result<ShowOpened, Error>;            // _coqui_acp/secret_show_open
     fn show_deliver(&self, deliver: &ShowDeliver) -> Result<ShowDone, Error>;     // _coqui_acp/secret_show_deliver
     fn approve(&self, approval: &Approval) -> Result<Decision, Error>;
+    fn mode(&self) -> Mode;                           // default Mode::Ask
+    fn recall(&self, field: &str) -> Option<Zeroizing<Vec<u8>>>;          // default None
+    fn keeps(&self) -> Vec<Keep>;                     // default empty
+    fn remember(&self, field: &str, value: &[u8], keep: &str);            // default does nothing
 }
+pub struct Keep { pub id: String, pub label: String }   // #[non_exhaustive]; Keep::new(id, label)
+pub const KEEP_FIELD: &str = "_keep";
 ```
+
+- **A frontend that holds secrets.** `recall` is asked for every question of a `secret_request` whose questions are all secret ones: when it holds each, the request is answered with handles at once, nothing is put to the person and `Event::Recalled` is emitted (a form with a plain question, or a secret not held, is asked whole). `keeps` makes the form carry one more question, `_keep` (a choice, the first `Keep` the default); its answer is taken out of `plain` and handed with each typed value to `remember`, so a frontend keeps what the person chose (this once, this session, until it closes, a time). An answer that is none of the offered ids refuses the request and keeps nothing; an agent's own question named `_keep` is refused. `recall` must not wait on the person, and a frontend's failure to keep is its own to report: the value is the session's already.
 
 - **Owner-only.** A session has one frontend and nothing else is ever asked; each answer's binding must verify for `identity()` and for the host's own id, so an answer from another attached client is refused (`Error::Secret(UnknownIdentity)`).
 - **A use is a permission, and the session's mode decides.** `Frontend::mode()` (default `Mode::Ask`) is read at every use. In `Mode::Bypass` (Full access) a use is approved without asking (`Event::Bypassed`); in any other mode `approve` is asked, with allow once or allow for the session, as on a permission card. A host with a permission decider answers `mode()` from the same one. Only an earlier `Decision::Session` for the exact same action on the exact same secret skips the question. A refusal, or no answer, means the action does not run. **A session allowance and Bypass both trust the contents of the folder the command runs in**: the scripts, hooks and configuration there belong to the agent, which can change them, and whatever the command runs from there can read the value. Every approval of a command carries `notice: Some(FOLDER_NOTICE)`; show it.

@@ -23,7 +23,8 @@ use coqui_acp::secret::{
 };
 use coqui_acp_secrets::{
     Action, Approval, CommandOutput, CommandSpec, Decision, Error, Event, FOLDER_NOTICE, Frontend,
-    Mode, ProcessRunner, Runner, Secrets, SecretsBuilder, SessionConfig, SessionTools, Settings,
+    KEEP_FIELD, Keep, Mode, ProcessRunner, Runner, Secrets, SecretsBuilder, SessionConfig,
+    SessionTools, Settings,
 };
 use data_encoding::{HEXLOWER, HEXUPPER};
 use serde_json::{Value, json};
@@ -126,6 +127,11 @@ struct Person {
     bypass: std::sync::atomic::AtomicBool,
     /// Runs while the person is deciding.
     while_deciding: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// What the frontend holds already, by field.
+    held: Mutex<BTreeMap<String, String>>,
+    /// The ways to keep a typed secret the form offers, and what the frontend was told to keep: field, value, way.
+    keeps: Mutex<Vec<Keep>>,
+    kept: Mutex<Vec<(String, String, String)>>,
 }
 
 struct Keys {
@@ -167,6 +173,9 @@ impl Person {
             show_answer: Mutex::default(),
             while_deciding: Mutex::default(),
             bypass: std::sync::atomic::AtomicBool::new(false),
+            held: Mutex::default(),
+            keeps: Mutex::default(),
+            kept: Mutex::default(),
         })
     }
 
@@ -299,6 +308,26 @@ impl Frontend for Person {
                 .collect(),
         );
         Ok(ShowDone::Shown)
+    }
+
+    fn recall(&self, field: &str) -> Option<Zeroizing<Vec<u8>>> {
+        self.held
+            .lock()
+            .unwrap()
+            .get(field)
+            .map(|value| Zeroizing::new(value.clone().into_bytes()))
+    }
+
+    fn keeps(&self) -> Vec<Keep> {
+        self.keeps.lock().unwrap().clone()
+    }
+
+    fn remember(&self, field: &str, value: &[u8], keep: &str) {
+        self.kept.lock().unwrap().push((
+            field.to_owned(),
+            String::from_utf8(value.to_vec()).unwrap(),
+            keep.to_owned(),
+        ));
     }
 
     fn mode(&self) -> Mode {
@@ -2123,4 +2152,133 @@ fn a_background_process_does_not_outlive_a_command_that_exited() {
         .unwrap()
         .success();
     assert!(!alive, "the background process {pid} is still running");
+}
+
+fn token_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"token": {"type": "string", "writeOnly": true}},
+        "required": ["token"]
+    })
+}
+
+#[test]
+fn a_request_for_secrets_the_frontend_holds_is_answered_without_asking_the_person() {
+    let setup = setup("recalled");
+    setup
+        .person
+        .held
+        .lock()
+        .unwrap()
+        .insert("token".to_owned(), PASSWORD.to_owned());
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "The deploy needs a token", "schema": token_schema()}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(result["status"], "accepted");
+    let handle = result["handles"]["token"].as_str().unwrap().to_owned();
+    assert_eq!(setup.person.requests.load(Ordering::SeqCst), 0);
+    assert!(leaks(&result.to_string(), PASSWORD).is_empty());
+    assert!(setup.events.lock().unwrap().iter().any(
+        |event| matches!(event, Event::Recalled { handle: seen, secret, .. } if *seen == handle && secret == "token")
+    ));
+    // The handle is the held value's: a use runs with it, and the output is scrubbed.
+    setup.person.will_decide(&[Decision::Once]);
+    let (used, error) = call(
+        &setup.tools,
+        "secret_use",
+        &json!({"handle": handle, "env": {"name": "TOKEN", "command": "echo"}}),
+    );
+    assert!(!error, "{used}");
+    assert!(leaks(&used.to_string(), PASSWORD).is_empty(), "{used}");
+    assert_eq!(setup.runs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_request_with_a_plain_question_or_a_secret_not_held_is_still_put_to_the_person() {
+    let setup = setup("not_recalled");
+    setup
+        .person
+        .held
+        .lock()
+        .unwrap()
+        .insert("password".to_owned(), "held".to_owned());
+    // `user` is a plain question and `token` is not held: the person is asked for the whole form.
+    setup
+        .person
+        .will_type(r#"{"user":"ana"}"#, &[("password", PASSWORD)]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": schema()}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(setup.person.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(result["plain"]["user"], "ana");
+}
+
+#[test]
+fn a_form_offers_the_ways_to_keep_a_secret_and_the_frontend_is_told_the_one_chosen() {
+    let setup = setup("keeps");
+    *setup.person.keeps.lock().unwrap() = vec![
+        Keep::new("once", "This once"),
+        Keep::new("session", "This session"),
+    ];
+    setup.person.will_type(
+        &format!(r#"{{"{KEEP_FIELD}":"session"}}"#),
+        &[("token", PASSWORD)],
+    );
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": token_schema()}),
+    );
+    assert!(!error, "{result}");
+    // The form that went to the person carried the question; the agent's answer does not.
+    let wire = setup.person.wire.lock().unwrap().join("\n");
+    assert!(
+        wire.contains(KEEP_FIELD) && wire.contains("This session"),
+        "{wire}"
+    );
+    assert!(result["plain"].get(KEEP_FIELD).is_none(), "{result}");
+    assert!(result["handles"]["token"].is_string());
+    assert_eq!(
+        *setup.person.kept.lock().unwrap(),
+        vec![(
+            "token".to_owned(),
+            PASSWORD.to_owned(),
+            "session".to_owned()
+        )]
+    );
+    assert!(leaks(&result.to_string(), PASSWORD).is_empty());
+}
+
+#[test]
+fn an_answer_to_the_keep_question_that_was_not_offered_is_refused_and_a_name_the_host_owns_is_not_the_agents()
+ {
+    let setup = setup("keeps_refused");
+    *setup.person.keeps.lock().unwrap() = vec![Keep::new("once", "This once")];
+    setup.person.will_type(
+        &format!(r#"{{"{KEEP_FIELD}":"forever"}}"#),
+        &[("token", PASSWORD)],
+    );
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": token_schema()}),
+    );
+    assert!(error, "{result}");
+    assert!(setup.person.kept.lock().unwrap().is_empty());
+    assert_eq!(setup.tools.handle_count(), 0, "nothing was kept");
+    let mut own = token_schema();
+    own["properties"][KEEP_FIELD] = json!({"type": "string"});
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": own}),
+    );
+    assert!(error, "{result}");
+    assert_eq!(setup.person.requests.load(Ordering::SeqCst), 1);
 }
