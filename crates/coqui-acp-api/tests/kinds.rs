@@ -420,7 +420,13 @@ fn every_models_keys_are_pinned() {
         ),
         (
             "AccountCatalog",
-            &["accepts", "credential_variables", "kinds", "logins"],
+            &[
+                "accepts",
+                "credential_variables",
+                "kinds",
+                "logins",
+                "secret_variables",
+            ],
             &[],
         ),
         ("Accepted", &["slots", "standard"], &["standard"]),

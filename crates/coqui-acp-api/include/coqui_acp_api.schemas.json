@@ -2805,6 +2805,14 @@
         "description": "Every variable any of its kinds reads: applying an account clears all of them, then sets the chosen kind's.",
         "default": []
       },
+      "secret_variables": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The part of `credential_variables` that is itself a credential: a key, a token, a secret, or what names where one is kept (a configuration or credentials file, a profile). Not an endpoint, a switch that picks a cloud provider, a region or a project, which `credential_variables` also lists because applying an account clears them. A host that refuses a variable because it would stand in for the account's credential reads this and leaves the endpoints and switches to the person. A catalog that does not say lists none; every name here is also in `credential_variables`.",
+        "default": []
+      },
       "accepts": {
         "type": "array",
         "items": {
