@@ -55,7 +55,7 @@ impl Target {
 
 /// What one setting of an access became for a target.
 ///
-/// A part whose [`said`](Self::said) is an error passes nothing: its other fields are empty.
+/// A part whose `said` is an error passes nothing: its other fields are empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Part {
