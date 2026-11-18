@@ -83,6 +83,20 @@ void main() {
       expect(followed, [('app:/missions', 'open it')]);
     });
 
+    testWidgets('a link is drawn in the accent of the look, underlined', (tester) async {
+      final look = _look();
+      await tester.pumpWidget(host(const AgentMarkdown(text: 'a [link](https://example.org/x) here'), look: look.copyWith(accent: const Color(0xFF00AA55))));
+      TextSpan? link;
+      for (final rich in tester.widgetList<RichText>(find.byType(RichText))) {
+        rich.text.visitChildren((span) {
+          if (span is TextSpan && span.recognizer != null) link = span;
+          return true;
+        });
+      }
+      expect(link?.style?.color, const Color(0xFF00AA55));
+      expect(link?.style?.decoration, TextDecoration.underline);
+    });
+
     testWidgets('a host\'s syntax and builder give its own words a meaning', (tester) async {
       await tester.pumpWidget(
         host(AgentMarkdown(text: 'see M-12 now', inlineSyntaxes: [_Reference()], builders: {'ref': _RefBuilder()})),

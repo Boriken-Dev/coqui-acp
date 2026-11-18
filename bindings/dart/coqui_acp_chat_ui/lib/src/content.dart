@@ -51,6 +51,7 @@ class AgentMarkdown extends StatelessWidget {
       softLineBreak: softLineBreak,
       styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
         p: base,
+        a: TextStyle(color: look.accent, decoration: TextDecoration.underline, decorationColor: look.accent),
         code: code?.copyWith(backgroundColor: look.code),
         codeblockDecoration: BoxDecoration(color: look.code, borderRadius: BorderRadius.circular(look.radius / 2)),
         blockquoteDecoration: BoxDecoration(
