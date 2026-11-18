@@ -6,8 +6,9 @@
 //! kind's and places the login file in the account's directory. Signing in, renewing and watching the login are the
 //! account provider's ([`StdioAccounts`]). The kinds of each harness are tables in [`accounts`].
 //!
-//! A session's id must be a UUID, as the kind says: the provider does not translate the program's ids. OpenCode's are
-//! `ses_` and letters and digits, which the provider passes on as they are.
+//! A session's id must be a UUID, as the kind says: the provider does not translate the program's ids, except
+//! OpenCode's: its own are `ses_` and letters and digits, passed on as they are, and a session the provider wrote into
+//! its store is `ses_` and the UUID's hex digits, which the relay turns into the UUID for the host and back.
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -33,6 +34,7 @@ pub mod accounts;
 mod login;
 mod opencode;
 pub mod opencode_history;
+pub mod opencode_import;
 mod relay;
 mod replay;
 
@@ -336,6 +338,7 @@ impl AcpHarness for StdioProvider {
             roots: WorkingRoots::new(request.working_roots.clone()),
             hold,
             replays: Arc::clone(&self.replays),
+            native_ids: self.settings.harness == StdioHarness::OpenCode,
         })
     }
 
@@ -361,21 +364,33 @@ impl AcpHarness for StdioProvider {
     fn import_session(
         &self,
         session: SessionImport,
-        _spawner: Object<dyn ProcessSpawner>,
+        spawner: Object<dyn ProcessSpawner>,
     ) -> Result<ImportReport, ProviderError> {
         if let Some(grant) = &session.account {
             accounts::known(self.def(), &grant.reference())?;
+        }
+        if self.settings.harness == StdioHarness::OpenCode {
+            // OpenCode takes a history into its own store; replaying it as context is what is left when it cannot.
+            let document = self.opencode_history(&session)?;
+            match self.import_opencode(&session, &document, spawner) {
+                Ok(report) => return Ok(report),
+                Err(error)
+                    if self.settings.replay_max_bytes > 0
+                        && [
+                            u32::from(Status::GUATIAO_ERR_UNSUPPORTED),
+                            u32::from(Status::GUATIAO_ERR_INTERNAL),
+                        ]
+                        .contains(&u32::from(error.status)) => {}
+                Err(error) => return Err(error),
+            }
         }
         if self.settings.replay_max_bytes == 0 {
             return Err(unsupported(match self.settings.harness {
                 StdioHarness::Antigravity => {
                     "Antigravity keeps a conversation as a database of its own protobuf steps, which it does not document, so it cannot be seeded with a history it did not make; set replay_max_bytes to replay the history as context in the first prompt"
                 }
-                StdioHarness::Grok => {
+                StdioHarness::Grok | StdioHarness::OpenCode => {
                     "this provider does not seed a session in an agent it does not keep the sessions of; set replay_max_bytes to replay the history as context in the first prompt"
-                }
-                StdioHarness::OpenCode => {
-                    "OpenCode keeps its sessions in a database of its own, which this provider does not write into; set replay_max_bytes to replay the history as context in the first prompt"
                 }
             }));
         }

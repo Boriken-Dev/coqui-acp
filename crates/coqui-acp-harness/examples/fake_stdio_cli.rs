@@ -2,7 +2,7 @@
 //! the contract check's `--program-agent` and the stdio provider's tests. It never calls a model.
 //!
 //! Which program it plays is told by its arguments, as the provider starts them: `agent stdio` is Grok, `acp` is
-//! Antigravity or OpenCode; `login [--oauth]` and `models` are Grok's; `auth list` and `export --pure ID` are OpenCode's. As an ACP agent it answers `initialize`,
+//! Antigravity or OpenCode; `login [--oauth]` and `models` are Grok's; `auth list`, `export --pure ID` and `import FILE` are OpenCode's. As an ACP agent it answers `initialize`,
 //! `session/new` and `session/prompt`, whose text decides the turn: `wait` ends only on `session/cancel`; `ask` asks for
 //! a permission and says `echo: allowed` or `echo: refused`, or ends cancelled when the answer was a cancel; any other
 //! text is answered `echo: TEXT`.
@@ -78,7 +78,10 @@ fn log_start(args: &[String]) {
         .iter()
         .filter_map(|name| std::env::var(name).ok().map(|value| (*name, value)))
         .collect();
-    let line = json!({"args": args, "env_names": names, "directories": directories, "endpoints": endpoints});
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let line = json!({"args": args, "cwd": cwd, "env_names": names, "directories": directories, "endpoints": endpoints});
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -179,6 +182,90 @@ fn export(id: &str) -> ! {
             exit(1)
         }
     }
+}
+
+/// `opencode import FILE`: the session the file holds becomes a fixture of the data folder, listed and opened by the agent,
+/// and `Imported session: ID` is printed. The checks are the ones the real program was seen to make of a hand-written
+/// file (ids that start `ses`, `msg` and `prt`, the keys it needs), and the session's directory is the working directory
+/// of this process, as the real program's is.
+fn import(file: &str) -> ! {
+    let Some(base) = std::env::var_os("XDG_DATA_HOME") else {
+        eprintln!("no data folder");
+        exit(3);
+    };
+    let Some(file) = std::fs::read_to_string(file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        eprintln!("Error: the file is not a session");
+        exit(1);
+    };
+    let refuse = |why: &str| -> ! {
+        eprintln!("Error: Unexpected error\n\n{why}");
+        exit(1)
+    };
+    let prefixed = |value: &Value, prefix: &str| -> bool {
+        value.as_str().is_some_and(|text| {
+            text.starts_with(prefix)
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    };
+    let info = &file["info"];
+    if !prefixed(&info["id"], "ses") {
+        refuse("Expected a string starting with \"ses\"\n  at [\"id\"]");
+    }
+    for key in ["slug", "title", "version"] {
+        if !info[key].is_string() {
+            refuse(&format!("Missing key\n  at [\"{key}\"]"));
+        }
+    }
+    for key in ["created", "updated"] {
+        if !info["time"][key].is_number() {
+            refuse(&format!("Missing key\n  at [\"time\"][\"{key}\"]"));
+        }
+    }
+    let mut turns: Vec<[String; 2]> = Vec::new();
+    for message in file["messages"].as_array().into_iter().flatten() {
+        let (role, message_info) = (message["info"]["role"].as_str(), &message["info"]);
+        if !prefixed(&message_info["id"], "msg") || !prefixed(&message_info["sessionID"], "ses") {
+            refuse("Expected a string starting with \"msg\"\n  at [\"id\"]");
+        }
+        let mut said = String::new();
+        for part in message["parts"].as_array().into_iter().flatten() {
+            if !prefixed(&part["id"], "prt") || !prefixed(&part["messageID"], "msg") {
+                refuse("Expected a string starting with \"prt\"\n  at [\"id\"]");
+            }
+            if part["type"] == "text" {
+                said.push_str(part["text"].as_str().unwrap_or_default());
+            }
+        }
+        match role {
+            Some("user") => turns.push([said, String::new()]),
+            Some("assistant") => {
+                if let Some(turn) = turns.last_mut() {
+                    turn[1].push_str(&said);
+                }
+            }
+            _ => refuse("Expected Message"),
+        }
+    }
+    let id = info["id"].as_str().unwrap_or_default().to_owned();
+    let folder = PathBuf::from(base).join("opencode").join("fixture");
+    let _ = std::fs::create_dir_all(&folder);
+    let directory = std::env::current_dir()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let session = json!({
+        "title": info["title"], "directory": directory, "updated": "2026-11-18T12:00:00Z",
+        "turns": turns, "export": file,
+    });
+    if std::fs::write(folder.join(format!("{id}.json")), session.to_string()).is_err() {
+        exit(1);
+    }
+    println!("Imported session: {id}");
+    exit(0)
 }
 
 fn fresh() -> String {
@@ -444,6 +531,7 @@ fn main() {
         ["agent", "stdio"] | ["acp"] => agent(),
         ["auth", "list"] => auth_list(),
         ["export", "--pure", id] => export(id),
+        ["import", file] => import(file),
         _ => {
             eprintln!("unknown arguments");
             exit(2);

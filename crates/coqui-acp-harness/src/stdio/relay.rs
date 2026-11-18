@@ -47,6 +47,8 @@ pub(crate) struct Params {
     pub hold: Option<Hold>,
     /// The sessions imported by replay, which this connection may open.
     pub replays: Arc<Replays>,
+    /// Whether the program keeps an imported session under an id made from its UUID (OpenCode does).
+    pub native_ids: bool,
 }
 
 #[derive(Default)]
@@ -575,6 +577,7 @@ pub(crate) fn open(params: Params) -> Result<Object<dyn Channel>, ProviderError>
         roots,
         hold,
         replays,
+        native_ids,
     } = params;
     let process = match spawner.spawn(spec) {
         Ok(process) => Arc::new(process),
@@ -594,7 +597,11 @@ pub(crate) fn open(params: Params) -> Result<Object<dyn Channel>, ProviderError>
         max_message_bytes,
         max_requests,
         replays,
-        mapping: Mutex::new(Mapping::default()),
+        mapping: Mutex::new(if native_ids {
+            Mapping::native()
+        } else {
+            Mapping::default()
+        }),
     });
     let ending = Ending { spawner, hold };
     let started = (|| {

@@ -1,8 +1,10 @@
 //! OpenCode as a provider of its own: the stdio provider and its account provider with the harness fixed, under the ids
 //! `opencode` and `opencode_accounts`, so a host that runs several agents through `stdio` can still say which one an entry
-//! and its accounts are. Reading a session out of OpenCode (`opencode export`) is here too.
+//! and its accounts are. Reading a session out of OpenCode (`opencode export`) and writing one into its store
+//! (`opencode import`) are here too.
 
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 use std::ffi::OsString;
@@ -13,18 +15,21 @@ use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountKeeper, AccountOffer, AccountProvider, AccountProviderInfo, AccountRef,
     AccountUsage, AccountUsageQuery, AccountWatch, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, HarnessInfo, ImportReport, LINE_TOO_LARGE, LoginOutcome, LoginPrompter,
-    LoginRequest, ModelListing, ModelsRequest, ProcessSpawner, RenewReport, RenewRequest,
-    Requirement, SessionExport, SessionImport, StartRequest, UsageQuery, UsageReport, WatchRequest,
+    ExportPage, HarnessInfo, HistoryLoss, ImportReport, LINE_TOO_LARGE, LoginOutcome,
+    LoginPrompter, LoginRequest, ModelListing, ModelsRequest, ProcessSpawner, RenewReport,
+    RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, StartRequest, UsageQuery,
+    UsageReport, WatchRequest,
 };
 use coqui_acp_history::paging::{PageError, page};
+use coqui_acp_history::{Document, Header, HistoryError, Origin, RedactionSettings, Redactor};
 
 use super::accounts;
 use super::{
     StdioAccountSettings, StdioAccounts, StdioHarness, StdioProvider, StdioSettings,
-    opencode_history,
+    opencode_history, opencode_import,
 };
 use crate::ThroughSpawner;
+use crate::account::Files;
 use crate::cli;
 use crate::process::Launch;
 
@@ -45,9 +50,9 @@ pub struct OpenCodeSettings {
     /// The largest message a connection takes, in bytes; one more ends it.
     #[map(default = 67_108_864)]
     pub max_message_bytes: u64,
-    /// How many bytes of an imported history the first prompt of a session carries, as context the agent reads. 0, the
-    /// default, imports nothing: OpenCode's store is not written by the provider, and a replay sends the history to the
-    /// agent's model, so it is a choice.
+    /// How many bytes of an imported history the first prompt of a session carries, as context the agent reads, when the
+    /// history cannot be written into the account's data folder (no account, no folder, no private files). 0, the
+    /// default, replays nothing: a replay sends the history to the agent's model, so it is a choice.
     #[map(default = 0)]
     pub replay_max_bytes: u64,
     /// The most bytes of one message, tool input or tool output in a replay; one over it is cut and reported.
@@ -312,28 +317,28 @@ fn error(status: Status, why: &str) -> ProviderError {
     ProviderError::new(status, why)
 }
 
+/// The `Imported session: <id>` line `opencode import` prints, and the id.
+fn imported_id(output: &str) -> Option<&str> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Imported session:"))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
 impl StdioProvider {
-    /// A session of OpenCode's as a history: `opencode export --pure <id>` on the account's data folder (or the
-    /// environment's, with no account), through the spawner, then paged.
-    pub(super) fn export_opencode(
+    /// A launch of the program with `args` on the account's data folder (or the environment's, with no account): the
+    /// host's variables, less what is a credential of the harness when an account applies, and the account's folder, which is
+    /// all of the account a command that only reads or writes sessions needs: the key is not passed.
+    fn opencode_launch(
         &self,
-        export: &SessionExport,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ExportPage, ProviderError> {
+        args: impl IntoIterator<Item = String>,
+        environment: &Environment,
+        applied: Option<&accounts::Applied>,
+    ) -> Launch {
         let def = self.def();
-        if !opencode_history::is_native_id(&export.session_id) {
-            return Err(error(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the session id is not one OpenCode made (`ses_` and letters and digits)",
-            ));
-        }
-        let applied = match &export.account {
-            Some(grant) => accounts::apply(def, grant)?,
-            None => None,
-        };
-        let mut launch =
-            Launch::new(self.program_name()).args(["export", "--pure", &export.session_id]);
-        for (name, value) in export.environment.expose().iter() {
+        let mut launch = Launch::new(self.program_name()).args(args);
+        for (name, value) in environment.iter() {
             let credential = def
                 .variables
                 .iter()
@@ -342,8 +347,7 @@ impl StdioProvider {
                 launch.env.insert(name.into(), value.into());
             }
         }
-        if let Some(applied) = &applied {
-            // Only the account's data folder: the export reads sessions and needs no credential.
+        if let Some(applied) = applied {
             for (name, value) in applied.environment.expose().iter() {
                 if accounts::same_name(name, "XDG_DATA_HOME") {
                     launch.env.insert(name.into(), value.into());
@@ -354,6 +358,37 @@ impl StdioProvider {
                 .remove_env
                 .retain(|name| !accounts::same_name(&name.to_string_lossy(), "XDG_DATA_HOME"));
         }
+        launch
+    }
+
+    /// A session of OpenCode's as a history: `opencode export --pure <id>` on the account's data folder (or the
+    /// environment's, with no account), through the spawner, then paged. The id is the one OpenCode made, or the UUID
+    /// the host knows an imported session by.
+    pub(super) fn export_opencode(
+        &self,
+        export: &SessionExport,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<ExportPage, ProviderError> {
+        let def = self.def();
+        let native = if opencode_history::is_native_id(&export.session_id) {
+            export.session_id.clone()
+        } else if let Some(native) = opencode_history::native_id_of(&export.session_id) {
+            native
+        } else {
+            return Err(error(
+                Status::GUATIAO_ERR_BAD_VALUE,
+                "the session id is not one OpenCode made (`ses_` and letters and digits) or a UUID",
+            ));
+        };
+        let applied = match &export.account {
+            Some(grant) => accounts::apply(def, grant)?,
+            None => None,
+        };
+        let launch = self.opencode_launch(
+            ["export".to_owned(), "--pure".to_owned(), native.clone()],
+            export.environment.expose(),
+            applied.as_ref(),
+        );
         let done = cli::run(
             &ThroughSpawner::new(spawner),
             &launch,
@@ -385,7 +420,9 @@ impl StdioProvider {
             });
         }
         let output = String::from_utf8_lossy(&done.stdout);
-        let history = opencode_history::export(&output, &export.session_id)
+        let host =
+            opencode_history::host_id_of(&native).unwrap_or_else(|| export.session_id.clone());
+        let history = opencode_history::export(&output, &host)
             .map_err(|why| error(Status::GUATIAO_ERR_BAD_VALUE, &why))?
             .to_string()
             .map_err(|why| error(Status::GUATIAO_ERR_BAD_VALUE, &why.to_string()))?;
@@ -400,5 +437,150 @@ impl StdioProvider {
             )),
             Err(other) => Err(error(Status::GUATIAO_ERR_BAD_VALUE, &other.to_string())),
         }
+    }
+
+    /// The history of `session` as a document: an empty one for a session with none, redacted by the provider's patterns
+    /// when it has any.
+    ///
+    /// # Errors
+    ///
+    /// `GUATIAO_ERR_BAD_VALUE` for an id that is not a UUID, a history this provider cannot read or a pattern that is no
+    /// expression; `GUATIAO_ERR_UNSUPPORTED` for a version of the format it does not read.
+    pub(super) fn opencode_history(
+        &self,
+        session: &SessionImport,
+    ) -> Result<Document, ProviderError> {
+        let bad = |why: &str| error(Status::GUATIAO_ERR_BAD_VALUE, why);
+        let uuid = uuid::Uuid::try_parse(&session.session_id)
+            .map_err(|_| bad("the session id is not a UUID"))?;
+        let mut document = if session.history.trim().is_empty() {
+            Document::new(Header::new(
+                uuid.hyphenated().to_string(),
+                Origin::new(opencode_history::HARNESS),
+            ))
+        } else {
+            Document::from_slice(session.history.as_bytes()).map_err(|why| match why {
+                HistoryError::UnknownVersion { .. } | HistoryError::UnknownFormat => error(
+                    Status::GUATIAO_ERR_UNSUPPORTED,
+                    "this provider does not read that version of the history format",
+                ),
+                _ => bad("the history is not one this provider can read"),
+            })?
+        };
+        if !self.settings.replay_redact_patterns.is_empty() {
+            let mut redaction = RedactionSettings::default();
+            redaction
+                .patterns
+                .clone_from(&self.settings.replay_redact_patterns);
+            let mut redactor = Redactor::try_new(&redaction).map_err(|_| {
+                bad("a pattern to redact from a history is not a usable expression")
+            })?;
+            redactor.document(&mut document).map_err(|_| {
+                bad("the history cannot be redacted into one this provider can write")
+            })?;
+        }
+        Ok(document)
+    }
+
+    /// Writes `session`'s history into the account's data folder as a session of OpenCode's own: the file `opencode import`
+    /// reads is made there through the spawner and the program is run on it in the session's working directory (the
+    /// directory it gives the session), and the file is removed again. The session is then `ses_` and the UUID's hex digits
+    /// ([`opencode_history::native_id_of`]), which the relay turns back into the UUID for the host.
+    ///
+    /// # Errors
+    ///
+    /// `GUATIAO_ERR_UNSUPPORTED` with no account or no private files to put the file in; `GUATIAO_ERR_BAD_VALUE` for an id
+    /// that is not a UUID or a history this provider cannot read; `GUATIAO_ERR_INTERNAL` when the program does not take
+    /// the file.
+    pub(super) fn import_opencode(
+        &self,
+        session: &SessionImport,
+        history: &Document,
+        spawner: Object<dyn ProcessSpawner>,
+    ) -> Result<ImportReport, ProviderError> {
+        let def = self.def();
+        let Some(grant) = &session.account else {
+            return Err(error(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "a session is written into the data folder of an account, and this one has no account",
+            ));
+        };
+        let Some(applied) = accounts::apply(def, grant)? else {
+            return Err(error(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "this account keeps no data folder of its own to write a session into",
+            ));
+        };
+        let Some(folder) = grant.state_dir.as_deref() else {
+            return Err(error(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "this account has no data folder of its own to write a session into",
+            ));
+        };
+        let imported =
+            opencode_import::import(history, &session.session_id, &session.working_directory)
+                .map_err(|why| error(Status::GUATIAO_ERR_BAD_VALUE, &why))?;
+        let spawner = Arc::new(spawner);
+        let files = Files::new(Arc::clone(&spawner));
+        if !files.available() {
+            return Err(error(
+                Status::GUATIAO_ERR_UNSUPPORTED,
+                "this spawner has no private files to put the session's file in",
+            ));
+        }
+        let name = alloc::format!("imports/{}.json", imported.native_id);
+        files.write(&name, &imported.text)?;
+        let launch = self
+            .opencode_launch(
+                [
+                    "import".to_owned(),
+                    alloc::format!("{}/{name}", folder.trim_end_matches(['/', '\\'])),
+                ],
+                session.environment.expose(),
+                Some(&applied),
+            )
+            .cwd(&session.working_directory);
+        let done = cli::run(
+            &ThroughSpawner::shared(spawner),
+            &launch,
+            None,
+            EXPORT_LIMIT,
+            EXPORT_MAX_BYTES,
+        );
+        // The file holds the history: it goes whatever came of the import.
+        let _ = files.remove(&name);
+        let done = done.map_err(|_| {
+            error(
+                Status::GUATIAO_ERR_INTERNAL,
+                "the program could not be started to import the session",
+            )
+        })?;
+        let said = String::from_utf8_lossy(&done.stdout);
+        if done.timed_out
+            || !done.succeeded()
+            || imported_id(&said) != Some(imported.native_id.as_str())
+        {
+            return Err(error(
+                Status::GUATIAO_ERR_INTERNAL,
+                "the program did not take the session's history",
+            ));
+        }
+        let mut report = ImportReport::new();
+        report.seeded_from = imported.seeded_from.map(|point| {
+            let mut seed = SeedPoint::line(point.line);
+            seed.digest = Some(point.digest);
+            seed
+        });
+        report.losses = imported
+            .report
+            .losses()
+            .iter()
+            .map(|loss| {
+                let mut out = HistoryLoss::new(loss.kind.clone(), loss.count);
+                out.detail.clone_from(&loss.detail);
+                out
+            })
+            .collect();
+        Ok(report)
     }
 }

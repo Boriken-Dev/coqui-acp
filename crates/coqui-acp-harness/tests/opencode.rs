@@ -16,7 +16,7 @@ use coqui_acp_api::guatiao::{Map, Status, Value};
 use coqui_acp_api::{
     AccountGrant, AccountProvider, AcpHarness, Channel, ChannelSink, Credentials, Environment,
     LoginAnswer, LoginForm, LoginPrompter, LoginRequest, OpenUrl, ProcessSpawner, SessionExport,
-    StartRequest,
+    SessionImport, StartRequest,
 };
 use coqui_acp_harness::LocalSpawner;
 use coqui_acp_harness::stdio::{
@@ -426,15 +426,20 @@ fn an_export_refuses_what_is_not_a_session_of_the_account() {
         u32::from(gone.status),
         u32::from(Status::GUATIAO_ERR_NOT_FOUND)
     );
-    // An id that could be taken for an option, a path or another id's shape never reaches the program.
-    for bad in [
-        "--help",
-        "-s",
-        "ses_../x",
-        "ses_a b",
-        "",
-        "0b9c1a2e-0000-4000-8000-000000000000",
-    ] {
+    // An id that could be taken for an option or a path never reaches the program; a UUID is the host's name for a session
+    // written into the folder, so it is looked for there and, not being there, is not found.
+    let unknown = page_of(
+        SessionExport::new("0b9c1a2e-0000-4000-8000-000000000000", "/work/project")
+            .account(key_grant(&mine)),
+        &mine,
+    )
+    .expect_err("no such session");
+    assert_eq!(
+        u32::from(unknown.status),
+        u32::from(Status::GUATIAO_ERR_NOT_FOUND)
+    );
+    // An id that could be taken for an option or a path never reaches the program.
+    for bad in ["--help", "-s", "ses_../x", "ses_a b", ""] {
         let refused = page_of(
             SessionExport::new(bad, "/work/project")
                 .environment(environment.clone())
@@ -568,7 +573,12 @@ fn the_api_key_sign_in_makes_a_provider_key_account() {
 fn the_account_provider_offers_the_sign_in_and_the_key_it_makes() {
     let offer = accounts().offers().expect("offers");
     // The sign-in form suggests the providers' variables and takes any other name.
-    let inputs = coqui_acp_harness::provider::to_json(&offer.logins[0].inputs);
+    let key = offer
+        .logins
+        .iter()
+        .find(|login| login.id == "api-key")
+        .expect("the key method");
+    let inputs = coqui_acp_harness::provider::to_json(&key.inputs);
     let variable = &inputs["properties"]["variable"];
     assert!(
         variable["examples"]
@@ -619,6 +629,222 @@ fn opencode_is_the_stdio_provider_with_the_harness_fixed() {
         provider().program().expect("program").as_deref(),
         Some(fake().as_str())
     );
+}
+
+/// A history a Claude session made: a prompt, reasoning, a command with its result, an answer, and a second prompt.
+fn claude_history() -> String {
+    use coqui_acp_history::conversation::{Call, Recorder, Stamp};
+    use coqui_acp_history::{Header, Origin, Stop, StopReason};
+    let at = |second: u32| Stamp::at(Some(format!("2026-11-18T12:00:{second:02}.000Z")));
+    let mut rec = Recorder::new();
+    rec.prompt(
+        vec![json!({"type": "text", "text": "list the files"})],
+        at(1),
+    );
+    rec.thought("looking", at(2));
+    let mut call = Call::new("toolu_1");
+    call.name = Some("Bash".to_owned());
+    call.title = Some("ls".to_owned());
+    call.status = Some("pending".to_owned());
+    call.raw_input = Some(json!({"command": "ls"}));
+    rec.update(call.announce(), at(3));
+    call.status = Some("completed".to_owned());
+    call.raw_output = Some(json!("a.txt b.txt"));
+    rec.update(call.finish(), at(4));
+    rec.message("two files", at(5));
+    rec.end_turn(Stop::Acp(StopReason::EndTurn), None, at(6));
+    rec.prompt(vec![json!({"type": "text", "text": "thanks"})], at(7));
+    rec.message("welcome", at(8));
+    rec.end_turn(Stop::Acp(StopReason::EndTurn), None, at(9));
+    let mut header = Header::new(
+        "0b9c1a2e-0000-4000-8000-000000000001",
+        Origin::new("claude"),
+    );
+    header.created_at = Some("2026-11-18T12:00:00.000Z".to_owned());
+    header.model = Some("claude-sonnet-4-5".to_owned());
+    let mut document = Document::new(header);
+    document.lines = rec.finish();
+    document.seal().expect("a history");
+    document.to_string().expect("text")
+}
+
+const HOST_ID: &str = "7d8c1f4e-2b9a-4c63-8f10-5a6b7c8d9e0f";
+const STORED_ID: &str = "ses_7d8c1f4e2b9a4c638f105a6b7c8d9e0f";
+
+/// A history is written into the account's data folder through `opencode import`, in the session's working directory, with
+/// the file removed after and no key passed; the host then opens, lists, prompts and exports the session by its UUID while
+/// the program speaks of it by the id it stored it under.
+#[test]
+fn a_history_is_written_into_the_accounts_folder_and_the_session_is_the_hosts_uuid() {
+    let dir = scratch("import");
+    let work = scratch("import-work");
+    let log = dir.join("fake.log");
+    let environment: Environment = [("COQUI_ACP_FAKE_STDIO_LOG", text(&log))]
+        .into_iter()
+        .collect();
+    let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().files(&dir).into_object();
+    let report = provider()
+        .import_session(
+            SessionImport::new(HOST_ID, text(&work), claude_history())
+                .environment(environment.clone())
+                .account(key_grant(&dir)),
+            spawner,
+        )
+        .expect("imported");
+    assert!(
+        report
+            .losses
+            .iter()
+            .any(|loss| loss.kind == "thinking" && loss.count == 1),
+        "{:?}",
+        report.losses
+    );
+    assert!(
+        !report.replayed(),
+        "it is a session of OpenCode's, not a replay"
+    );
+    // The program was run on the file in the session's folder, as the account, and the file is gone.
+    let entries = logged(&log);
+    let entry = entries.last().expect("a run");
+    assert_eq!(entry["args"][0], json!("import"));
+    let file = entry["args"][1].as_str().expect("a path");
+    assert!(
+        file.starts_with(text(&dir)) && file.ends_with(&format!("{STORED_ID}.json")),
+        "{file}"
+    );
+    assert!(!Path::new(file).exists(), "the history stays in a file");
+    assert_eq!(
+        std::fs::canonicalize(entry["cwd"].as_str().expect("a directory")).ok(),
+        std::fs::canonicalize(&work).ok()
+    );
+    assert_eq!(entry["directories"]["XDG_DATA_HOME"], json!(text(&dir)));
+    assert!(!has(&names_of(entry), "OPENAI_API_KEY"), "{entry}");
+    assert!(!entry.to_string().contains(KEY));
+    // The session is in the account's folder under the id made from the UUID.
+    let stored = fixtures(&dir).join(format!("{STORED_ID}.json"));
+    let session: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&stored).expect("stored")).expect("JSON");
+    assert_eq!(
+        session["turns"],
+        json!([["list the files", "two files"], ["thanks", "welcome"]])
+    );
+    // The host opens it by the UUID; every id on the way out is the UUID.
+    let request = StartRequest::builder().account(key_grant(&dir)).build();
+    let mut conn = Conn::open(request, &dir);
+    conn.call("initialize", &json!({"protocolVersion": 1}));
+    let (_, listed) = conn.call("session/list", &json!({}));
+    assert_eq!(
+        listed["result"]["sessions"][0]["sessionId"],
+        json!(HOST_ID),
+        "{listed}"
+    );
+    let cwd = text(&work);
+    let (updates, loaded) = conn.call(
+        "session/load",
+        &json!({"sessionId": HOST_ID, "cwd": cwd, "mcpServers": []}),
+    );
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let kinds: Vec<&str> = updates
+        .iter()
+        .filter_map(|update| update["params"]["update"]["sessionUpdate"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "user_message_chunk",
+            "agent_message_chunk",
+            "user_message_chunk",
+            "agent_message_chunk"
+        ]
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| update["params"]["sessionId"] == json!(HOST_ID))
+    );
+    let (updates, answered) = conn.call(
+        "session/prompt",
+        &json!({"sessionId": HOST_ID, "prompt": [{"type": "text", "text": "hello"}]}),
+    );
+    assert_eq!(
+        answered["result"]["stopReason"],
+        json!("end_turn"),
+        "{answered}"
+    );
+    assert_eq!(updates[0]["params"]["sessionId"], json!(HOST_ID));
+    assert_eq!(
+        updates[0]["params"]["update"]["content"]["text"],
+        json!("echo: hello")
+    );
+    drop(conn);
+    // Read back out by the UUID, it is the history that went in.
+    let page = page_of(
+        SessionExport::new(HOST_ID, cwd)
+            .account(key_grant(&dir))
+            .max_bytes(1 << 20),
+        &dir,
+    )
+    .expect("exported");
+    let document = Document::from_slice(page.text.as_bytes()).expect("a history");
+    assert_eq!(document.header.id, HOST_ID);
+    let prompts: Vec<String> = document
+        .lines
+        .iter()
+        .filter_map(|line| match &line.body {
+            Body::Prompt { prompt } => prompt[0]["text"].as_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts, ["list the files", "thanks"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// With nowhere to write the session it is not written, and the reason is the account's; only when the provider is set
+/// to replay does it fall back, and then the history is context in a prompt.
+#[test]
+fn a_session_with_no_account_folder_is_refused_or_replayed_as_the_provider_is_set() {
+    let work = scratch("import-no-account");
+    let spawner =
+        || -> Object<dyn ProcessSpawner> { LocalSpawner::new().files(&work).into_object() };
+    let refused = provider()
+        .import_session(
+            SessionImport::new(HOST_ID, text(&work), claude_history()),
+            spawner(),
+        )
+        .expect_err("no account to write into");
+    assert_eq!(
+        u32::from(refused.status),
+        u32::from(Status::GUATIAO_ERR_UNSUPPORTED)
+    );
+    assert!(
+        refused.message().contains("no account"),
+        "{}",
+        refused.message()
+    );
+    // Not a UUID: refused whatever else is so.
+    let bad = provider()
+        .import_session(
+            SessionImport::new("ses_abc", text(&work), claude_history()).account(key_grant(&work)),
+            spawner(),
+        )
+        .expect_err("not a UUID");
+    assert_eq!(
+        u32::from(bad.status),
+        u32::from(Status::GUATIAO_ERR_BAD_VALUE)
+    );
+    let mut settings = OpenCodeSettings::new();
+    settings.executable = Some(fake());
+    settings.replay_max_bytes = 1 << 20;
+    let replaying = OpenCodeProvider::new(settings);
+    let report = replaying
+        .import_session(
+            SessionImport::new(HOST_ID, text(&work), claude_history()),
+            spawner(),
+        )
+        .expect("replayed");
+    assert!(report.replayed(), "{:?}", report.losses);
+    let _ = std::fs::remove_dir_all(&work);
 }
 
 /// Against the real program, which a person's machine may have: `COQUI_ACP_OPENCODE_REAL` names it,
@@ -704,4 +930,199 @@ fn the_real_program_lists_opens_and_exports_a_session_of_a_data_folder() {
             .iter()
             .any(|line| matches!(&line.body, Body::Prompt { .. }))
     );
+}
+
+/// Against the real program: a history a Claude session made is written into the data folder, opened by the host's UUID,
+/// replayed by `session/load`, and a follow-up prompt reaches the model with that history in its request. A second history
+/// that holds a compaction summary reaches the model as the summary, without what it replaced.
+///
+/// `COQUI_ACP_OPENCODE_REAL` names the program, `COQUI_ACP_OPENCODE_IMPORT_DATA` an empty data folder, and
+/// `COQUI_ACP_OPENCODE_STUB_LOG` a file the stand-in model that the program's configuration names appends each request
+/// body to, a line each. Run it with a home, configuration folder and `OPENCODE_DISABLE_EXTERNAL_SKILLS=1` of the test's
+/// own in the environment, never the person's. It is skipped (it passes) when they are not set.
+#[test]
+fn the_real_program_continues_a_history_written_into_its_store() {
+    let (Some(program), Some(data), Some(stub)) = (
+        std::env::var_os("COQUI_ACP_OPENCODE_REAL"),
+        std::env::var_os("COQUI_ACP_OPENCODE_IMPORT_DATA"),
+        std::env::var_os("COQUI_ACP_OPENCODE_STUB_LOG"),
+    ) else {
+        eprintln!("skipped: COQUI_ACP_OPENCODE_REAL, _IMPORT_DATA and _STUB_LOG are not set");
+        return;
+    };
+    let dir = PathBuf::from(data);
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).expect("a working directory");
+    let stub = PathBuf::from(stub);
+    let mut settings = OpenCodeSettings::new();
+    settings.executable = Some(program.to_string_lossy().into_owned());
+    let real = OpenCodeProvider::new(settings);
+    let requests = || -> Vec<String> {
+        std::fs::read_to_string(&stub)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    for (id, summarised) in [
+        (HOST_ID, false),
+        ("2c4e6a80-1b3d-4f57-9a9c-0d1e2f3a4b5c", true),
+    ] {
+        let history = if summarised {
+            claude_history_with_a_summary()
+        } else {
+            claude_history()
+        };
+        let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().files(&dir).into_object();
+        let report = real
+            .import_session(
+                SessionImport::new(id, text(&work), history).account(key_grant(&dir)),
+                spawner,
+            )
+            .expect("the program takes the history");
+        assert!(!report.replayed(), "{:?}", report.losses);
+        let (sender, received) = mpsc::channel();
+        let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().files(&dir).into_object();
+        let channel = real
+            .start(
+                StartRequest::builder().account(key_grant(&dir)).build(),
+                spawner,
+                Sink(sender).into_object(),
+            )
+            .expect("it starts");
+        let mut conn = Conn {
+            channel,
+            received,
+            next: 0,
+        };
+        conn.call("initialize", &json!({"protocolVersion": 1}));
+        let (_, listed) = conn.call("session/list", &json!({}));
+        let sessions = listed["result"]["sessions"].as_array().expect("sessions");
+        let mine = sessions
+            .iter()
+            .find(|session| session["sessionId"] == json!(id))
+            .unwrap_or_else(|| panic!("the session is listed by its UUID: {listed}"));
+        assert_eq!(
+            std::fs::canonicalize(mine["cwd"].as_str().expect("a directory")).ok(),
+            std::fs::canonicalize(&work).ok(),
+            "{mine}"
+        );
+        let (updates, loaded) = conn.call(
+            "session/load",
+            &json!({"sessionId": id, "cwd": text(&work), "mcpServers": []}),
+        );
+        assert!(loaded.get("error").is_none(), "{loaded}");
+        assert!(
+            updates
+                .iter()
+                .all(|update| update["params"]["sessionId"] == json!(id)),
+            "{updates:?}"
+        );
+        let said: Vec<String> = updates
+            .iter()
+            .filter_map(|update| {
+                update["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect();
+        let before = requests().len();
+        let follow_up = if summarised {
+            "and after that?"
+        } else {
+            "and now what?"
+        };
+        let (_, answered) = conn.call(
+            "session/prompt",
+            &json!({"sessionId": id, "prompt": [{"type": "text", "text": follow_up}]}),
+        );
+        assert_eq!(
+            answered["result"]["stopReason"],
+            json!("end_turn"),
+            "{answered}"
+        );
+        drop(conn);
+        let sent = requests();
+        let request = sent[before..]
+            .iter()
+            .find(|body| body.contains(follow_up))
+            .unwrap_or_else(|| panic!("no request carried the follow-up: {sent:?}"));
+        if summarised {
+            // The summary is what the model reads of what it replaced.
+            assert!(
+                said.iter().all(|text| !text.contains("old answer")),
+                "{said:?}"
+            );
+            assert!(request.contains("we listed the files"), "{request}");
+            assert!(request.contains("next answer"), "{request}");
+            assert!(!request.contains("old answer"), "{request}");
+        } else {
+            assert!(said.iter().any(|text| text == "list the files"), "{said:?}");
+            assert!(said.iter().any(|text| text == "two files"), "{said:?}");
+            for wanted in [
+                "list the files",
+                "two files",
+                "a.txt b.txt",
+                "thanks",
+                "welcome",
+            ] {
+                assert!(request.contains(wanted), "{wanted} is not in {request}");
+            }
+            assert!(request.contains("\"bash\""), "{request}");
+            assert!(!request.contains("looking"), "{request}");
+        }
+        // The follow-up is in the session, which the host reads back by its UUID.
+        let spawner: Object<dyn ProcessSpawner> = LocalSpawner::new().files(&dir).into_object();
+        let page = real
+            .export_session(
+                SessionExport::new(id, text(&work)).account(key_grant(&dir)),
+                spawner,
+            )
+            .expect("exported");
+        let document = Document::from_slice(page.text.as_bytes()).expect("a history");
+        document.check().expect("it keeps the rules");
+        assert_eq!(document.header.id, id);
+        assert!(
+            document.lines.iter().any(|line| matches!(
+                &line.body,
+                Body::Prompt { prompt } if prompt[0]["text"] == json!(follow_up)
+            )),
+            "{}",
+            page.text
+        );
+    }
+}
+
+/// A history whose second turn follows a compaction: what the summary replaced is not in the file.
+fn claude_history_with_a_summary() -> String {
+    use coqui_acp_history::conversation::Recorder;
+    use coqui_acp_history::conversation::Stamp;
+    use coqui_acp_history::{Header, Origin, Stop, StopReason};
+    let at = |second: u32| Stamp::at(Some(format!("2026-11-18T12:00:{second:02}.000Z")));
+    let mut rec = Recorder::new();
+    rec.prompt(vec![json!({"type": "text", "text": "old question"})], at(1));
+    rec.message("old answer", at(2));
+    rec.end_turn(Stop::Acp(StopReason::EndTurn), None, at(3));
+    rec.compaction(
+        Some("we listed the files".to_owned()),
+        None,
+        Some(900),
+        at(4),
+    );
+    rec.prompt(
+        vec![json!({"type": "text", "text": "next question"})],
+        at(5),
+    );
+    rec.message("next answer", at(6));
+    rec.end_turn(Stop::Acp(StopReason::EndTurn), None, at(7));
+    let mut header = Header::new(
+        "0b9c1a2e-0000-4000-8000-000000000002",
+        Origin::new("claude"),
+    );
+    header.created_at = Some("2026-11-18T12:00:00.000Z".to_owned());
+    header.model = Some("claude-sonnet-4-5".to_owned());
+    let mut document = Document::new(header);
+    document.lines = rec.finish();
+    document.seal().expect("a history");
+    document.to_string().expect("text")
 }

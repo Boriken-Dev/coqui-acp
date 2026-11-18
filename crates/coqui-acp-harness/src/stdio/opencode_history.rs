@@ -38,6 +38,24 @@ pub fn is_native_id(id: &str) -> bool {
     })
 }
 
+/// The id OpenCode's store holds the session the host knows as the UUID `id` under: `ses_` and the UUID's 32 hex
+/// digits, so that the same UUID is the same session on every connection and after a restart. `None` for text that is not
+/// a UUID.
+#[must_use]
+pub fn native_id_of(id: &str) -> Option<String> {
+    let uuid = uuid::Uuid::try_parse(id).ok()?;
+    Some(format!("ses_{}", uuid.simple()))
+}
+
+/// The UUID a session of OpenCode's is known by to the host, when its id is one [`native_id_of`] made: `ses_` and 32
+/// lower-case hex digits. `None` for every id OpenCode made itself (`ses_` and 26 letters and digits).
+#[must_use]
+pub fn host_id_of(native: &str) -> Option<String> {
+    let rest = native.strip_prefix("ses_")?;
+    let uuid = uuid::Uuid::try_parse(rest).ok()?;
+    (rest == uuid.simple().to_string()).then(|| uuid.hyphenated().to_string())
+}
+
 fn text(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -494,6 +512,30 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(second, ["c", "c~2"]);
+    }
+
+    #[test]
+    fn a_uuid_and_the_id_it_has_in_opencodes_store_are_each_others_and_nothing_else_is() {
+        let uuid = "7d8c1f4e-2b9a-4c63-8f10-5a6b7c8d9e0f";
+        let native = native_id_of(uuid).expect("an id");
+        assert_eq!(native, "ses_7d8c1f4e2b9a4c638f105a6b7c8d9e0f");
+        assert!(is_native_id(&native));
+        assert_eq!(host_id_of(&native).as_deref(), Some(uuid));
+        // Whatever spelling the host sends, the same session.
+        assert_eq!(native_id_of(&uuid.to_ascii_uppercase()), Some(native));
+        // An id OpenCode made itself, or anything else, is no UUID's.
+        for other in [
+            "ses_e11822fdeffeQonF7BHkuhxiss",
+            "ses_7D8C1F4E2B9A4C638F105A6B7C8D9E0F",
+            "ses_7d8c1f4e2b9a4c638f105a6b7c8d9e0",
+            "7d8c1f4e2b9a4c638f105a6b7c8d9e0f",
+            "ses_",
+        ] {
+            assert_eq!(host_id_of(other), None, "{other}");
+        }
+        for not_uuid in ["ses_x", "", "--help"] {
+            assert_eq!(native_id_of(not_uuid), None, "{not_uuid}");
+        }
     }
 
     #[test]
