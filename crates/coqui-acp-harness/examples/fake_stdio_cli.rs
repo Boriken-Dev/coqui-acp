@@ -2,7 +2,7 @@
 //! the contract check's `--program-agent` and the stdio provider's tests. It never calls a model.
 //!
 //! Which program it plays is told by its arguments, as the provider starts them: `agent stdio` is Grok, `acp` is
-//! Antigravity or OpenCode; `login [--oauth]` and `models` are Grok's; `auth list`, `export --pure ID` and `import FILE` are OpenCode's. As an ACP agent it answers `initialize`,
+//! Antigravity or OpenCode; `login [--oauth]` and `models` are Grok's; `auth list`, `auth login [-p PROVIDER] [-m METHOD]`, `export --pure ID` and `import FILE` are OpenCode's. As an ACP agent it answers `initialize`,
 //! `session/new` and `session/prompt`, whose text decides the turn: `wait` ends only on `session/cancel`; `ask` asks for
 //! a permission and says `echo: allowed` or `echo: refused`, or ends cancelled when the answer was a cancel; any other
 //! text is answered `echo: TEXT`.
@@ -30,7 +30,7 @@
 )]
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::exit;
 use std::time::Duration;
@@ -266,6 +266,156 @@ fn import(file: &str) -> ! {
     }
     println!("Imported session: {id}");
     exit(0)
+}
+
+/// What the program printed on plain pipes, recorded in `tests/fixtures/opencode_auth_login.json`.
+fn recorded() -> Value {
+    serde_json::from_str(include_str!("../tests/fixtures/opencode_auth_login.json"))
+        .expect("the recorded prompts are JSON")
+}
+
+fn say(text: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.flush();
+}
+
+/// What the program's input says up to Enter (a carriage return, as a terminal sends it, or a line feed), or the end of it:
+/// the program ends when its input does.
+fn typed_line() -> String {
+    let mut typed = Vec::new();
+    let mut byte = [0_u8; 1];
+    let mut input = std::io::stdin().lock();
+    loop {
+        match input.read(&mut byte) {
+            Ok(1) if matches!(byte[0], b'\r' | b'\n') => {
+                return String::from_utf8_lossy(&typed).into_owned();
+            }
+            Ok(1) => typed.push(byte[0]),
+            _ => exit(1),
+        }
+    }
+}
+
+/// What a finished sign-in leaves: the provider's entry in `auth.json` of the data folder. The fields of an oauth entry are
+/// not recorded, so the stand-in's are made up.
+fn write_sign_in(provider: &str, entry: &Value) {
+    let Some(base) = std::env::var_os("XDG_DATA_HOME") else {
+        eprintln!("no data folder");
+        exit(3);
+    };
+    let folder = PathBuf::from(base).join("opencode");
+    let _ = std::fs::create_dir_all(&folder);
+    let file = folder.join("auth.json");
+    let mut all: Value = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({}));
+    all[provider] = entry.clone();
+    if std::fs::write(
+        &file,
+        serde_json::to_string_pretty(&all).unwrap_or_default(),
+    )
+    .is_err()
+    {
+        exit(1);
+    }
+}
+
+/// A device code that is confirmed after a moment, as far as the stand-in knows.
+fn device_flow(provider: &str, scenario: &Value, key: &str) -> ! {
+    say(scenario[key].as_str().unwrap_or_default());
+    pause("COQUI_ACP_FAKE_LOGIN_MS", 1200);
+    write_sign_in(
+        provider,
+        &json!({"type": "oauth", "refresh": format!("fake-{}", fresh()), "access": "fake", "expires": 0}),
+    );
+    say("\n");
+    exit(0)
+}
+
+/// A key typed on one line, kept as the provider's entry.
+fn key_flow(provider: &str, prompt: &str, after: &str) -> ! {
+    say(prompt);
+    let key = typed_line();
+    say(after);
+    write_sign_in(provider, &json!({"type": "api", "key": key}));
+    exit(0)
+}
+
+/// `opencode auth login [-p PROVIDER] [-m METHOD]` as the recorded prompts say it answers.
+fn auth_login(args: &[&str]) -> ! {
+    let recorded = recorded();
+    let scenario = |name: &str| recorded["scenarios"][name].clone();
+    let output = |name: &str| {
+        scenario(name)["output"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut provider = None;
+    let mut method = None;
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        match *flag {
+            "-p" => provider = rest.next().copied(),
+            "-m" => method = rest.next().copied(),
+            _ => {}
+        }
+    }
+    let after_key = scenario("openrouter_key")["after_input"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    match (provider, method) {
+        (None, _) => {
+            say(&output("picker"));
+            typed_line();
+            exit(1)
+        }
+        (Some("openrouter"), _) => key_flow(
+            "openrouter",
+            scenario("openrouter_key")["before_input"]
+                .as_str()
+                .unwrap_or_default(),
+            &after_key,
+        ),
+        (Some(name @ ("anthropic" | "opencode")), _) => {
+            key_flow(name, &output(&format!("{name}_key")), &after_key)
+        }
+        (Some("openai"), None) => {
+            // The selection is answered by Enter, which takes the first, the browser.
+            say(&output("openai_methods"));
+            typed_line();
+            say(&output("openai_browser"));
+            std::thread::sleep(Duration::from_secs(30));
+            exit(1)
+        }
+        (Some("openai"), Some("Manually enter API Key")) => {
+            key_flow("openai", &output("openai_key"), &after_key)
+        }
+        (Some("openai"), Some("ChatGPT Pro/Plus (headless)")) => {
+            device_flow("openai", &scenario("openai_headless"), "output")
+        }
+        (Some("openai"), Some("ChatGPT Pro/Plus (browser)")) => {
+            say(&output("openai_browser"));
+            std::thread::sleep(Duration::from_secs(30));
+            exit(1)
+        }
+        (Some("openai"), Some(_)) => {
+            say(&output("openai_bad_method"));
+            exit(1)
+        }
+        (Some("github-copilot"), _) => {
+            say(&output("copilot_type"));
+            typed_line();
+            device_flow("github-copilot", &scenario("copilot_device"), "after_input")
+        }
+        _ => {
+            say(&output("bad_provider"));
+            exit(1)
+        }
+    }
 }
 
 fn fresh() -> String {
@@ -530,6 +680,7 @@ fn main() {
         ["models"] => models(),
         ["agent", "stdio"] | ["acp"] => agent(),
         ["auth", "list"] => auth_list(),
+        ["auth", "login", rest @ ..] => auth_login(rest),
         ["export", "--pure", id] => export(id),
         ["import", file] => import(file),
         _ => {

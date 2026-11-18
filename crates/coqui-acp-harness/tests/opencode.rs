@@ -590,8 +590,10 @@ fn the_account_provider_offers_the_sign_in_and_the_key_it_makes() {
     let kinds: Vec<&str> = offer.kinds.iter().map(|kind| kind.id.as_str()).collect();
     assert_eq!(kinds, ["opencode-login", "opencode-provider-key"]);
     let methods: Vec<&str> = offer.logins.iter().map(|login| login.id.as_str()).collect();
-    assert_eq!(methods, ["api-key"]);
-    assert_eq!(offer.logins[0].produces, "opencode-provider-key");
+    assert_eq!(methods, ["provider-key", "provider-code", "api-key"]);
+    assert_eq!(offer.logins[0].produces, "opencode-login");
+    assert_eq!(offer.logins[1].produces, "opencode-login");
+    assert_eq!(key.produces, "opencode-provider-key");
     let catalog = provider().accounts().expect("catalog");
     for kind in [
         "harness-login",
@@ -629,6 +631,238 @@ fn opencode_is_the_stdio_provider_with_the_harness_fixed() {
         provider().program().expect("program").as_deref(),
         Some(fake().as_str())
     );
+}
+
+/// What a person was shown to open: each page, with its code.
+type Shown = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A person who types the key they are asked for and writes down every page and code they are shown.
+struct Watching {
+    key: String,
+    shown: Shown,
+    /// The person gives up this long after they were first asked.
+    gives_up_after: Option<Duration>,
+    since: std::time::Instant,
+}
+
+impl LoginPrompter for Watching {
+    fn say(&self, _text: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn open_url(&self, open: OpenUrl) -> Result<(), ProviderError> {
+        self.shown
+            .lock()
+            .expect("lock")
+            .push((open.url, open.user_code));
+        Ok(())
+    }
+
+    fn ask(&self, _form: LoginForm) -> Result<LoginAnswer, ProviderError> {
+        Ok(LoginAnswer::new(
+            Value::from(Map::new()),
+            Credentials::from_iter([("api_key", self.key.as_str())]),
+        ))
+    }
+
+    fn cancelled(&self) -> Result<bool, ProviderError> {
+        Ok(self
+            .gives_up_after
+            .is_some_and(|after| self.since.elapsed() >= after))
+    }
+}
+
+/// The method `id` for `provider` (and `method`) in `dir`, and what the person was shown.
+fn provider_login(
+    id: &str,
+    provider: &str,
+    method: Option<&str>,
+    dir: &Path,
+) -> (Result<coqui_acp_api::LoginOutcome, ProviderError>, Shown) {
+    provider_login_for(id, provider, method, dir, None)
+}
+
+fn provider_login_for(
+    id: &str,
+    provider: &str,
+    method: Option<&str>,
+    dir: &Path,
+    gives_up_after: Option<Duration>,
+) -> (Result<coqui_acp_api::LoginOutcome, ProviderError>, Shown) {
+    let mut inputs = Map::new();
+    inputs.set("provider", Value::from(provider));
+    if let Some(method) = method {
+        inputs.set("method", Value::from(method));
+    }
+    let shown = Shown::default();
+    let outcome = accounts().login(
+        LoginRequest::new(id, text(dir)).inputs(Value::from(inputs)),
+        LocalSpawner::new().files(dir).into_object(),
+        Watching {
+            key: KEY.to_owned(),
+            shown: shown.clone(),
+            gives_up_after,
+            since: std::time::Instant::now(),
+        }
+        .into_object(),
+    );
+    (outcome, shown)
+}
+
+fn kept_sign_in(outcome: &coqui_acp_api::LoginOutcome) -> serde_json::Value {
+    let text = outcome
+        .credentials
+        .expose()
+        .get("auth_json")
+        .expect("the sign-in file")
+        .to_owned();
+    serde_json::from_str(&text).expect("JSON")
+}
+
+/// OpenCode's own `auth login` is run for a provider and answered: a key typed into its prompt makes an account whose
+/// credential is the `auth.json` it wrote, in the sign-in's folder and nowhere else.
+#[test]
+fn a_provider_login_types_the_key_into_opencodes_own_prompt_and_keeps_the_file_it_wrote() {
+    let dir = scratch("login-key");
+    for provider in ["openrouter", "anthropic", "opencode"] {
+        let (outcome, shown) = provider_login("provider-key", provider, None, &dir);
+        let outcome = outcome.expect("signed in");
+        assert_eq!(outcome.kind, "opencode-login");
+        assert!(!outcome.checked);
+        assert!(shown.lock().expect("lock").is_empty(), "no page for a key");
+        let kept = kept_sign_in(&outcome);
+        assert_eq!(kept[provider]["type"], json!("api"));
+        assert_eq!(kept[provider]["key"], json!(KEY));
+    }
+    // The openai key is a method of its own, named by its label.
+    let (outcome, _) = provider_login(
+        "provider-key",
+        "openai",
+        Some("Manually enter API Key"),
+        &dir,
+    );
+    assert_eq!(
+        kept_sign_in(&outcome.expect("signed in"))["openai"]["key"],
+        json!(KEY)
+    );
+    let on_disk =
+        std::fs::read_to_string(dir.join("opencode").join("auth.json")).expect("the file");
+    assert!(on_disk.contains("openrouter") && on_disk.contains("openai"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A code is shown with its page, and the sign-in ends when the program does.
+#[test]
+fn a_provider_login_shows_the_page_and_code_the_program_prints_and_waits_for_it_to_end() {
+    for (provider, method, page) in [
+        (
+            "openai",
+            Some("ChatGPT Pro/Plus (headless)"),
+            "https://auth.openai.com/codex/device",
+        ),
+        // A selection nothing but Enter answers: GitHub.com is the program's first choice.
+        ("github-copilot", None, "https://github.com/login/device"),
+    ] {
+        let dir = scratch(&format!("login-code-{provider}"));
+        let (outcome, shown) = provider_login("provider-code", provider, method, &dir);
+        let outcome = outcome.expect("signed in");
+        assert_eq!(outcome.kind, "opencode-login");
+        let shown = shown.lock().expect("lock").clone();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].0, page);
+        assert_eq!(shown[0].1.as_deref(), Some("ABCD-12345"));
+        assert_eq!(kept_sign_in(&outcome)[provider]["type"], json!("oauth"));
+        assert!(
+            !KEY.is_empty()
+                && !serde_json::to_string(&kept_sign_in(&outcome))
+                    .expect("text")
+                    .contains(KEY)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A code is waited for, not passed: the person who gives up while the program waits for them ends the sign-in at once, and
+/// no sign-in file is left.
+#[test]
+fn a_provider_login_that_waits_for_a_code_ends_when_the_person_gives_up() {
+    let dir = scratch("login-cancel");
+    for provider in ["github-copilot", "openai"] {
+        let begun = std::time::Instant::now();
+        let (outcome, shown) = provider_login_for(
+            "provider-code",
+            provider,
+            (provider == "openai").then_some("ChatGPT Pro/Plus (headless)"),
+            &dir,
+            Some(Duration::from_millis(400)),
+        );
+        let refused = outcome.expect_err("cancelled");
+        assert_eq!(
+            u32::from(refused.status),
+            u32::from(Status::GUATIAO_ERR_GONE)
+        );
+        assert!(
+            refused.message().contains("cancelled"),
+            "{}",
+            refused.message()
+        );
+        assert!(
+            begun.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            begun.elapsed()
+        );
+        let _ = shown;
+    }
+    assert!(!dir.join("opencode").join("auth.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the program refuses, and a browser that returns to a port on the machine it runs on, are refused with their
+/// reasons, and no sign-in file is left.
+#[test]
+fn a_provider_login_refuses_what_the_program_refuses_and_a_browser_that_returns_to_this_machine() {
+    let dir = scratch("login-refused");
+    for (provider, method, reason) in [
+        (
+            "openai",
+            Some("ChatGPT Pro/Plus (browser)"),
+            "port on the machine",
+        ),
+        ("openai", None, "port on the machine"),
+        ("openai", Some("nonsense"), "Unknown method"),
+        ("nosuchprovider", None, "Unknown provider"),
+    ] {
+        let (outcome, shown) = provider_login("provider-code", provider, method, &dir);
+        let refused = outcome.expect_err(provider);
+        assert!(
+            refused.message().contains(reason),
+            "{provider} {method:?}: {}",
+            refused.message()
+        );
+        assert!(shown.lock().expect("lock").is_empty());
+        assert!(!refused.message().contains(KEY));
+    }
+    assert!(
+        !dir.join("opencode").join("auth.json").exists(),
+        "a refused sign-in left a file"
+    );
+    // A value the program could take for an option, or that is no id, never reaches it.
+    for (provider, method) in [
+        ("", None),
+        ("-x", None),
+        ("two\nlines", None),
+        ("openai", Some("-m")),
+        ("openai", Some("a\u{7}b")),
+    ] {
+        let (outcome, _) = provider_login("provider-key", provider, method, &dir);
+        let refused = outcome.expect_err(provider);
+        assert_eq!(
+            u32::from(refused.status),
+            u32::from(Status::GUATIAO_ERR_BAD_VALUE),
+            "{provider:?} {method:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A history a Claude session made: a prompt, reasoning, a command with its result, an answer, and a second prompt.

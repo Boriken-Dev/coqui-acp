@@ -6,25 +6,28 @@
 //! `OPENCODE_AUTH_CONTENT` replaces the whole of `auth.json` for a run. An account starts OpenCode with a data folder of
 //! its own, so no credential in the person's `auth.json` meets the account's, and its sessions are the account's.
 //!
-//! Not measured: a real sign-in (`opencode auth login` is a picker that needs a terminal), the fields of an OAuth entry in
+//! Not measured: a completed sign-in (`opencode auth login` was run to its prompts, on plain pipes, and a made-up key typed once), the fields of an OAuth entry in
 //! `auth.json`, whether it rewrites the file when it refreshes one, the folder on macOS, and every provider variable beyond
 //! the ones listed. A provider the catalog adds is not in the list a start clears.
 
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
+use std::ffi::OsString;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
     ASK, Credentials, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
-    ProcessSpawner,
+    OPEN_URL, OpenUrl, ProcessSpawner, USER_CODE,
 };
 use serde_json::json;
 
 use coqui_acp_api::standard;
 
 use super::{AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef, check_variable_name};
+use crate::login::reason;
+use crate::process::Launch;
 use crate::provider::schema;
 use crate::stdio::login::{self, Ctx};
 
@@ -235,12 +238,46 @@ pub static DEF: HarnessDef = HarnessDef {
     ],
     variables: VARIABLES,
     renew_args: None,
-    login_unsupported: "OpenCode signs in with `opencode auth login`, a picker over every provider that needs a terminal, which this provider does not drive; a key account is made with the `api-key` method",
+    login_unsupported: "OpenCode is signed in with the `provider-key`, `provider-code` and `api-key` methods; its own sign-in that returns the browser to a port on the machine it runs on is not offered",
 };
 
-/// The ways to sign in: only the key. A provider's sign-in through a browser is a picker in a terminal.
+/// The ways to sign in: OpenCode's own `auth login` for a provider, which asks for a key (`provider-key`) or shows a code to
+/// confirm on a page (`provider-code`), and a key in a variable the account names (`api-key`). A provider's sign-in through a
+/// browser that returns to a port of the machine OpenCode runs on is not offered.
 #[must_use]
 pub fn logins() -> Vec<LoginMethodInfo> {
+    let inputs = |providers: &[&str], methods: &[&str]| {
+        schema(&json!({
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string", "title": "Provider",
+                    "description": "The provider's id or name, as `opencode auth login` takes it.",
+                    "examples": providers},
+                "method": {"type": "string", "title": "Login method",
+                    "description": "The method's label, for a provider that has several.",
+                    "examples": methods},
+            },
+            "required": ["provider"],
+            "additionalProperties": false,
+        }))
+    };
+    let mut own_key =
+        LoginMethodInfo::new("provider-key", "A provider's key, kept by OpenCode", LOGIN);
+    own_key.description = "Runs `opencode auth login` for a provider and types the key it asks for into its prompt, so that OpenCode keeps the key in a sign-in file of the account's own. It sends nothing to the provider.".to_string();
+    own_key.inputs = inputs(
+        &["openrouter", "anthropic", "opencode", "google", "openai"],
+        &["Manually enter API Key"],
+    );
+    own_key.steps = vec![ASK.to_string()];
+    own_key.remote = true;
+    let mut code = LoginMethodInfo::new("provider-code", "Sign in with a code", LOGIN);
+    code.description = "Runs `opencode auth login` for a provider that shows a page and a code to confirm there, and waits until the person has. OpenCode keeps the sign-in in a file of the account's own.".to_string();
+    code.inputs = inputs(
+        &["github-copilot", "openai"],
+        &["ChatGPT Pro/Plus (headless)"],
+    );
+    code.steps = vec![OPEN_URL.to_string(), USER_CODE.to_string()];
+    code.remote = true;
     let mut key = LoginMethodInfo::new("api-key", "Provider API key", PROVIDER_KEY);
     key.description = "Asks which environment variable the key goes in (a provider's own is suggested, any other name works) and then the key. It sends nothing to the provider.".to_string();
     key.inputs = schema(&json!({
@@ -251,22 +288,34 @@ pub fn logins() -> Vec<LoginMethodInfo> {
     }));
     key.steps = vec![ASK.to_string()];
     key.remote = true;
-    vec![key]
+    vec![own_key, code, key]
 }
 
 fn bad(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why)
 }
 
-fn api_key(ctx: &Ctx<'_>, variable: &str) -> Result<LoginOutcome, ProviderError> {
-    let form = LoginForm::new(
+fn launch(program: &str, args: &[&str], dir: &str) -> Launch {
+    let mut launch = Launch::new(program)
+        .args(args.iter().copied())
+        .env("XDG_DATA_HOME", dir);
+    launch.remove_env = VARIABLES.iter().map(OsString::from).collect();
+    launch
+}
+
+fn key_form() -> LoginForm {
+    LoginForm::new(
         "OpenCode provider key",
         schema(&json!({
             "type": "object",
             "properties": {"api_key": crate::provider::credential()},
             "required": ["api_key"],
         })),
-    );
+    )
+}
+
+/// The key the person typed into `form`, when it is one the program can be given on a line.
+fn typed_key(ctx: &Ctx<'_>, form: LoginForm) -> Result<alloc::string::String, ProviderError> {
     let answer = ctx.ask(form)?;
     let key = answer
         .secrets
@@ -277,6 +326,11 @@ fn api_key(ctx: &Ctx<'_>, variable: &str) -> Result<LoginOutcome, ProviderError>
     if key.trim().is_empty() || key.chars().any(char::is_control) {
         return Err(bad("login refused: no usable key was given"));
     }
+    Ok(key)
+}
+
+fn api_key(ctx: &Ctx<'_>, variable: &str) -> Result<LoginOutcome, ProviderError> {
+    let key = typed_key(ctx, key_form())?;
     let mut credentials = Credentials::new();
     credentials.insert("api_key", key);
     let mut outcome = LoginOutcome::new(PROVIDER_KEY, credentials);
@@ -286,30 +340,258 @@ fn api_key(ctx: &Ctx<'_>, variable: &str) -> Result<LoginOutcome, ProviderError>
     Ok(outcome)
 }
 
+/// What `opencode auth login` has shown so far, read from its lines as they come.
+#[derive(Default)]
+struct Shown {
+    url: Option<alloc::string::String>,
+    code: Option<alloc::string::String>,
+    opened: bool,
+    keyed: bool,
+    /// The title of a selection being listed, and the end of its list not yet seen.
+    selecting: Option<alloc::string::String>,
+    /// The last thing the program said it could not do.
+    error: Option<alloc::string::String>,
+}
+
+/// A line of the program's prompts without the frame it draws them in: the bars, the marker and the bullet.
+fn spoken(line: &str) -> &str {
+    line.trim_start_matches(['|', '*', '>', '\u{2022}', ' '])
+        .trim()
+}
+
+/// Whether `url` sends the browser back to a port of the machine the program runs on: its `redirect_uri` is a loopback
+/// address, which the program then listens on.
+fn returns_to_this_machine(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    query
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("redirect_uri="))
+        .any(|target| {
+            let target = percent_decoded(target);
+            crate::cli::host_of(&target).is_some_and(|host| crate::cli::is_loopback(&host))
+        })
+}
+
+fn percent_decoded(text: &str) -> alloc::string::String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = bytes
+            .get(at + 1..at + 3)
+            .and_then(|pair| core::str::from_utf8(pair).ok())
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok());
+        match (bytes[at], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                at += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    alloc::string::String::from_utf8_lossy(&out).into_owned()
+}
+
+fn internal(why: &str) -> ProviderError {
+    ProviderError::new(Status::GUATIAO_ERR_INTERNAL, why)
+}
+
+/// What one line of `opencode auth login` says, as far as a sign-in answers it.
+#[derive(Debug, PartialEq, Eq)]
+enum Said {
+    /// The program refused: its reason.
+    Error(alloc::string::String),
+    /// The rule that ends a prompt's frame.
+    Rule,
+    /// A prompt's title: a selection when no key is asked.
+    Title(alloc::string::String),
+    /// The page to open.
+    Page(alloc::string::String),
+    /// The code to confirm there.
+    Code(alloc::string::String),
+    /// The prompt for a key.
+    Key,
+    /// Nothing to answer.
+    Nothing,
+}
+
+fn classify(text: &str) -> Said {
+    let text = text.trim();
+    if let Some(error) = text.strip_prefix("Error:") {
+        return Said::Error(error.trim().to_string());
+    }
+    if text.starts_with('\u{2014}') {
+        return Said::Rule;
+    }
+    let said = spoken(text);
+    if let Some(url) = said.strip_prefix("Go to:") {
+        Said::Page(url.trim().to_string())
+    } else if let Some(code) = said.strip_prefix("Enter code:") {
+        Said::Code(code.trim().to_string())
+    } else if said.contains("Enter your API key") {
+        Said::Key
+    } else if text.starts_with('*') {
+        Said::Title(said.to_string())
+    } else {
+        Said::Nothing
+    }
+}
+
+impl Shown {
+    /// Takes one line, answering what it asks: a key is asked of the person and typed, a selection takes its first (the
+    /// program's own default), a page and code are shown to the person.
+    fn line(
+        &mut self,
+        ctx: &Ctx<'_>,
+        input: &crate::cli::Cli,
+        line: &str,
+    ) -> Result<(), ProviderError> {
+        match classify(line) {
+            Said::Error(error) => self.error = Some(error),
+            // The rule that ends a frame: a selection has been listed whole.
+            Said::Rule => {
+                if self.selecting.take().is_some() {
+                    let _ = input.write(b"\r");
+                }
+            }
+            Said::Title(title) => self.selecting = Some(title),
+            Said::Page(url) => {
+                if returns_to_this_machine(&url) {
+                    return Err(ProviderError::new(
+                        Status::GUATIAO_ERR_UNSUPPORTED,
+                        "this sign-in returns the browser to a port on the machine OpenCode runs on, which this provider does not hand over; name a method that shows a code, or one that asks for a key",
+                    ));
+                }
+                if !(url.starts_with("https://")
+                    && !url.chars().any(|c| c.is_whitespace() || c.is_control()))
+                {
+                    return Err(internal(
+                        "OpenCode printed a page that is not an https address",
+                    ));
+                }
+                self.url = Some(url);
+            }
+            Said::Code(code) => self.code = Some(code),
+            Said::Key if !self.keyed => {
+                self.keyed = true;
+                let key = typed_key(ctx, key_form())?;
+                input
+                    .write(alloc::format!("{key}\r").as_bytes())
+                    .map_err(|_| internal("OpenCode no longer reads its input"))?;
+            }
+            Said::Key | Said::Nothing => {}
+        }
+        if let Some(url) = &self.url
+            && self.code.is_some()
+            && !self.opened
+        {
+            self.opened = true;
+            let mut open = OpenUrl::new(url.clone());
+            open.user_code.clone_from(&self.code);
+            ctx.open_url(open)?;
+        }
+        Ok(())
+    }
+}
+
+/// `opencode auth login -p provider [-m method]` on the sign-in's data folder: what it asks is answered, and what it writes
+/// is the account's sign-in.
+fn provider_login(
+    ctx: &Ctx<'_>,
+    program: &str,
+    dir: &str,
+    provider: &str,
+    method: Option<&str>,
+) -> Result<LoginOutcome, ProviderError> {
+    let mut args = vec!["auth", "login", "-p", provider];
+    if let Some(method) = method {
+        args.extend(["-m", method]);
+    }
+    let mut child = ctx.spawn(&launch(program, &args, dir))?;
+    let input = child.input();
+    let mut shown = Shown::default();
+    let exit = child.run(ctx, |line| shown.line(ctx, &input, line))?;
+    if exit.code != Some(0) {
+        let why = shown
+            .error
+            .map(|error| alloc::format!(": {}", reason(&error, &[])))
+            .unwrap_or_default();
+        return Err(bad(&alloc::format!(
+            "login refused: `opencode auth login` ended without a sign-in{why}"
+        )));
+    }
+    let text = ctx
+        .read_settled(AUTH_FILE)
+        .map_err(|_| internal("`opencode auth login` wrote no sign-in file"))?;
+    let mut outcome = LoginOutcome::new(LOGIN, login::one("auth_json", &text));
+    // Whether the provider accepts it is not known without a model turn.
+    outcome.checked = false;
+    Ok(outcome)
+}
+
+/// Whether `text` can be one argument of `opencode auth login` that is no option: at most `limit` characters, no control
+/// character, not starting with `-`.
+fn argument(text: &str, limit: usize) -> bool {
+    !text.trim().is_empty()
+        && text.chars().count() <= limit
+        && !text.starts_with('-')
+        && !text.chars().any(char::is_control)
+}
+
 /// Runs the sign-in `request.method` names.
 ///
 /// # Errors
 ///
 /// As [`AccountProvider::login`](coqui_acp_api::AccountProvider::login).
 pub fn sign_in(
+    program: alloc::string::String,
     request: LoginRequest,
     spawner: Object<dyn ProcessSpawner>,
     prompter: Object<dyn LoginPrompter>,
 ) -> Result<LoginOutcome, ProviderError> {
-    if request.method != "api-key" {
-        return Err(ProviderError::new(
+    let inputs = crate::provider::to_json(&request.inputs);
+    let text = |name: &str| {
+        inputs
+            .get(name)
+            .and_then(|value| value.as_str().map(ToString::to_string))
+    };
+    let dir = request.state_dir.clone();
+    match request.method.as_str() {
+        "api-key" => {
+            let variable = text("variable")
+                .ok_or_else(|| bad("login refused: the variable the key is for is missing"))?;
+            check_variable_name(&variable)?;
+            login::run(spawner, prompter, request.timeout_ms, move |ctx| {
+                api_key(ctx, &variable)
+            })
+        }
+        "provider-key" | "provider-code" => {
+            let provider = text("provider")
+                .filter(|provider| argument(provider, 64))
+                .ok_or_else(|| {
+                    bad("login refused: the provider is missing or not an id or a name")
+                })?;
+            let method = text("method").filter(|method| !method.trim().is_empty());
+            if method
+                .as_deref()
+                .is_some_and(|method| !argument(method, 80))
+            {
+                return Err(bad("login refused: the login method is not a label"));
+            }
+            login::run(spawner, prompter, request.timeout_ms, move |ctx| {
+                provider_login(ctx, &program, &dir, &provider, method.as_deref())
+            })
+        }
+        _ => Err(ProviderError::new(
             Status::GUATIAO_ERR_BAD_VALUE,
             "this harness offers no such way to sign in",
-        ));
+        )),
     }
-    let variable = crate::provider::to_json(&request.inputs)
-        .get("variable")
-        .and_then(|value| value.as_str().map(ToString::to_string))
-        .ok_or_else(|| bad("login refused: the variable the key is for is missing"))?;
-    check_variable_name(&variable)?;
-    login::run(spawner, prompter, request.timeout_ms, move |ctx| {
-        api_key(ctx, &variable)
-    })
 }
 
 #[cfg(test)]
@@ -465,5 +747,113 @@ mod tests {
                 assert!(!error.message().contains(CANARY));
             }
         }
+    }
+
+    fn recorded() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/opencode_auth_login.json"
+        ))
+        .expect("the recorded prompts are JSON")
+    }
+
+    /// What a sign-in answers in `output`, in order.
+    fn said_in(output: &str) -> Vec<Said> {
+        output
+            .lines()
+            .map(|line| classify(&crate::cli::plain(line)))
+            .filter(|said| *said != Said::Nothing)
+            .collect()
+    }
+
+    fn said_of(name: &str, field: &str) -> Vec<Said> {
+        said_in(
+            recorded()["scenarios"][name][field]
+                .as_str()
+                .expect("recorded"),
+        )
+    }
+
+    #[test]
+    fn the_prompts_the_program_printed_are_read_as_what_they_ask() {
+        let title = |text: &str| Said::Title(text.to_string());
+        assert!(said_of("picker", "output").contains(&title("Select provider")));
+        assert!(said_of("openai_methods", "output").contains(&title("Login method")));
+        assert!(
+            said_of("copilot_type", "output").contains(&title("Select GitHub deployment type"))
+        );
+        for (name, field) in [
+            ("openai_key", "output"),
+            ("anthropic_key", "output"),
+            ("opencode_key", "output"),
+            ("openrouter_key", "before_input"),
+        ] {
+            let said = said_of(name, field);
+            assert!(said.contains(&Said::Key), "{name}: {said:?}");
+            // The key's own prompt is no selection.
+            assert!(
+                !said.iter().any(|said| matches!(said, Said::Title(_))),
+                "{name}"
+            );
+        }
+        for (name, field, page) in [
+            (
+                "openai_headless",
+                "output",
+                "https://auth.openai.com/codex/device",
+            ),
+            (
+                "copilot_device",
+                "after_input",
+                "https://github.com/login/device",
+            ),
+        ] {
+            let said = said_of(name, field);
+            assert!(
+                said.contains(&Said::Page(page.to_string())),
+                "{name}: {said:?}"
+            );
+            assert!(
+                said.contains(&Said::Code("ABCD-12345".to_string())),
+                "{name}: {said:?}"
+            );
+            assert!(!returns_to_this_machine(page));
+        }
+        let browser = said_of("openai_browser", "output");
+        let Some(Said::Page(page)) = browser.iter().find(|said| matches!(said, Said::Page(_)))
+        else {
+            panic!("no page in {browser:?}");
+        };
+        assert!(returns_to_this_machine(page), "{page}");
+        assert!(!browser.iter().any(|said| matches!(said, Said::Code(_))));
+        assert!(
+            said_of("openai_bad_method", "output")
+                .iter()
+                .any(|said| matches!(said, Said::Error(why) if why.starts_with("Unknown method \"nonsense\" for openai")))
+        );
+        assert!(said_of("bad_provider", "output").contains(&Said::Error(
+            "Unknown provider \"nosuchprovider\"".to_string()
+        )));
+    }
+
+    #[test]
+    fn a_page_that_sends_the_browser_back_to_this_machine_is_known_by_its_redirect() {
+        let back = "https://auth.example.com/authorize?client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcb&state=s";
+        assert!(returns_to_this_machine(back));
+        assert!(returns_to_this_machine(
+            "https://a.example/o?redirect_uri=http%3A%2F%2F127.0.0.1%3A40000%2Fcallback"
+        ));
+        assert!(!returns_to_this_machine(
+            "https://a.example/o?redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb"
+        ));
+        assert!(!returns_to_this_machine("https://a.example/device"));
+    }
+
+    #[test]
+    fn what_the_program_is_given_is_a_label_and_never_an_option() {
+        assert!(argument("openai", 64) && argument("ChatGPT Pro/Plus (headless)", 80));
+        for bad in ["", "  ", "-p", "--help", "a\nb", "a\u{1b}b"] {
+            assert!(!argument(bad, 80), "{bad:?}");
+        }
+        assert!(!argument(&"x".repeat(65), 64));
     }
 }
