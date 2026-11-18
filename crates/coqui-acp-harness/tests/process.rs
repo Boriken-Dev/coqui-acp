@@ -484,3 +484,69 @@ fn an_exit_is_told_after_everything_read_however_slow_the_sink() {
         "{told:?}"
     );
 }
+
+static REAL_FOLDER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+fn real_folder() -> Vec<std::path::PathBuf> {
+    REAL_FOLDER.get().cloned().into_iter().collect()
+}
+
+/// A folder the environment of a launch puts first on `PATH` does not decide which program starts: the one this process finds
+/// does, here in a folder the host named.
+#[test]
+fn a_bare_program_is_found_on_this_processs_path_and_not_on_one_the_launch_sets() {
+    let root = std::env::temp_dir().join(format!("acp-own-path-{}", std::process::id()));
+    let (real, impostor) = (root.join("real"), root.join("impostor"));
+    for folder in [&real, &impostor] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let name = "acp-own-path-agent";
+    let file = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    // The real program is a copy of this test program, which lists its tests and ends with status 0.
+    std::fs::copy(std::env::current_exe().unwrap(), real.join(&file)).unwrap();
+    // The impostor cannot start where Windows would look for it first (an empty program), and ends with 77 elsewhere.
+    #[cfg(windows)]
+    std::fs::write(impostor.join(&file), "").unwrap();
+    #[cfg(unix)]
+    {
+        std::fs::write(impostor.join(&file), "#!/bin/sh\nexit 77\n").unwrap();
+        std::fs::set_permissions(
+            impostor.join(&file),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    REAL_FOLDER.set(real.clone()).unwrap();
+    coqui_acp_harness::set_program_dirs(real_folder);
+    let launch = Launch::new(name)
+        .arg("--list")
+        .env("PATH", impostor.as_os_str());
+    let spawned = PlainSpawn.spawn(&launch).unwrap();
+    let mut stdout = spawned.stdout;
+    let mut listed = String::new();
+    let _ = stdout.read_to_string(&mut listed);
+    let until = Instant::now() + Duration::from_secs(30);
+    let exit = loop {
+        if let Some(exit) = spawned.process.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(Instant::now() < until, "it never exited");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(exit.code, Some(0), "{listed}");
+    assert!(listed.contains("a_bare_program_is_found"), "{listed}");
+    // A name with a directory is started as it is, wherever the launch's path points.
+    let direct = Launch::new(real.join(&file))
+        .arg("--list")
+        .env("PATH", impostor.as_os_str());
+    let spawned = PlainSpawn.spawn(&direct).unwrap();
+    let mut direct_out = spawned.stdout;
+    let mut listed = String::new();
+    let _ = direct_out.read_to_string(&mut listed);
+    assert!(listed.contains("a_bare_program_is_found"), "{listed}");
+    let _ = std::fs::remove_dir_all(&root);
+}
