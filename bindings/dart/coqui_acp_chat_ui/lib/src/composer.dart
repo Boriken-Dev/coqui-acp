@@ -245,7 +245,7 @@ class Composer extends StatefulWidget {
   /// Told whether the `/` list is showing, so a host's own keys leave Enter, Tab and Escape to it while it is.
   final ValueChanged<bool>? onSuggestions;
 
-  /// The most each group of the `/` list holds; the list scrolls past a screenful.
+  /// The most each group of the `/` list holds; the list scrolls past a screenful when it holds more than the default.
   final int suggestionLimit;
 
   /// The agent's `/` commands.
@@ -755,7 +755,8 @@ class CommandSuggestions extends StatelessWidget {
       borderRadius: BorderRadius.circular(look.radius / 2),
       clipBehavior: Clip.antiAlias,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 280),
+        // Past the default count the list scrolls; within it it is as tall as its rows.
+        constraints: BoxConstraints(maxHeight: limit > shown ? 280 : double.infinity),
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
