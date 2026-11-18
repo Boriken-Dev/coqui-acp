@@ -48,7 +48,19 @@ fn internal(why: &str) -> ProviderError {
 
 /// A command line of Codex for the account commands: every credential variable removed, then `set`.
 pub(crate) fn command(executable: &OsString, args: &[&str], dir: &str) -> Launch {
-    let mut launch = Launch::new(executable.clone()).args(args.iter().copied());
+    command_after(executable, &[], args, dir)
+}
+
+/// [`command`] for a program that takes `leading` arguments before Codex's own (a wrapper such as `wsl codex`).
+pub(crate) fn command_after(
+    executable: &OsString,
+    leading: &[OsString],
+    args: &[&str],
+    dir: &str,
+) -> Launch {
+    let mut launch = Launch::new(executable.clone())
+        .args(leading.iter().cloned())
+        .args(args.iter().copied());
     launch.remove_env = VARIABLES.iter().map(OsString::from).collect();
     launch.env("CODEX_HOME", dir)
 }
@@ -69,12 +81,13 @@ pub(crate) fn configure(files: &Files) -> Result<(), ProviderError> {
 pub(crate) fn save(
     spawn: &ThroughSpawner,
     executable: &OsString,
+    leading: &[OsString],
     dir: &str,
     login: &StdinLogin,
     limit: Duration,
     job: Option<&Job>,
 ) -> Result<(), ProviderError> {
-    let launch = command(executable, &["login", login.flag], dir);
+    let launch = command_after(executable, leading, &["login", login.flag], dir);
     let mut input = format!("{}\n", login.secret);
     let done = match job {
         Some(job) => job.run(spawn, &launch, Some(input.as_bytes()), limit, OUTPUT),
@@ -462,6 +475,7 @@ fn typed(
     let saved = save(
         spawn,
         &plan.executable,
+        &[],
         &plan.dir,
         &login,
         plan.limit,
@@ -560,4 +574,28 @@ pub(crate) fn renew(
     let mut report = RenewReport::renewed(after.expose().clone());
     report.expires_at = expires_at;
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wrapper_program_gets_its_own_arguments_before_codex_login() {
+        let wrapper = OsString::from("wsl");
+        let launch = command_after(
+            &wrapper,
+            &[OsString::from("codex")],
+            &["login", "--with-api-key"],
+            "/home",
+        );
+        assert_eq!(launch.program, wrapper);
+        assert_eq!(launch.args, ["codex", "login", "--with-api-key"]);
+        assert_eq!(
+            launch.env.get(&OsString::from("CODEX_HOME")),
+            Some(&OsString::from("/home"))
+        );
+        let plain = command(&wrapper, &["login", "status"], "/home");
+        assert_eq!(plain.args, ["login", "status"]);
+    }
 }

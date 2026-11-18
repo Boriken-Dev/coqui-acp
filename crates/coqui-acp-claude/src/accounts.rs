@@ -5,18 +5,22 @@
 //! `false`.
 
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::ClaudeLaunch;
+use std::ffi::OsString;
+
 use coqui_acp_api::guatiao::library::ProviderError;
-use coqui_acp_api::guatiao::{Status, Wipe};
+use coqui_acp_api::guatiao::{Secret, Status, Wipe};
 use coqui_acp_api::standard::{ANTHROPIC_API, CLAUDE_CODE};
 use coqui_acp_api::{
     ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountOffer,
     AccountRef, Credentials, EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL,
     PASTE_CODE, PROXY,
 };
-use coqui_acp_harness::account::{Watched, rfc3339_ms};
+use coqui_acp_harness::account::{Accounts, Files, Hold, Watched, rfc3339_ms, same_name};
 use coqui_acp_harness::provider::{credential, resolve, schema, to_json};
 use serde_json::{Value, json};
 
@@ -88,6 +92,24 @@ pub(crate) const VARIABLES: &[&str] = &[
     "ANTHROPIC_VERTEX_PROJECT_ID",
     "CLOUD_ML_REGION",
     "ANTHROPIC_FOUNDRY_RESOURCE",
+];
+
+/// The part of [`VARIABLES`] whose value is itself a secret: a key, a token, a password or a private key. Not an endpoint,
+/// a switch that picks a cloud provider, a project, a profile or the path of a file, which a person sets on purpose and
+/// which a start still clears.
+pub(crate) const SECRETS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AWS_API_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+    "CLAUDE_CODE_CLIENT_KEY",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
 ];
 
 fn settings(secret: &str) -> Value {
@@ -261,6 +283,7 @@ fn full() -> AccountCatalog {
         .iter()
         .map(|v| (*v).to_string())
         .collect::<Vec<String>>();
+    catalog.secret_variables = SECRETS.iter().map(|v| (*v).to_string()).collect();
     catalog
 }
 
@@ -362,7 +385,7 @@ fn guatiao_json(value: &coqui_acp_api::guatiao::Value) -> Value {
 
 /// What applying a grant does.
 #[non_exhaustive]
-pub(crate) struct Applied {
+pub(crate) struct Plan {
     /// The variables Claude Code is given.
     pub set: Vec<(String, String)>,
     /// The variables removed before, every credential variable; empty for `harness-login`, which clears nothing.
@@ -465,7 +488,12 @@ pub fn variables(grant: &AccountGrant) -> Vec<(String, String)> {
 ///
 /// `BAD_VALUE`: an id that is not one, a kind not listed, settings the kind refuses, a credential missing, empty or
 /// one the kind does not take, a missing directory.
-pub(crate) fn plan(grant: &AccountGrant) -> Result<Applied, ProviderError> {
+pub(crate) fn plan(grant: &AccountGrant) -> Result<Plan, ProviderError> {
+    plan_as(grant, false)
+}
+
+/// [`plan`], where a login kind with no file in the grant (`in_place`) is the directory as it is.
+fn plan_as(grant: &AccountGrant, in_place: bool) -> Result<Plan, ProviderError> {
     let grant = &resolved(grant)?;
     check(&grant.reference())?;
     let credentials: &Credentials = grant.credentials.expose();
@@ -473,7 +501,7 @@ pub(crate) fn plan(grant: &AccountGrant) -> Result<Applied, ProviderError> {
         if !credentials.is_empty() {
             return Err(bad("that kind takes no credential"));
         }
-        return Ok(Applied {
+        return Ok(Plan {
             set: Vec::new(),
             remove: Vec::new(),
             dir: None,
@@ -482,7 +510,7 @@ pub(crate) fn plan(grant: &AccountGrant) -> Result<Applied, ProviderError> {
     }
     let url = base_url(&grant.settings)?;
     let mut set = Vec::new();
-    let mut applied = Applied {
+    let mut applied = Plan {
         set: Vec::new(),
         remove: VARIABLES.iter().map(|v| (*v).to_string()).collect(),
         dir: None,
@@ -491,17 +519,20 @@ pub(crate) fn plan(grant: &AccountGrant) -> Result<Applied, ProviderError> {
     if matches!(grant.kind.as_str(), LOGIN | CONSOLE) {
         let only = credentials.keys().all(|key| key == FILE_KEY);
         let text = credentials.get(FILE_KEY).filter(|text| !text.is_empty());
-        if !only || text.is_none() {
+        let there = in_place && credentials.is_empty();
+        if !there && (!only || text.is_none()) {
             return Err(bad("the login's credentials are missing or not the kind's"));
         }
         let dir = grant.state_dir.clone().unwrap_or_default();
         set.push(("CLAUDE_CONFIG_DIR".to_string(), dir.clone()));
         applied.dir = Some(dir);
-        applied.watched = vec![
-            Watched::new(CREDENTIALS_FILE, FILE_KEY)
-                .usable(usable)
-                .expires(expires),
-        ];
+        if !there {
+            applied.watched = vec![
+                Watched::new(CREDENTIALS_FILE, FILE_KEY)
+                    .usable(usable)
+                    .expires(expires),
+            ];
+        }
     } else {
         let key = match grant.kind.as_str() {
             OAUTH_TOKEN => "token",
@@ -523,6 +554,142 @@ pub(crate) fn plan(grant: &AccountGrant) -> Result<Applied, ProviderError> {
     Ok(applied)
 }
 
+/// What is left to do for an account [`apply`] has applied to a launch: the files of a login the account keeps.
+///
+/// It holds no credential a log or a `Debug` would show.
+#[must_use = "a login kept in files is placed only by `hold`"]
+pub struct Applied {
+    id: String,
+    revision: u64,
+    credentials: Secret<Credentials>,
+    dir: Option<String>,
+    watched: Vec<Watched>,
+}
+
+impl core::fmt::Debug for Applied {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Applied")
+            .field("id", &self.id)
+            .field("dir", &self.dir)
+            .field("watched", &self.watched.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Applied {
+    /// Claude Code's configuration directory, for a kind that keeps a login in one.
+    #[must_use]
+    pub fn dir(&self) -> Option<&str> {
+        self.dir.as_deref()
+    }
+
+    /// Whether the account keeps a login in files that [`hold`](Self::hold) places and watches.
+    #[must_use]
+    pub fn keeps_files(&self) -> bool {
+        !self.watched.is_empty()
+    }
+
+    /// Places the files of a login in the account's directory through `files` and holds them in `accounts`, which sees
+    /// to it that the grant's copy replaces only one that is blank, older or not a file, and tells a renewal or a loss
+    /// to the keepers of a live hold. `None` for an account that keeps no file: nothing is written. The hold lasts
+    /// until [`Hold::finish`] or its drop; keep it as long as Claude Code runs.
+    ///
+    /// # Errors
+    ///
+    /// `BAD_VALUE` when the grant carries no copy of the login; the spawner's refusal to read or write a file.
+    pub fn hold(
+        self,
+        accounts: &Arc<Accounts>,
+        files: &Files,
+    ) -> Result<Option<Hold>, ProviderError> {
+        if self.watched.is_empty() {
+            return Ok(None);
+        }
+        accounts
+            .hold(
+                files.clone(),
+                None,
+                &self.id,
+                self.dir.as_deref().unwrap_or_default(),
+                self.revision,
+                self.credentials.expose(),
+                self.watched,
+            )
+            .map(Some)
+    }
+}
+
+/// Applies `grant` to `launch`, as `start` does: every credential variable is removed from what Claude Code starts
+/// with, including those of `launch.env`, then the kind's is set (`CLAUDE_CONFIG_DIR` the grant's `state_dir` for a
+/// login kind, `--setting-sources=project,local` for an environment kind unless `launch` already says which sources to
+/// load). `harness-login` changes nothing.
+///
+/// A login kind whose grant carries no `credentials_file` and a `state_dir` is applied **in place**: Claude Code runs on
+/// that directory as it is, nothing is written and [`Applied::hold`] places nothing. A login is placed only when the
+/// grant carries its copy, and only by `hold`. `files` is used only to check that the spawner serves files when a login
+/// is to be placed.
+///
+/// The endpoint variables are cleared and set only from the grant's `base_url`: a host that keeps a person's own
+/// choice of endpoint (`ANTHROPIC_BASE_URL`, a cloud switch) puts it back afterwards. They are among the catalog's
+/// `credential_variables` and not among its `secret_variables`.
+///
+/// # Errors
+///
+/// `BAD_VALUE`: an id that is not one, a kind not listed, settings the kind refuses, a credential missing or not the
+/// kind's, a login kind with no `state_dir`; `UNSUPPORTED`: a login to place on a spawner with no files.
+pub fn apply(
+    grant: &AccountGrant,
+    launch: &mut ClaudeLaunch,
+    files: &Files,
+) -> Result<Applied, ProviderError> {
+    apply_as(grant, launch, files, true)
+}
+
+/// [`apply`] for `start` and the other calls of the harness, which place every login the grant carries and refuse one
+/// that carries none (`in_place` false).
+pub(crate) fn apply_as(
+    grant: &AccountGrant,
+    launch: &mut ClaudeLaunch,
+    files: &Files,
+    in_place: bool,
+) -> Result<Applied, ProviderError> {
+    let grant = &resolved(grant)?;
+    let mut plan = plan_as(grant, in_place)?;
+    let applied = |plan: &mut Plan| Applied {
+        id: grant.id.clone(),
+        revision: grant.revision,
+        credentials: Secret::new(grant.credentials.expose().clone()),
+        dir: plan.dir.take(),
+        watched: core::mem::take(&mut plan.watched),
+    };
+    if grant.kind == HARNESS_LOGIN {
+        return Ok(applied(&mut plan));
+    }
+    if !plan.watched.is_empty() && !files.available() {
+        return Err(ProviderError::new(
+            Status::GUATIAO_ERR_UNSUPPORTED,
+            "this spawner serves no private files, which the login is kept in",
+        ));
+    }
+    // What the host's environment holds under a credential name does not reach Claude Code beside the account's.
+    launch.env.retain(|name, _| {
+        !plan
+            .remove
+            .iter()
+            .any(|v| same_name(&name.to_string_lossy(), v))
+    });
+    launch.remove_env = plan.remove.iter().map(OsString::from).collect();
+    for (name, value) in &plan.set {
+        launch.env.insert(name.into(), value.into());
+    }
+    if plan.dir.is_none() && launch.setting_sources.is_none() {
+        // The person's own user settings (an apiKeyHelper, an env block) would outrank the credential: they are left
+        // out unless the launch says which sources to load.
+        launch.setting_sources = Some(vec!["project".to_string(), "local".to_string()]);
+    }
+    Ok(applied(&mut plan))
+}
+
 /// The grant of Claude Code's own kind that applies `grant`, when `grant` is an account of an accepted standard.
 pub(crate) fn resolved(grant: &AccountGrant) -> Result<AccountGrant, ProviderError> {
     resolve(&catalog(), grant)
@@ -536,10 +703,10 @@ fn secret_key_variable(kind: &str) -> &'static str {
     }
 }
 
-impl core::fmt::Debug for Applied {
+impl core::fmt::Debug for Plan {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // The variables set may hold a credential: only their names are shown.
-        f.debug_struct("Applied")
+        f.debug_struct("Plan")
             .field(
                 "set",
                 &self.set.iter().map(|(name, _)| name).collect::<Vec<_>>(),
@@ -551,7 +718,7 @@ impl core::fmt::Debug for Applied {
     }
 }
 
-impl Drop for Applied {
+impl Drop for Plan {
     fn drop(&mut self) {
         for (_, value) in &mut self.set {
             value.wipe();
@@ -576,7 +743,7 @@ mod tests {
         coqui_acp_harness::provider::schema(json)
     }
 
-    fn set_of(applied: &Applied, name: &str) -> Option<String> {
+    fn set_of(applied: &Plan, name: &str) -> Option<String> {
         applied
             .set
             .iter()

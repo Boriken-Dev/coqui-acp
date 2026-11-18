@@ -95,7 +95,7 @@ What a provider that applies an account to a harness started through a host's sp
 pub struct SecretText;   // a credential as text: wiped when dropped, Debug shows its length; Deref<Target = str>
 pub enum FileState { Missing, Text(SecretText), Planted /* longer than MAX_FILE_BYTES, a link, not a file */ }
 pub struct Files;   // Clone; the held spawner's file methods
-Files::new(Arc<Object<dyn ProcessSpawner>>);  .available() -> bool;  .write(path, text);  .state(path) -> Result<FileState>;  .read(path) -> Result<Option<SecretText>>;
+Files::new(Arc<Object<dyn ProcessSpawner>>);  .available() -> bool;  .spawner() -> &Arc<Object<dyn ProcessSpawner>> /* a call that also starts a program through it */;  .write(path, text);  .state(path) -> Result<FileState>;  .read(path) -> Result<Option<SecretText>>;
     .info(path) -> Result<Option<FileInfo>>;  .remove(path)
 #[non_exhaustive] pub struct Watched { pub path, pub key, pub usable: fn(&str) -> bool, pub expires: fn(&str) -> Option<String>, pub identity: fn(&str) -> Option<String> }
 Watched::new(path, key) /* usable: not blank */ .usable(f) .expires(f) .identity(f)

@@ -134,6 +134,12 @@ impl Files {
         Self { spawner }
     }
 
+    /// The spawner these files are served by, for a call that also starts a program through it.
+    #[must_use]
+    pub const fn spawner(&self) -> &Arc<Object<dyn ProcessSpawner>> {
+        &self.spawner
+    }
+
     /// Whether the spawner serves files at all.
     #[must_use]
     pub fn available(&self) -> bool {
