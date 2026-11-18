@@ -1,4 +1,4 @@
-//! OpenCode (`opencode acp`), measured on 1.19.6 and 2.3.2.
+//! OpenCode (`opencode acp`), measured on 1.19.6 (Windows arm64, Linux arm64 and macOS x86_64) and 2.3.2 (Windows arm64).
 //!
 //! OpenCode keeps what it signs in with and every session in its data folder, `$XDG_DATA_HOME/opencode` (`auth.json`,
 //! `opencode.db`), and honours `XDG_DATA_HOME` on every system measured (Windows included, where it ignores
@@ -7,7 +7,7 @@
 //! its own, so no credential in the person's `auth.json` meets the account's, and its sessions are the account's.
 //!
 //! Not measured: a completed sign-in (`opencode auth login` was run to its prompts, on plain pipes, and a made-up key typed once), the fields of an OAuth entry in
-//! `auth.json`, whether it rewrites the file when it refreshes one, the folder on macOS, and every provider variable beyond
+//! `auth.json`, whether it rewrites the file when it refreshes one, and every provider variable beyond
 //! the ones listed. A provider the catalog adds is not in the list a start clears.
 
 use alloc::string::ToString;
