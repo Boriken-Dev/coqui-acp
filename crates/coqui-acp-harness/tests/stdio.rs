@@ -83,6 +83,7 @@ fn run_suite(side: &str, harness: &str, kind: &str, logins: bool) -> String {
         .env("STDIO_CASE_LOGINS", if logins { "1" } else { "0" })
         .env_remove("GROK_HOME")
         .env_remove("PI_CODING_AGENT_DIR")
+        .env_remove("XDG_DATA_HOME")
         .output()
         .expect("the test runs itself");
     let logged = std::fs::read_to_string(&log).unwrap_or_default();
@@ -113,6 +114,29 @@ fn grok_keeps_every_rule_of_the_kind_for_each_kind() {
 }
 
 #[test]
+fn opencode_keeps_every_rule_of_the_kind_for_each_kind() {
+    for harness in ["opencode", "opencode-own"] {
+        for kind in [
+            "harness-login",
+            "opencode-login",
+            "opencode-api-key",
+            "opencode-provider-key",
+        ] {
+            run_suite("harness", harness, kind, false);
+        }
+    }
+}
+
+#[test]
+fn opencode_accounts_keep_every_rule_of_the_account_kind_for_each_kind_and_login() {
+    for harness in ["opencode", "opencode-own"] {
+        for kind in ["opencode-login", "opencode-provider-key"] {
+            run_suite("accounts", harness, kind, true);
+        }
+    }
+}
+
+#[test]
 fn antigravity_keeps_every_rule_of_the_kind() {
     run_suite("harness", "antigravity", "harness-login", false);
 }
@@ -135,13 +159,22 @@ fn the_suite_inside() {
     registry
         .load_file(&library())
         .expect("the library loads once cargo built it");
+    // `opencode-own` is OpenCode through the provider that has the harness fixed, under its own ids.
+    let own = harness == "opencode-own";
+    let (harness_id, accounts_id) = if own {
+        ("opencode", "opencode_accounts")
+    } else {
+        ("stdio", "stdio_accounts")
+    };
     let mut settings = Map::new();
-    settings.set("harness", Value::from(harness.as_str()));
+    if !own {
+        settings.set("harness", Value::from(harness.as_str()));
+    }
     settings.set("executable", Value::from(fake().as_str()));
     let outcome = if side == "accounts" {
         settings.set("renew_poll_ms", 100);
         let provider = registry
-            .offer::<dyn AccountProvider>("stdio_accounts")
+            .offer::<dyn AccountProvider>(accounts_id)
             .expect("the library offers it")
             .expect("its table is this kind")
             .instantiate(&Value::from(settings))
@@ -155,7 +188,7 @@ fn the_suite_inside() {
         outcome
     } else {
         let provider = registry
-            .offer::<dyn AcpHarness>("stdio")
+            .offer::<dyn AcpHarness>(harness_id)
             .expect("the library offers it")
             .expect("its table is this kind")
             .instantiate(&Value::from(settings))

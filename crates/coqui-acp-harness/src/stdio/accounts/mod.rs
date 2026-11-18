@@ -19,6 +19,7 @@ use crate::provider::{credential, schema};
 pub mod antigravity;
 pub mod grok;
 mod keeping;
+pub mod opencode;
 
 pub use keeping::Keeping;
 

@@ -1,4 +1,4 @@
-//! Grok's accounts (and Antigravity's, which lists none) as a provider of the `account_provider` kind.
+//! Grok's accounts, OpenCode's (and Antigravity's, which lists none) as a provider of the `account_provider` kind.
 //!
 //! It makes the accounts [`accounts`](super::accounts) lists for the harness: it signs a person in with the harness's own
 //! command, renews a login with no model turn where the harness can, and watches a login's file for a change nobody told
@@ -24,10 +24,10 @@ use crate::account::DEFAULT_POLL_MS;
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
 #[map(crate = ::coqui_acp_api::guatiao)]
 pub struct StdioAccountSettings {
-    /// The harness: `grok` or `antigravity`.
+    /// The harness: `grok`, `antigravity` or `opencode`.
     pub harness: StdioHarness,
     /// The program it signs in and renews with: a path, or a name looked up on the `PATH` where the spawner runs it. The
-    /// harness's own (`grok`, `agy`) when absent.
+    /// harness's own (`grok`, `agy`, `opencode`) when absent.
     pub executable: Option<String>,
     /// How often, in milliseconds, a watch looks at the file an account keeps its login in; 0 looks only when the watch
     /// begins and ends, and when a call is made on the account.
@@ -51,7 +51,7 @@ impl StdioAccountSettings {
     }
 }
 
-/// The accounts of Grok or Antigravity, as a provider of `account_provider` under the id `stdio_accounts`.
+/// The accounts of Grok, Antigravity or OpenCode, as a provider of `account_provider` under the id `stdio_accounts`.
 ///
 /// Register it beside a host's own providers with `Registry::register_local`, or build it into a library with
 /// `guatiao::providers!`.
@@ -97,6 +97,7 @@ impl StdioAccounts {
         match self.settings.harness {
             StdioHarness::Grok => accounts::grok::logins(),
             StdioHarness::Antigravity => alloc::vec::Vec::new(),
+            StdioHarness::OpenCode => accounts::opencode::logins(),
         }
     }
 }
@@ -111,6 +112,9 @@ impl AccountProvider for StdioAccounts {
             }
             StdioHarness::Antigravity => {
                 "Antigravity's sign-in is unmeasured, so it keeps no account yet.".into()
+            }
+            StdioHarness::OpenCode => {
+                "Makes an OpenCode account from a provider's key, watches the sign-in OpenCode keeps in `auth.json`, and says its accounts report no plan usage.".into()
             }
         };
         Ok(info)
@@ -129,6 +133,9 @@ impl AccountProvider for StdioAccounts {
         match self.settings.harness {
             StdioHarness::Grok => {
                 accounts::grok::sign_in(self.program_name(), request, spawner, prompter)
+            }
+            StdioHarness::OpenCode => {
+                accounts::opencode::sign_in(self.program_name(), request, spawner, prompter)
             }
             StdioHarness::Antigravity => Err(ProviderError::new(
                 Status::GUATIAO_ERR_UNSUPPORTED,

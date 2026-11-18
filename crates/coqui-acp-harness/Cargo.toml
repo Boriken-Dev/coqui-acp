@@ -79,6 +79,10 @@ name = "account"
 required-features = ["kind"]
 
 [[test]]
+name = "opencode"
+required-features = ["kind"]
+
+[[test]]
 name = "stdio"
 required-features = ["kind"]
 
