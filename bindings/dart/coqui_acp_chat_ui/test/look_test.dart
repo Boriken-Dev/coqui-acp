@@ -56,6 +56,15 @@ void main() {
     expect(a.lerp(null, 0.5), same(a));
   });
 
+  test('a message width with no bound is not blended, and the nearer look stands', () {
+    final bounded = ChatLook.fromScheme(dark, messageWidth: 400);
+    final open = bounded.copyWith(messageWidth: double.infinity, centred: true, bubbleBorder: const Color(0xFF123456));
+    expect(bounded.lerp(open, 0.25).messageWidth, 400);
+    expect(bounded.lerp(open, 0.75).messageWidth, double.infinity);
+    expect(bounded.lerp(open, 0.75).centred, isTrue);
+    expect(bounded.lerp(open, 0.75).bubbleBorder, const Color(0xFF123456));
+  });
+
   test('densities have names a settings file can use', () {
     expect(ChatDensity.named('thinking'), ChatDensity.thinking);
     expect(ChatDensity.named('nope'), isNull);

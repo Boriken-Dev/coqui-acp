@@ -214,7 +214,8 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     if (other == null) return this;
     Color mix(Color a, Color b) => Color.lerp(a, b, t)!;
     Color? mixed(Color? a, Color? b) => a == null || b == null ? (t < 0.5 ? a : b) : Color.lerp(a, b, t);
-    double size(double a, double b) => lerpDouble(a, b, t)!;
+    // A width with no bound (infinity) cannot be blended: the nearer one stands.
+    double size(double a, double b) => a.isFinite && b.isFinite ? lerpDouble(a, b, t)! : (t < 0.5 ? a : b);
     final near = t < 0.5 ? this : other;
     return ChatLook(
       bg: mix(bg, other.bg),
