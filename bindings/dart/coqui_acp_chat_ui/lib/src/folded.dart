@@ -32,13 +32,7 @@ class _Placed extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final look = context.chatLook;
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: look.messageWidth),
-        child: Padding(padding: EdgeInsets.only(bottom: look.gap), child: child),
-      ),
-    );
+    return look.column(Padding(padding: EdgeInsets.only(bottom: look.gap), child: child));
   }
 }
 

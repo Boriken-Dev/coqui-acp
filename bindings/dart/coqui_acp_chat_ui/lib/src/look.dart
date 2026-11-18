@@ -60,6 +60,8 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     this.userToTheRight = true,
     this.monospace = false,
     this.userPrefix,
+    this.centred = false,
+    this.bubbleBorder,
   }) : _user = user,
        _agent = agent,
        _notice = notice,
@@ -136,6 +138,12 @@ final class ChatLook extends ThemeExtension<ChatLook> {
   /// Put before what the person wrote, in place of setting it apart with a colour.
   final String? userPrefix;
 
+  /// With this on, the conversation's column of [messageWidth] sits in the middle of a wider space rather than at its left.
+  final bool centred;
+
+  /// The colour of a line round a bubble; none without.
+  final Color? bubbleBorder;
+
   @override
   ChatLook copyWith({
     Color? bg,
@@ -166,6 +174,8 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     bool? userToTheRight,
     bool? monospace,
     String? userPrefix,
+    bool? centred,
+    Color? bubbleBorder,
   }) => ChatLook(
     bg: bg ?? this.bg,
     surface: surface ?? this.surface,
@@ -195,6 +205,8 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     userToTheRight: userToTheRight ?? this.userToTheRight,
     monospace: monospace ?? this.monospace,
     userPrefix: userPrefix ?? this.userPrefix,
+    centred: centred ?? this.centred,
+    bubbleBorder: bubbleBorder ?? this.bubbleBorder,
   );
 
   @override
@@ -233,6 +245,8 @@ final class ChatLook extends ThemeExtension<ChatLook> {
       userToTheRight: near.userToTheRight,
       monospace: near.monospace,
       userPrefix: near.userPrefix,
+      centred: near.centred,
+      bubbleBorder: mixed(bubbleBorder, other.bubbleBorder),
     );
   }
 }
@@ -240,4 +254,25 @@ final class ChatLook extends ThemeExtension<ChatLook> {
 /// The [ChatLook] in force: the theme's, else one made from its colour scheme.
 extension ChatLookOf on BuildContext {
   ChatLook get chatLook => Theme.of(this).extension<ChatLook>() ?? ChatLook.fromScheme(Theme.of(this).colorScheme);
+}
+
+/// How an entry sits in the conversation's column.
+extension ChatLookColumn on ChatLook {
+  /// [child] in the column of [messageWidth]: at its left, or in the middle where the look is [centred]; [toTheRight] puts a
+  /// shorter child at the column's right edge. [wide] gives it the whole width instead.
+  Widget column(Widget child, {bool toTheRight = false, bool wide = false}) {
+    if (wide) return child;
+    if (centred) {
+      return Center(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: messageWidth),
+          child: Align(alignment: toTheRight ? Alignment.centerRight : Alignment.centerLeft, child: child),
+        ),
+      );
+    }
+    return Align(
+      alignment: toTheRight ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(constraints: BoxConstraints(maxWidth: messageWidth), child: child),
+    );
+  }
 }

@@ -427,9 +427,12 @@ String? _nameOf(Object? uri, ChatLimits limits) {
 
 /// A slash command the agent offers.
 final class AgentCommandInfo {
-  const AgentCommandInfo(this.name, this.description);
+  const AgentCommandInfo(this.name, this.description, {this.hint});
   final String name;
   final String description;
+
+  /// What follows the name, such as `[period]`, when the agent says (ACP's `input.hint`).
+  final String? hint;
 }
 
 List<AgentCommandInfo>? parseCommands(Object? raw, ChatLimits limits) {
@@ -444,6 +447,10 @@ List<AgentCommandInfo>? parseCommands(Object? raw, ChatLimits limits) {
             : AgentCommandInfo(
                 name,
                 shortText(entry['description'], limits) ?? '',
+                hint: switch (entry['input']) {
+                  final Map input => shortText(input['hint'], limits),
+                  _ => null,
+                },
               );
       })
       .whereType<AgentCommandInfo>()

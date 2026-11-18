@@ -18,6 +18,7 @@ modes, a browser panel) enters through a slot, never a fork.
 - Sizes: `messageWidth` 780, `gap` 22, `padding` 12, `radius` 12, `bodySize` 16, `codeFont` `'monospace'`.
 - Switches: `agentInBubble` (false), `userToTheRight` (true), `monospace`, `userPrefix` (such as `'> '`).
 - `density: ChatDensity` (`normal`, `thinking`, `verbose`; `.label`, `ChatDensity.named`): what a transcript folds, below.
+- `centred` (false: the column of `messageWidth` sits at the left; true: in the middle of a wider space) and `bubbleBorder` (a line round a bubble; none by default).
 - `ChatLook.fromScheme(scheme, {density, messageWidth, ...})`, `copyWith`, `lerp`. An app's look is a preset: build one, put it in
   `ThemeData(extensions: [...])`.
 
@@ -50,13 +51,14 @@ and `selection` (`SelectableTranscriptState.copyAll()`).
 
 ## Renderers
 
-`ChatRenderers({entry, tool, block, burst, work, plan})`, given to `ChatTranscript(renderers:)` and read below it through
+`ChatRenderers({entry, tool, block, burst, work, plan, wide})`, given to `ChatTranscript(renderers:)` and read below it through
 `ChatScope`. Every field defaults to the package's own drawing; `a.merge(b)` puts `b` first and over.
 
 - `entry: List<Widget? Function(BuildContext, ChatEntryData)>`: tried in order for each entry; null passes. This is where a host's own
   content goes (a chart, a page, a delegation card, an A2UI surface).
 - `tool: Map<String, Widget Function(BuildContext, ToolCall)>`: a card for a tool `kind`.
 - `block: List<Widget? Function(BuildContext, ToolCall, ToolBlock)>`: one piece of a tool call's content.
+- `wide: bool Function(ChatEntryData)`: the entries that take the whole width instead of the column (a table, a chart).
 - `burst`, `work`: the line a burst of finished tool calls, or a finished turn's work (not the running turn's), folds into (`summary`, and the `cards` or `items`
   that open under it); `plan`: the plan.
 
@@ -108,9 +110,10 @@ the model must never see, and a display of values the person chose to look at. T
 
 ## Composer
 
-`Composer({controller, onSend, focusNode, enabled, working, starting, onStop, onSteer, enterSteers, commands, centred, hint, header, attachments, pickFiles,
+`Composer({controller, onSend, focusNode, enabled, working, starting, onStop, canQueue, onSuggestions, suggestionLimit, onSteer, enterSteers, commands, centred, hint, header, attachments, pickFiles,
 pickFolder, clipboard, pasteAsFile, before, after, trailing, plusItems, onShiftTab, recall, actions, commandsTitle, actionsTitle,
 mentions})`: the field, `/` suggestions from the agent's commands (and the host's own `actions`), `@` mentions from the host, paste, the attachment chips, the `+` menu, and Send (Queue and Stop while `working`, a spinner while `starting`). With `onSteer`, a running turn also shows Steer (keys `composer-steer`, `composer-queue`): Enter does Queue (`onSend`), or Steer when `enterSteers`, and Alt+Enter the other; each tooltip names its key.
+When the `/` list shows, the arrow keys, Enter, Tab and Escape are its (`onSuggestions` says so); `canQueue: false` leaves Stop alone while a turn runs.
 `ComposerState.onKey` handles Shift+Tab (`onShiftTab`), Up in an empty message (`recall`: the last message sent, or null) and Ctrl+V (⌘V)
 itself, whatever `focusNode` it is given; `paste()` is public.
 
@@ -141,8 +144,8 @@ version, and a comment on a line written into the message. `diffLines`, `withCon
 
 ## Also exported
 
-`ToolCard`, `ToolEntry`, `ToolBlockView`, `CodeBox`, `TerminalBlock`, `TranscriptEntry`, `AgentMarkdown` (an image shows only its
-description, a link is copied, never opened), `CopyButton`, `Thought`, `CompactionView`, `MessageBox`, `FoldLine`, `SummaryText`,
+`ToolCard`, `ToolEntry`, `ToolBlockView`, `CodeBox`, `TerminalBlock`, `TranscriptEntry`, `AgentMarkdown({text, inlineSyntaxes, builders, onTapLink, softLineBreak})` (an image shows only its
+description, a link is copied unless `onTapLink` says what it does; `inlineSyntaxes` and `builders` give a host's own words a meaning), `CopyButton`, `Thought`, `CompactionView`, `MessageBox`, `FoldLine`, `SummaryText`,
 `ToolBurst`, `TurnWork`, `PlanChecklist`, `conversationText(entries)`, `plainMarkdown(text)`, `shortLine(value)`.
 
 ## Gotchas

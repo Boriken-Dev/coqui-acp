@@ -188,6 +188,9 @@ class Composer extends StatefulWidget {
     this.onStop,
     this.onSteer,
     this.enterSteers = false,
+    this.canQueue = true,
+    this.onSuggestions,
+    this.suggestionLimit = CommandSuggestions.shown,
     this.commands = const [],
     this.actions = const [],
     this.commandsTitle = 'Agent commands',
@@ -236,6 +239,15 @@ class Composer extends StatefulWidget {
   final bool starting;
   final VoidCallback? onStop;
 
+  /// Whether a message can wait for the turn to end. Without it, a turn running shows Stop alone and Enter sends nothing.
+  final bool canQueue;
+
+  /// Told whether the `/` list is showing, so a host's own keys leave Enter, Tab and Escape to it while it is.
+  final ValueChanged<bool>? onSuggestions;
+
+  /// The most each group of the `/` list holds; the list scrolls past a screenful.
+  final int suggestionLimit;
+
   /// The agent's `/` commands.
   final List<AgentCommandInfo> commands;
 
@@ -270,6 +282,44 @@ class Composer extends StatefulWidget {
 }
 
 class ComposerState extends State<Composer> {
+  int _highlight = 0;
+  String? _closedFor;
+  String? _lastTyped;
+  bool _shown = false;
+
+  /// The `/` list for the text now in the field, none after Escape closed it for this text.
+  Suggested get _suggested {
+    final typed = widget.controller.text;
+    if (typed == _closedFor) return (commands: const [], actions: const []);
+    return suggestionsFor(typed, widget.commands, widget.actions, limit: widget.suggestionLimit);
+  }
+
+  /// Takes the row [index] of the list: a command's name goes into the field, an action runs.
+  void _pickRow(Suggested found, int index) {
+    if (index < 0 || index >= found.commands.length + found.actions.length) return;
+    if (index < found.commands.length) {
+      final text = '/${found.commands[index].name} ';
+      widget.controller.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
+    } else {
+      widget.controller.value = const TextEditingValue();
+      found.actions[index - found.commands.length].run();
+    }
+  }
+
+  void _reportShown(bool shown) {
+    if (shown == _shown) return;
+    _shown = shown;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onSuggestions?.call(shown);
+    });
+  }
+
+  @override
+  void dispose() {
+    if (_shown) widget.onSuggestions?.call(false);
+    super.dispose();
+  }
+
   void _say(String text) => ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(text)));
 
   void _sayAll(Iterable<String> problems) {
@@ -344,11 +394,37 @@ class ComposerState extends State<Composer> {
   bool get _steering => widget.working && widget.onSteer != null;
 
   /// What Enter does: send, or while a turn runs queue or steer as [Composer.enterSteers] says.
-  void _enter() => (_steering && widget.enterSteers ? widget.onSteer! : widget.onSend)();
+  void _enter() {
+    if (widget.working && !widget.canQueue && !_steering) return;
+    (_steering && widget.enterSteers ? widget.onSteer! : widget.onSend)();
+  }
 
   /// Shift+Tab goes to [Composer.onShiftTab], Up in an empty message brings back [Composer.recall], Alt+Enter while a turn runs
   /// does what Enter does not (queue or steer), and Ctrl+V (⌘V on a Mac) pastes through [paste]; every other key goes on as usual.
   KeyEventResult onKey(FocusNode node, KeyEvent event) {
+    final found = _suggested;
+    final rows = found.commands.length + found.actions.length;
+    if (rows > 0 && (event is KeyDownEvent || event is KeyRepeatEvent)) {
+      final key = event.logicalKey;
+      final keys = HardwareKeyboard.instance;
+      final plain = !keys.isShiftPressed && !keys.isAltPressed && !keys.isControlPressed && !keys.isMetaPressed;
+      if (key == LogicalKeyboardKey.arrowDown) {
+        setState(() => _highlight = (_highlight + 1) % rows);
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowUp) {
+        setState(() => _highlight = (_highlight - 1 + rows) % rows);
+        return KeyEventResult.handled;
+      }
+      if (event is KeyDownEvent && plain && (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter || key == LogicalKeyboardKey.tab)) {
+        _pickRow(found, _highlight.clamp(0, rows - 1));
+        return KeyEventResult.handled;
+      }
+      if (event is KeyDownEvent && key == LogicalKeyboardKey.escape) {
+        setState(() => _closedFor = widget.controller.text);
+        return KeyEventResult.handled;
+      }
+    }
     if (event is KeyDownEvent &&
         (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
         HardwareKeyboard.instance.isAltPressed &&
@@ -423,21 +499,27 @@ class ComposerState extends State<Composer> {
           final caret = value.selection.isValid ? value.selection.baseOffset : value.text.length;
           final mention = widget.mentions == null ? null : mentionAt(value.text, caret);
           return Column(mainAxisSize: MainAxisSize.min, children: [
-            CommandSuggestions(
-              commands: widget.commands,
-              actions: widget.actions,
-              commandsTitle: widget.commandsTitle,
-              actionsTitle: widget.actionsTitle,
-              typed: value.text,
-              onPick: (command) {
-                final text = '/${command.name} ';
-                widget.controller.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
-              },
-              onRun: (action) {
-                widget.controller.value = const TextEditingValue();
-                action.run();
-              },
-            ),
+            Builder(builder: (context) {
+              // Typing on opens the list again, from its first row.
+              if (value.text != _lastTyped) {
+                _lastTyped = value.text;
+                _highlight = 0;
+                if (value.text != _closedFor) _closedFor = null;
+              }
+              final found = _suggested;
+              _reportShown(found.commands.isNotEmpty || found.actions.isNotEmpty);
+              return CommandSuggestions(
+                commands: widget.commands,
+                actions: widget.actions,
+                commandsTitle: widget.commandsTitle,
+                actionsTitle: widget.actionsTitle,
+                typed: value.text == _closedFor ? '' : value.text,
+                limit: widget.suggestionLimit,
+                highlighted: _highlight,
+                onPick: (command) => _pickRow(found, found.commands.indexWhere((c) => c.name == command.name)),
+                onRun: (action) => _pickRow(found, found.commands.length + found.actions.indexOf(action)),
+              );
+            }),
             if (mention != null)
               MentionSuggestions(
                 key: const Key('mention-suggestions'),
@@ -568,7 +650,9 @@ class _Controls extends StatelessWidget {
     ];
     final right = widget.trailing;
     final steers = widget.working && widget.onSteer != null;
-    final send = widget.working
+    final send = widget.working && !widget.canQueue && !steers
+        ? IconButton(tooltip: 'Stop', onPressed: widget.onStop, icon: const Icon(Icons.stop_circle_outlined))
+        : widget.working
         ? Row(mainAxisSize: MainAxisSize.min, children: [
             if (steers)
               IconButton(
@@ -632,7 +716,13 @@ class CommandSuggestions extends StatelessWidget {
     this.onRun,
     this.commandsTitle = 'Agent commands',
     this.actionsTitle = 'Host actions',
+    this.limit = shown,
+    this.highlighted,
   });
+
+  /// The most each group lists, and the row Enter would pick.
+  final int limit;
+  final int? highlighted;
 
   /// The most each group lists.
   static const int shown = 6;
@@ -647,9 +737,7 @@ class CommandSuggestions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!typed.startsWith('/') || typed.contains(' ')) return const SizedBox.shrink();
-    final wanted = typed.substring(1).toLowerCase();
-    final found = commands.where((command) => command.name.toLowerCase().startsWith(wanted)).take(shown).toList();
-    final foundActions = actions.where((action) => action.name.toLowerCase().startsWith(wanted)).take(shown).toList();
+    final (commands: found, actions: foundActions) = suggestionsFor(typed, commands, actions, limit: limit);
     if (found.isEmpty && foundActions.isEmpty) return const SizedBox.shrink();
     final look = context.chatLook;
     final titled = actions.isNotEmpty;
@@ -661,35 +749,77 @@ class CommandSuggestions extends StatelessWidget {
         child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: look.muted)),
       ),
     );
+    final selected = look.accent.withValues(alpha: 0.14);
     return Material(
       color: look.composer,
       borderRadius: BorderRadius.circular(look.radius / 2),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (titled && found.isNotEmpty) title(commandsTitle, const Key('commands-group')),
-          for (final command in found)
-            ListTile(
-              dense: true,
-              visualDensity: VisualDensity.compact,
-              title: Text('/${command.name}', style: TextStyle(fontFamily: look.codeFont)),
-              subtitle: command.description.isEmpty ? null : Text(command.description, maxLines: 1, overflow: TextOverflow.ellipsis),
-              onTap: () => onPick(command),
-            ),
-          if (foundActions.isNotEmpty) title(actionsTitle, const Key('actions-group')),
-          for (final action in foundActions)
-            ListTile(
-              key: ValueKey('action ${action.name}'),
-              dense: true,
-              visualDensity: VisualDensity.compact,
-              title: Text('/${action.name}', style: TextStyle(fontFamily: look.codeFont)),
-              subtitle: action.description.isEmpty ? null : Text(action.description, maxLines: 1, overflow: TextOverflow.ellipsis),
-              onTap: () => onRun?.call(action),
-            ),
-        ],
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 280),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (titled && found.isNotEmpty) title(commandsTitle, const Key('commands-group')),
+              for (final (index, command) in found.indexed)
+                ListTile(
+                  key: ValueKey('command ${command.name}'),
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  tileColor: highlighted == index ? selected : null,
+                  title: Text.rich(
+                    TextSpan(children: [
+                      TextSpan(text: '/${command.name}', style: TextStyle(fontFamily: look.codeFont)),
+                      if (command.hint != null) TextSpan(text: ' ${command.hint}', style: TextStyle(color: look.muted)),
+                    ]),
+                  ),
+                  subtitle: command.description.isEmpty ? null : Text(command.description, maxLines: 2, overflow: TextOverflow.ellipsis),
+                  onTap: () => onPick(command),
+                ),
+              if (foundActions.isNotEmpty) title(actionsTitle, const Key('actions-group')),
+              for (final (index, action) in foundActions.indexed)
+                ListTile(
+                  key: ValueKey('action ${action.name}'),
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  tileColor: highlighted == found.length + index ? selected : null,
+                  title: Text('/${action.name}', style: TextStyle(fontFamily: look.codeFont)),
+                  subtitle: action.description.isEmpty ? null : Text(action.description, maxLines: 2, overflow: TextOverflow.ellipsis),
+                  onTap: () => onRun?.call(action),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
+}
+
+/// What `/` offers: commands and actions, in the order the list shows them.
+typedef Suggested = ({List<AgentCommandInfo> commands, List<ComposerAction> actions});
+
+/// The commands and actions [typed] asks for, at most [limit] of each: the names that start with the word after the `/` first,
+/// then those whose name or description holds it, without regard to case. Nothing once the text is past its first word.
+Suggested suggestionsFor(String typed, List<AgentCommandInfo> commands, List<ComposerAction> actions, {int limit = CommandSuggestions.shown}) {
+  if (!typed.startsWith('/') || typed.contains(RegExp(r'\s'))) return (commands: const [], actions: const []);
+  final wanted = typed.substring(1).toLowerCase();
+  List<T> pick<T>(List<T> all, String Function(T) name, String Function(T) description) {
+    final starts = <T>[], holds = <T>[];
+    for (final item in all) {
+      final text = name(item).toLowerCase();
+      if (text.startsWith(wanted)) {
+        starts.add(item);
+      } else if (text.contains(wanted) || description(item).toLowerCase().contains(wanted)) {
+        holds.add(item);
+      }
+    }
+    return [...starts, ...holds].take(limit).toList();
+  }
+
+  return (
+    commands: pick(commands, (command) => command.name, (command) => command.description),
+    actions: pick(actions, (action) => action.name, (action) => action.description),
+  );
 }
 
 /// What the host's [ComposerMentions] offers for the `@` being typed: the files and folders matching [query], each with where it

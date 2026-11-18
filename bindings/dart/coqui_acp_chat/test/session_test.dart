@@ -545,11 +545,17 @@ void main() {
         feed(session, {
           'sessionUpdate': 'available_commands_update',
           'availableCommands': [
-            {'name': 'review', 'description': 'Review the diff'},
+            {
+              'name': 'review',
+              'description': 'Review the diff',
+              'input': {'hint': '[branch]'},
+            },
+            {'name': 'cost', 'description': 'Show the cost', 'input': 'text'},
             {'description': 'no name'},
           ],
         });
-        expect(session.commands.map((c) => c.name), ['review']);
+        expect(session.commands.map((c) => c.name), ['review', 'cost']);
+        expect(session.commands.map((c) => c.hint), ['[branch]', null]);
         feed(session, {
           'sessionUpdate': 'usage_update',
           'used': 50,

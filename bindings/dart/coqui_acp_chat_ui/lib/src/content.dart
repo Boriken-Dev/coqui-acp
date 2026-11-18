@@ -11,10 +11,32 @@ import 'tools.dart';
 
 /// Markdown from an agent, which is untrusted. An image would be fetched as soon as it is drawn, which lets whatever wrote it
 /// send data to any address, so only its description is shown. A link is copied rather than opened, so the address is seen first.
+///
+/// A host adds to it without a fork: [inlineSyntaxes] and [builders] give its own words a meaning (a reference to one of its
+/// records, drawn as a link), [onTapLink] says what a link does, and [softLineBreak] keeps the line breaks an agent wrote.
 class AgentMarkdown extends StatelessWidget {
-  const AgentMarkdown({super.key, required this.text});
+  const AgentMarkdown({
+    super.key,
+    required this.text,
+    this.inlineSyntaxes = const [],
+    this.builders = const {},
+    this.onTapLink,
+    this.softLineBreak = false,
+  });
 
   final String text;
+
+  /// Tried before the Markdown parser's own inline syntaxes.
+  final List<md.InlineSyntax> inlineSyntaxes;
+
+  /// Draws an element by its tag, besides the package's own code block.
+  final Map<String, MarkdownElementBuilder> builders;
+
+  /// What following a link does, with its address and the words it shows; the address is copied, with a note, when null.
+  final void Function(String href, String label)? onTapLink;
+
+  /// Whether a line break inside a paragraph stays a line break.
+  final bool softLineBreak;
 
   @override
   Widget build(BuildContext context) {
@@ -24,7 +46,9 @@ class AgentMarkdown extends StatelessWidget {
     // The conversation's own selection takes this text in, so it is not a selection of its own.
     return MarkdownBody(
       data: text,
-      builders: {'pre': _CodeBlock(look)},
+      builders: {'pre': _CodeBlock(look), ...builders},
+      inlineSyntaxes: inlineSyntaxes,
+      softLineBreak: softLineBreak,
       styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
         p: base,
         code: code?.copyWith(backgroundColor: look.code),
@@ -40,6 +64,10 @@ class AgentMarkdown extends StatelessWidget {
       ),
       onTapLink: (label, href, title) {
         if (href == null) return;
+        if (onTapLink != null) {
+          onTapLink!(href, label);
+          return;
+        }
         Clipboard.setData(ClipboardData(text: href));
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           SnackBar(content: Text('Address copied: $href', maxLines: 2, overflow: TextOverflow.ellipsis)),
@@ -61,12 +89,10 @@ class TranscriptEntry extends StatelessWidget {
     final renderers = ChatScope.renderersOf(context);
     final body = renderers.drawEntry(context, entry) ?? _own(context, look, renderers);
     final toTheRight = entry.role == MessageRole.user && look.userToTheRight;
-    return Align(
-      alignment: toTheRight ? Alignment.centerRight : Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: look.messageWidth),
-        child: Padding(padding: EdgeInsets.only(bottom: look.gap), child: body),
-      ),
+    return look.column(
+      Padding(padding: EdgeInsets.only(bottom: look.gap), child: body),
+      toTheRight: toTheRight,
+      wide: renderers.wide?.call(entry) ?? false,
     );
   }
 
@@ -118,7 +144,11 @@ class MessageBox extends StatelessWidget {
         ? child
         : Container(
             padding: EdgeInsets.symmetric(horizontal: look.padding + 2, vertical: look.padding - 2),
-            decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(look.radius)),
+            decoration: BoxDecoration(
+              color: color,
+              border: look.bubbleBorder == null ? null : Border.all(color: look.bubbleBorder!),
+              borderRadius: BorderRadius.circular(look.radius),
+            ),
             child: child,
           );
     if (copy == null) return body;

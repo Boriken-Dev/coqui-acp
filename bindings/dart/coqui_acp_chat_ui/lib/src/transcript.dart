@@ -105,14 +105,10 @@ class ChatTranscriptState extends State<ChatTranscript> {
     final turn = at < 0 ? widget.entries : widget.entries.sublist(at + 1);
     final since = at < 0 ? null : widget.entries[at].at;
     final look = context.chatLook;
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: look.messageWidth),
-        child: Padding(
-          padding: EdgeInsets.only(bottom: look.gap, top: 2),
-          child: WorkingRow(headline: workingHeadline(turn, agent: widget.agentName), startedAt: running?.startedAt ?? since, clock: widget.clock),
-        ),
+    return look.column(
+      Padding(
+        padding: EdgeInsets.only(bottom: look.gap, top: 2),
+        child: WorkingRow(headline: workingHeadline(turn, agent: widget.agentName), startedAt: running?.startedAt ?? since, clock: widget.clock),
       ),
     );
   }
@@ -161,13 +157,7 @@ class ChatTranscriptState extends State<ChatTranscript> {
                 itemBuilder: (context, index) {
                   if (index < items.length) return TranscriptItemView(item: items[index]);
                   if (index != planAt) return _workingRow();
-                  return Align(
-                    alignment: Alignment.centerLeft,
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(maxWidth: look.messageWidth),
-                      child: Padding(padding: EdgeInsets.only(bottom: look.gap), child: PlanChecklist(entries: widget.plan)),
-                    ),
-                  );
+                  return look.column(Padding(padding: EdgeInsets.only(bottom: look.gap), child: PlanChecklist(entries: widget.plan)));
                 },
               ),
             ),

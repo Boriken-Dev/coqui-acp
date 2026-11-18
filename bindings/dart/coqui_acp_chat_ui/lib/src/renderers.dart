@@ -28,7 +28,7 @@ typedef PlanRenderer = Widget Function(BuildContext context, List<PlanEntry> pla
 /// default in the package, and [merge] puts one registry over another.
 @immutable
 final class ChatRenderers {
-  const ChatRenderers({this.entry = const [], this.tool = const {}, this.block = const [], this.burst, this.work, this.plan});
+  const ChatRenderers({this.entry = const [], this.tool = const {}, this.block = const [], this.burst, this.work, this.plan, this.wide});
 
   /// Tried in order for every entry before the package draws it.
   final List<EntryRenderer> entry;
@@ -42,6 +42,9 @@ final class ChatRenderers {
   final WorkRenderer? work;
   final PlanRenderer? plan;
 
+  /// Whether an entry takes the whole width rather than the column of [ChatLook.messageWidth]: a table or a chart.
+  final bool Function(ChatEntryData entry)? wide;
+
   static const ChatRenderers none = ChatRenderers();
 
   /// This registry, with [other] taking precedence: its entry and block renderers are tried first, its tool renderers replace
@@ -53,6 +56,7 @@ final class ChatRenderers {
     burst: other.burst ?? burst,
     work: other.work ?? work,
     plan: other.plan ?? plan,
+    wide: other.wide ?? wide,
   );
 
   Widget? drawEntry(BuildContext context, ChatEntryData entry) {
