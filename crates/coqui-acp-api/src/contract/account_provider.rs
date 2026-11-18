@@ -267,8 +267,38 @@ struct Made {
     by_login: bool,
 }
 
+/// The file under `dir` that holds a credential, by its path from `dir` with `/` between the parts: looked for in the
+/// directory and in the folders below it, to a depth of three, where a program keeps its own (`opencode/auth.json`).
+fn found_in(
+    dir: &std::path::Path,
+    from: &str,
+    depth: usize,
+    holds: &dyn Fn(&[u8]) -> bool,
+) -> Option<String> {
+    let mut folders = Vec::new();
+    for entry in std::fs::read_dir(dir.join(from)).ok()?.flatten() {
+        let name = entry.file_name().to_str()?.to_string();
+        let path = if from.is_empty() {
+            name
+        } else {
+            format!("{from}/{name}")
+        };
+        if entry.file_type().ok()?.is_dir() {
+            folders.push(path);
+        } else if std::fs::read(entry.path()).is_ok_and(|bytes| holds(&bytes)) {
+            return Some(path);
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    folders
+        .iter()
+        .find_map(|folder| found_in(dir, folder, depth - 1, holds))
+}
+
 /// The file of the account's directory that holds a credential: one the sign-in wrote through the spawner, or, for a
-/// sign-in whose own program writes it, a file of the directory itself.
+/// sign-in whose own program writes it, a file of the directory itself or of a folder in it.
 fn holding(
     writes: &[(String, Vec<u8>)],
     credentials: &Credentials,
@@ -284,13 +314,7 @@ fn holding(
         .iter()
         .find(|(_, bytes)| holds(bytes))
         .map(|(path, _)| path.clone())
-        .or_else(|| {
-            std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
-                let name = entry.file_name().to_str()?.to_string();
-                let bytes = std::fs::read(entry.path()).ok()?;
-                holds(&bytes).then_some(name)
-            })
-        })
+        .or_else(|| found_in(dir, "", 3, &holds))
 }
 
 /// A new account of `info`.
