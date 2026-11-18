@@ -5,12 +5,13 @@ use serde_json::{Value, json};
 use crate::client::{ClientId, Cursor};
 use crate::error::HubError;
 use crate::hub::{Hub, Queued, Route};
+use crate::log::Gap;
 use crate::output::{Note, Output};
 use crate::permission::ID_PREFIX;
 use crate::policy::Action;
 use crate::protocol::{
-    INVALID_PARAMS, META_KEY, REFUSED, error, fields, notification, own_meta, request, result,
-    stamp,
+    INVALID_PARAMS, META_KEY, REFUSED, error, error_with, fields, notification, own_meta, request,
+    result, stamp,
 };
 
 impl Hub {
@@ -132,15 +133,46 @@ impl Hub {
             ));
             return;
         }
-        let cursor = own_meta(message)
-            .and_then(|m| m.get("cursor"))
-            .and_then(Value::as_str)
-            .and_then(|c| c.parse::<Cursor>().ok());
+        let cursor = match own_meta(message).and_then(|m| m.get("cursor")) {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_str().and_then(|c| c.parse::<Cursor>().ok()) {
+                Some(cursor) => Some(cursor),
+                None => {
+                    out.push(Self::reply(
+                        client,
+                        error_with(
+                            id,
+                            INVALID_PARAMS,
+                            "the cursor is not one this session issued",
+                            json!({ "reason": "bad_cursor" }),
+                        ),
+                    ));
+                    return;
+                }
+            },
+        };
         let after = match (method == "session/load", cursor) {
             (_, Some(cursor)) => cursor.0,
             (true, None) => 0,
             (false, None) => self.log.head().0,
         };
+        if let Some(gap) = self.log.gap(after) {
+            let (message, data) = match gap {
+                Gap::Ahead { head } => (
+                    "the cursor is ahead of this session's log: the log it came from is gone",
+                    json!({ "reason": "cursor_ahead", "head": head.to_string() }),
+                ),
+                Gap::Dropped { first } => (
+                    "the cursor is older than the log kept: what followed it is gone",
+                    json!({ "reason": "cursor_expired", "oldest": first.to_string(), "head": self.log.head().to_string() }),
+                ),
+            };
+            out.push(Self::reply(
+                client,
+                error_with(id, INVALID_PARAMS, message, data),
+            ));
+            return;
+        }
         let truncated = self.log.truncated_after(after);
         let was_attached = self.is_attached(client);
         if let Some(member) = self.members.get_mut(client) {

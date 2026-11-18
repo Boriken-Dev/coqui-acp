@@ -18,6 +18,7 @@ mod permission;
 mod policy;
 mod protocol;
 mod settings;
+mod snapshot;
 
 pub use client::{Client, ClientId, Cursor, CursorError};
 pub use error::HubError;
@@ -26,3 +27,4 @@ pub use output::{Answerer, Note, Output, PermissionRequest};
 pub use policy::{Action, AllowAll, Policy, Verdict};
 pub use protocol::{ENDED, META_KEY, PERMISSION_CLOSED, PRESENCE, TURN_ENDED};
 pub use settings::{NonDefault, Settings};
+pub use snapshot::{LogSnapshot, SnapshotError};

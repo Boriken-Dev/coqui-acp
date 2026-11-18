@@ -35,6 +35,10 @@ pub(crate) fn error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+pub(crate) fn error_with(id: &Value, code: i64, message: &str, data: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } })
+}
+
 /// Merges `fields` into the hub's own key of the message's `params._meta`.
 pub(crate) fn stamp(message: &mut Value, fields: Map<String, Value>) {
     let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) else {

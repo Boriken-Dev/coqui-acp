@@ -6,7 +6,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
 use coqui_acp_hub::{
-    Action, Answerer, Client, ClientId, Cursor, Hub, META_KEY, Note, Output, Policy, Verdict,
+    Action, Answerer, Client, ClientId, Cursor, Hub, LogSnapshot, META_KEY, Note, Output, Policy,
+    SnapshotError, Verdict,
 };
 use serde_json::{Value, json};
 
@@ -636,4 +637,184 @@ fn settings_report_what_is_not_the_default() {
     assert_eq!(names, ["max_log_entries", "max_queued_prompts"]);
     assert_eq!("12".parse::<Cursor>().unwrap().to_string(), "12");
     assert!("x".parse::<Cursor>().is_err());
+}
+
+/// A hub that has run two turns, a client having seen the first of them.
+fn busy_rig() -> Rig {
+    let mut rig = Rig::new(hub());
+    rig.attach("a", None);
+    rig.send("a", prompt(2, "one"));
+    rig.run_agent();
+    rig.send("a", prompt(3, "two"));
+    rig.run_agent();
+    rig
+}
+
+/// A hub for the same session built from what `rig`'s hub kept, through the text a host would write to disk.
+fn restarted(rig: &Rig, builder: coqui_acp_hub::Builder) -> Rig {
+    let text = rig.hub.log_snapshot().to_json().to_string();
+    let snapshot = LogSnapshot::from_json(&serde_json::from_str(&text).unwrap()).unwrap();
+    Rig::new(builder.restore_log(snapshot).expect("restore").build())
+}
+
+fn load_error(messages: &[Value]) -> &Value {
+    &messages.iter().find(|m| m["id"] == 1).expect("answer")["error"]
+}
+
+#[test]
+fn a_restarted_hub_serves_the_cursor_a_client_held_in_the_same_order() {
+    let mut rig = busy_rig();
+    // a client that stopped at the end of the first turn holds this cursor (the echo, the text, the turn's end)
+    rig.attach("phone", Some("3"));
+    let before = rig.take("phone");
+    let before_tail: Vec<Value> = updates(&before).into_iter().cloned().collect();
+    assert_eq!(before_tail.iter().map(seq).collect::<Vec<_>>(), [4, 5, 6]);
+    let head = rig.hub.head();
+
+    let mut again = restarted(&rig, Hub::builder(SESSION));
+    assert_eq!(again.hub.head(), head);
+    assert_eq!(again.hub.log_len(), rig.hub.log_len());
+
+    // the client comes back to the new hub with the cursor it held
+    again.attach("phone", Some("3"));
+    let after = again.take("phone");
+    assert_eq!(
+        updates(&after).into_iter().cloned().collect::<Vec<_>>(),
+        before_tail
+    );
+    let answer = after.iter().find(|m| m["id"] == 1).unwrap();
+    assert_eq!(answer["result"]["_meta"][META_KEY]["cursor"], "6");
+
+    // a fresh client replays the whole log, as it would have before the restart
+    again.attach("new", None);
+    let all = again.take("new");
+    assert_eq!(
+        updates(&all).iter().map(|m| seq(m)).collect::<Vec<_>>(),
+        (1..=6).collect::<Vec<_>>()
+    );
+    assert_eq!(text_of(updates(&all)[0]), "one");
+
+    // new updates carry on from the head: cursors and prompt numbers are not issued twice
+    again.send("phone", prompt(5, "three"));
+    again.run_agent();
+    let live = again.take("phone");
+    let live_seqs: Vec<u64> = updates(&live).iter().map(|m| seq(m)).collect();
+    assert_eq!(
+        live_seqs,
+        [8],
+        "the sender is told its turn ended by the answer, not the notice"
+    );
+    let seen_by_new = again.take("new");
+    let seen_by_new = updates(&seen_by_new);
+    assert_eq!(
+        seen_by_new.iter().map(|m| seq(m)).collect::<Vec<_>>(),
+        [7, 8, 9]
+    );
+    assert_eq!(seen_by_new[0]["params"]["_meta"][META_KEY]["prompt"], 3);
+}
+
+#[test]
+fn a_hub_restarted_without_its_log_refuses_a_cursor_from_the_old_one() {
+    let mut rig = busy_rig();
+    rig.take("a");
+    let mut again = Rig::new(hub());
+    again.agent(update("fresh"));
+    again.connect(Client::new("phone"));
+    again.load("phone", Some("6"));
+    let got = again.take("phone");
+    assert!(updates(&got).is_empty(), "nothing is replayed");
+    let error = load_error(&got);
+    assert_eq!(error["data"]["reason"], "cursor_ahead");
+    assert_eq!(error["data"]["head"], "1");
+    assert_eq!(
+        again.hub.attached_count(),
+        0,
+        "a refused load attaches nothing"
+    );
+
+    // the client may start over without a cursor
+    again.load("phone", None);
+    assert_eq!(updates(&again.take("phone")).len(), 1);
+}
+
+#[test]
+fn a_cursor_older_than_the_kept_log_is_an_error_not_a_partial_replay() {
+    let mut rig = Rig::new(Hub::builder(SESSION).max_log_entries(3).build());
+    rig.attach("a", None);
+    for n in 0..6 {
+        rig.agent(update(&format!("t{n}")));
+    }
+    rig.take("a");
+    // kept: 4, 5, 6. A client at 3 misses nothing; one at 2 would miss 3.
+    rig.attach("b", Some("3"));
+    assert_eq!(updates(&rig.take("b")).len(), 3);
+    rig.connect(Client::new("c"));
+    rig.load("c", Some("2"));
+    let got = rig.take("c");
+    assert!(updates(&got).is_empty());
+    let error = load_error(&got);
+    assert_eq!(error["data"]["reason"], "cursor_expired");
+    assert_eq!(error["data"]["oldest"], "4");
+    assert_eq!(error["data"]["head"], "6");
+
+    // the same holds after a restart whose bounds are tighter than the kept log
+    let mut again = restarted(&rig, Hub::builder(SESSION).max_log_entries(2));
+    assert_eq!(again.hub.log_len(), 2);
+    assert_eq!(again.hub.head(), "6".parse::<Cursor>().unwrap());
+    again.connect(Client::new("b"));
+    again.load("b", Some("3"));
+    assert_eq!(
+        load_error(&again.take("b"))["data"]["reason"],
+        "cursor_expired"
+    );
+    again.attach("d", Some("4"));
+    assert_eq!(updates(&again.take("d")).len(), 2);
+}
+
+#[test]
+fn a_cursor_that_is_not_one_is_refused_rather_than_replayed_from() {
+    let mut rig = busy_rig();
+    rig.take("a");
+    rig.connect(Client::new("b"));
+    rig.load("b", Some("not-a-cursor"));
+    let got = rig.take("b");
+    assert!(updates(&got).is_empty());
+    assert_eq!(load_error(&got)["data"]["reason"], "bad_cursor");
+}
+
+#[test]
+fn a_log_with_a_bad_entry_is_not_restored() {
+    let mut rig = busy_rig();
+    rig.take("a");
+    let good = rig.hub.log_snapshot();
+    let mut entries = good.entries.clone();
+    entries.swap(0, 1);
+    let reordered = LogSnapshot::new(good.head, entries);
+    assert!(matches!(
+        Hub::builder(SESSION).restore_log(reordered),
+        Err(SnapshotError::OutOfOrder(1))
+    ));
+    let short = LogSnapshot::new("3".parse().unwrap(), good.entries.clone());
+    assert!(matches!(
+        Hub::builder(SESSION).restore_log(short),
+        Err(SnapshotError::PastHead(3))
+    ));
+    let bare = LogSnapshot::new(good.head, vec![json!({ "method": "session/update" })]);
+    assert!(matches!(
+        Hub::builder(SESSION).restore_log(bare),
+        Err(SnapshotError::NoCursor(0))
+    ));
+    assert!(LogSnapshot::from_json(&json!({ "head": "1" })).is_err());
+}
+
+#[test]
+fn a_host_keeps_the_log_by_appending_what_followed_the_cursor_it_last_kept() {
+    let mut rig = busy_rig();
+    let mut kept: Vec<Value> = rig.hub.log_after(Cursor::START).cloned().collect();
+    let kept_to = rig.hub.head();
+    rig.send("a", prompt(4, "three"));
+    rig.run_agent();
+    kept.extend(rig.hub.log_after(kept_to).cloned());
+    assert_eq!(kept, rig.hub.log_snapshot().entries);
+    assert!(rig.hub.log_after(rig.hub.head()).next().is_none());
 }

@@ -11,6 +11,7 @@ use crate::output::{Note, Output, PermissionRequest};
 use crate::policy::{Action, AllowAll, Policy, Verdict};
 use crate::protocol::{PRESENCE, notification};
 use crate::settings::Settings;
+use crate::snapshot::{LogSnapshot, SnapshotError, prompt_of};
 
 pub(crate) struct Member {
     pub client: Client,
@@ -86,6 +87,8 @@ pub struct Builder {
     initialize: Value,
     settings: Settings,
     policy: Arc<dyn Policy>,
+    log: Log,
+    next_prompt: u64,
 }
 
 impl core::fmt::Debug for Builder {
@@ -146,17 +149,36 @@ impl Builder {
         self
     }
 
-    /// The hub: no client attached, nothing logged.
+    /// Starts the hub with a log kept from an earlier run (`Hub::log_snapshot`), so the cursors clients hold are still
+    /// theirs: the next update is the one after the snapshot's head, and prompt numbers go on after the highest kept.
+    /// The settings' bounds apply to what is restored, whichever order they are given in.
+    ///
+    /// # Errors
+    /// `SnapshotError` when an entry has no cursor, is out of order, or is past the snapshot's head.
+    pub fn restore_log(mut self, snapshot: LogSnapshot) -> Result<Self, SnapshotError> {
+        let highest = snapshot
+            .entries
+            .iter()
+            .filter_map(prompt_of)
+            .max()
+            .unwrap_or(0);
+        self.log = Log::restore(snapshot)?;
+        self.next_prompt = highest + 1;
+        Ok(self)
+    }
+
+    /// The hub: no client attached, nothing logged unless `restore_log` gave it a log.
     #[must_use]
-    pub fn build(self) -> Hub {
+    pub fn build(mut self) -> Hub {
+        self.log.trim(&self.settings);
         Hub {
             session: self.session,
             initialize: self.initialize,
             settings: self.settings,
             policy: self.policy,
             members: BTreeMap::new(),
-            log: Log::default(),
-            next_prompt: 1,
+            log: self.log,
+            next_prompt: self.next_prompt,
             running: None,
             queue: VecDeque::new(),
             routes: HashMap::new(),
@@ -178,6 +200,8 @@ impl Hub {
             initialize: json!({ "protocolVersion": 1, "agentCapabilities": {} }),
             settings: Settings::default(),
             policy: Arc::new(AllowAll),
+            log: Log::default(),
+            next_prompt: 1,
         }
     }
 
@@ -282,6 +306,20 @@ impl Hub {
     #[must_use]
     pub fn head(&self) -> Cursor {
         self.log.head()
+    }
+
+    /// The log as it stands, for the host to keep and give a later hub to `Builder::restore_log`. Take it again (or keep
+    /// `log_after` of the cursor last kept) whenever a call returned outputs, since each update is logged as it is fanned
+    /// out.
+    #[must_use]
+    pub fn log_snapshot(&self) -> LogSnapshot {
+        self.log.snapshot()
+    }
+
+    /// The kept updates after `cursor`, oldest first, as they were fanned out: what a host appends to the log it keeps
+    /// since the cursor it last kept. Empty when `cursor` is the head; entries the bounds dropped are not in it.
+    pub fn log_after(&self, cursor: Cursor) -> impl Iterator<Item = &Value> {
+        self.log.after(cursor.0).map(|e| &e.message)
     }
 
     /// Updates currently kept for replay.
