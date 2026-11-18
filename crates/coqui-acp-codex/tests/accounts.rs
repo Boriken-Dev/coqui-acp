@@ -331,3 +331,26 @@ fn a_credential_variable_of_another_case_does_not_survive_on_windows() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_environment_an_account_sets_lists_the_home_and_no_credential() {
+    let key = AccountGrant::new("acct", "codex-api-key")
+        .credentials(credentials_of(&[("api_key", "sk-canary-1")]))
+        .state_dir("/state/acct");
+    let set = coqui_acp_codex::accounts::variables(&key);
+    assert_eq!(
+        set,
+        vec![("CODEX_HOME".to_string(), "/state/acct".to_string())]
+    );
+    assert!(!format!("{set:?}").contains("sk-canary-1"));
+    for grant in [
+        AccountGrant::new("acct", "harness-login").state_dir("/state/acct"),
+        AccountGrant::new("acct", "no-such-kind").state_dir("/state/acct"),
+        AccountGrant::new("acct", "codex-api-key"),
+    ] {
+        assert!(
+            coqui_acp_codex::accounts::variables(&grant).is_empty(),
+            "{grant:?}"
+        );
+    }
+}

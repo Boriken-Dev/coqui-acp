@@ -373,6 +373,23 @@ pub(crate) fn check(account: &AccountRef) -> Result<(), ProviderError> {
     Ok(())
 }
 
+/// The variables applying `grant` sets in Codex's environment that hold no credential, by name: its home
+/// (`CODEX_HOME`, for every kind but `harness-login`, when the grant has a directory). A host reads them to tell its
+/// profile's layers what an account sets before a session starts; an endpoint is Codex's configuration, not a
+/// variable, and the credentials' own are never listed. A grant this provider cannot apply lists none.
+#[must_use]
+pub fn variables(grant: &AccountGrant) -> Vec<(String, String)> {
+    let Ok(grant) = resolved(grant) else {
+        return Vec::new();
+    };
+    match grant.state_dir.as_deref().filter(|dir| !dir.is_empty()) {
+        Some(dir) if grant.kind != HARNESS_LOGIN => {
+            vec![("CODEX_HOME".to_string(), dir.to_string())]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// What applying `grant` does; `None` for `harness-login`, which hands nothing over and clears nothing.
 ///
 /// # Errors

@@ -435,6 +435,30 @@ pub(crate) fn check(account: &AccountRef) -> Result<(), ProviderError> {
     Ok(())
 }
 
+/// The variables applying `grant` sets in Claude Code's environment that hold no credential, by name: its configuration
+/// directory (`CLAUDE_CONFIG_DIR`, for a kind that keeps a login there, when the grant has a directory) and the endpoint
+/// (`ANTHROPIC_BASE_URL`, when the account has one). A host reads them to tell its profile's layers what an account
+/// sets before a session starts; the credentials' own variables are never listed. A grant this provider cannot apply
+/// lists none.
+#[must_use]
+pub fn variables(grant: &AccountGrant) -> Vec<(String, String)> {
+    let Ok(grant) = resolved(grant) else {
+        return Vec::new();
+    };
+    let mut set = Vec::new();
+    if matches!(grant.kind.as_str(), LOGIN | CONSOLE)
+        && let Some(dir) = grant.state_dir.as_deref().filter(|dir| !dir.is_empty())
+    {
+        set.push(("CLAUDE_CONFIG_DIR".to_string(), dir.to_string()));
+    }
+    if grant.kind != HARNESS_LOGIN
+        && let Ok(Some(url)) = base_url(&grant.settings)
+    {
+        set.push(("ANTHROPIC_BASE_URL".to_string(), url));
+    }
+    set
+}
+
 /// What applying `grant` does.
 ///
 /// # Errors

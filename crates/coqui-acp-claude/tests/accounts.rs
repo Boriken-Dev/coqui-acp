@@ -519,3 +519,40 @@ fn the_harness_lists_no_login_and_no_renewal() {
     assert!(catalog.logins.is_empty());
     assert!(catalog.kinds.iter().all(|kind| !kind.renews));
 }
+
+#[test]
+fn the_environment_an_account_sets_lists_the_directory_and_the_endpoint_and_no_credential() {
+    let login = AccountGrant::new("acct", "claude-login").state_dir("/state/acct");
+    assert_eq!(
+        coqui_acp_claude::accounts::variables(&login),
+        vec![("CLAUDE_CONFIG_DIR".to_string(), "/state/acct".to_string())]
+    );
+    let key = AccountGrant::new("acct", "anthropic-api-key")
+        .credentials(credentials_of(&[("api_key", CANARY)]))
+        .settings(coqui_acp_harness::provider::schema(
+            &serde_json::json!({"base_url": "https://gateway.example"}),
+        ));
+    let set = coqui_acp_claude::accounts::variables(&key);
+    assert_eq!(
+        set,
+        vec![(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://gateway.example".to_string()
+        )]
+    );
+    assert!(
+        !format!("{set:?}").contains(CANARY),
+        "a credential is never listed"
+    );
+    // The login Claude Code has where it runs, a kind this provider lacks and a directory-less grant list nothing.
+    for grant in [
+        AccountGrant::new("acct", "harness-login").state_dir("/state/acct"),
+        AccountGrant::new("acct", "no-such-kind").state_dir("/state/acct"),
+        AccountGrant::new("acct", "claude-login"),
+    ] {
+        assert!(
+            coqui_acp_claude::accounts::variables(&grant).is_empty(),
+            "{grant:?}"
+        );
+    }
+}
