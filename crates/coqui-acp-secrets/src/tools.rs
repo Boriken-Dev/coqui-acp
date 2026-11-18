@@ -311,13 +311,15 @@ impl SessionTools {
         let kept = if keeps.is_empty() {
             None
         } else {
-            let chosen = opened
-                .plain
-                .remove(KEEP_FIELD)
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .filter(|chosen| keeps.iter().any(|keep| &keep.id == chosen))
-                .ok_or(Error::Arguments("the way to keep it was not one offered"))?;
-            Some(chosen)
+            // A frontend that left the question unanswered keeps it as the form started: with the first way offered.
+            let chosen = match opened.plain.remove(KEEP_FIELD) {
+                None => keeps.first().map(|keep| keep.id.clone()),
+                Some(value) => value
+                    .as_str()
+                    .map(str::to_owned)
+                    .filter(|chosen| keeps.iter().any(|keep| &keep.id == chosen)),
+            };
+            Some(chosen.ok_or(Error::Arguments("the way to keep it was not one offered"))?)
         };
         let typed: Vec<(String, Zeroizing<Vec<u8>>)> = opened
             .secrets

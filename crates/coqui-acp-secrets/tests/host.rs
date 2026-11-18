@@ -2282,3 +2282,27 @@ fn an_answer_to_the_keep_question_that_was_not_offered_is_refused_and_a_name_the
     assert!(error, "{result}");
     assert_eq!(setup.person.requests.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn a_form_answered_without_the_keep_question_is_kept_as_the_form_started() {
+    let setup = setup("keeps_default");
+    *setup.person.keeps.lock().unwrap() = vec![
+        Keep::new("session", "This session"),
+        Keep::new("once", "This once"),
+    ];
+    setup.person.will_type("{}", &[("token", PASSWORD)]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": token_schema()}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(
+        *setup.person.kept.lock().unwrap(),
+        vec![(
+            "token".to_owned(),
+            PASSWORD.to_owned(),
+            "session".to_owned()
+        )]
+    );
+}
