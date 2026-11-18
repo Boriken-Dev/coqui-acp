@@ -540,7 +540,9 @@ fn the_api_key_sign_in_makes_a_provider_key_account() {
     for (key, method, variable) in [
         ("", "api-key", "GROQ_API_KEY"),
         ("a\nb", "api-key", "GROQ_API_KEY"),
-        (KEY, "api-key", "LD_PRELOAD"),
+        (KEY, "api-key", "AOS_SOMETHING"),
+        (KEY, "api-key", "1ST_KEY"),
+        (KEY, "api-key", "TWO WORDS"),
         (KEY, "api-key", ""),
         (KEY, "device", "GROQ_API_KEY"),
     ] {
@@ -551,12 +553,30 @@ fn the_api_key_sign_in_makes_a_provider_key_account() {
         );
         assert!(!refused.message().contains(KEY), "{}", refused.message());
     }
+    // A variable no provider's catalog entry names is the person's to choose: the account carries the key in it.
+    for variable in ["ACME_GATEWAY_KEY", "LD_PRELOAD", "lower_case_key"] {
+        let outcome = sign_in(KEY, "api-key", variable, &dir).expect("any variable name is taken");
+        assert_eq!(
+            coqui_acp_harness::provider::to_json(&outcome.settings),
+            json!({"variable": variable})
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn the_account_provider_offers_the_sign_in_and_the_key_it_makes() {
     let offer = accounts().offers().expect("offers");
+    // The sign-in form suggests the providers' variables and takes any other name.
+    let inputs = coqui_acp_harness::provider::to_json(&offer.logins[0].inputs);
+    let variable = &inputs["properties"]["variable"];
+    assert!(
+        variable["examples"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == "OPENAI_API_KEY")),
+        "{inputs}"
+    );
+    assert!(variable.get("enum").is_none(), "{inputs}");
     let kinds: Vec<&str> = offer.kinds.iter().map(|kind| kind.id.as_str()).collect();
     assert_eq!(kinds, ["opencode-login", "opencode-provider-key"]);
     let methods: Vec<&str> = offer.logins.iter().map(|login| login.id.as_str()).collect();

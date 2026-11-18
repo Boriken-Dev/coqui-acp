@@ -46,6 +46,8 @@ pub struct Setting {
     pub url: bool,
     /// The only values it takes, when it takes only some.
     pub choices: &'static [&'static str],
+    /// Values a form offers while it takes any other: listed as the schema's `examples`, never checked.
+    pub suggestions: &'static [&'static str],
 }
 
 /// A URL a kind talks to, as [`EndpointSlot`].
@@ -186,6 +188,9 @@ fn property(setting: &Setting) -> Value {
     if !setting.choices.is_empty() {
         property["enum"] = json!(setting.choices);
     }
+    if !setting.suggestions.is_empty() {
+        property["examples"] = json!(setting.suggestions);
+    }
     property
 }
 
@@ -282,6 +287,41 @@ fn is_url(text: &str) -> bool {
         && text.len() > 8
         && text.len() <= 2048
         && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Whether `name` is one a consumer of the AOS specification owns: `AOS_*`, `*_OVERLAY_ROOT` and `*_OVERLAY_STATE`,
+/// whatever the ASCII case.
+fn is_reserved_variable(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("AOS_")
+        || upper.ends_with("_OVERLAY_ROOT")
+        || upper.ends_with("_OVERLAY_STATE")
+}
+
+/// Checks that `name` can be the variable a key is carried in: a name every system and shell takes (ASCII letters,
+/// digits and underscores, no digit first) that no overlay's own variable shares. No other name is refused.
+///
+/// # Errors
+///
+/// `GUATIAO_ERR_BAD_VALUE`, saying why. The message holds the name, which is no credential.
+pub(crate) fn check_variable_name(name: &str) -> Result<(), ProviderError> {
+    let first = name.bytes().next();
+    let usable = first.is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && name.len() <= 255
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if !usable {
+        return Err(bad(
+            "the variable is not an environment variable name: ASCII letters, digits and underscores, no digit first",
+        ));
+    }
+    if is_reserved_variable(name) {
+        return Err(bad(alloc::format!(
+            "`{name}` is a variable the host owns (`AOS_*`, `*_OVERLAY_ROOT`, `*_OVERLAY_STATE`)"
+        )));
+    }
+    Ok(())
 }
 
 /// The kind `account` names: `None` for [`HARNESS_LOGIN`].
@@ -394,6 +434,11 @@ pub fn apply(def: &HarnessDef, grant: &AccountGrant) -> Result<Option<Applied>, 
                 kind.id
             )));
         }
+    }
+    if let Some((setting, _)) = kind.named_variable
+        && let Some(name) = settings.get(setting).and_then(Value::as_str)
+    {
+        check_variable_name(name)?;
     }
     for setting in kind.settings.iter().filter(|s| s.required) {
         if !settings.contains_key(setting.name) {

@@ -158,6 +158,7 @@ pub static DEF: HarnessDef = HarnessDef {
                 required: true,
                 url: false,
                 choices: KEY_VARIABLES,
+                suggestions: &[],
             }],
             state_dir: true,
             rotates: false,

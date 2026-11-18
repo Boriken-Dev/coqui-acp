@@ -13,7 +13,6 @@
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-use std::ffi::OsString;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
@@ -25,9 +24,7 @@ use serde_json::json;
 
 use coqui_acp_api::standard;
 
-use super::{AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef};
-use crate::login::reason;
-use crate::process::Launch;
+use super::{AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef, check_variable_name};
 use crate::provider::schema;
 use crate::stdio::login::{self, Ctx};
 
@@ -41,7 +38,8 @@ pub const PROVIDER_KEY: &str = "opencode-provider-key";
 /// The file the sign-in is kept in, in the folder `XDG_DATA_HOME` names.
 const AUTH_FILE: &str = "opencode/auth.json";
 
-/// The variables a key account may name: each one seen to make OpenCode list a provider as signed in by the environment.
+/// The variables a sign-in form suggests: each one seen to make OpenCode list a provider as signed in by the environment.
+/// A key account may name any other variable (a provider the catalog adds, or one the person's own `opencode.json` reads).
 pub const KEY_VARIABLES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -159,7 +157,8 @@ pub static DEF: HarnessDef = HarnessDef {
                 name: "variable",
                 required: true,
                 url: false,
-                choices: KEY_VARIABLES,
+                choices: &[],
+                suggestions: KEY_VARIABLES,
             }],
             state_dir: true,
             rotates: false,
@@ -167,7 +166,8 @@ pub static DEF: HarnessDef = HarnessDef {
             renews: false,
             endpoints: &[],
             notices: &[
-                "the credential is in the environment of every program the agent runs",
+                "the credential is in the environment of every program the agent runs, in the variable the account names, over the person's own value of it",
+                "OpenCode uses it only where it reads that variable: a provider's own key variable, or one the person's own `opencode.json` names",
                 "the account has an OpenCode data folder of its own: its sessions are the account's, and the person's own `opencode.json` still applies",
             ],
             credential_variables: &[],
@@ -190,7 +190,8 @@ pub static DEF: HarnessDef = HarnessDef {
                 name: "variable",
                 required: true,
                 url: false,
-                choices: KEY_VARIABLES,
+                choices: &[],
+                suggestions: KEY_VARIABLES,
             }],
             state_dir: true,
             rotates: false,
@@ -198,7 +199,8 @@ pub static DEF: HarnessDef = HarnessDef {
             renews: false,
             endpoints: &[],
             notices: &[
-                "the credential is in the environment of every program the agent runs",
+                "the credential is in the environment of every program the agent runs, in the variable the account names, over the person's own value of it",
+                "OpenCode uses it only where it reads that variable: a provider's own key variable, or one the person's own `opencode.json` names",
                 "the account has an OpenCode data folder of its own: its sessions are the account's, and the person's own `opencode.json` still applies",
             ],
             credential_variables: &[],
@@ -240,10 +242,10 @@ pub static DEF: HarnessDef = HarnessDef {
 #[must_use]
 pub fn logins() -> Vec<LoginMethodInfo> {
     let mut key = LoginMethodInfo::new("api-key", "Provider API key", PROVIDER_KEY);
-    key.description = "Asks which provider's variable the key is for, then the key, and checks that OpenCode takes the variable as that provider's sign-in. It sends nothing to the provider.".to_string();
+    key.description = "Asks which environment variable the key goes in (a provider's own is suggested, any other name works) and then the key. It sends nothing to the provider.".to_string();
     key.inputs = schema(&json!({
         "type": "object",
-        "properties": {"variable": {"type": "string", "enum": KEY_VARIABLES}},
+        "properties": {"variable": {"type": "string", "examples": KEY_VARIABLES}},
         "required": ["variable"],
         "additionalProperties": false,
     }));
@@ -252,62 +254,11 @@ pub fn logins() -> Vec<LoginMethodInfo> {
     vec![key]
 }
 
-fn launch(program: &str, args: &[&str], dir: &str, extra: &[(&str, &str)]) -> Launch {
-    let mut launch = Launch::new(program)
-        .args(args.iter().copied())
-        .env("XDG_DATA_HOME", dir);
-    for (name, value) in extra {
-        launch = launch.env(*name, *value);
-    }
-    launch.remove_env = VARIABLES.iter().map(OsString::from).collect();
-    launch
-}
-
 fn bad(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why)
 }
 
-/// `opencode auth list` on the account's folder with the key in its variable: it lists the variable under the
-/// environment when OpenCode takes it as a provider's sign-in, and calls no provider.
-fn key_is_seen(
-    ctx: &Ctx<'_>,
-    program: &str,
-    dir: &str,
-    variable: &str,
-    key: &str,
-) -> Result<bool, ProviderError> {
-    let mut child = ctx.spawn(&launch(program, &["auth", "list"], dir, &[(variable, key)]))?;
-    let mut seen = false;
-    let mut last = alloc::string::String::new();
-    let exit = child.run(ctx, |line| {
-        if line.split_whitespace().any(|word| word == variable) {
-            seen = true;
-        }
-        if !line.trim().is_empty() {
-            last = line.to_string();
-        }
-        Ok(())
-    })?;
-    if exit.code != Some(0) {
-        return Err(bad(&alloc::format!(
-            "login refused: {}",
-            reason(&last, &[key])
-        )));
-    }
-    Ok(seen)
-}
-
-fn api_key(
-    ctx: &Ctx<'_>,
-    program: &str,
-    dir: &str,
-    variable: &str,
-) -> Result<LoginOutcome, ProviderError> {
-    if !KEY_VARIABLES.contains(&variable) {
-        return Err(bad(
-            "login refused: that is no variable OpenCode reads a key from",
-        ));
-    }
+fn api_key(ctx: &Ctx<'_>, variable: &str) -> Result<LoginOutcome, ProviderError> {
     let form = LoginForm::new(
         "OpenCode provider key",
         schema(&json!({
@@ -326,11 +277,6 @@ fn api_key(
     if key.trim().is_empty() || key.chars().any(char::is_control) {
         return Err(bad("login refused: no usable key was given"));
     }
-    if !key_is_seen(ctx, program, dir, variable, &key)? {
-        return Err(bad(
-            "login refused: OpenCode does not take that variable as a provider's sign-in",
-        ));
-    }
     let mut credentials = Credentials::new();
     credentials.insert("api_key", key);
     let mut outcome = LoginOutcome::new(PROVIDER_KEY, credentials);
@@ -346,7 +292,6 @@ fn api_key(
 ///
 /// As [`AccountProvider::login`](coqui_acp_api::AccountProvider::login).
 pub fn sign_in(
-    program: alloc::string::String,
     request: LoginRequest,
     spawner: Object<dyn ProcessSpawner>,
     prompter: Object<dyn LoginPrompter>,
@@ -361,9 +306,9 @@ pub fn sign_in(
         .get("variable")
         .and_then(|value| value.as_str().map(ToString::to_string))
         .ok_or_else(|| bad("login refused: the variable the key is for is missing"))?;
-    let dir = request.state_dir.clone();
+    check_variable_name(&variable)?;
     login::run(spawner, prompter, request.timeout_ms, move |ctx| {
-        api_key(ctx, &program, &dir, &variable)
+        api_key(ctx, &variable)
     })
 }
 
@@ -474,28 +419,51 @@ mod tests {
     }
 
     #[test]
-    fn a_key_account_names_a_variable_from_the_list_and_nothing_else() {
-        let key = |variable: &str| {
-            AccountGrant::new("a", API_KEY)
+    fn a_key_account_names_any_variable_and_the_form_only_suggests() {
+        let key = |kind: &str, variable: &str| {
+            AccountGrant::new("a", kind)
                 .settings(schema(&json!({"variable": variable})))
                 .credentials(Credentials::from_iter([("api_key", CANARY)]))
                 .state_dir("/some/dir")
         };
-        let applied = apply(&DEF, &key("GROQ_API_KEY"))
-            .expect("applies")
-            .expect("a kind");
-        assert!(names(&applied).contains(&"GROQ_API_KEY".to_string()));
-        for bad in [
-            "LD_PRELOAD",
-            "PATH",
-            "OPENCODE_PERMISSION",
-            "XDG_DATA_HOME",
-            "",
-        ] {
-            let Err(error) = apply(&DEF, &key(bad)) else {
-                panic!("{bad:?} was taken");
-            };
-            assert!(!error.message().contains(CANARY));
+        for kind in [API_KEY, PROVIDER_KEY] {
+            let info = catalog(&DEF).kind(kind).expect("kind").settings.clone();
+            let variable = &crate::provider::to_json(&info)["properties"]["variable"];
+            assert_eq!(variable["examples"], json!(KEY_VARIABLES), "{kind}");
+            assert!(variable.get("enum").is_none(), "{kind}: {variable}");
+            // A provider's own variable, one the catalog may add, and ones that move programs or the person's own: all taken.
+            for name in [
+                "GROQ_API_KEY",
+                "ACME_GATEWAY_KEY",
+                "lower_case_1",
+                "_X",
+                "LD_PRELOAD",
+                "PATH",
+                "OPENCODE_PERMISSION",
+            ] {
+                let applied = apply(&DEF, &key(kind, name))
+                    .unwrap_or_else(|error| panic!("{name} refused: {}", error.message()))
+                    .expect("a kind");
+                assert!(names(&applied).contains(&name.to_string()), "{name}");
+                assert!(!alloc::format!("{applied:?}").contains(CANARY));
+            }
+            // Only what is no variable name, or what the host owns, is refused.
+            for bad in [
+                "",
+                "1ST_KEY",
+                "A=B",
+                "TWO WORDS",
+                "KEY-NAME",
+                "AOS_OVERLAY_NAME",
+                "aos_x",
+                "TEAM_OVERLAY_ROOT",
+                "team_overlay_state",
+            ] {
+                let Err(error) = apply(&DEF, &key(kind, bad)) else {
+                    panic!("{bad:?} was taken");
+                };
+                assert!(!error.message().contains(CANARY));
+            }
         }
     }
 }

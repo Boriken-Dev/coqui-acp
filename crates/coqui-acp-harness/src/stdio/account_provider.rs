@@ -134,9 +134,7 @@ impl AccountProvider for StdioAccounts {
             StdioHarness::Grok => {
                 accounts::grok::sign_in(self.program_name(), request, spawner, prompter)
             }
-            StdioHarness::OpenCode => {
-                accounts::opencode::sign_in(self.program_name(), request, spawner, prompter)
-            }
+            StdioHarness::OpenCode => accounts::opencode::sign_in(request, spawner, prompter),
             StdioHarness::Antigravity => Err(ProviderError::new(
                 Status::GUATIAO_ERR_UNSUPPORTED,
                 self.settings.harness.def().login_unsupported,
