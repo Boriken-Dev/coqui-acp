@@ -63,7 +63,25 @@ All of it is given by the host and carried unchecked: `id` is stable and opaque 
 pub struct Cursor(u64);              // Copy, Ord, Default, Display (decimal), FromStr (CursorError), Cursor::START
 ```
 
-Opaque, monotonic, stable across reconnects, never a byte offset: one is issued per logged message, in the order they were fanned out, and replay from the start and from a cursor deliver the same messages in the same order (the latter is the tail of the former). Clients treat it as an opaque string. It travels as `params._meta["dev.boriken.coqui.acp/hub"].seq` (decimal string) on every logged message and is `result._meta[...].cursor` (the log's head) in the answer to `session/load` and `session/resume`. To resume from one, a client puts `params._meta["dev.boriken.coqui.acp/hub"].cursor` in its `session/load` or `session/resume` request: the hub replays everything after it. `META_KEY` is that key. A hub restarted without its log issues cursors from 1 again; the host must not mix the two.
+Opaque, monotonic, stable across reconnects, never a byte offset: one is issued per logged message, in the order they were fanned out, and replay from the start and from a cursor deliver the same messages in the same order (the latter is the tail of the former). Clients treat it as an opaque string. It travels as `params._meta["dev.boriken.coqui.acp/hub"].seq` (decimal string) on every logged message and is `result._meta[...].cursor` (the log's head) in the answer to `session/load` and `session/resume`. To resume from one, a client puts `params._meta["dev.boriken.coqui.acp/hub"].cursor` in its `session/load` or `session/resume` request: the hub replays everything after it. `META_KEY` is that key. A hub restarted without its log issues cursors from 1 again; a cursor from the earlier log is then refused (below), never replayed from. Keeping the log across a restart: "Keeping the log".
+
+## Keeping the log
+
+```rust
+pub struct LogSnapshot { pub head: Cursor, pub entries: Vec<Value> }     // Clone, Debug, PartialEq
+pub fn LogSnapshot::new(head: Cursor, entries: Vec<Value>) -> Self
+pub fn LogSnapshot::to_json(&self) -> Value                              // { "head": "<cursor>", "entries": [...] }
+pub fn LogSnapshot::from_json(&Value) -> Result<LogSnapshot, SnapshotError>
+#[non_exhaustive] pub enum SnapshotError { NoCursor(usize), OutOfOrder(usize), PastHead(usize), Malformed(&'static str) }   // Display, Error
+
+pub fn Hub::log_snapshot(&self) -> LogSnapshot
+pub fn Hub::log_after(&self, cursor: Cursor) -> impl Iterator<Item = &Value>
+pub fn Builder::restore_log(self, LogSnapshot) -> Result<Builder, SnapshotError>
+```
+
+The hub keeps no file: the host does. `log_snapshot` is the whole kept log (every entry exactly as it was fanned out, with its `seq`, and the head cursor, which can be past the last entry when the bounds dropped it). A host that writes after every call that returned outputs appends `log_after(<cursor it last wrote>)` instead of rewriting everything. `Builder::restore_log` starts a hub with that log: its head is the snapshot's, so the next update is the one after it and every cursor a client holds stays valid; prompt numbers go on after the highest kept. The settings' bounds are applied to what is restored (a smaller `max_log_entries` drops the oldest at once). It is refused when an entry has no `seq`, is not after the one before it, or is past `head`. Only the log is restored: connected clients, the running turn, the queue and open permission requests are not, since they belong to links and an agent turn that did not survive the restart.
+
+A load or resume naming a cursor the log cannot continue from is a JSON-RPC error (code -32602) and attaches nothing, never a partial or shifted replay. `error.data.reason` says which: `cursor_ahead` (the cursor is past the head: it came from a log that is gone; `head`), `cursor_expired` (the entries after it were dropped by the bounds; `oldest`, the first kept, and `head`) or `bad_cursor` (not a cursor). The client may then load again without a cursor, which replays everything kept and says `truncated` when the bounds dropped the oldest.
 
 ## Client side: what a client sends
 
@@ -80,7 +98,7 @@ Opaque, monotonic, stable across reconnects, never a byte offset: one is issued 
 | response `hub-perm-<n>` | an answer to a permission request (below) |
 | response to a request the agent made | passed to the agent under the agent's own id |
 
-Before attaching, only `initialize` and `authenticate` are answered; other requests get an error and the hub never forwards a message of an unattached client. `truncated: true` means log entries after the cursor were dropped by the bounds, so the replay has a gap (reconcile, or tell the person). The session id in `session/load`, `session/resume` and `session/prompt` must be the hub's.
+Before attaching, only `initialize` and `authenticate` are answered; other requests get an error and the hub never forwards a message of an unattached client. `truncated: true` means the bounds dropped the oldest entries of a replay that named no cursor, so it starts mid-session (tell the person); a cursor the bounds passed is an error instead ("Keeping the log"). The session id in `session/load`, `session/resume` and `session/prompt` must be the hub's.
 
 ## Agent side: what the agent sends
 
