@@ -467,8 +467,8 @@ impl Shown {
                         "this sign-in returns the browser to a port on the machine OpenCode runs on, which this provider does not hand over; name a method that shows a code, or one that asks for a key",
                     ));
                 }
-                if !(url.starts_with("https://")
-                    && !url.chars().any(|c| c.is_whitespace() || c.is_control()))
+                if !url.starts_with("https://")
+                    || url.chars().any(|c| c.is_whitespace() || c.is_control())
                 {
                     return Err(internal(
                         "OpenCode printed a page that is not an https address",

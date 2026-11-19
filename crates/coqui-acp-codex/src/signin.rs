@@ -415,7 +415,7 @@ fn web(
     }
     job.check()?;
     let exit = cli.wait(Duration::from_secs(5));
-    if !exit.is_some_and(|exit| exit.code == Some(0)) {
+    if exit.is_none_or(|exit| exit.code != Some(0)) {
         return Err(internal(&format!(
             "Codex's sign-in did not finish: {}",
             reason(&printed, &[])

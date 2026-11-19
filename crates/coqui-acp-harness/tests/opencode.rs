@@ -773,10 +773,9 @@ fn a_provider_login_shows_the_page_and_code_the_program_prints_and_waits_for_it_
         assert_eq!(shown[0].1.as_deref(), Some("ABCD-12345"));
         assert_eq!(kept_sign_in(&outcome)[provider]["type"], json!("oauth"));
         assert!(
-            !KEY.is_empty()
-                && !serde_json::to_string(&kept_sign_in(&outcome))
-                    .expect("text")
-                    .contains(KEY)
+            !serde_json::to_string(&kept_sign_in(&outcome))
+                .expect("text")
+                .contains(KEY)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

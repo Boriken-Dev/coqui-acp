@@ -177,7 +177,7 @@ fn a_depth_the_setting_forbids_is_the_settings_not_the_parsers() {
         }
         other => panic!("{other:?}"),
     }
-    assert!(!read_all(&with_turn(nested_meta(70)), ReaderSettings::default()).is_ok());
+    assert!(read_all(&with_turn(nested_meta(70)), ReaderSettings::default()).is_err());
 }
 
 #[test]

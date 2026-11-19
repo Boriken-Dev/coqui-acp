@@ -357,7 +357,7 @@ fn web(
     }
     job.check()?;
     let exit = cli.wait(Duration::from_secs(5));
-    if !exit.is_some_and(|exit| exit.code == Some(0)) {
+    if exit.is_none_or(|exit| exit.code != Some(0)) {
         return Err(failure(
             Status::GUATIAO_ERR_BAD_VALUE,
             &format!("login refused: {}", reason(&printed, &[&*code])),
