@@ -550,3 +550,47 @@ fn a_bare_program_is_found_on_this_processs_path_and_not_on_one_the_launch_sets(
     assert!(listed.contains("a_bare_program_is_found"), "{listed}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A program that ends the moment it starts is sometimes already gone when it would join its job, which the system refuses:
+/// starting it must not fail, however loaded the machine is.
+#[test]
+fn a_program_that_ends_at_once_always_starts() {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let burners: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut n = 0_u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    n = std::hint::black_box(n.wrapping_mul(31).wrapping_add(7));
+                }
+            })
+        })
+        .collect();
+    let starters: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                for _ in 0..500 {
+                    let launch = if cfg!(windows) {
+                        Launch::new("cmd.exe").args(["/d", "/c", "exit 0"])
+                    } else {
+                        Launch::new("/bin/sh").args(["-c", "exit 0"])
+                    };
+                    let spawned = PlainSpawn
+                        .spawn(&launch)
+                        .unwrap_or_else(|error| panic!("a quick program did not start: {error}"));
+                    let _ = spawned.process.kill();
+                }
+            })
+        })
+        .collect();
+    let failures = starters
+        .into_iter()
+        .filter_map(|starter| starter.join().err())
+        .count();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for burner in burners {
+        let _ = burner.join();
+    }
+    assert_eq!(failures, 0, "2000 starts");
+}
