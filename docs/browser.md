@@ -256,7 +256,7 @@ The instance name is the label. The SRV record gives host and port. TXT keys, no
 | `peer` | the peer id, as a hint to match against one already paired |
 | `method` | the proof's method, `noise` or `webcrypto`. A record naming none is `webcrypto`'s, the only method before records named one; a client skips one naming a method it cannot run |
 | `acpv` | ACP versions, comma separated |
-| `offers` | protocol tokens served over one link, comma separated, such as `acp/1,a2a/1,mcp`. A client ignores one it does not know, and what a peer may open is what the link's own document says. See [the link](https://boriken-dev.github.io/coqui-agentic-peer/link/) |
+| `offers` | protocol tokens served over one link, comma separated, such as `acp/1,a2a/1,mcp`. A client ignores one it does not know, and what a peer may open is what the link's own document says. See [the link](https://boriken-dev.github.io/coqui-link/link/) |
 
 A client MUST treat all of it as hostile input. It MUST NOT offer a record that names this machine in any spelling, including `localhost`, `*.localhost`, a numeric form of a loopback address or an IPv4 address inside an IPv6 one, which would point a person at a service of their own; one that is link-local; one that is plain; or one that names no `peer`, which nothing could then prove. It SHOULD remove format characters from a label, which can hide part of it or reorder what is shown around it.
 
