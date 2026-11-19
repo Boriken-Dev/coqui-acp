@@ -512,8 +512,15 @@ fn a_kind_it_does_not_keep_is_bad_value_even_when_a_harness_would_take_its_stand
 
 /// A loopback server that answers every request with `body`.
 fn stand_in(body: &'static str) -> SocketAddr {
+    stand_in_seen(body).0
+}
+
+/// [`stand_in`], and the requests it was sent, as text.
+fn stand_in_seen(body: &'static str) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
     let addr = listener.local_addr().expect("its address");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let heard = Arc::clone(&seen);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { return };
@@ -525,6 +532,10 @@ fn stand_in(body: &'static str) -> SocketAddr {
                     Ok(n) => bytes.extend_from_slice(&chunk[..n]),
                 }
             }
+            heard
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&bytes).into_owned());
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nanthropic-ratelimit-requests-limit: 50\r\nanthropic-ratelimit-requests-remaining: 7\r\nanthropic-ratelimit-requests-reset: 2026-11-16T20:00:00Z\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -532,7 +543,7 @@ fn stand_in(body: &'static str) -> SocketAddr {
             );
         }
     });
-    addr
+    (addr, seen)
 }
 
 const DOCUMENT: &str = r#"{"five_hour":{"utilization":12.5,"resets_at":"2026-11-16T20:00:00+00:00"},"seven_day":{"utilization":34.0,"resets_at":"2026-11-20T10:00:00+00:00"}}"#;
@@ -587,6 +598,13 @@ fn a_logins_plan_windows_are_its_usage_and_a_console_login_has_none() {
 #[test]
 fn the_provider_keeps_every_rule_of_the_kind_against_the_stand_in() {
     let dir = scratch("contract");
+    // The login Claude Code keeps in this home, which the local account's plan usage is read with.
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+    std::fs::write(
+        dir.join(".claude").join(".credentials.json"),
+        login_text("contract-access", "contract-refresh", 4_102_444_800_000),
+    )
+    .unwrap();
     let out = Command::new(std::env::current_exe().expect("the test knows itself"))
         .args([
             "--exact",
@@ -675,20 +693,113 @@ fn replay_program() -> PathBuf {
 #[test]
 fn it_offers_the_login_of_its_program_as_the_automatic_local_account() {
     let offer = provider().offers().expect("offered");
-    assert!(offer.local);
+    assert!(offer.local && offer.reports_usage(HARNESS_LOGIN));
     assert!(
         offer.kind(HARNESS_LOGIN).is_none(),
         "it cannot sign in to it"
     );
-    let usage = provider()
-        .usage(
-            AccountUsageQuery::new(AccountGrant::new("local", HARNESS_LOGIN)),
-            LocalSpawner::new().into_object(),
-            Heard::default().into_object(),
-        )
-        .expect("answered");
-    assert!(!usage.supported && usage.unsupported_because.is_some());
+}
+
+/// What the local account's usage is for a provider on `endpoint`, with Claude Code's configuration in `config`.
+fn local_usage(
+    endpoint: Option<String>,
+    config: &Path,
+) -> Result<coqui_acp_api::AccountUsage, ProviderError> {
+    ClaudeAccounts::new(AccountSettings {
+        executable: fake(),
+        usage_endpoint: endpoint,
+        ..AccountSettings::default()
+    })
+    .usage(
+        AccountUsageQuery::new(AccountGrant::new("local", HARNESS_LOGIN)).environment(
+            [("CLAUDE_CONFIG_DIR", config.to_string_lossy().into_owned())]
+                .into_iter()
+                .collect(),
+        ),
+        LocalSpawner::new().into_object(),
+        Heard::default().into_object(),
+    )
+}
+
+#[test]
+fn the_local_account_reads_plan_usage_with_the_login_in_claude_codes_configuration_directory() {
+    let (addr, seen) = stand_in_seen(DOCUMENT);
+    let config = scratch("local-usage");
+    std::fs::write(
+        config.join(".credentials.json"),
+        login_text("local-access-9", "local-refresh-9", 4_102_444_800_000),
+    )
+    .unwrap();
+    let usage = local_usage(Some(format!("http://{addr}")), &config).expect("read");
+    assert!(usage.supported, "{usage:?}");
     assert_eq!(usage.account.as_deref(), Some("local"));
+    let ids: Vec<&str> = usage.buckets.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(ids, ["five_hour", "seven_day"]);
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(requests[0].starts_with("GET /api/oauth/usage "));
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer local-access-9"),
+        "the figures are read with the login Claude Code keeps"
+    );
+    assert!(!format!("{usage:?}").contains("local-access-9"));
+    assert!(log(&config).is_empty(), "no program was needed");
+    // The login is read, never written.
+    assert_eq!(
+        std::fs::read_to_string(config.join(".credentials.json")).unwrap(),
+        login_text("local-access-9", "local-refresh-9", 4_102_444_800_000)
+    );
+    let _ = std::fs::remove_dir_all(&config);
+}
+
+#[test]
+fn the_local_account_renews_an_expired_login_through_claude_code_and_reads_again() {
+    let (addr, seen) = stand_in_seen(DOCUMENT);
+    let config = scratch("local-usage-renew");
+    std::fs::write(
+        config.join(".credentials.json"),
+        login_text("stand-in-access-1", "stand-in-refresh-1", 1_000),
+    )
+    .unwrap();
+    let usage = local_usage(Some(format!("http://{addr}")), &config).expect("read");
+    assert!(usage.supported, "{usage:?}");
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "the expired token was never sent");
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer stand-in-access-2"),
+        "the renewed token was read from the same directory"
+    );
+    assert!(
+        log(&config)
+            .iter()
+            .any(|entry| entry["args"] == serde_json::json!(["auth", "status"]))
+    );
+    let _ = std::fs::remove_dir_all(&config);
+}
+
+#[test]
+fn the_local_account_with_no_login_file_has_no_usage_and_says_why() {
+    let config = scratch("local-usage-none");
+    let usage = local_usage(None, &config).expect("answered");
+    assert!(!usage.supported && usage.buckets.is_empty());
+    assert!(usage.unsupported_because.is_some());
+    assert_eq!(usage.account.as_deref(), Some("local"));
+    // A login that cannot be renewed is the person's next step, not a figure.
+    std::fs::write(
+        config.join(".credentials.json"),
+        login_text("a", "r", 1_000),
+    )
+    .unwrap();
+    std::fs::write(config.join("fake-refresh"), "refuse-blank").unwrap();
+    let (addr, seen) = stand_in_seen(DOCUMENT);
+    let error = local_usage(Some(format!("http://{addr}")), &config).expect_err("expired");
+    assert_eq!(error.status, Status::GUATIAO_ERR_GONE);
+    assert!(seen.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&config);
 }
 
 #[test]

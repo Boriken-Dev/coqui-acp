@@ -301,7 +301,7 @@ pub fn catalog() -> AccountCatalog {
 
 /// What the account provider offers: the kinds of account it makes (the harness's own login, which it cannot sign in
 /// to, left out of the kinds and offered as the automatic `local` account), the ways to sign in, and the kinds whose
-/// plan usage it reads.
+/// plan usage it reads (the `local` account's too, from the login Claude Code keeps in its configuration directory).
 #[must_use]
 pub fn offer() -> AccountOffer {
     let full = full();
@@ -313,7 +313,7 @@ pub fn offer() -> AccountOffer {
         .collect();
     offer.logins = full.logins;
     offer.local = true;
-    offer.usage = [LOGIN, OAUTH_TOKEN, API_KEY, AUTH_TOKEN]
+    offer.usage = [LOGIN, OAUTH_TOKEN, API_KEY, AUTH_TOKEN, HARNESS_LOGIN]
         .iter()
         .map(|id| (*id).to_string())
         .collect();
