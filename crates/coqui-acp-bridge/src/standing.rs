@@ -17,8 +17,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coqui_agentic_peer::home;
-use coqui_agentic_peer::link::{Accepted, Handler};
-use coqui_agentic_peer::mux::{CloseReason, LinkStream, StreamLife};
+use coqui_link::link::{Accepted, Handler};
+use coqui_link::mux::{CloseReason, LinkStream, StreamLife};
 use coqui_transport::Failure;
 use serde_json::{Value, json};
 

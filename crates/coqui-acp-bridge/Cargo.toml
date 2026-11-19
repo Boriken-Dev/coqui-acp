@@ -16,7 +16,9 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "f45938e8cede85a2a2e00afedea1b4944f7c8a67" }
+# The proof, pairing, streams, peers and forwarding (`sealed`, `forward`), and what an agent adds around them: the home, discovery and MCP offers.
+coqui-link = { git = "https://github.com/Boriken-Dev/coqui-link", rev = "40123baab01440c0522a27baa7321a31892b3735", features = ["sealed", "forward"] }
+coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "161307f9ebc216a56e21d7407688baa80f442823" }
 coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "984db3d54b73de10c7892b06fe269a259de2d1c5" }
 # Unpublished so far.
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "9146f55dd9fb9be8d6d96f43e17bc7a057ba0681", features = ["pin"] }

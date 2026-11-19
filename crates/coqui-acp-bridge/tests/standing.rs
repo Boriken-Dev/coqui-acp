@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use coqui_agentic_peer::auth::{Identity, Proof, Trust};
-use coqui_agentic_peer::auth::{Sealed, prove_out};
-use coqui_agentic_peer::mux::{Limits, Mux, Side};
+use coqui_link::auth::{Identity, Proof, Trust};
+use coqui_link::auth::{Sealed, prove_out};
+use coqui_link::mux::{Limits, Mux, Side};
 use coqui_transport::Channel as _;
 use serde_json::{Value, json};
 

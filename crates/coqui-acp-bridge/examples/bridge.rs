@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use coqui_acp_bridge::helper::Helper;
 use coqui_acp_bridge::standing::DEFAULT_NAME;
 use coqui_acp_bridge::{agent, dial, discover, forward, grant, keygen, mcp_shim, pairing, serve};
-use coqui_agentic_peer::auth::Method;
+use coqui_link::auth::Method;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
