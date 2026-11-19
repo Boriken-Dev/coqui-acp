@@ -18,9 +18,9 @@ use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountLoss, AccountProvider, AccountRenewal, AccountUsageQuery,
-    Credentials, LoginAnswer, LoginForm, LoginPrompter, LoginRequest, OpenUrl, ProcessSpawner,
-    RenewRequest, WatchRequest,
+    AccountGrant, AccountKeeper, AccountLoss, AccountModelsQuery, AccountProvider, AccountRenewal,
+    AccountUsageQuery, Credentials, HARNESS_LOGIN, LoginAnswer, LoginForm, LoginPrompter,
+    LoginRequest, OpenUrl, ProcessSpawner, RenewRequest, WatchRequest,
 };
 use coqui_acp_claude::{AccountSettings, ClaudeAccounts};
 use coqui_acp_harness::LocalSpawner;
@@ -637,4 +637,211 @@ fn the_suite_inside() {
     if let Err(failures) = outcome {
         panic!("{failures}");
     }
+}
+
+/// What the local account's models are for a provider running `executable` with `environment` and nothing else of the
+/// host's.
+fn listing_of(
+    executable: String,
+    environment: coqui_acp_api::Environment,
+) -> coqui_acp_api::ModelListing {
+    ClaudeAccounts::new(AccountSettings {
+        executable,
+        ..AccountSettings::default()
+    })
+    .models(
+        AccountModelsQuery::new(AccountGrant::new("local", HARNESS_LOGIN)).environment(environment),
+        LocalSpawner::new().into_object(),
+        Heard::default().into_object(),
+    )
+    .expect("answered")
+}
+
+/// The recordings of Claude Code 2.1.318.
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("2.1.318")
+}
+
+/// The replaying stand-in, built beside the tests.
+fn replay_program() -> PathBuf {
+    profile()
+        .join("examples")
+        .join(format!("replay_claude{}", std::env::consts::EXE_SUFFIX))
+}
+
+#[test]
+fn it_offers_the_login_of_its_program_as_the_automatic_local_account() {
+    let offer = provider().offers().expect("offered");
+    assert!(offer.local);
+    assert!(
+        offer.kind(HARNESS_LOGIN).is_none(),
+        "it cannot sign in to it"
+    );
+    let usage = provider()
+        .usage(
+            AccountUsageQuery::new(AccountGrant::new("local", HARNESS_LOGIN)),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(!usage.supported && usage.unsupported_because.is_some());
+    assert_eq!(usage.account.as_deref(), Some("local"));
+}
+
+#[test]
+fn models_of_an_account_it_does_not_keep_are_refused_as_a_bad_value() {
+    let ask = |grant: AccountGrant| {
+        provider().models(
+            AccountModelsQuery::new(grant),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+    };
+    // A login with no credential or directory is not a grant the kind takes.
+    let error = ask(AccountGrant::new("a", "claude-login")).expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let error = ask(AccountGrant::new("a", "no-such-kind")).expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+}
+
+/// What the recorded `initialize` of Claude Code 2.1.318 gives a host that asks for the models before any session: no
+/// turn is made, since the stand-in replays only the recording's control answers.
+#[test]
+fn the_local_account_lists_the_recorded_models_with_versions_and_efforts_and_no_turn() {
+    let environment: coqui_acp_api::Environment = [(
+        "COQUI_ACP_CLAUDE_REPLAY",
+        fixtures()
+            .join("cli_session")
+            .to_string_lossy()
+            .into_owned(),
+    )]
+    .into_iter()
+    .collect();
+    let listing = listing_of(replay_program().to_string_lossy().into_owned(), environment);
+    assert!(listing.known, "{listing:?}");
+    let seen: Vec<_> = listing
+        .models
+        .iter()
+        .map(|model| {
+            (
+                model.id.as_str(),
+                model.name.as_deref().unwrap(),
+                model.resolved.as_deref().unwrap(),
+                model.version.as_deref().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (
+                "default",
+                "Default (Opus 5.5)",
+                "claude-opus-5-5",
+                "Opus 5.5"
+            ),
+            ("opus", "Opus 5.5", "claude-opus-5-5", "Opus 5.5"),
+            ("fable", "Fable 5.1", "claude-fable-5-1", "Fable 5.1"),
+            ("sonnet", "Sonnet 5.5", "claude-sonnet-5-5", "Sonnet 5.5"),
+            ("haiku", "Haiku 5.5", "claude-haiku-5-5", "Haiku 5.5"),
+        ]
+    );
+    assert_eq!(
+        listing
+            .models
+            .iter()
+            .filter(|model| model.is_default)
+            .count(),
+        1,
+        "only the default entry"
+    );
+    for model in &listing.models {
+        assert_eq!(model.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+}
+
+#[test]
+fn the_local_account_models_of_a_program_that_is_not_installed_say_so_by_kind() {
+    let dir = scratch("models-missing");
+    let missing = dir.join("no-such-claude");
+    let listing = listing_of(
+        missing.to_string_lossy().into_owned(),
+        coqui_acp_api::Environment::new(),
+    );
+    assert!(!listing.known, "{listing:?}");
+    assert_eq!(
+        listing.unknown_kind,
+        Some(coqui_acp_api::UnknownKind::NotInstalled)
+    );
+    assert!(listing.unknown_because.is_some() && listing.models.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_account_models_of_a_program_that_cannot_be_run_are_a_failure_with_its_text() {
+    // A directory is found, and cannot be started.
+    let dir = scratch("models-failed");
+    let listing = listing_of(
+        dir.to_string_lossy().into_owned(),
+        coqui_acp_api::Environment::new(),
+    );
+    assert!(!listing.known, "{listing:?}");
+    assert_eq!(
+        listing.unknown_kind,
+        Some(coqui_acp_api::UnknownKind::Failed)
+    );
+    assert!(
+        listing
+            .unknown_because
+            .as_deref()
+            .is_some_and(|why| why.contains("could not be")),
+        "{listing:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_account_models_of_a_claude_code_with_no_login_say_nobody_is_signed_in() {
+    let dir = scratch("models-signed-out");
+    let environment = |signed_out: bool| -> coqui_acp_api::Environment {
+        let mut pairs = vec![("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned())];
+        if signed_out {
+            pairs.push(("COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT", "1".to_owned()));
+        }
+        pairs.into_iter().collect()
+    };
+    let out = listing_of(fake(), environment(true));
+    assert!(out.known && out.signed_out, "{out:?}");
+    assert!(!out.models.is_empty() && out.unknown_kind.is_none());
+    let signed_in = listing_of(fake(), environment(false));
+    assert!(signed_in.known && !signed_in.signed_out, "{signed_in:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_account_of_a_claude_code_that_lists_no_model_says_why_and_never_waits_for_a_session() {
+    let dir = scratch("models-none");
+    let environment = |signed_out: bool| -> coqui_acp_api::Environment {
+        let mut pairs = vec![
+            ("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()),
+            ("COQUI_ACP_FAKE_CLAUDE_NO_MODELS", "1".to_owned()),
+        ];
+        if signed_out {
+            pairs.push(("COQUI_ACP_FAKE_CLAUDE_SIGNED_OUT", "1".to_owned()));
+        }
+        pairs.into_iter().collect()
+    };
+    let out = listing_of(fake(), environment(true));
+    assert!(
+        !out.known && out.signed_out && out.models.is_empty(),
+        "{out:?}"
+    );
+    assert!(out.unknown_because.is_some(), "{out:?}");
+    let other = listing_of(fake(), environment(false));
+    assert!(!other.known && !other.signed_out, "{other:?}");
+    assert_eq!(other.unknown_kind, Some(coqui_acp_api::UnknownKind::Failed));
+    let _ = std::fs::remove_dir_all(&dir);
 }

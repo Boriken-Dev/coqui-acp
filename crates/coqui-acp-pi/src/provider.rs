@@ -14,20 +14,19 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, HarnessInfo, ImportReport, ModelInfo, ModelListing, ModelsRequest, Narrowing,
-    ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, UnknownKind,
-    UsageQuery, UsageReport,
+    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
+    Environment, ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner, Requirement,
+    SessionExport, SessionImport, StartRequest,
 };
+use coqui_acp_harness::Settings;
 use coqui_acp_harness::account::{Accounts, Files, Hold, Watched, same_name};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
 use coqui_acp_harness::stdio::accounts::{Applied, apply, known, login_usable};
 use coqui_acp_harness::{Access, Mode};
-use coqui_acp_harness::{Settings, ThroughSpawner};
 
 use crate::accounts::{self, DEF};
-use crate::{PiAgent, PiLaunch, PiSession, PiSettings};
+use crate::{PiAgent, PiLaunch};
 
 /// How the Pi provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -205,7 +204,7 @@ impl PiProvider {
         grant: &AccountGrant,
         applied: &Applied,
         spawner: &Arc<Object<dyn ProcessSpawner>>,
-        accounts: &Arc<Accounts>,
+        (accounts, keeper): (&Arc<Accounts>, Option<Object<dyn AccountKeeper>>),
     ) -> Result<Option<Hold>, ProviderError> {
         let files = Files::new(Arc::clone(spawner));
         if applied.needs_files && !files.available() {
@@ -220,7 +219,7 @@ impl PiProvider {
         accounts
             .hold(
                 files,
-                None,
+                keeper,
                 &grant.id,
                 dir,
                 grant.revision,
@@ -245,20 +244,7 @@ impl PiProvider {
         let Some(grant) = account else {
             return Ok(None);
         };
-        let Some(applied) = apply(&DEF, grant)? else {
-            return Ok(None);
-        };
-        // What the host's environment holds under a credential name does not reach Pi beside the account's.
-        launch.env.retain(|name, _| {
-            !DEF.variables
-                .iter()
-                .any(|variable| same_name(&name.to_string_lossy(), variable))
-        });
-        launch.remove_env = DEF.variables.iter().map(OsString::from).collect();
-        for (name, value) in applied.environment.expose().iter() {
-            launch.env.insert(name.into(), value.into());
-        }
-        Self::hold(grant, &applied, spawner, &self.accounts)
+        apply_to(grant, launch, spawner, (&self.accounts, None))
     }
 
     /// Whether the spawner starts programs on this machine, where the permission gate is written.
@@ -271,14 +257,35 @@ impl PiProvider {
             ))
         }
     }
+}
 
-    /// Reads the account of a call that runs nothing, so that a grant the kind refuses is refused as it is everywhere.
-    fn glance(account: Option<&AccountGrant>) -> Result<(), ProviderError> {
-        if let Some(grant) = account {
-            apply(&DEF, grant)?;
-        }
-        Ok(())
+/// Applies `grant` to `launch`: every credential variable of Pi removed, the kind's set, and the login file placed in the
+/// account's directory through the spawner and held in `accounts`, whose keeper (when one is given) hears what happens to
+/// it for as long as the hold lasts.
+///
+/// # Errors
+///
+/// `BAD_VALUE` for a grant the kind refuses; `UNSUPPORTED` for a kind that needs files from a spawner with none.
+pub(crate) fn apply_to(
+    grant: &AccountGrant,
+    launch: &mut PiLaunch,
+    spawner: &Arc<Object<dyn ProcessSpawner>>,
+    keeping: (&Arc<Accounts>, Option<Object<dyn AccountKeeper>>),
+) -> Result<Option<Hold>, ProviderError> {
+    let Some(applied) = apply(&DEF, grant)? else {
+        return Ok(None);
+    };
+    // What the host's environment holds under a credential name does not reach Pi beside the account's.
+    launch.env.retain(|name, _| {
+        !DEF.variables
+            .iter()
+            .any(|variable| same_name(&name.to_string_lossy(), variable))
+    });
+    launch.remove_env = DEF.variables.iter().map(OsString::from).collect();
+    for (name, value) in applied.environment.expose().iter() {
+        launch.env.insert(name.into(), value.into());
     }
+    PiProvider::hold(grant, &applied, spawner, keeping)
 }
 
 impl AcpHarness for PiProvider {
@@ -411,65 +418,5 @@ impl AcpHarness for PiProvider {
                 "this provider does not export a Pi session yet",
             ))
         }
-    }
-
-    fn models(
-        &self,
-        request: ModelsRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ModelListing, ProviderError> {
-        let mut launch = self.launch(request.environment.expose());
-        let spawner = Arc::new(spawner);
-        let hold = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
-        let spawn = ThroughSpawner::shared(spawner);
-        let listing = match PiSession::read_models(&launch, &spawn, PiSettings::new()) {
-            Ok(models) if models.is_empty() => {
-                ModelListing::unknown("Pi lists no model: none has a credential")
-            }
-            Ok(models) => ModelListing::of(
-                models
-                    .into_iter()
-                    .map(|model| {
-                        let mut info = ModelInfo::new(model.id);
-                        info.name = Some(model.name);
-                        info.efforts = model.efforts;
-                        info.default_effort = model.default_effort;
-                        info.is_default = model.is_default;
-                        let mut about = vec![model.provider];
-                        if model.reasoning {
-                            about.push("reasoning".to_string());
-                        }
-                        if let Some(window) = model.context_window {
-                            about.push(format!("{}K context", window / 1000));
-                        }
-                        info.description = Some(about.join(", "));
-                        info
-                    })
-                    .collect(),
-            ),
-            Err(error) => ModelListing::unavailable(
-                match &error {
-                    crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
-                        UnknownKind::NotInstalled
-                    }
-                    _ => UnknownKind::Failed,
-                },
-                format!("Pi could not be asked: {error}"),
-            ),
-        };
-        if let Some(hold) = hold {
-            hold.finish();
-        }
-        Ok(listing)
-    }
-
-    fn usage(
-        &self,
-        query: UsageQuery,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<UsageReport, ProviderError> {
-        drop(spawner);
-        Self::glance(query.account.as_ref())?;
-        Ok(UsageReport::unsupported("Pi reports no usage allowances"))
     }
 }

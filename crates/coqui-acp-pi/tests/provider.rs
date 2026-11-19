@@ -13,8 +13,8 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
-    AcpHarness, ChannelSink, ModelsRequest, ProcessSpawner, READ_ONLY, Requirement, SpawnSpec,
-    SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery,
+    AcpHarness, ChannelSink, ProcessSpawner, READ_ONLY, Requirement, SpawnSpec, SpawnedProcess,
+    SpawnerInfo, StartRequest,
 };
 use coqui_acp_harness::{LocalSpawner, Mode};
 use coqui_acp_pi::{PiProvider, ProviderSettings};
@@ -290,40 +290,6 @@ fn an_import_and_an_export_answer_unsupported_with_a_reason_without_the_history_
     assert!(matches!(exported, Err(error) if error.status == Status::GUATIAO_ERR_UNSUPPORTED));
 }
 
-#[test]
-fn models_come_from_pi_with_no_turn_and_usage_is_unsupported() {
-    let dir = scratch("models-home");
-    let environment: coqui_acp_api::Environment =
-        [("PI_CODING_AGENT_DIR", dir.to_string_lossy().into_owned())]
-            .into_iter()
-            .collect();
-    let listing = provider()
-        .models(
-            ModelsRequest::new().environment(environment.clone()),
-            spawner(),
-        )
-        .expect("answered");
-    assert!(listing.known, "{listing:?}");
-    let ids: Vec<&str> = listing
-        .models
-        .iter()
-        .map(|model| model.id.as_str())
-        .collect();
-    assert_eq!(ids, ["stub/stub-fast", "stub/stub-think"]);
-    assert_eq!(listing.models[1].name.as_deref(), Some("Stub Think"));
-    assert!(
-        listing.models[1]
-            .description
-            .as_deref()
-            .is_some_and(|text| text.contains("reasoning"))
-    );
-    let report = provider()
-        .usage(UsageQuery::new().environment(environment), spawner())
-        .expect("answered");
-    assert!(!report.supported, "{report:?}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 fn settings_from(text: &str) -> Result<ProviderSettings, guatiao_serde::Error> {
     json::from_str_as::<ProviderSettings>(text, Presentation::new())
 }
@@ -336,28 +302,6 @@ fn the_settings_are_read_by_id_and_a_mode_that_is_none_is_refused() {
     assert_eq!(settings.modes, Some(vec![Mode::Plan, Mode::Bypass]));
     assert!(settings_from(r#"{"mode": "yolo"}"#).is_err());
     assert_eq!(settings_from("{}").unwrap().executable, "pi");
-}
-
-#[test]
-fn the_default_model_carries_its_thinking_levels_and_the_others_none() {
-    let dir = scratch("models-efforts");
-    let environment: coqui_acp_api::Environment =
-        [("PI_CODING_AGENT_DIR", dir.to_string_lossy().into_owned())]
-            .into_iter()
-            .collect();
-    let listing = provider()
-        .models(ModelsRequest::new().environment(environment), spawner())
-        .expect("answered");
-    let fast = &listing.models[0];
-    let think = &listing.models[1];
-    assert!(
-        !fast.is_default && fast.efforts.is_empty() && fast.default_effort.is_none(),
-        "{fast:?}"
-    );
-    assert!(think.is_default, "{think:?}");
-    assert_eq!(think.efforts, ["off", "minimal", "low", "medium", "high"]);
-    assert_eq!(think.default_effort.as_deref(), Some("medium"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

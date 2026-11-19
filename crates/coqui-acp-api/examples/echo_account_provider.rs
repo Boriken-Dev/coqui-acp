@@ -24,11 +24,12 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
 use coqui_acp_api::usage::{Bucket, Coverage, Refill, Source, Status as Level, Unit};
 use coqui_acp_api::{
-    ASK, AccountGrant, AccountKeeper, AccountKindInfo, AccountLoss, AccountOffer, AccountProvider,
-    AccountProviderInfo, AccountRenewal, AccountUsage, AccountUsageQuery, AccountWatch,
-    Credentials, EndpointSlot, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter,
-    LoginRequest, MODEL_API, OPEN_URL, OpenUrl, ProcessSpawner, RenewReport, RenewRequest,
-    SecretBytes, SpawnSpec, SpawnedProcess, USER_CODE, WatchRequest, is_account_id,
+    ASK, AccountGrant, AccountKeeper, AccountKindInfo, AccountLoss, AccountModelsQuery,
+    AccountOffer, AccountProvider, AccountProviderInfo, AccountRenewal, AccountUsage,
+    AccountUsageQuery, AccountWatch, Credentials, EndpointSlot, HARNESS_LOGIN, LoginForm,
+    LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest, MODEL_API, ModelInfo, ModelListing,
+    OPEN_URL, OpenUrl, ProcessSpawner, RenewReport, RenewRequest, SecretBytes, SpawnSpec,
+    SpawnedProcess, USER_CODE, WatchRequest, is_account_id,
 };
 use serde_json::{Value, json};
 
@@ -188,7 +189,7 @@ fn offer(settings: &EchoSettings) -> AccountOffer {
             .default_url("https://echo.example"),
     ];
     key.history_portable = true;
-    let mut offer = AccountOffer::new();
+    let mut offer = AccountOffer::new().with_local();
     offer.kinds = vec![file, key];
     if settings.usage {
         offer.usage = vec![FILE_KIND.into()];
@@ -299,6 +300,17 @@ fn key_of(grant: &AccountGrant) -> String {
         grant.id,
         grant.state_dir.as_deref().unwrap_or_default()
     )
+}
+
+/// Checks that a grant's id is one.
+fn check_id(grant: &AccountGrant) -> Result<(), ProviderError> {
+    if is_account_id(&grant.id) {
+        Ok(())
+    } else {
+        Err(bad(
+            "an account id is 1 to 128 bytes with no control character",
+        ))
+    }
 }
 
 /// Checks a grant of a kind the echo lists, and what it needs of `spawner`.
@@ -794,6 +806,28 @@ impl AccountProvider for EchoAccounts {
         .into_object())
     }
 
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        drop(keeper);
+        let grant = query.account;
+        if grant.kind == HARNESS_LOGIN {
+            check_id(&grant)?;
+            return Ok(ModelListing::of(vec![ModelInfo::new("echo")]));
+        }
+        read_grant(&offer(&self.settings), &grant, &spawner)?;
+        drop(spawner);
+        // The account's own kind decides: a key reaches the large model, a login does not.
+        let mut models = vec![ModelInfo::new("echo")];
+        if grant.kind == KEY_KIND {
+            models.push(ModelInfo::new("echo-large"));
+        }
+        Ok(ModelListing::of(models))
+    }
+
     fn usage(
         &self,
         query: AccountUsageQuery,
@@ -803,6 +837,12 @@ impl AccountProvider for EchoAccounts {
         drop(keeper);
         let offer = offer(&self.settings);
         let grant = query.account;
+        if grant.kind == HARNESS_LOGIN {
+            check_id(&grant)?;
+            let mut none = AccountUsage::unsupported("the echo's own login reports no usage");
+            none.account = Some(grant.id);
+            return Ok(none);
+        }
         read_grant(&offer, &grant, &spawner)?;
         drop(spawner);
         let mut usage = if offer.reports_usage(&grant.kind) {

@@ -12,9 +12,7 @@ use coqui_acp_api::ChannelSink;
 use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{FromValue, Map, Status, ToValue, Value};
-use coqui_acp_api::{
-    AcpHarness, ModelsRequest, ProcessSpawner, READ_ONLY, Requirement, UsageQuery,
-};
+use coqui_acp_api::{AcpHarness, ProcessSpawner, READ_ONLY, Requirement};
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
 use coqui_acp_harness::{LocalSpawner, Mode};
 use guatiao_serde::Presentation;
@@ -196,47 +194,6 @@ impl ChannelSink for Sink {
     fn closed(&mut self, _status: u32, _reason: &str) {}
 }
 
-#[test]
-fn a_usage_read_for_an_account_checks_the_grant_like_a_start_does() {
-    // A login with no credential or directory is not a grant the kind takes.
-    let error = provider()
-        .usage(
-            UsageQuery::new().account(coqui_acp_api::AccountGrant::new("a", "codex-chatgpt")),
-            spawner(),
-        )
-        .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
-}
-
-#[test]
-fn it_lists_models_and_reads_usage_through_the_spawner_it_is_given() {
-    {
-        let dir = scratch("reads-home");
-        // A login the stand-in did not make: Codex is signed in.
-        std::fs::write(dir.join("auth.json"), "a login").expect("a login");
-        let environment: coqui_acp_api::Environment =
-            [("CODEX_HOME", dir.to_string_lossy().into_owned())]
-                .into_iter()
-                .collect();
-        let listing = provider()
-            .models(
-                ModelsRequest::new().environment(environment.clone()),
-                spawner(),
-            )
-            .expect("answered");
-        assert!(listing.known, "{listing:?}");
-        assert_eq!(listing.models[0].id, "gpt-standin");
-        assert_eq!(listing.models[0].efforts, ["low", "high"]);
-        assert_eq!(listing.models[0].default_effort.as_deref(), Some("low"));
-        assert!(listing.models[0].is_default);
-        let report = provider()
-            .usage(UsageQuery::new().environment(environment), spawner())
-            .expect("answered");
-        assert!(report.supported && !report.buckets.is_empty(), "{report:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
 struct Frames(std::sync::mpsc::Sender<serde_json::Value>);
 
 impl ChannelSink for Frames {
@@ -363,73 +320,4 @@ fn the_modes_it_names_widen_what_a_client_may_choose_and_bypass_needs_its_switch
         assert_eq!(narrow, base, "allow_bypass {allow_bypass}, no modes");
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// What `models` answers for a provider running `executable` with `environment` and nothing else of the host's.
-fn listing_of(
-    executable: String,
-    environment: coqui_acp_api::Environment,
-) -> coqui_acp_api::ModelListing {
-    CodexProvider::new(ProviderSettings {
-        executable,
-        ..ProviderSettings::default()
-    })
-    .models(ModelsRequest::new().environment(environment), spawner())
-    .expect("answered")
-}
-
-#[test]
-fn models_of_a_program_that_is_not_installed_say_so_by_kind() {
-    let dir = scratch("models-missing");
-    let missing = dir.join("no-such-codex");
-    let listing = listing_of(
-        missing.to_string_lossy().into_owned(),
-        coqui_acp_api::Environment::new(),
-    );
-    assert!(!listing.known, "{listing:?}");
-    assert_eq!(
-        listing.unknown_kind,
-        Some(coqui_acp_api::UnknownKind::NotInstalled)
-    );
-    assert!(listing.unknown_because.is_some() && listing.models.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn models_of_a_program_that_cannot_be_run_are_a_failure_with_its_text() {
-    // A directory is found, and cannot be started.
-    let dir = scratch("models-failed");
-    let listing = listing_of(
-        dir.to_string_lossy().into_owned(),
-        coqui_acp_api::Environment::new(),
-    );
-    assert!(!listing.known, "{listing:?}");
-    assert_eq!(
-        listing.unknown_kind,
-        Some(coqui_acp_api::UnknownKind::Failed)
-    );
-    assert!(
-        listing
-            .unknown_because
-            .as_deref()
-            .is_some_and(|why| why.contains("could not be")),
-        "{listing:?}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn models_of_a_codex_nobody_is_signed_in_to_say_so() {
-    let dir = scratch("models-signed-out");
-    let environment: coqui_acp_api::Environment =
-        [("CODEX_HOME", dir.to_string_lossy().into_owned())]
-            .into_iter()
-            .collect();
-    let out = listing_of(fake(), environment.clone());
-    assert!(out.known && out.signed_out, "{out:?}");
-    assert!(!out.models.is_empty() && out.unknown_kind.is_none());
-    std::fs::write(dir.join("auth.json"), "a login").expect("a login");
-    let signed_in = listing_of(fake(), environment);
-    assert!(signed_in.known && !signed_in.signed_out, "{signed_in:?}");
-    let _ = std::fs::remove_dir_all(&dir);
 }

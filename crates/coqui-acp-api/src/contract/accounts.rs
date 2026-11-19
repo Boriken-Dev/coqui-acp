@@ -28,8 +28,7 @@ use super::json::{from_json, to_json};
 use crate::{
     ACCOUNT_ID_MAX, AccountCatalog, AccountGrant, AccountKindInfo, AccountRef, AcpHarness,
     Credentials, HARNESS_LOGIN, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
-    ModelsRequest, ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest,
-    UsageQuery, is_account_id,
+    ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, is_account_id,
 };
 
 pub(super) const OK: u32 = 0;
@@ -530,31 +529,7 @@ fn applies(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
             info.id
         );
 
-        // import, export, models and usage on the account.
-        let (watch, spawner, _) = host::spawner_in(Some(&dir));
-        let listing = harness
-            .models(ModelsRequest::new().account(grant.clone()), spawner)
-            .map_err(|e| format!("{}: models: {}", info.id, why(&e)))?;
-        ensure!(
-            watch.destroyed() && !format!("{listing:?}").contains(CANARY),
-            "{}: models kept an object it was handed, or answered a credential",
-            info.id
-        );
-        let (watch, spawner, _) = host::spawner_in(Some(&dir));
-        let report = harness
-            .usage(UsageQuery::new().account(grant.clone()), spawner)
-            .map_err(|e| format!("{}: usage: {}", info.id, why(&e)))?;
-        ensure!(
-            watch.destroyed() && !format!("{report:?}").contains(CANARY),
-            "{}: usage kept an object it was handed, or answered a credential",
-            info.id
-        );
-        ensure!(
-            report.account.as_deref() == Some(grant.id.as_str()) || !report.supported,
-            "{}: usage reported for {:?}, not the granted account",
-            info.id,
-            report.account
-        );
+        // import and export on the account.
         if contract.imports {
             let session = fresh_uuid();
             let (watch, spawner, _) = host::spawner_in(Some(&dir));
@@ -624,20 +599,6 @@ fn refuses(contract: &Contract, harness: &dyn AcpHarness, place: &Place) -> Outc
         Some(strange.reference()),
     );
     refused("refusal", answer.err())?;
-    let (watch, spawner, _) = host::spawner();
-    let answer = harness.models(ModelsRequest::new().account(strange.clone()), spawner);
-    ensure!(
-        watch.destroyed(),
-        "models refused with an object it was handed alive"
-    );
-    refused("models", answer.err())?;
-    let (watch, spawner, _) = host::spawner();
-    let answer = harness.usage(UsageQuery::new().account(strange.clone()), spawner);
-    ensure!(
-        watch.destroyed(),
-        "usage refused with an object it was handed alive"
-    );
-    refused("usage", answer.err())?;
     // An id that is not an id.
     for id in [
         String::new(),

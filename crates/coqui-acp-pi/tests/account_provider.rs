@@ -16,9 +16,9 @@ use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountLoss, AccountProvider, AccountRenewal, AccountUsageQuery,
-    Credentials, LoginAnswer, LoginForm, LoginPrompter, LoginRequest, OpenUrl, ProcessSpawner,
-    RenewRequest, WatchRequest,
+    AccountGrant, AccountKeeper, AccountLoss, AccountModelsQuery, AccountProvider, AccountRenewal,
+    AccountUsageQuery, Credentials, HARNESS_LOGIN, LoginAnswer, LoginForm, LoginPrompter,
+    LoginRequest, OpenUrl, ProcessSpawner, RenewRequest, WatchRequest,
 };
 use coqui_acp_harness::LocalSpawner;
 use coqui_acp_pi::{AccountSettings, PiAccounts};
@@ -49,8 +49,21 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+fn fake() -> String {
+    library()
+        .parent()
+        .expect("a file in examples")
+        .join(format!("fake_pi{}", std::env::consts::EXE_SUFFIX))
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn provider() -> PiAccounts {
-    PiAccounts::new(AccountSettings { renew_poll_ms: 100 })
+    PiAccounts::new(AccountSettings {
+        renew_poll_ms: 100,
+        executable: fake(),
+        ..AccountSettings::default()
+    })
 }
 
 fn spawner(dir: &Path) -> Object<dyn ProcessSpawner> {
@@ -282,16 +295,112 @@ fn the_suite_inside() {
         .expect("the library loads once cargo built it");
     let mut settings = Map::new();
     settings.set("renew_poll_ms", 100);
+    settings.set("executable", Value::from(fake().as_str()));
     let provider = registry
         .offer::<dyn AccountProvider>("pi_accounts")
         .expect("the library offers it")
         .expect("its table is this kind")
         .instantiate(&Value::from(settings))
         .expect("the settings are taken");
-    let outcome = AccountContract::new("pi").logins(false).run(&provider);
+    let outcome = AccountContract::new("pi")
+        .logins(false)
+        .program(true)
+        .run(&provider);
     drop(provider);
     drop(registry);
     if let Err(failures) = outcome {
         panic!("{failures}");
     }
+}
+
+/// The models of the local account, for a provider that runs the stand-in with `environment`.
+fn listing_of(environment: coqui_acp_api::Environment) -> coqui_acp_api::ModelListing {
+    let dir = scratch("listing");
+    let listing = provider()
+        .models(
+            AccountModelsQuery::new(AccountGrant::new("local", HARNESS_LOGIN))
+                .environment(environment),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    let _ = std::fs::remove_dir_all(&dir);
+    listing
+}
+
+#[test]
+fn it_offers_the_login_of_its_program_as_the_automatic_local_account() {
+    let offer = provider().offers().expect("offered");
+    assert!(offer.local && !offer.reports_usage(HARNESS_LOGIN));
+}
+
+#[test]
+fn a_kind_it_does_not_list_is_refused_by_models_as_a_bad_value() {
+    let dir = scratch("refused");
+    let error = provider()
+        .models(
+            AccountModelsQuery::new(AccountGrant::new("a", "no-such-kind")),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_account_lists_models_from_pi_with_no_turn_and_has_no_usage() {
+    let dir = scratch("models-home");
+    let environment: coqui_acp_api::Environment =
+        [("PI_CODING_AGENT_DIR", dir.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+    let listing = listing_of(environment.clone());
+    assert!(listing.known, "{listing:?}");
+    let ids: Vec<&str> = listing
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    assert_eq!(ids, ["stub/stub-fast", "stub/stub-think"]);
+    assert_eq!(listing.models[1].name.as_deref(), Some("Stub Think"));
+    assert!(
+        listing.models[1]
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("reasoning"))
+    );
+    let report = provider()
+        .usage(
+            AccountUsageQuery::new(AccountGrant::new("local", HARNESS_LOGIN))
+                .environment(environment),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(
+        !report.supported && report.unsupported_because.is_some(),
+        "{report:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_default_model_carries_its_thinking_levels_and_the_others_none() {
+    let dir = scratch("models-efforts");
+    let environment: coqui_acp_api::Environment =
+        [("PI_CODING_AGENT_DIR", dir.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+    let listing = listing_of(environment);
+    let fast = &listing.models[0];
+    let think = &listing.models[1];
+    assert!(
+        !fast.is_default && fast.efforts.is_empty() && fast.default_effort.is_none(),
+        "{fast:?}"
+    );
+    assert!(think.is_default, "{think:?}");
+    assert_eq!(think.efforts, ["off", "minimal", "low", "medium", "high"]);
+    assert_eq!(think.default_effort.as_deref(), Some("medium"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

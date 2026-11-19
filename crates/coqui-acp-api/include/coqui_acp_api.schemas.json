@@ -732,7 +732,7 @@
     "properties": {
       "known": {
         "type": "boolean",
-        "description": "Whether the harness listed them; when not, `models` is empty."
+        "description": "Whether the provider listed them; when not, `models` is empty."
       },
       "unknown_because": {
         "type": [
@@ -750,7 +750,7 @@
               "failed"
             ],
             "x-enum-labels": {
-              "not_installed": "The program the harness runs is not on the machine.",
+              "not_installed": "The program the account's models are asked of is not on the machine.",
               "failed": "The program is there and could not be asked; the text says what."
             }
           },
@@ -758,11 +758,11 @@
             "type": "null"
           }
         ],
-        "description": "What kind of reason that is, when the harness could not be started; absent when it simply lists its models only once a session has started."
+        "description": "What kind of reason that is, when the program could not be started; absent when it simply lists its models only once a session has started."
       },
       "signed_out": {
         "type": "boolean",
-        "description": "Whether the harness, though it listed its models, says nobody is signed in, so a session on the machine's own login would be refused its first prompt. Says nothing of an account a host applies.",
+        "description": "Whether the program, though it listed its models, says nobody is signed in, so a session on the machine's own login would be refused its first prompt. Says nothing of an account a host applies.",
         "default": false
       },
       "models": {
@@ -772,42 +772,42 @@
           "properties": {
             "id": {
               "type": "string",
-              "description": "The harness's own identifier or alias for it."
+              "description": "The program's own identifier or alias for it."
             },
             "name": {
               "type": [
                 "string",
                 "null"
               ],
-              "description": "What the harness shows a person, when it has a name apart from the identifier; a provider that knows the version puts it here too."
+              "description": "What the program shows a person, when it has a name apart from the identifier; a provider that knows the version puts it here too."
             },
             "description": {
               "type": [
                 "string",
                 "null"
               ],
-              "description": "The harness's one-line description, when it gives one."
+              "description": "The program's one-line description, when it gives one."
             },
             "resolved": {
               "type": [
                 "string",
                 "null"
               ],
-              "description": "The model an alias or default resolves to, as the harness names it."
+              "description": "The model an alias or default resolves to, as the program names it."
             },
             "version": {
               "type": [
                 "string",
                 "null"
               ],
-              "description": "The model and its version as a person reads them (`Opus 5.5`), when the harness can say it."
+              "description": "The model and its version as a person reads them (`Opus 5.5`), when the program can say it."
             },
             "efforts": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "The efforts this model takes, in the harness's order; empty when the harness lists none for it.",
+              "description": "The efforts this model takes, in the program's order; empty when it lists none for it.",
               "default": []
             },
             "default_effort": {
@@ -815,11 +815,11 @@
                 "string",
                 "null"
               ],
-              "description": "The effort the model uses when none is named, when the harness says."
+              "description": "The effort the model uses when none is named, when the program says."
             },
             "is_default": {
               "type": "boolean",
-              "description": "Whether the harness uses this model when none is named.",
+              "description": "Whether the program uses this model when none is named.",
               "default": false
             }
           },
@@ -828,7 +828,7 @@
             "id"
           ]
         },
-        "description": "The models, in the harness's order.",
+        "description": "The models, in the program's order.",
         "default": []
       }
     },
@@ -845,7 +845,7 @@
       "failed"
     ],
     "x-enum-labels": {
-      "not_installed": "The program the harness runs is not on the machine.",
+      "not_installed": "The program the account's models are asked of is not on the machine.",
       "failed": "The program is there and could not be asked; the text says what."
     },
     "properties": {}
@@ -856,42 +856,42 @@
     "properties": {
       "id": {
         "type": "string",
-        "description": "The harness's own identifier or alias for it."
+        "description": "The program's own identifier or alias for it."
       },
       "name": {
         "type": [
           "string",
           "null"
         ],
-        "description": "What the harness shows a person, when it has a name apart from the identifier; a provider that knows the version puts it here too."
+        "description": "What the program shows a person, when it has a name apart from the identifier; a provider that knows the version puts it here too."
       },
       "description": {
         "type": [
           "string",
           "null"
         ],
-        "description": "The harness's one-line description, when it gives one."
+        "description": "The program's one-line description, when it gives one."
       },
       "resolved": {
         "type": [
           "string",
           "null"
         ],
-        "description": "The model an alias or default resolves to, as the harness names it."
+        "description": "The model an alias or default resolves to, as the program names it."
       },
       "version": {
         "type": [
           "string",
           "null"
         ],
-        "description": "The model and its version as a person reads them (`Opus 5.5`), when the harness can say it."
+        "description": "The model and its version as a person reads them (`Opus 5.5`), when the program can say it."
       },
       "efforts": {
         "type": "array",
         "items": {
           "type": "string"
         },
-        "description": "The efforts this model takes, in the harness's order; empty when the harness lists none for it.",
+        "description": "The efforts this model takes, in the program's order; empty when it lists none for it.",
         "default": []
       },
       "default_effort": {
@@ -899,11 +899,11 @@
           "string",
           "null"
         ],
-        "description": "The effort the model uses when none is named, when the harness says."
+        "description": "The effort the model uses when none is named, when the program says."
       },
       "is_default": {
         "type": "boolean",
-        "description": "Whether the harness uses this model when none is named.",
+        "description": "Whether the program uses this model when none is named.",
         "default": false
       }
     },
@@ -1241,81 +1241,6 @@
       "kind",
       "text"
     ]
-  },
-  "UsageQuery": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-      "environment": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "string"
-        },
-        "writeOnly": true,
-        "x-sensitive": true,
-        "description": "Variables for what the harness runs to ask, over its configuration's. A provider shows none of them in an answer, a refusal, an error or a log.",
-        "default": {}
-      },
-      "account": {
-        "type": [
-          "object",
-          "null"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "The host's id for the account: text the host assigns, 1 to [`ACCOUNT_ID_MAX`] bytes with no control character, opaque to the provider, echoed (into usage reports) and never interpreted."
-          },
-          "kind": {
-            "type": "string",
-            "description": "One of the catalog's kinds."
-          },
-          "settings": {
-            "description": "The kind's non-secret settings, an object its catalog schema accepts.",
-            "default": {}
-          },
-          "credentials": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "writeOnly": true,
-            "x-sensitive": true,
-            "description": "The kind's secrets, by the key path of the sensitive setting each fills.",
-            "default": {}
-          },
-          "state_dir": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "A private directory where the harness runs, made by the host, for a kind whose catalog entry says `state_dir`. The provider writes the account there and starts the harness on it."
-          },
-          "revision": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 18446744073709551615,
-            "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
-            "default": 0
-          },
-          "provides": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
-            "default": []
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "kind"
-        ],
-        "description": "The account to report for; its `id` is echoed into the report and never interpreted. The provider applies the rest, as `start` does."
-      }
-    },
-    "additionalProperties": false
   },
   "UsageReport": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3387,81 +3312,6 @@
     },
     "additionalProperties": false
   },
-  "ModelsRequest": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-      "environment": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "string"
-        },
-        "writeOnly": true,
-        "x-sensitive": true,
-        "description": "Variables for what the harness runs to ask, over its configuration's. A provider shows none of them in an answer, a refusal, an error or a log.",
-        "default": {}
-      },
-      "account": {
-        "type": [
-          "object",
-          "null"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "The host's id for the account: text the host assigns, 1 to [`ACCOUNT_ID_MAX`] bytes with no control character, opaque to the provider, echoed (into usage reports) and never interpreted."
-          },
-          "kind": {
-            "type": "string",
-            "description": "One of the catalog's kinds."
-          },
-          "settings": {
-            "description": "The kind's non-secret settings, an object its catalog schema accepts.",
-            "default": {}
-          },
-          "credentials": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "writeOnly": true,
-            "x-sensitive": true,
-            "description": "The kind's secrets, by the key path of the sensitive setting each fills.",
-            "default": {}
-          },
-          "state_dir": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "A private directory where the harness runs, made by the host, for a kind whose catalog entry says `state_dir`. The provider writes the account there and starts the harness on it."
-          },
-          "revision": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 18446744073709551615,
-            "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
-            "default": 0
-          },
-          "provides": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
-            "default": []
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "kind"
-        ],
-        "description": "The account to ask for; absent asks as the configuration stands."
-      }
-    },
-    "additionalProperties": false
-  },
   "AccountRenewal": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -3780,8 +3630,13 @@
         "items": {
           "type": "string"
         },
-        "description": "The kinds whose accounts report their plan's usage through [`AccountProvider::usage`]: ids listed in `kinds`. A kind not here answers `usage` with \"not offered\".",
+        "description": "The kinds whose accounts report their plan's usage through [`AccountProvider::usage`]: ids listed in `kinds`, or [`HARNESS_LOGIN`](crate::HARNESS_LOGIN) when `local` is true. A kind not here answers `usage` with \"not offered\".",
         "default": []
+      },
+      "local": {
+        "type": "boolean",
+        "description": "Whether the provider's program has a login of its own that the provider offers as an automatic account named [`LOCAL_ACCOUNT`](crate::LOCAL_ACCOUNT), of kind [`HARNESS_LOGIN`](crate::HARNESS_LOGIN): the program run on the configuration as it stands, nothing applied. A host lists it without anyone adding it, and `usage` and `models` answer for a grant of that kind. A provider that offers none refuses such a grant as a kind it does not list.",
+        "default": false
       }
     },
     "additionalProperties": false
@@ -3918,6 +3773,81 @@
         "writeOnly": true,
         "x-sensitive": true,
         "description": "Variables for what the provider runs or reaches to ask (a proxy, say), over its configuration's. A provider shows none of them in an answer, a refusal, an error or a log.",
+        "default": {}
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "account"
+    ]
+  },
+  "AccountModelsQuery": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "account": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The host's id for the account: text the host assigns, 1 to [`ACCOUNT_ID_MAX`] bytes with no control character, opaque to the provider, echoed (into usage reports) and never interpreted."
+          },
+          "kind": {
+            "type": "string",
+            "description": "One of the catalog's kinds."
+          },
+          "settings": {
+            "description": "The kind's non-secret settings, an object its catalog schema accepts.",
+            "default": {}
+          },
+          "credentials": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "writeOnly": true,
+            "x-sensitive": true,
+            "description": "The kind's secrets, by the key path of the sensitive setting each fills.",
+            "default": {}
+          },
+          "state_dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A private directory where the harness runs, made by the host, for a kind whose catalog entry says `state_dir`. The provider writes the account there and starts the harness on it."
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615,
+            "description": "Counts the host's stored copies of the credentials, so a renewal says which it renews.",
+            "default": 0
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The standards the account provides, from the catalog of whoever made it. A harness reads it only for a `kind` its own catalog does not list: it then applies the account as the first of its `accepts` that this names.",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind"
+        ],
+        "description": "The account to list for: one of the kinds the provider lists, or, when it offers the automatic `local` account, [`HARNESS_LOGIN`](crate::HARNESS_LOGIN), for which nothing is applied."
+      },
+      "environment": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "writeOnly": true,
+        "x-sensitive": true,
+        "description": "Variables for what the provider runs to ask, over its configuration's. A provider shows none of them in an answer, a refusal, an error or a log.",
         "default": {}
       }
     },

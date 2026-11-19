@@ -14,11 +14,15 @@ use core::fmt;
 use guatiao::library::ProviderError;
 use guatiao::{FromValue, Map, Schema, Secret, ToValue, Value, Wipe};
 
-use crate::environment::Environment;
-
 /// The kind every provider lists: the harness's own login, where it runs. Nothing is handed over
 /// and nothing is cleared; the account exists to count use and limits.
 pub const HARNESS_LOGIN: &str = "harness-login";
+
+/// The name of the automatic account of kind [`HARNESS_LOGIN`]: the harness run on its own login, as its
+/// configuration stands. An account provider whose program has such a login says so in
+/// [`AccountOffer::local`](crate::AccountOffer::local), and a host lists the account under this name
+/// without anyone adding it.
+pub const LOCAL_ACCOUNT: &str = "local";
 
 /// The longest [`AccountGrant::id`], in bytes.
 pub const ACCOUNT_ID_MAX: usize = 128;
@@ -147,7 +151,8 @@ fn empty_settings() -> Value {
 }
 
 /// The account a call runs on, with its credentials: what a host hands every call that runs the
-/// harness (`start`, `import_session`, `export_session`, `models`, `usage`).
+/// harness (`start`, `import_session`, `export_session`) and what an account provider is asked
+/// (`usage`, `models`).
 ///
 /// A provider that applies it (sets variables, writes files into `state_dir`) clears every name
 /// in its catalog's `credential_variables` first, then sets the chosen kind's, and shows no
@@ -850,41 +855,6 @@ impl RenewReport {
             expires_at: None,
             not_renewed_because: Some(reason.into()),
         }
-    }
-}
-
-/// The models an account may use, for [`AcpHarness::models`](crate::AcpHarness::models).
-#[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq)]
-#[map(crate = ::guatiao, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ModelsRequest {
-    /// Variables for what the harness runs to ask, over its configuration's. A provider shows none
-    /// of them in an answer, a refusal, an error or a log.
-    #[map(default)]
-    pub environment: Secret<Environment>,
-    /// The account to ask for; absent asks as the configuration stands.
-    pub account: Option<AccountGrant>,
-}
-
-impl ModelsRequest {
-    /// A request adding nothing to the provider's configuration.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The variables for what the harness runs.
-    #[must_use]
-    pub fn environment(mut self, environment: Environment) -> Self {
-        self.environment = Secret::new(environment);
-        self
-    }
-
-    /// The account to ask for.
-    #[must_use]
-    pub fn account(mut self, account: AccountGrant) -> Self {
-        self.account = Some(account);
-        self
     }
 }
 

@@ -29,15 +29,15 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::usage::{
     Bucket, Coverage, LIMIT_META_KEY, LimitHit, Refill, Source, Spend, Status as Level,
-    USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit, UsageQuery,
-    UsageReport, UsageSupport,
+    USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit, UsageReport,
+    UsageSupport,
 };
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountKindInfo, AccountRef, AcpHarness, Channel, ChannelSink,
     EndpointSlot, Environment, ExportPage, HARNESS_LOGIN, HarnessInfo, ImportReport,
-    LINE_TOO_LARGE, MODEL_API, ModelInfo, ModelListing, ModelsRequest, NO_COMMANDS, Narrowing,
-    ProcessSpawner, READ_ONLY, Requirement, SecretBytes, SeedPoint, SessionExport, SessionImport,
-    SpawnSpec, SpawnedProcess, StartRequest, WorkingRoots, is_account_id, is_session_id,
+    LINE_TOO_LARGE, MODEL_API, NO_COMMANDS, Narrowing, ProcessSpawner, READ_ONLY, Requirement,
+    SecretBytes, SeedPoint, SessionExport, SessionImport, SpawnSpec, SpawnedProcess, StartRequest,
+    WorkingRoots, is_account_id, is_session_id,
 };
 use serde_json::{Value, json};
 
@@ -77,7 +77,7 @@ extern "C" fn threads_done() -> Status {
 #[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[map(crate = ::coqui_acp_api::guatiao, rename_all = "snake_case")]
 enum EchoUsage {
-    /// It reports none: the extension is not advertised and `usage` says so.
+    /// It reports none: the extension is not advertised.
     #[default]
     None,
     /// It reports what its prompts script.
@@ -141,9 +141,6 @@ struct Kept {
 
 type Store = Arc<Mutex<BTreeMap<String, Kept>>>;
 
-/// The newest report any connection of an instance made, by the account it ran on (`""` for none).
-type Reports = Arc<Mutex<BTreeMap<String, UsageReport>>>;
-
 /// Unix seconds now.
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -165,11 +162,10 @@ struct UsageState {
     spends: BTreeMap<String, Spend>,
     /// Whether the client asked for `_coqui_acp/usage_update`.
     notify: bool,
-    reports: Reports,
 }
 
 impl UsageState {
-    fn new(account: Option<String>, reports: Reports) -> Self {
+    fn new(account: Option<String>) -> Self {
         let mut report = UsageReport::new();
         report.sources = SOURCES.to_vec();
         report.account = account;
@@ -177,7 +173,6 @@ impl UsageState {
             report,
             spends: BTreeMap::new(),
             notify: false,
-            reports,
         }
     }
 
@@ -188,8 +183,7 @@ impl UsageState {
         report
     }
 
-    /// Something changed: a new revision, kept for the kind's `usage`, and the notification when
-    /// the client asked.
+    /// Something changed: a new revision, and the notification when the client asked.
     fn changed(&mut self, session: Option<&str>) -> Vec<Value> {
         self.report.revision += 1;
         self.report.observed_at = self
@@ -199,11 +193,6 @@ impl UsageState {
             .map(|bucket| bucket.observed_at)
             .max()
             .unwrap_or(0);
-        let key = self.report.account.clone().unwrap_or_default();
-        self.reports
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, self.report.clone());
         if !self.notify {
             return Vec::new();
         }
@@ -352,8 +341,6 @@ struct EchoHarness {
     sessions: Store,
     /// The next of its own ids.
     next: Arc<AtomicU64>,
-    /// What its connections reported, for `usage`.
-    reports: Reports,
 }
 
 impl EchoHarness {
@@ -362,7 +349,6 @@ impl EchoHarness {
             settings,
             sessions: Arc::default(),
             next: Arc::new(AtomicU64::new(1)),
-            reports: Arc::default(),
         }
     }
 
@@ -470,7 +456,7 @@ impl AcpHarness for EchoHarness {
             turns: BTreeMap::new(),
             asked: 0,
             usage: (self.settings.usage == EchoUsage::Scripted)
-                .then(|| UsageState::new(account_id, Arc::clone(&self.reports))),
+                .then(|| UsageState::new(account_id)),
         };
         let thread_queue = Arc::clone(&queue);
         let thread = std::thread::Builder::new()
@@ -581,40 +567,6 @@ impl AcpHarness for EchoHarness {
         }
         let next = (end < lines.len()).then(|| format!("{end}:{digest}"));
         Ok(ExportPage::new(text, next))
-    }
-
-    fn models(
-        &self,
-        request: ModelsRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ModelListing, ProviderError> {
-        self.applied(request.account.as_ref(), &spawner)?;
-        Ok(ModelListing::of(vec![ModelInfo::new("echo")]))
-    }
-
-    fn usage(
-        &self,
-        query: UsageQuery,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<UsageReport, ProviderError> {
-        self.applied(query.account.as_ref(), &spawner)?;
-        drop(spawner);
-        let account = query.account.as_ref().map(|grant| grant.id.clone());
-        if self.settings.usage != EchoUsage::Scripted {
-            return Ok(UsageReport::unsupported("this echo reports no usage"));
-        }
-        let held = self
-            .reports
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&account.clone().unwrap_or_default())
-            .cloned();
-        Ok(held.unwrap_or_else(|| {
-            let mut report = UsageReport::new();
-            report.sources = SOURCES.to_vec();
-            report.account = account;
-            report
-        }))
     }
 }
 

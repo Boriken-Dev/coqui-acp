@@ -516,14 +516,6 @@ const String usageVectors = r'''{
   ],
   "refused": [
     {
-      "name": "a query that names a key it does not declare",
-      "type": "UsageQuery",
-      "json": {
-        "account": "pool/alice",
-        "refresh": true
-      }
-    },
-    {
       "name": "a start request that names a key it does not declare",
       "type": "StartRequest",
       "json": {

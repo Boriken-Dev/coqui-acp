@@ -236,27 +236,27 @@ impl StartRequestBuilder {
     }
 }
 
-/// One model a harness says an account may use.
+/// One model an account may use, as its account provider lists it.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
 #[map(crate = ::guatiao)]
 #[non_exhaustive]
 pub struct ModelInfo {
-    /// The harness's own identifier or alias for it.
+    /// The program's own identifier or alias for it.
     pub id: String,
-    /// What the harness shows a person, when it has a name apart from the identifier; a provider that knows the version puts it here too.
+    /// What the program shows a person, when it has a name apart from the identifier; a provider that knows the version puts it here too.
     pub name: Option<String>,
-    /// The harness's one-line description, when it gives one.
+    /// The program's one-line description, when it gives one.
     pub description: Option<String>,
-    /// The model an alias or default resolves to, as the harness names it.
+    /// The model an alias or default resolves to, as the program names it.
     pub resolved: Option<String>,
-    /// The model and its version as a person reads them (`Opus 5.5`), when the harness can say it.
+    /// The model and its version as a person reads them (`Opus 5.5`), when the program can say it.
     pub version: Option<String>,
-    /// The efforts this model takes, in the harness's order; empty when the harness lists none for it.
+    /// The efforts this model takes, in the program's order; empty when it lists none for it.
     #[map(default)]
     pub efforts: Vec<String>,
-    /// The effort the model uses when none is named, when the harness says.
+    /// The effort the model uses when none is named, when the program says.
     pub default_effort: Option<String>,
-    /// Whether the harness uses this model when none is named.
+    /// Whether the program uses this model when none is named.
     #[map(default)]
     pub is_default: bool,
 }
@@ -278,43 +278,43 @@ impl ModelInfo {
     }
 }
 
-/// Why a harness could not list its models, as a kind a host can act on; the text beside it is for people.
+/// Why an account provider could not list an account's models, as a kind a host can act on; the text beside it is for people.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq)]
 #[map(crate = ::guatiao, rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum UnknownKind {
-    /// The program the harness runs is not on the machine.
+    /// The program the account's models are asked of is not on the machine.
     NotInstalled,
     /// The program is there and could not be asked; the text says what.
     Failed,
 }
 
-/// What a harness can say about the models an account may use, with no model turn. A harness that
-/// cannot list says so; it never guesses.
+/// What an account provider can say about the models an account may use, with no model turn. A
+/// provider that cannot list says so; it never guesses.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
 #[map(crate = ::guatiao)]
 #[non_exhaustive]
 pub struct ModelListing {
-    /// Whether the harness listed them; when not, `models` is empty.
+    /// Whether the provider listed them; when not, `models` is empty.
     pub known: bool,
     /// Why it could not, when `known` is false.
     pub unknown_because: Option<String>,
-    /// What kind of reason that is, when the harness could not be started; absent when it simply
+    /// What kind of reason that is, when the program could not be started; absent when it simply
     /// lists its models only once a session has started.
     pub unknown_kind: Option<UnknownKind>,
-    /// Whether the harness, though it listed its models, says nobody is signed in, so a session
+    /// Whether the program, though it listed its models, says nobody is signed in, so a session
     /// on the machine's own login would be refused its first prompt. Says nothing of an account a
     /// host applies.
     #[map(default)]
     pub signed_out: bool,
-    /// The models, in the harness's order.
+    /// The models, in the program's order.
     #[map(default)]
     pub models: Vec<ModelInfo>,
 }
 
 impl ModelListing {
-    /// A listing the harness could not give, with the reason: it lists its models only in a
-    /// session, or has no way to list them.
+    /// A listing the provider could not give, with the reason: the program lists its models only
+    /// in a session, or has no way to list them.
     #[must_use]
     pub fn unknown(reason: impl Into<String>) -> Self {
         Self {
@@ -326,7 +326,7 @@ impl ModelListing {
         }
     }
 
-    /// A listing the harness could not give because of `kind`, with the reason for people.
+    /// A listing the provider could not give because of `kind`, with the reason for people.
     #[must_use]
     pub fn unavailable(kind: UnknownKind, reason: impl Into<String>) -> Self {
         Self {
@@ -335,7 +335,7 @@ impl ModelListing {
         }
     }
 
-    /// The models a harness listed.
+    /// The models a provider listed.
     #[must_use]
     pub fn of(models: Vec<ModelInfo>) -> Self {
         Self {

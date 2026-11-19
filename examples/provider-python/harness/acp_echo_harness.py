@@ -55,7 +55,6 @@ WORDS = ("sandboxed_scripts", "only_skills")
 START_KEYS = {"environment", "working_roots", "requirements", "account", "cache_lifetime"}
 IMPORT_KEYS = {"session_id", "working_directory", "history", "environment", "account"}
 EXPORT_KEYS = {"session_id", "working_directory", "environment", "account", "after", "max_bytes"}
-QUERY_KEYS = {"environment", "account"}
 
 #: The usage extension's names, as `coqui_acp_api::usage` spells them.
 USAGE_CAPABILITY = "dev.boriken.coqui.acp/usage"
@@ -153,14 +152,6 @@ def _new_session(session: str, lines: List[Dict[str, Any]]) -> None:
     _NEXT[0] += 1
 
 
-class _Reports:
-    """The newest report a connection of one instance made, by the account it ran on ("" for none)."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.held: Dict[str, Dict[str, Any]] = {}
-
-
 def _bucket(id: str, **fields: Any) -> Dict[str, Any]:
     """A bucket with every key the model has, `fields` over nothing known."""
     bucket: Dict[str, Any] = {
@@ -184,8 +175,7 @@ def _bucket(id: str, **fields: Any) -> Dict[str, Any]:
 class _Usage:
     """The usage of one connection of a scripted echo."""
 
-    def __init__(self, account: Optional[str], reports: "_Reports") -> None:
-        self.reports = reports
+    def __init__(self, account: Optional[str]) -> None:
         self.report: Dict[str, Any] = {
             "supported": True,
             "unsupported_because": None,
@@ -209,12 +199,9 @@ class _Usage:
         return report
 
     def changed(self, session: Optional[str]) -> List[Dict[str, Any]]:
-        """Something changed: a new revision, kept for the kind's `usage`, and the notification when the
-        client asked."""
+        """Something changed: a new revision, and the notification when the client asked."""
         self.report["revision"] += 1
         self.report["observed_at"] = max((b["observed_at"] for b in self.report["buckets"]), default=0)
-        with self.reports.lock:
-            self.reports.held[self.report["account"] or ""] = self.snapshot(None)
         if not self.notify:
             return []
         return [{
@@ -781,7 +768,6 @@ ACCEPTS = [
         ],
     }
 ]
-MODELS_KEYS = {"environment", "account"}
 CACHE_LIFETIMES = ("default", "short", "long")
 
 
@@ -988,7 +974,6 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         if config.usage not in ("none", "scripted"):
             raise BadValue("`usage` is `none` or `scripted`")
         self.scripted = config.usage == "scripted"
-        self.reports = _Reports()
 
     def describe(self) -> Dict[str, Any]:
         info: Dict[str, Any] = {
@@ -1033,7 +1018,7 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
             raise BadValue("the working roots are not a list of texts")
         account = grant["id"] if grant is not None else None
         q = _Queue()
-        usage = _Usage(account, self.reports) if self.scripted else None
+        usage = _Usage(account) if self.scripted else None
         threading.Thread(
             target=_deliver,
             args=(sink, hold, q, _Agent(list(roots), usage)),
@@ -1114,50 +1099,3 @@ class EchoHarness(provide.Provider, AcpHarness, display_name="Echo harness, in P
         if end < len(lines):
             page["next"] = f"{end}:{digest}"
         return page
-
-    def models(self, request: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
-        asked = request.to_python()
-        try:
-            if not isinstance(asked, dict) or not set(asked) <= MODELS_KEYS:
-                raise BadValue("the request has a key the echo does not know")
-            self._applied(asked.get("account"), spawner)
-        finally:
-            spawner.destroy()
-        return {"known": True, "models": [{"id": "echo"}]}
-
-    def usage(self, query: Ref, spawner: ProcessSpawner) -> Dict[str, Any]:
-        asked = query.to_python()
-        try:
-            if not isinstance(asked, dict) or not set(asked) <= QUERY_KEYS:
-                raise BadValue("the query has a key the echo does not know")
-            self._applied(asked.get("account"), spawner)
-        finally:
-            spawner.destroy()
-        if not self.scripted:
-            return {
-                "supported": False,
-                "unsupported_because": "this echo reports no usage",
-                "sources": [],
-                "account": None,
-                "revision": 0,
-                "observed_at": 0,
-                "buckets": [],
-                "limit": None,
-                "spend": None,
-            }
-        account = asked["account"]["id"] if asked.get("account") is not None else None
-        with self.reports.lock:
-            held = self.reports.held.get(account or "")
-        if held is not None:
-            return dict(held)
-        return {
-            "supported": True,
-            "unsupported_because": None,
-            "sources": ["reported"],
-            "account": account,
-            "revision": 0,
-            "observed_at": 0,
-            "buckets": [],
-            "limit": None,
-            "spend": None,
-        }

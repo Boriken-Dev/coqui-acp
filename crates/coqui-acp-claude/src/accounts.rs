@@ -12,13 +12,13 @@ use alloc::vec::Vec;
 use crate::ClaudeLaunch;
 use std::ffi::OsString;
 
-use coqui_acp_api::guatiao::library::ProviderError;
+use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{Secret, Status, Wipe};
 use coqui_acp_api::standard::{ANTHROPIC_API, CLAUDE_CODE};
 use coqui_acp_api::{
-    ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountOffer,
-    AccountRef, Credentials, EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL,
-    PASTE_CODE, PROXY,
+    ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeper,
+    AccountKindInfo, AccountOffer, AccountRef, Credentials, EndpointSlot, HARNESS_LOGIN,
+    LoginMethodInfo, MODEL_API, OPEN_URL, PASTE_CODE, PROXY,
 };
 use coqui_acp_harness::account::{Accounts, Files, Hold, Watched, rfc3339_ms, same_name};
 use coqui_acp_harness::provider::{credential, resolve, schema, to_json};
@@ -300,7 +300,8 @@ pub fn catalog() -> AccountCatalog {
 }
 
 /// What the account provider offers: the kinds of account it makes (the harness's own login, which it cannot sign in
-/// to, left out), the ways to sign in, and the kinds whose plan usage it reads.
+/// to, left out of the kinds and offered as the automatic `local` account), the ways to sign in, and the kinds whose
+/// plan usage it reads.
 #[must_use]
 pub fn offer() -> AccountOffer {
     let full = full();
@@ -311,6 +312,7 @@ pub fn offer() -> AccountOffer {
         .filter(|kind| kind.id != HARNESS_LOGIN)
         .collect();
     offer.logins = full.logins;
+    offer.local = true;
     offer.usage = [LOGIN, OAUTH_TOKEN, API_KEY, AUTH_TOKEN]
         .iter()
         .map(|id| (*id).to_string())
@@ -602,13 +604,28 @@ impl Applied {
         accounts: &Arc<Accounts>,
         files: &Files,
     ) -> Result<Option<Hold>, ProviderError> {
+        self.hold_keeping(accounts, files, None)
+    }
+
+    /// [`hold`](Self::hold) with a keeper that hears of the login's renewal or loss for as long as the hold lasts, and
+    /// is destroyed when the hold ends (at once, for an account that keeps no file).
+    ///
+    /// # Errors
+    ///
+    /// As [`hold`](Self::hold).
+    pub fn hold_keeping(
+        self,
+        accounts: &Arc<Accounts>,
+        files: &Files,
+        keeper: Option<Object<dyn AccountKeeper>>,
+    ) -> Result<Option<Hold>, ProviderError> {
         if self.watched.is_empty() {
             return Ok(None);
         }
         accounts
             .hold(
                 files.clone(),
-                None,
+                keeper,
                 &self.id,
                 self.dir.as_deref().unwrap_or_default(),
                 self.revision,

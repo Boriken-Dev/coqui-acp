@@ -15,18 +15,17 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, HarnessInfo, ImportReport, ModelInfo, ModelListing, ModelsRequest, Narrowing,
-    ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, UnknownKind,
-    UsageQuery, UsageReport,
+    ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner, Requirement, SessionExport,
+    SessionImport, StartRequest,
 };
+use coqui_acp_harness::Settings;
 use coqui_acp_harness::account::{Accounts, Files, Hold};
 use coqui_acp_harness::acp::Harness;
-use coqui_acp_harness::provider::{Reports, Serving, shared, takes_of};
+use coqui_acp_harness::provider::{Serving, shared, takes_of};
 use coqui_acp_harness::{Access, Mode};
-use coqui_acp_harness::{Settings, ThroughSpawner};
 
 use crate::accounts;
-use crate::{CodexAgent, CodexLaunch, CodexSession, CodexSettings, ModelRead};
+use crate::{CodexAgent, CodexLaunch};
 
 /// How the Codex provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -117,8 +116,6 @@ impl Default for ProviderSettings {
 )]
 pub struct CodexProvider {
     settings: ProviderSettings,
-    /// What the account's readings and the connections learned of its usage.
-    reports: Arc<Reports>,
     /// What the provider knows of the files it placed for its accounts.
     accounts: Arc<Accounts>,
     /// For each home a key or token was saved in, a fingerprint of it.
@@ -139,7 +136,6 @@ impl CodexProvider {
     pub fn new(settings: ProviderSettings) -> Self {
         Self {
             settings,
-            reports: Arc::new(Reports::new()),
             accounts: Arc::new(Accounts::new()),
             saved: std::sync::Mutex::new(alloc::collections::BTreeMap::new()),
             seeds: crate::Seeds::default(),
@@ -177,10 +173,6 @@ impl CodexProvider {
         }
         let refusal = narrow(requirements)?;
         Ok((launch, refusal))
-    }
-
-    fn support(&self) -> coqui_acp_api::UsageSupport {
-        CodexAgent::new().usage()
     }
 }
 
@@ -296,11 +288,6 @@ impl AcpHarness for CodexProvider {
         settings.client_mcp_servers = self.settings.client_mcp_servers;
         settings.working_roots = request.working_roots.iter().map(PathBuf::from).collect();
         settings.account.clone_from(&account_id);
-        let reports = Arc::clone(&self.reports);
-        let support = self.support();
-        settings.on_usage = Some(Arc::new(move |report: &UsageReport| {
-            reports.observe(&support, account_id.as_deref(), report);
-        }));
         let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
         let mut serving = Serving::new(settings, limit);
         if let Some(hold) = applying.hold {
@@ -378,77 +365,5 @@ impl AcpHarness for CodexProvider {
                 "this provider does not export a Codex thread yet",
             ))
         }
-    }
-
-    fn models(
-        &self,
-        request: ModelsRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ModelListing, ProviderError> {
-        let (mut launch, _) = self.launch(request.environment.expose(), &[])?;
-        let spawner = Arc::new(spawner);
-        let applying = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
-        let spawn = ThroughSpawner::shared(spawner);
-        let listing = match CodexSession::read_models(&launch, &spawn, CodexSettings::new()) {
-            Ok(ModelRead {
-                models: Some(models),
-                signed_out,
-            }) => {
-                let listing = ModelListing::of(
-                    models
-                        .into_iter()
-                        .map(|model| {
-                            let mut info = ModelInfo::new(model.id);
-                            info.name = Some(model.name);
-                            info.description = model.description;
-                            info.efforts = model.efforts;
-                            info.default_effort = model.default_effort;
-                            info.is_default = model.is_default;
-                            info
-                        })
-                        .collect(),
-                );
-                if signed_out {
-                    listing.signed_out()
-                } else {
-                    listing
-                }
-            }
-            Ok(_) => ModelListing::unknown("Codex listed no model"),
-            Err(error) => ModelListing::unavailable(
-                match &error {
-                    crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
-                        UnknownKind::NotInstalled
-                    }
-                    _ => UnknownKind::Failed,
-                },
-                format!("Codex could not be asked: {error}"),
-            ),
-        };
-        if let Some(hold) = applying.hold {
-            hold.finish();
-        }
-        Ok(listing)
-    }
-
-    fn usage(
-        &self,
-        query: UsageQuery,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<UsageReport, ProviderError> {
-        let (mut launch, _) = self.launch(query.environment.expose(), &[])?;
-        let spawner = Arc::new(spawner);
-        let applying = self.apply(query.account.as_ref(), &spawner, &mut launch)?;
-        let id = query.account.as_ref().map(|account| account.id.as_str());
-        let spawn = ThroughSpawner::shared(spawner);
-        // Codex answers with no turn: ask it. A login with no allowances answers with an error, and nothing is reported.
-        let report = match CodexSession::read_account_usage(&launch, &spawn, CodexSettings::new()) {
-            Ok(buckets) => self.reports.read(&self.support(), id, buckets),
-            Err(_) => self.reports.report(&self.support(), id),
-        };
-        if let Some(hold) = applying.hold {
-            hold.finish();
-        }
-        Ok(report)
     }
 }

@@ -1,6 +1,6 @@
 //! How much of each usage allowance an account has used, how it refills and when: one model for a
-//! harness's or provider's answer, the ACP extension that carries it, and the `acp_harness` kind's
-//! `usage` method.
+//! harness's or provider's answer, the ACP extension that carries it, and the `account_provider`
+//! kind's `usage` method.
 //!
 //! The model is plain data and the same in every language: counts and money are integers, times are
 //! Unix seconds, lengths are Guatiao's `Duration` (`[seconds, nanoseconds]`). No float appears. It
@@ -14,11 +14,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use guatiao::{FromValue, Schema, Secret, ToValue};
+use guatiao::{FromValue, Schema, ToValue};
 use serde::{Deserialize, Serialize};
-
-use crate::account::AccountGrant;
-use crate::environment::Environment;
 
 /// The key of `agentCapabilities._meta` (`capabilities._meta` in ACP version 2) in which an agent
 /// that reports usage says so: `{"version": 1, "sources": ["reported", "inferred"], "spend": true}`,
@@ -643,43 +640,6 @@ impl UsageSupport {
     #[must_use]
     pub fn reports(&self) -> bool {
         !self.sources.is_empty()
-    }
-}
-
-/// What a host asks [`AcpHarness::usage`](crate::AcpHarness::usage): refuses a key it does not
-/// declare.
-#[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq)]
-#[map(crate = ::guatiao, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct UsageQuery {
-    /// Variables for what the harness runs to ask, over its configuration's. A provider shows none
-    /// of them in an answer, a refusal, an error or a log.
-    #[map(default)]
-    pub environment: Secret<Environment>,
-    /// The account to report for; its `id` is echoed into the report and never interpreted. The
-    /// provider applies the rest, as `start` does.
-    pub account: Option<AccountGrant>,
-}
-
-impl UsageQuery {
-    /// A query adding nothing to the provider's configuration.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The variables for what the harness runs.
-    #[must_use]
-    pub fn environment(mut self, environment: Environment) -> Self {
-        self.environment = Secret::new(environment);
-        self
-    }
-
-    /// The account the report is for.
-    #[must_use]
-    pub fn account(mut self, account: AccountGrant) -> Self {
-        self.account = Some(account);
-        self
     }
 }
 

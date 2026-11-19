@@ -13,10 +13,10 @@ use coqui_acp_api::contract::Contract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Secret, Status, Value};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, FileInfo, HarnessInfo, ImportReport, LoginMethodInfo, ModelListing, ModelsRequest,
-    ProcessSpawner, Requirement, SecretBytes, SessionExport, SessionImport, SessionQuery, Source,
-    SpawnSpec, SpawnedProcess, SpawnerInfo, StartRequest, UsageQuery, UsageReport, UsageSupport,
+    AccountCatalog, AccountRef, AcpHarness, Channel, ChannelSink, Environment, ExportPage,
+    FileInfo, HarnessInfo, ImportReport, LoginMethodInfo, ProcessSpawner, Requirement, SecretBytes,
+    SessionExport, SessionImport, SessionQuery, Source, SpawnSpec, SpawnedProcess, SpawnerInfo,
+    StartRequest, UsageSupport,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -78,11 +78,6 @@ fn what_a_provider_leaves_out_has_its_default() {
             .expect("answered"),
         None
     );
-    let models = harness
-        .models(ModelsRequest::new(), spawner())
-        .expect("answered");
-    assert!(models.known);
-    assert_eq!(models.models[0].id, "echo");
 }
 
 /// A host describes a configured harness by building an instance from its settings and asking it.
@@ -262,22 +257,9 @@ fn a_scripted_echo_reports_usage_as_the_contract_documents() {
 }
 
 #[test]
-fn an_echo_that_reports_no_usage_says_so_with_a_reason() {
+fn an_echo_that_reports_no_usage_advertises_none() {
     let (_registry, harness) = loaded();
     assert!(!harness.describe().expect("described").usage.reports());
-    let report = harness
-        .usage(
-            UsageQuery::new().account(AccountGrant::new("pool/alice", "harness-login")),
-            spawner(),
-        )
-        .expect("answered");
-    assert!(!report.supported && report.buckets.is_empty());
-    assert!(
-        report
-            .unsupported_because
-            .as_deref()
-            .is_some_and(|why| !why.is_empty())
-    );
 }
 
 struct Disagrees {
@@ -359,52 +341,29 @@ impl AcpHarness for Disagrees {
     ) -> Result<ExportPage, ProviderError> {
         self.inner.export_session(export, spawner)
     }
-
-    fn usage(
-        &self,
-        query: UsageQuery,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<UsageReport, ProviderError> {
-        if self.hides_in_describe {
-            return self.inner.usage(query, spawner);
-        }
-        drop((query, spawner));
-        Ok(UsageReport::unsupported("it says it has none"))
-    }
-
-    fn models(
-        &self,
-        request: ModelsRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ModelListing, ProviderError> {
-        self.inner.models(request, spawner)
-    }
 }
 
 /// A provider that reports usage differently from what it says is caught: a harness whose `describe`
-/// hides what its connections do, and one whose `usage` slot contradicts its connections.
+/// hides what its connections do.
 #[test]
 fn the_contract_names_a_provider_whose_usage_disagrees_with_itself() {
     let registry = registry();
     let mut settings = Map::new();
     settings.set("usage", "scripted");
-    let inner = instance(&registry, settings);
-    for hides_in_describe in [false, true] {
-        let harness = Disagrees {
-            inner: Arc::clone(&inner),
-            hides_in_describe,
-            leaks: false,
-            lists_login: false,
-        };
-        let failures = Contract::new("a provider that disagrees with itself")
-            .run(&harness)
-            .expect_err("the contract finds the disagreement");
-        let said = failures.to_string();
-        assert!(
-            said.contains("describes itself") || said.contains("reports usage as it says"),
-            "{said}"
-        );
-    }
+    let harness = Disagrees {
+        inner: instance(&registry, settings),
+        hides_in_describe: true,
+        leaks: false,
+        lists_login: false,
+    };
+    let failures = Contract::new("a provider that disagrees with itself")
+        .run(&harness)
+        .expect_err("the contract finds the disagreement");
+    let said = failures.to_string();
+    assert!(
+        said.contains("describes itself") || said.contains("reports usage as it says"),
+        "{said}"
+    );
 }
 
 /// A provider that puts a credential in a refusal is named by the account checks.

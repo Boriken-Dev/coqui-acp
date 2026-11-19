@@ -5,20 +5,28 @@
 //! and renews nothing, and it has no plan limits to read. It runs no agent: the harness
 //! ([`PiProvider`](crate::PiProvider)) applies an account the host hands it.
 
+use alloc::string::String;
+use alloc::sync::Arc;
 use core::time::Duration;
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
-    AccountKeeper, AccountOffer, AccountProvider, AccountProviderInfo, AccountUsage,
-    AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest, ProcessSpawner,
-    RenewReport, RenewRequest, WatchRequest,
+    AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
+    AccountUsage, AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginOutcome, LoginPrompter,
+    LoginRequest, ModelInfo, ModelListing, ProcessSpawner, RenewReport, RenewRequest, UnknownKind,
+    WatchRequest,
 };
-use coqui_acp_harness::account::DEFAULT_POLL_MS;
+use coqui_acp_harness::ThroughSpawner;
+use coqui_acp_harness::account::{Accounts, DEFAULT_POLL_MS};
 use coqui_acp_harness::stdio::accounts::Keeping;
 
 use crate::account_usage::read_limits;
 use crate::accounts::DEF;
+use crate::provider::apply_to;
+use crate::{PiLaunch, PiSession, PiSettings};
 
 /// How the Pi account provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -28,12 +36,24 @@ pub struct AccountSettings {
     /// begins and ends.
     #[map(default = 30_000)]
     pub renew_poll_ms: u64,
+    /// The Pi program it lists models with: a path, or a name looked up on the `PATH` where the spawner runs it. On
+    /// Windows npm's shim is `pi.cmd`.
+    #[map(default = String::from("pi"))]
+    pub executable: String,
+    /// A Node executable, an absolute path, that runs Pi's CLI `script` instead of an `executable` looked up on the
+    /// `PATH`. Set with `script`.
+    pub node: Option<String>,
+    /// Pi's CLI script, an absolute path, which `node` runs.
+    pub script: Option<String>,
 }
 
 impl Default for AccountSettings {
     fn default() -> Self {
         Self {
             renew_poll_ms: DEFAULT_POLL_MS,
+            executable: "pi".into(),
+            node: None,
+            script: None,
         }
     }
 }
@@ -53,6 +73,8 @@ impl Default for AccountSettings {
 pub struct PiAccounts {
     settings: AccountSettings,
     keeping: Keeping,
+    /// What it knows of the files it placed for a call that lists models, and who hears of them.
+    accounts: Arc<Accounts>,
 }
 
 impl From<AccountSettings> for PiAccounts {
@@ -68,11 +90,24 @@ impl PiAccounts {
         Self {
             settings,
             keeping: Keeping::new(&DEF),
+            accounts: Arc::new(Accounts::new()),
         }
     }
 
     fn unconfigured() -> Self {
         Self::new(AccountSettings::default())
+    }
+
+    /// What Pi is started with for a call: the program and the environment the call adds.
+    fn launch(&self, environment: &coqui_acp_api::Environment) -> PiLaunch {
+        let mut launch = PiLaunch::new(".");
+        launch.executable = OsString::from(&self.settings.executable);
+        launch.node = self.settings.node.as_ref().map(PathBuf::from);
+        launch.script = self.settings.script.as_ref().map(PathBuf::from);
+        for (name, value) in environment.iter() {
+            launch.env.insert(name.into(), value.into());
+        }
+        launch
     }
 }
 
@@ -132,7 +167,78 @@ impl AccountProvider for PiAccounts {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<AccountUsage, ProviderError> {
         drop((spawner, keeper));
+        if query.account.kind == HARNESS_LOGIN {
+            return self.keeping.usage(&query, "Pi reports no usage allowances");
+        }
         self.keeping.own(&query.account)?;
         Ok(AccountUsage::from_report(read_limits(&query.account)?))
+    }
+
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        let grant = &query.account;
+        let local = grant.kind == HARNESS_LOGIN;
+        if local {
+            grant.check_id()?;
+        } else {
+            self.keeping.own(grant)?;
+        }
+        let mut launch = self.launch(query.environment.expose());
+        let spawner = Arc::new(spawner);
+        // The login's file is placed for the call and a login Pi renews meanwhile is told to the keeper.
+        let hold = if local {
+            drop(keeper);
+            None
+        } else {
+            apply_to(grant, &mut launch, &spawner, (&self.accounts, Some(keeper)))?
+        };
+        let listing = listing(&launch, &ThroughSpawner::shared(spawner));
+        if let Some(hold) = hold {
+            hold.finish();
+        }
+        Ok(listing)
+    }
+}
+
+/// The models Pi lists once started on `launch`, with no turn.
+fn listing(launch: &PiLaunch, spawn: &ThroughSpawner) -> ModelListing {
+    match PiSession::read_models(launch, spawn, PiSettings::new()) {
+        Ok(models) if models.is_empty() => {
+            ModelListing::unknown("Pi lists no model: none has a credential")
+        }
+        Ok(models) => ModelListing::of(
+            models
+                .into_iter()
+                .map(|model| {
+                    let mut info = ModelInfo::new(model.id);
+                    info.name = Some(model.name);
+                    info.efforts = model.efforts;
+                    info.default_effort = model.default_effort;
+                    info.is_default = model.is_default;
+                    let mut about = vec![model.provider];
+                    if model.reasoning {
+                        about.push("reasoning".to_string());
+                    }
+                    if let Some(window) = model.context_window {
+                        about.push(format!("{}K context", window / 1000));
+                    }
+                    info.description = Some(about.join(", "));
+                    info
+                })
+                .collect(),
+        ),
+        Err(error) => ModelListing::unavailable(
+            match &error {
+                crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                    UnknownKind::NotInstalled
+                }
+                _ => UnknownKind::Failed,
+            },
+            format!("Pi could not be asked: {error}"),
+        ),
     }
 }

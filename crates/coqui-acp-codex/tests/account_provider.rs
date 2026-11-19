@@ -18,9 +18,9 @@ use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountLoss, AccountProvider, AccountRenewal, AccountUsageQuery,
-    Credentials, LoginAnswer, LoginForm, LoginPrompter, LoginRequest, OpenUrl, ProcessSpawner,
-    RenewRequest, WatchRequest,
+    AccountGrant, AccountKeeper, AccountLoss, AccountModelsQuery, AccountProvider, AccountRenewal,
+    AccountUsageQuery, Credentials, HARNESS_LOGIN, LoginAnswer, LoginForm, LoginPrompter,
+    LoginRequest, OpenUrl, ProcessSpawner, RenewRequest, WatchRequest,
 };
 use coqui_acp_codex::{AccountSettings, CodexAccounts};
 use coqui_acp_harness::LocalSpawner;
@@ -729,4 +729,171 @@ fn the_suite_inside() {
     if let Err(failures) = outcome {
         panic!("{failures}");
     }
+}
+
+/// What the local account's models are for a provider running `executable` with `environment` and nothing else of the
+/// host's.
+fn listing_of(
+    executable: String,
+    environment: coqui_acp_api::Environment,
+) -> coqui_acp_api::ModelListing {
+    CodexAccounts::new(AccountSettings {
+        executable,
+        ..AccountSettings::default()
+    })
+    .models(
+        AccountModelsQuery::new(AccountGrant::new("local", HARNESS_LOGIN)).environment(environment),
+        LocalSpawner::new().into_object(),
+        Heard::default().into_object(),
+    )
+    .expect("answered")
+}
+
+#[test]
+fn it_offers_the_login_of_its_program_as_the_automatic_local_account() {
+    let offer = provider().offers().expect("offered");
+    assert!(offer.local && offer.reports_usage(HARNESS_LOGIN));
+    assert!(
+        offer.kind(HARNESS_LOGIN).is_none(),
+        "it cannot sign in to it"
+    );
+}
+
+#[test]
+fn the_local_account_lists_models_and_reads_usage_through_the_spawner_it_is_given() {
+    let dir = scratch("reads-home");
+    // A login the stand-in did not make: Codex is signed in.
+    std::fs::write(dir.join("auth.json"), "a login").expect("a login");
+    let environment: coqui_acp_api::Environment =
+        [("CODEX_HOME", dir.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+    let listing = listing_of(fake(), environment.clone());
+    assert!(listing.known, "{listing:?}");
+    assert_eq!(listing.models[0].id, "gpt-standin");
+    assert_eq!(listing.models[0].efforts, ["low", "high"]);
+    assert_eq!(listing.models[0].default_effort.as_deref(), Some("low"));
+    assert!(listing.models[0].is_default);
+    let usage = provider()
+        .usage(
+            AccountUsageQuery::new(AccountGrant::new("local", HARNESS_LOGIN))
+                .environment(environment),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(usage.supported && !usage.buckets.is_empty(), "{usage:?}");
+    assert_eq!(usage.account.as_deref(), Some("local"));
+    assert!(usage.revision > 0 && usage.observed_at > 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_account_it_does_not_keep_is_refused_as_a_bad_value_by_models_and_usage() {
+    // A login with no credential or directory is not a grant the kind takes.
+    let error = provider()
+        .models(
+            AccountModelsQuery::new(AccountGrant::new("a", "codex-chatgpt")),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let error = provider()
+        .models(
+            AccountModelsQuery::new(AccountGrant::new("a", "no-such-kind")),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+}
+
+#[test]
+fn a_token_is_saved_once_for_a_home_however_often_its_models_are_listed() {
+    let provider = provider();
+    let dir = scratch("once");
+    let grant = AccountGrant::new("acct", "codex-access-token")
+        .credentials(credentials_of(&[("access_token", CANARY)]))
+        .state_dir(dir.to_string_lossy());
+    for _ in 0..3 {
+        provider
+            .models(
+                AccountModelsQuery::new(grant.clone()),
+                spawner(&dir),
+                Heard::default().into_object(),
+            )
+            .expect("listed");
+    }
+    let saves = log(&dir)
+        .iter()
+        .filter(|e| e["args"] == serde_json::json!(["login", "--with-access-token"]))
+        .count();
+    assert_eq!(saves, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_account_models_of_a_program_that_is_not_installed_say_so_by_kind() {
+    let dir = scratch("models-missing");
+    let missing = dir.join("no-such-codex");
+    let listing = listing_of(
+        missing.to_string_lossy().into_owned(),
+        coqui_acp_api::Environment::new(),
+    );
+    assert!(!listing.known, "{listing:?}");
+    assert_eq!(
+        listing.unknown_kind,
+        Some(coqui_acp_api::UnknownKind::NotInstalled)
+    );
+    assert!(listing.unknown_because.is_some() && listing.models.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_account_models_of_a_program_that_cannot_be_run_are_a_failure_with_its_text() {
+    // A directory is found, and cannot be started.
+    let dir = scratch("models-failed");
+    let listing = listing_of(
+        dir.to_string_lossy().into_owned(),
+        coqui_acp_api::Environment::new(),
+    );
+    assert!(!listing.known, "{listing:?}");
+    assert_eq!(
+        listing.unknown_kind,
+        Some(coqui_acp_api::UnknownKind::Failed)
+    );
+    assert!(
+        listing
+            .unknown_because
+            .as_deref()
+            .is_some_and(|why| why.contains("could not be")),
+        "{listing:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_account_models_of_a_codex_nobody_is_signed_in_to_say_so() {
+    let dir = scratch("models-signed-out");
+    let environment: coqui_acp_api::Environment =
+        [("CODEX_HOME", dir.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+    let out = listing_of(fake(), environment.clone());
+    assert!(out.known && out.signed_out, "{out:?}");
+    assert!(!out.models.is_empty() && out.unknown_kind.is_none());
+    std::fs::write(dir.join("auth.json"), "a login").expect("a login");
+    let signed_in = listing_of(fake(), environment);
+    assert!(signed_in.known && !signed_in.signed_out, "{signed_in:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The commands the stand-in logged in `dir`.
+fn log(dir: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("fake-codex.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a log line"))
+        .collect()
 }

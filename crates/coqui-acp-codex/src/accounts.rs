@@ -13,13 +13,13 @@ use core::time::Duration;
 use std::ffi::OsString;
 use std::sync::{Mutex, PoisonError};
 
-use coqui_acp_api::guatiao::library::ProviderError;
+use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{Secret, Status, Wipe};
 use coqui_acp_api::standard::{CODEX, OPENAI_API};
 use coqui_acp_api::{
-    ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKindInfo, AccountOffer,
-    AccountRef, Credentials, EndpointSlot, HARNESS_LOGIN, LoginMethodInfo, MODEL_API, OPEN_URL,
-    PASTE_CODE, USER_CODE,
+    ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeper,
+    AccountKindInfo, AccountOffer, AccountRef, Credentials, EndpointSlot, HARNESS_LOGIN,
+    LoginMethodInfo, MODEL_API, OPEN_URL, PASTE_CODE, USER_CODE,
 };
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{
@@ -218,7 +218,8 @@ pub fn catalog() -> AccountCatalog {
 }
 
 /// What the account provider offers: the kinds of account it makes (the harness's own login, which it cannot sign in
-/// to, left out), the ways to sign in, and the kinds whose plan usage it reads.
+/// to, left out of the kinds and offered as the automatic `local` account), the ways to sign in, and the kinds whose
+/// plan usage it reads (the `local` account's too, which Codex reads with no turn).
 #[must_use]
 pub fn offer() -> AccountOffer {
     let full = full();
@@ -229,7 +230,8 @@ pub fn offer() -> AccountOffer {
         .filter(|kind| kind.id != HARNESS_LOGIN)
         .collect();
     offer.logins = full.logins;
-    offer.usage = [CHATGPT, ACCESS_TOKEN, API_KEY]
+    offer.local = true;
+    offer.usage = [CHATGPT, ACCESS_TOKEN, API_KEY, HARNESS_LOGIN]
         .iter()
         .map(|id| (*id).to_string())
         .collect();
@@ -575,13 +577,28 @@ impl Applied {
         accounts: &Arc<Accounts>,
         files: &Files,
     ) -> Result<Option<Hold>, ProviderError> {
+        self.hold_keeping(accounts, files, None)
+    }
+
+    /// [`hold`](Self::hold) with a keeper that hears of the login's renewal or loss for as long as the hold lasts, and
+    /// is destroyed when the hold ends (at once, for an account that keeps no file).
+    ///
+    /// # Errors
+    ///
+    /// As [`hold`](Self::hold).
+    pub fn hold_keeping(
+        self,
+        accounts: &Arc<Accounts>,
+        files: &Files,
+        keeper: Option<Object<dyn AccountKeeper>>,
+    ) -> Result<Option<Hold>, ProviderError> {
         if self.watched.is_empty() {
             return Ok(None);
         }
         accounts
             .hold(
                 files.clone(),
-                None,
+                keeper,
                 &self.id,
                 &self.dir,
                 self.revision,

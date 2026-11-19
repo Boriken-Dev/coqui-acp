@@ -226,7 +226,7 @@ class Channel(KindProtocol, Protocol, kind="channel", floor_hash=3787630980, is_
         ...
 
 
-class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=2105385007):
+class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=3025339842):
     """Drives an Agent Client Protocol agent, and serves it as one ACP connection over a channel.
 
     The host is the ACP client and the provider the agent: each message on the channel, either way,
@@ -344,33 +344,10 @@ class AcpHarness(KindProtocol, Protocol, kind="acp_harness", floor_hash=21053850
         ...
 
     @fallible
-    def models(self, request: Ref, spawner: Taken[ProcessSpawner]) -> ValueAnswer:
-        """The models the account behind `request` may use, when the harness can say without a model
-        turn. Never carries a value from the request. `spawner` is handed over as
-        `import_session`'s is. The default, for a harness with no way to list them: unknown, and
-        says so.
-        """
-        ...
-
-    @fallible
     def session_record(self, query: Ref) -> ValueAnswer:
         """Where the harness keeps its own record of the session `query` names (by the session id it
         reported, a UUID), when it keeps one and the file is there. The default, for a harness that
         keeps none: none.
-        """
-        ...
-
-    @fallible
-    def usage(self, query: Ref, spawner: Taken[ProcessSpawner]) -> ValueAnswer:
-        """What the account behind `query` has used and has left, with no session and no model turn;
-        cheap, so a host may poll it as often as it likes. A harness that learns usage
-        only while a turn runs answers the newest report its connections saw for the account, with
-        its `observed_at`. Never carries a value from the environment or the credentials. The
-        default, for a harness that reports no usage, is a true answer:
-        [`UsageReport::unsupported`].
-
-        A provider that runs a program to ask (Codex's `account/rateLimits/read`) runs it through
-        `spawner`, on the account's directory, and destroys it as `import_session` does.
         """
         ...
 
@@ -463,9 +440,9 @@ class AccountWatch(KindProtocol, Protocol, kind="account_watch", floor_hash=5891
         ...
 
 
-class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_hash=767683853):
+class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_hash=4172086390):
     """Owns accounts: the kinds it makes, the sign-in that makes one, the renewal and watching of its
-    credentials, and the usage of its plan.
+    credentials, the usage of its plan and the models it may use.
 
     An account provider does not run an agent. A harness (`acp_harness`) applies an account the
     host hands it when the account's `provides` meets what the harness accepts, and never asks how
@@ -565,8 +542,10 @@ class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_has
         turn: the account's windows, how much of each is used, when each resets and which models it
         covers. Cheap, so a host may poll it as often as it likes. A kind the provider lists in
         `offers().usage` answers `supported`; any other kind it lists answers "not offered",
-        [`AccountUsage::unsupported`], which is a true answer. A kind it does not
-        list is `GUATIAO_ERR_BAD_VALUE`, as is an id that is not 1 to 128 bytes without a control
+        [`AccountUsage::unsupported`], which is a true answer. The automatic `local` account (kind
+        [`HARNESS_LOGIN`](crate::HARNESS_LOGIN), when `offers().local`) is asked of the program on
+        the configuration as it stands. A kind it neither lists nor offers as `local` is
+        `GUATIAO_ERR_BAD_VALUE`, as is an id that is not 1 to 128 bytes without a control
         character.
 
         **Plan usage only.** The tokens a session or a run spent are not an account's: ACP reports
@@ -575,6 +554,28 @@ class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_has
         `spawner`, on the account's directory, and destroys it; `keeper` is handed over as
         `watch`'s is, for a login the call sees renewed or lost, and is destroyed before the call
         answers.
+        """
+        ...
+
+    @required
+    @fallible
+    def models(self, query: Ref, spawner: Taken[ProcessSpawner], keeper: Taken[AccountKeeper]) -> ValueAnswer:
+        """The models the account behind `query.account` may use, with no model turn and no session:
+        what a host shows a person choosing one before a session starts. The listing is the
+        account's, so an account of another kind (another login, another key) may list others. A
+        provider that cannot list for a kind (the program lists its models only in a session, or
+        has no way to) answers [`ModelListing::unknown`] with the reason, which is a true answer,
+        and one that tried and could not answers [`ModelListing::unavailable`]; it never guesses.
+
+        Takes every kind the provider lists in `offers().kinds`, and [`HARNESS_LOGIN`](crate::HARNESS_LOGIN)
+        (the automatic `local` account) when `offers().local`: the program asked as its
+        configuration stands, with nothing applied. Any other kind is `GUATIAO_ERR_BAD_VALUE`, as
+        is an id that is not 1 to 128 bytes without a control character. Never carries a value of
+        the environment or the credentials.
+
+        A provider that runs a program to ask runs it through `spawner`, on the account's directory,
+        and destroys it; `keeper` is handed over as `watch`'s is, for a login the call sees renewed
+        or lost, and is destroyed before the call answers.
         """
         ...
 

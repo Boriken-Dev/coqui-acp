@@ -15,14 +15,16 @@ use std::sync::{Mutex, PoisonError};
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
-    AccountKeeper, AccountOffer, AccountProvider, AccountProviderInfo, AccountUsage,
-    AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest, ProcessSpawner,
-    RenewReport, RenewRequest, WatchRequest,
+    AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
+    AccountUsage, AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginOutcome, LoginPrompter,
+    LoginRequest, ModelInfo, ModelListing, ProcessSpawner, RenewReport, RenewRequest, Source,
+    UnknownKind, WatchRequest,
 };
+use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
 
 use crate::account_usage::{ReadOptions, read_limits};
-use crate::{accounts, signin};
+use crate::{CodexLaunch, CodexSession, CodexSettings, ModelRead, accounts, signin};
 
 /// How the Codex account provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -79,6 +81,8 @@ pub struct CodexAccounts {
     accounts: Arc<Accounts>,
     /// What each account's usage last read as, and the revision it was told at.
     reports: Mutex<BTreeMap<String, (AccountUsage, u64)>>,
+    /// For each home a key or token was saved in, a fingerprint of it.
+    saved: accounts::Saved,
 }
 
 impl From<AccountSettings> for CodexAccounts {
@@ -95,6 +99,7 @@ impl CodexAccounts {
             settings,
             accounts: Arc::new(Accounts::new()),
             reports: Mutex::new(BTreeMap::new()),
+            saved: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -108,6 +113,16 @@ impl CodexAccounts {
 
     fn limit(&self) -> Duration {
         Duration::from_millis(self.settings.command_timeout_ms)
+    }
+
+    /// What Codex is started with for a call: the program and the environment the call adds.
+    fn launch(&self, environment: &coqui_acp_api::Environment) -> CodexLaunch {
+        let mut launch = CodexLaunch::new(".");
+        launch.executable = self.executable();
+        for (name, value) in environment.iter() {
+            launch.env.insert(name.into(), value.into());
+        }
+        launch
     }
 
     /// `usage` with the revision it is told at: one more than the last, when what it reads has changed.
@@ -212,6 +227,34 @@ impl AccountProvider for CodexAccounts {
         spawner: Object<dyn ProcessSpawner>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<AccountUsage, ProviderError> {
+        if query.account.kind == HARNESS_LOGIN {
+            // The login Codex has where it runs: Codex reads its own allowances with no turn.
+            drop(keeper);
+            query.account.check_id()?;
+            let launch = self.launch(query.environment.expose());
+            let spawn = ThroughSpawner::shared(Arc::new(spawner));
+            let mut usage = AccountUsage::new();
+            usage.sources = vec![Source::Reported];
+            usage.account = Some(query.account.id.clone());
+            // A login with no allowances answers with an error, and nothing is reported.
+            if let Ok(mut buckets) =
+                CodexSession::read_account_usage(&launch, &spawn, CodexSettings::new())
+            {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|since| i64::try_from(since.as_secs()).ok())
+                    .unwrap_or(0);
+                for bucket in &mut buckets {
+                    if bucket.observed_at == 0 {
+                        bucket.observed_at = now;
+                    }
+                }
+                usage.observed_at = buckets.iter().map(|b| b.observed_at).max().unwrap_or(0);
+                usage.buckets = buckets;
+            }
+            return Ok(self.revised(usage));
+        }
         // Plan limits are read over the network with the credential: no program is started and no file read.
         drop((spawner, keeper));
         accounts::own(&query.account)?;
@@ -222,5 +265,84 @@ impl AccountProvider for CodexAccounts {
         }
         let report = read_limits(&query.account, &options)?;
         Ok(self.revised(AccountUsage::from_report(report)))
+    }
+
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        let grant = &query.account;
+        let local = grant.kind == HARNESS_LOGIN;
+        if local {
+            grant.check_id()?;
+        } else {
+            accounts::own(grant)?;
+        }
+        let mut launch = self.launch(query.environment.expose());
+        let spawner = Arc::new(spawner);
+        // The login's files are placed for the call and a login the program renews meanwhile is told to the keeper.
+        let hold = if local {
+            drop(keeper);
+            None
+        } else {
+            let files = Files::new(Arc::clone(&spawner));
+            let options = accounts::ApplyOptions::new().timeout(self.limit());
+            accounts::apply_as(
+                grant,
+                &mut launch,
+                &files,
+                &options,
+                false,
+                Some(&self.saved),
+            )?
+            .hold_keeping(&self.accounts, &files, Some(keeper))?
+        };
+        let listing = listing(&launch, &ThroughSpawner::shared(spawner));
+        if let Some(hold) = hold {
+            hold.finish();
+        }
+        Ok(listing)
+    }
+}
+
+/// The models Codex lists once started on `launch`, with no thread.
+fn listing(launch: &CodexLaunch, spawn: &ThroughSpawner) -> ModelListing {
+    match CodexSession::read_models(launch, spawn, CodexSettings::new()) {
+        Ok(ModelRead {
+            models: Some(models),
+            signed_out,
+        }) => {
+            let listing = ModelListing::of(
+                models
+                    .into_iter()
+                    .map(|model| {
+                        let mut info = ModelInfo::new(model.id);
+                        info.name = Some(model.name);
+                        info.description = model.description;
+                        info.efforts = model.efforts;
+                        info.default_effort = model.default_effort;
+                        info.is_default = model.is_default;
+                        info
+                    })
+                    .collect(),
+            );
+            if signed_out {
+                listing.signed_out()
+            } else {
+                listing
+            }
+        }
+        Ok(_) => ModelListing::unknown("Codex listed no model"),
+        Err(error) => ModelListing::unavailable(
+            match &error {
+                crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                    UnknownKind::NotInstalled
+                }
+                _ => UnknownKind::Failed,
+            },
+            format!("Codex could not be asked: {error}"),
+        ),
     }
 }

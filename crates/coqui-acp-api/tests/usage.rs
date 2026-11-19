@@ -12,12 +12,12 @@ use coqui_acp_api::guatiao::schema::validate::validate_map;
 use coqui_acp_api::guatiao::{FromValue, Schema, ToValue, Value};
 use coqui_acp_api::{
     Bucket, Coverage, LIMIT_META_KEY, Refill, Source, StartRequest, Status, USAGE_CAPABILITY,
-    USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit, UsageQuery, UsageReport, UsageSupport,
+    USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit, UsageReport, UsageSupport,
 };
 use guatiao_serde::{Serializable, from_serde};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value as Json, json};
+use serde_json::Value as Json;
 
 fn vectors() -> Json {
     serde_json::from_str(include_str!("../../../vectors/usage.json")).expect("the vectors are JSON")
@@ -134,20 +134,11 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     for case in cases("refused") {
         let name = case["name"].as_str().expect("named");
         let refused = match case["type"].as_str().expect("typed") {
-            "UsageQuery" => read_value::<UsageQuery>(&case["json"]).is_err(),
             "StartRequest" => read_value::<StartRequest>(&case["json"]).is_err(),
             other => panic!("{name}: no type {other}"),
         };
         assert!(refused, "{name}: a key nobody declared was taken");
     }
-    let query = read_value::<UsageQuery>(
-        &json!({"account": {"id": "pool/alice", "kind": "harness-login"}}),
-    )
-    .expect("declared");
-    assert_eq!(
-        query.account.map(|grant| grant.id).as_deref(),
-        Some("pool/alice")
-    );
 }
 
 fn bucket_of(figures: &Json) -> Bucket {

@@ -11,8 +11,9 @@ use std::ffi::OsString;
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountOffer, AccountUsage, AccountUsageQuery, AccountWatch,
-    LoginMethodInfo, ProcessSpawner, RenewReport, RenewRequest, WatchRequest,
+    AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountUsage, AccountUsageQuery,
+    AccountWatch, HARNESS_LOGIN, LoginMethodInfo, ModelListing, ProcessSpawner, RenewReport,
+    RenewRequest, WatchRequest,
 };
 
 use super::{Applied, HarnessDef, KindDef, apply, bad, identity_of, login_usable};
@@ -44,10 +45,11 @@ impl Keeping {
     }
 
     /// What the provider offers: the kinds of `def` that provide a standard (a kind whose standard the account chooses
-    /// is made by its owner, not by a provider), and `logins`, the ways to sign in. No kind reports usage.
+    /// is made by its owner, not by a provider), `logins`, the ways to sign in, and the harness's own login as the
+    /// automatic `local` account. No kind reports usage.
     #[must_use]
     pub fn offer(&self, logins: Vec<LoginMethodInfo>) -> AccountOffer {
-        let mut offer = AccountOffer::new();
+        let mut offer = AccountOffer::new().with_local();
         offer.kinds = self
             .def
             .kinds
@@ -140,17 +142,46 @@ impl Keeping {
     ///
     /// # Errors
     ///
-    /// `BAD_VALUE` as [`own`](Self::own) and for a grant the kind refuses.
+    /// `BAD_VALUE` for an id that is not one, a kind the provider does not list, or settings the kind refuses.
     pub fn usage(
         &self,
         query: &AccountUsageQuery,
         reason: &str,
     ) -> Result<AccountUsage, ProviderError> {
-        self.own(&query.account)?;
-        apply(self.def, &query.account)?;
+        self.checked(&query.account)?;
         let mut usage = AccountUsage::unsupported(reason);
         usage.account = Some(query.account.id.clone());
         Ok(usage)
+    }
+
+    /// What the models of `query.account` are, which is unknown for `reason`: the harness lists its models in its
+    /// session, not before it.
+    ///
+    /// # Errors
+    ///
+    /// `BAD_VALUE` for an id that is not one, a kind the provider does not list, or settings the kind refuses.
+    pub fn models(
+        &self,
+        query: &AccountModelsQuery,
+        reason: &str,
+    ) -> Result<ModelListing, ProviderError> {
+        self.checked(&query.account)?;
+        Ok(ModelListing::unknown(reason))
+    }
+
+    /// Checks `grant` as a call that asks about an account takes it: the harness's own login (the automatic `local`
+    /// account), or an account of a kind the provider keeps and the harness applies.
+    ///
+    /// # Errors
+    ///
+    /// `BAD_VALUE` for an id that is not one, a kind the provider does not list, or settings the kind refuses.
+    fn checked(&self, grant: &AccountGrant) -> Result<(), ProviderError> {
+        if grant.kind == HARNESS_LOGIN {
+            return grant.check_id();
+        }
+        self.own(grant)?;
+        apply(self.def, grant)?;
+        Ok(())
     }
 
     /// Renews the login of `request.account` with the harness's own command (`program` and the table's `renew_args`),

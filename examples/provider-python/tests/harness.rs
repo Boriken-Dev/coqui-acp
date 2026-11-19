@@ -27,71 +27,11 @@ mod with_python {
     use std::sync::Arc;
 
     use coqui_acp_api::contract::Contract;
-    use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
-    use coqui_acp_api::guatiao::{List, Map, Secret, Status, Value};
-    use coqui_acp_api::{
-        AccountGrant, AcpHarness, FileInfo, ModelsRequest, ProcessSpawner, SecretBytes,
-        SessionQuery, Source, SpawnSpec, SpawnedProcess, SpawnerInfo, UsageQuery,
-    };
+    use coqui_acp_api::guatiao::library::Registry;
+    use coqui_acp_api::guatiao::{List, Map, Value};
+    use coqui_acp_api::{AcpHarness, SessionQuery, Source};
 
     use super::support::{guatiao, manifest_dir, python, source};
-
-    /// A spawner nobody uses: the echo starts nothing.
-    struct Unused;
-
-    impl ProcessSpawner for Unused {
-        fn notice(&self, _notice: coqui_acp_api::HarnessNotice) -> Result<(), ProviderError> {
-            Ok(())
-        }
-
-        fn describe(&self) -> Result<SpawnerInfo, ProviderError> {
-            Ok(SpawnerInfo::new(
-                std::env::consts::OS,
-                std::env::consts::ARCH,
-                true,
-            ))
-        }
-
-        fn spawn(&self, _spec: SpawnSpec) -> Result<Object<dyn SpawnedProcess>, ProviderError> {
-            Err(ProviderError::new(
-                Status::GUATIAO_ERR_UNSUPPORTED,
-                "unused",
-            ))
-        }
-
-        fn write_file(
-            &self,
-            _path: &str,
-            _bytes: Secret<SecretBytes>,
-            _private: bool,
-        ) -> Result<(), ProviderError> {
-            Err(no_files())
-        }
-
-        fn read_file(
-            &self,
-            _path: &str,
-            _max_bytes: u64,
-        ) -> Result<Secret<SecretBytes>, ProviderError> {
-            Err(no_files())
-        }
-
-        fn file_info(&self, _path: &str) -> Result<Option<FileInfo>, ProviderError> {
-            Err(no_files())
-        }
-
-        fn remove_file(&self, _path: &str) -> Result<(), ProviderError> {
-            Err(no_files())
-        }
-    }
-
-    fn no_files() -> ProviderError {
-        ProviderError::new(Status::GUATIAO_ERR_UNSUPPORTED, "no private files")
-    }
-
-    fn unused_spawner() -> Object<dyn ProcessSpawner> {
-        Unused.into_object()
-    }
 
     fn kinds_crate() -> PathBuf {
         manifest_dir().join("../../crates/coqui-acp-api")
@@ -158,25 +98,13 @@ mod with_python {
                 .expect("answered"),
             None
         );
-        let models = harness
-            .models(ModelsRequest::new(), unused_spawner())
-            .expect("answered");
-        assert!(models.known);
-        assert_eq!(models.models[0].id, "echo");
     }
 
-    /// Scripted, the Python echo reports usage as the contract documents, through the kind and through ACP.
+    /// Scripted, the Python echo reports usage as the contract documents, through ACP.
     #[test]
     fn a_scripted_python_echo_reports_usage_as_the_contract_documents() {
         let (registry, plain) = loaded();
         assert!(!plain.describe().expect("described").usage.reports());
-        let report = plain
-            .usage(
-                UsageQuery::new().account(AccountGrant::new("pool/alice", "harness-login")),
-                unused_spawner(),
-            )
-            .expect("answered");
-        assert!(!report.supported && report.unsupported_because.is_some());
         let offer = registry
             .offer::<dyn AcpHarness>("acp_echo_harness_echo_harness")
             .expect("the source offers it")

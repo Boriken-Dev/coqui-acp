@@ -1,5 +1,5 @@
 //! What a provider of the `acp_harness` kind needs to front a harness that [`serve`] serves: the channel
-//! the host talks over, ended the way the kind says, and the usage a provider keeps for its `usage` method.
+//! the host talks over, ended the way the kind says.
 //!
 //! [`Serving::open`] runs `serve` on a thread of its own over a [`Channel`]: each message the host sends is a line `serve`
 //! reads, each line it writes a message handed to the host's sink. The harness starts its programs through the host's
@@ -9,7 +9,7 @@
 //! provides the kind has to be able to wait for before it is unloaded ([`threads_done`]).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -19,13 +19,10 @@ use std::thread::JoinHandle;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
-use coqui_acp_api::usage::Bucket;
-use coqui_acp_api::{
-    Channel, ChannelSink, HarnessNotice, ProcessSpawner, UsageReport, UsageSupport,
-};
+use coqui_acp_api::{Channel, ChannelSink, HarnessNotice, ProcessSpawner};
 use serde_json::Value;
 
-use crate::acp::{Harness, Settings, UsageTracker, serve};
+use crate::acp::{Harness, Settings, serve};
 use crate::process::{Launch, Spawn, Spawned};
 use crate::spawner::ThroughSpawner;
 
@@ -467,76 +464,6 @@ fn deliver(mut sink: Object<dyn ChannelSink>, shared: &Shared) {
         .clone()
         .unwrap_or((Status::GUATIAO_OK.into(), String::new()));
     sink.closed(status, &reason);
-}
-
-/// What a provider keeps of the usage its connections learned, by account, for the kind's `usage` method: the buckets
-/// and limits each connection's report held, merged as a connection merges them, so a repeat of figures already held
-/// changes nothing and the revision only grows.
-#[derive(Debug, Default)]
-pub struct Reports {
-    accounts: Mutex<BTreeMap<String, UsageTracker>>,
-}
-
-impl Reports {
-    /// Nothing seen.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn held(&self) -> MutexGuard<'_, BTreeMap<String, UsageTracker>> {
-        self.accounts.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Takes the report a connection on `account` has now.
-    pub fn observe(&self, support: &UsageSupport, account: Option<&str>, report: &UsageReport) {
-        let now = unix_now();
-        let mut held = self.held();
-        let tracker = held
-            .entry(account.unwrap_or_default().to_string())
-            .or_insert_with(|| UsageTracker::new(support.clone(), account.map(str::to_string)));
-        tracker.buckets(report.buckets.clone(), now);
-        if let Some(hit) = &report.limit {
-            tracker.limit(hit.clone(), now);
-        }
-    }
-
-    /// Takes buckets a reading of `account` gave, and answers the report with them.
-    pub fn read(
-        &self,
-        support: &UsageSupport,
-        account: Option<&str>,
-        buckets: Vec<Bucket>,
-    ) -> UsageReport {
-        let now = unix_now();
-        let mut held = self.held();
-        let tracker = held
-            .entry(account.unwrap_or_default().to_string())
-            .or_insert_with(|| UsageTracker::new(support.clone(), account.map(str::to_string)));
-        tracker.buckets(buckets, now);
-        tracker.snapshot(None, now)
-    }
-
-    /// The report of `account` as far as it is known: what its connections and readings gave, else an empty one that
-    /// names the sources `support` lists.
-    #[must_use]
-    pub fn report(&self, support: &UsageSupport, account: Option<&str>) -> UsageReport {
-        let now = unix_now();
-        match self.held().get(account.unwrap_or_default()) {
-            Some(tracker) => tracker.snapshot(None, now),
-            None => {
-                UsageTracker::new(support.clone(), account.map(str::to_string)).snapshot(None, now)
-            }
-        }
-    }
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|since| i64::try_from(since.as_secs()).ok())
-        .unwrap_or(0)
 }
 
 /// Boxes a harness for [`Serving::open`].

@@ -14,18 +14,17 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountRef, AcpHarness, CacheChoice, CacheLifetime, Channel,
-    ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport, ModelInfo, ModelListing,
-    ModelsRequest, Narrowing, ProcessSpawner, Requirement, SessionExport, SessionImport,
-    StartRequest, UnknownKind, UsageQuery, UsageReport,
+    ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner,
+    Requirement, SessionExport, SessionImport, StartRequest,
 };
+use coqui_acp_harness::Settings;
 use coqui_acp_harness::account::{Accounts, Files, Hold};
 use coqui_acp_harness::acp::Harness;
-use coqui_acp_harness::provider::{Reports, Serving, shared, takes_of};
+use coqui_acp_harness::provider::{Serving, shared, takes_of};
 use coqui_acp_harness::{Access, Mode};
-use coqui_acp_harness::{Settings, ThroughSpawner};
 
 use crate::accounts;
-use crate::{ClaudeAgent, ClaudeLaunch, ClaudeSession, ClaudeSettings};
+use crate::{ClaudeAgent, ClaudeLaunch};
 
 /// What a connection with `cache_lifetime` short sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and its sub-agent twin to.
 const SHORT_TTL: &str = "5m";
@@ -154,8 +153,6 @@ impl Default for ProviderSettings {
 )]
 pub struct ClaudeProvider {
     settings: ProviderSettings,
-    /// What the connections learned of each account's usage.
-    reports: Arc<Reports>,
     /// What the provider knows of the files it placed for its accounts.
     accounts: Arc<Accounts>,
     /// The ids a host seeded with no history, which their first start makes sessions.
@@ -174,7 +171,6 @@ impl ClaudeProvider {
     pub fn new(settings: ProviderSettings) -> Self {
         Self {
             settings,
-            reports: Arc::new(Reports::new()),
             accounts: Arc::new(Accounts::new()),
             fresh: crate::FreshSessions::default(),
         }
@@ -229,10 +225,6 @@ impl ClaudeProvider {
         }
         let refusal = narrow(requirements, &mut launch)?;
         Ok((launch, refusal))
-    }
-
-    fn support(&self) -> coqui_acp_api::UsageSupport {
-        ClaudeAgent::new().usage()
     }
 }
 
@@ -360,11 +352,6 @@ impl AcpHarness for ClaudeProvider {
         settings.client_mcp_servers = self.settings.client_mcp_servers;
         settings.working_roots = request.working_roots.iter().map(PathBuf::from).collect();
         settings.account.clone_from(&account_id);
-        let reports = Arc::clone(&self.reports);
-        let support = self.support();
-        settings.on_usage = Some(Arc::new(move |report: &UsageReport| {
-            reports.observe(&support, account_id.as_deref(), report);
-        }));
         let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
         let plugins = self.settings.allow_client_plugins;
         let client_access = self.settings.allow_client_access;
@@ -445,92 +432,5 @@ impl AcpHarness for ClaudeProvider {
                 "this provider does not export a Claude Code session yet",
             ))
         }
-    }
-
-    fn models(
-        &self,
-        request: ModelsRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ModelListing, ProviderError> {
-        let (mut launch, _) =
-            self.launch(request.environment.expose(), CacheLifetime::Default, &[])?;
-        let spawner = Arc::new(spawner);
-        let files = Files::new(Arc::clone(&spawner));
-        let applying = self.apply(request.account.as_ref(), &files, &mut launch)?;
-        drop(files);
-        let spawn = ThroughSpawner::shared(spawner);
-        let listing = match ClaudeSession::start(&launch, &spawn, ClaudeSettings::new(), |_| true) {
-            Ok(session) => {
-                let signed_out = session.signed_out();
-                let listing = session.models().map_or_else(
-                    || {
-                        // A Claude Code with nobody signed in can list none; that is the person's next step, not a
-                        // list that waits for a session.
-                        if signed_out {
-                            ModelListing::unknown(
-                                "nobody is signed in to Claude Code, which lists its models once someone is",
-                            )
-                            .signed_out()
-                        } else {
-                            ModelListing::unavailable(
-                                UnknownKind::Failed,
-                                "Claude Code listed no model",
-                            )
-                        }
-                    },
-                    |models| {
-                        ModelListing::of(
-                            models
-                                .into_iter()
-                                .map(|model| {
-                                    let mut info = ModelInfo::new(model.id.clone());
-                                    info.name = Some(model.label());
-                                    info.description = model.description;
-                                    info.resolved = model.resolved;
-                                    info.version = model.version;
-                                    info.efforts = model.efforts;
-                                    info.is_default = model.id == "default";
-                                    info
-                                })
-                                .collect(),
-                        )
-                    },
-                );
-                session.close();
-                if signed_out && listing.known {
-                    listing.signed_out()
-                } else {
-                    listing
-                }
-            }
-            Err(error) => ModelListing::unavailable(
-                match &error {
-                    crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
-                        UnknownKind::NotInstalled
-                    }
-                    _ => UnknownKind::Failed,
-                },
-                format!("Claude Code could not be asked: {error}"),
-            ),
-        };
-        if let Some(hold) = applying.hold {
-            hold.finish();
-        }
-        Ok(listing)
-    }
-
-    fn usage(
-        &self,
-        query: UsageQuery,
-        _spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<UsageReport, ProviderError> {
-        // Claude Code learns usage only during a turn: this is what the connections last saw.
-        if let Some(account) = &query.account {
-            accounts::plan(account)?;
-        }
-        let account = query.account.as_ref().map(AccountGrant::reference);
-        Ok(self
-            .reports
-            .report(&self.support(), account.as_ref().map(|a| a.id.as_str())))
     }
 }

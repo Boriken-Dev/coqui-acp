@@ -71,19 +71,12 @@ pub fn Serving::ending(self, f: impl FnOnce() + Send + 'static) -> Serving      
 pub fn shared(harness: impl Harness) -> Arc<dyn Harness>
 pub fn track(thread: JoinHandle<()>);  pub fn to_json(&guatiao::Value) -> Value        // track: threads_done waits for it
 pub fn threads_done() -> Status                                                    // a library's `unload` hook
-pub struct Reports;                                                               // Debug, Default
-pub fn Reports::new() -> Reports
-pub fn observe(&self, support: &UsageSupport, account: Option<&str>, report: &UsageReport)   // a connection's report
-pub fn read(&self, support: &UsageSupport, account: Option<&str>, buckets: Vec<Bucket>) -> UsageReport
-pub fn report(&self, support: &UsageSupport, account: Option<&str>) -> UsageReport
 pub fn takes_of(takes: &Takes) -> coqui_acp_api::Takes                              // resume true
 pub fn schema(json: &Value) -> guatiao::Value;  pub fn credential() -> Value        // for a catalog
 pub fn account_refusal(catalog: &AccountCatalog, account: &AccountRef) -> Result<Option<String>, ProviderError>
 ```
 
 What a provider of `acp_harness` needs to front a harness that `serve` serves. `Serving::open` builds the harness from a `Spawn` that starts its programs through the host's `spawner`, runs `serve` on a thread of its own and hands the host a `Channel`: each message sent is a line `serve` reads (a line feed inside a message that is not JSON is replaced by a NUL, so it stays one invalid line), each line it writes a message for the sink, which only one thread of the library calls. `send` waits while four messages wait on either side, so a sink that takes nothing holds the sender back (and `Settings::max_requests` bounds what `serve` has in hand); a message over `max_message_bytes` ends the connection `GUATIAO_ERR_BAD_VALUE`; `close` wakes a waiting `send` (`GUATIAO_ERR_GONE`), ends `serve`'s input, and `closed` follows once `serve` has returned and its lines are all handed over, with the host's status and reason, `GUATIAO_OK` when `serve` ended by itself and `GUATIAO_ERR_INTERNAL` when it failed. The spawner is destroyed before `closed`, whatever else holds the harness. A sink that refuses a message ends the connection with its status and message. A program that ends ends its session, not the connection: the host closes that.
-
-`Reports` is what a provider keeps for the kind's `usage` method, by account: `observe` takes a connection's report (give it `Settings::on_usage`), `read` a reading the provider made itself, and `report` answers the merged figures or, for an account nothing was learned of, an empty report naming the sources. A repeat changes nothing and the revision only grows.
 
 `account_refusal` is for a provider that applies nothing to the harness's environment yet: `GUATIAO_ERR_BAD_VALUE` for an id that is not an account id or a kind the catalog does not list, a reason for any listed kind but `harness-login`, `None` for that one.
 
@@ -167,7 +160,7 @@ Accounts (each harness's `DEF` is data; the catalog, the schemas and the checks 
 | grok | `grok-oidc` | `auth_json` (optional) | `GROK_OIDC_ISSUER`, `GROK_OIDC_CLIENT_ID`, `GROK_HOME`, `auth.json`; settings `issuer`, `client_id`, `proxy_base_url` | yes | yes | `grok models` |
 | antigravity | none beyond `harness-login` | | | | | |
 
-The harness lists no login method and no kind renews (`accounts::catalog`); it has no `login` or `renew` and takes no keeper, and `models` and `usage` only check the grant. The account provider (below) lists the methods.
+The harness lists no login method and no kind renews (`accounts::catalog`); it has no `login`, `renew`, `models` or `usage` and takes no keeper. The account provider (below) lists the methods.
 
 Login methods (Grok only): `device` (`grok login`, steps `open_url` with the code, remote), `browser` (`grok login --oauth`, loopback so not remote), `api-key` (asks for the key, checks it with `grok models`, `checked`). A sign-in runs the CLI in the login's directory on a thread of its own, so a cancel or the timeout answers `GUATIAO_ERR_GONE` (`login cancelled`, `login timed out`) within two seconds with the program killed; a key the CLI did not accept is `GUATIAO_ERR_BAD_VALUE` `login refused: ...` with no word of the CLI's output; the key is never in an argument. Every other `login` is `GUATIAO_ERR_UNSUPPORTED`: Antigravity's `agy acp --login`, whose prompts, token location and Credential Manager use were not measured; Grok's identity-provider sign-in, which needs a provider to answer. `grok-external` (`GROK_AUTH_PROVIDER_COMMAND`, a program named in settings) is not a kind until the owner decides.
 
@@ -175,7 +168,7 @@ Login methods (Grok only): `device` (`grok login`, steps `open_url` with the cod
 
 Offered by the same library file as `StdioProvider` (`examples/stdio_provider.rs`); `AccountContract` holds it to the kind for each Grok kind (`tests/stdio.rs`, with `.program(true)` so the suite starts `fake_stdio_cli`). It runs no agent. `accounts::Keeping` is what it does with a `HarnessDef`, which `coqui-acp-pi`'s account provider uses too.
 
-- `offers`: the kinds of the harness's table that provide a standard (Grok's three; Antigravity none, so its `login` answers `UNSUPPORTED` with the measured reason), the login methods above, and no usage kind: its accounts report no plan usage, so `usage` answers `AccountUsage::unsupported`. Every call refuses `BAD_VALUE` an id that is not one and a kind it does not list, **including a kind of another provider that provides the same standard**.
+- `offers`: the kinds of the harness's table that provide a standard (Grok's three; Antigravity none, so its `login` answers `UNSUPPORTED` with the measured reason), the login methods above, the automatic `local` account (the harness's own login: `offers().local`), and no usage kind: its accounts report no plan usage, so `usage` answers `AccountUsage::unsupported`, and the agent lists its models in its session, so `models` answers unknown with that reason (`Keeping::models`). Every call refuses `BAD_VALUE` an id that is not one and a kind it does not list, **including a kind of another provider that provides the same standard**.
 - `renew`: runs the harness's renewal program (`grok models`) on the account's directory, then looks at the file: a changed file is the new credentials, an unchanged one `not_renewed_because`, a missing, blank or another account's one `GUATIAO_ERR_GONE`. The directory is **looked at, never filled from the grant**, so a host that wants the grant's copy there lets a harness start on the account first. A renewal that leaves the login of another account in `auth.json` is refused `BAD_VALUE` and the grant's copy put back.
 - `watch`: for a kind that rotates and keeps a file, looks at `auth.json` every `renew_poll_ms` through the spawner and tells the keeper `renewed` or `lost`, once each; a half-written file is neither. An account that holds no login yet (`grok-oidc` without `auth_json`) is `UNSUPPORTED`.
 

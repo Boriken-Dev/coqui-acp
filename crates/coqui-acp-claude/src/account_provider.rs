@@ -15,14 +15,16 @@ use std::sync::{Mutex, PoisonError};
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
-    AccountKeeper, AccountOffer, AccountProvider, AccountProviderInfo, AccountUsage,
-    AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest, ProcessSpawner,
-    RenewReport, RenewRequest, WatchRequest,
+    AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
+    AccountUsage, AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginOutcome, LoginPrompter,
+    LoginRequest, ModelInfo, ModelListing, ProcessSpawner, RenewReport, RenewRequest, UnknownKind,
+    WatchRequest,
 };
+use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
 
 use crate::account_usage::{ReadOptions, read_limits};
-use crate::{accounts, signin};
+use crate::{ClaudeLaunch, ClaudeSession, ClaudeSettings, accounts, signin};
 
 /// How the Claude Code account provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -219,6 +221,14 @@ impl AccountProvider for ClaudeAccounts {
     ) -> Result<AccountUsage, ProviderError> {
         // Plan limits are read over the network with the credential: no program is started and no file read.
         drop((spawner, keeper));
+        if query.account.kind == HARNESS_LOGIN {
+            query.account.check_id()?;
+            let mut none = AccountUsage::unsupported(
+                "Claude Code reports plan usage only during a turn, so the login it has where it runs has none to read",
+            );
+            none.account = Some(query.account.id);
+            return Ok(none);
+        }
         accounts::own(&query.account)?;
         let mut options =
             ReadOptions::new().timeout(Duration::from_millis(self.settings.usage_timeout_ms));
@@ -227,5 +237,99 @@ impl AccountProvider for ClaudeAccounts {
         }
         let report = read_limits(&query.account, &options)?;
         Ok(self.revised(AccountUsage::from_report(report)))
+    }
+
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        let grant = &query.account;
+        let local = grant.kind == HARNESS_LOGIN;
+        if local {
+            grant.check_id()?;
+        } else {
+            accounts::own(grant)?;
+        }
+        let mut launch = ClaudeLaunch::new(".");
+        launch.executable = self.executable();
+        for (name, value) in query.environment.expose().iter() {
+            launch.env.insert(name.into(), value.into());
+        }
+        let spawner = Arc::new(spawner);
+        let files = Files::new(Arc::clone(&spawner));
+        // The login's files are placed for the call and a login the program renews meanwhile is told to the keeper.
+        let hold = if local {
+            drop(keeper);
+            None
+        } else {
+            accounts::apply_as(grant, &mut launch, &files, false)?.hold_keeping(
+                &self.accounts,
+                &files,
+                Some(keeper),
+            )?
+        };
+        drop(files);
+        let listing = listing(&launch, &ThroughSpawner::shared(spawner));
+        if let Some(hold) = hold {
+            hold.finish();
+        }
+        Ok(listing)
+    }
+}
+
+/// The models Claude Code lists once started on `launch`, with no turn.
+fn listing(launch: &ClaudeLaunch, spawn: &ThroughSpawner) -> ModelListing {
+    match ClaudeSession::start(launch, spawn, ClaudeSettings::new(), |_| true) {
+        Ok(session) => {
+            let signed_out = session.signed_out();
+            let listing = session.models().map_or_else(
+                || {
+                    // A Claude Code with nobody signed in can list none; that is the person's next step, not a
+                    // list that waits for a session.
+                    if signed_out {
+                        ModelListing::unknown(
+                            "nobody is signed in to Claude Code, which lists its models once someone is",
+                        )
+                        .signed_out()
+                    } else {
+                        ModelListing::unavailable(UnknownKind::Failed, "Claude Code listed no model")
+                    }
+                },
+                |models| {
+                    ModelListing::of(
+                        models
+                            .into_iter()
+                            .map(|model| {
+                                let mut info = ModelInfo::new(model.id.clone());
+                                info.name = Some(model.label());
+                                info.description = model.description;
+                                info.resolved = model.resolved;
+                                info.version = model.version;
+                                info.efforts = model.efforts;
+                                info.is_default = model.id == "default";
+                                info
+                            })
+                            .collect(),
+                    )
+                },
+            );
+            session.close();
+            if signed_out && listing.known {
+                listing.signed_out()
+            } else {
+                listing
+            }
+        }
+        Err(error) => ModelListing::unavailable(
+            match &error {
+                crate::Error::Spawn(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                    UnknownKind::NotInstalled
+                }
+                _ => UnknownKind::Failed,
+            },
+            format!("Claude Code could not be asked: {error}"),
+        ),
     }
 }

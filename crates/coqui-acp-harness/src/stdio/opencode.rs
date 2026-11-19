@@ -14,12 +14,12 @@ use coqui_acp_api::guatiao::Secret;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountKeeper, AccountOffer, AccountProvider, AccountProviderInfo, AccountRef,
-    AccountUsage, AccountUsageQuery, AccountWatch, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, HarnessInfo, HistoryLoss, ImportReport, LINE_TOO_LARGE, LoginOutcome,
-    LoginPrompter, LoginRequest, ModelListing, ModelsRequest, ProcessSpawner, RenewReport,
-    RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, StartRequest, UsageQuery,
-    UsageReport, WatchRequest,
+    AccountCatalog, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
+    AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, AcpHarness,
+    Channel, ChannelSink, Environment, ExportPage, HarnessInfo, HistoryLoss, ImportReport,
+    LINE_TOO_LARGE, LoginOutcome, LoginPrompter, LoginRequest, ModelListing, ProcessSpawner,
+    RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, StartRequest,
+    WatchRequest,
 };
 use coqui_acp_history::paging::{PageError, page};
 use coqui_acp_history::{Document, Header, HistoryError, Origin, RedactionSettings, Redactor};
@@ -193,22 +193,6 @@ impl AcpHarness for OpenCodeProvider {
     ) -> Result<ExportPage, ProviderError> {
         self.inner.export_session(export, spawner)
     }
-
-    fn models(
-        &self,
-        request: ModelsRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ModelListing, ProviderError> {
-        self.inner.models(request, spawner)
-    }
-
-    fn usage(
-        &self,
-        query: UsageQuery,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<UsageReport, ProviderError> {
-        self.inner.usage(query, spawner)
-    }
 }
 
 /// How OpenCode's account provider is configured.
@@ -311,6 +295,15 @@ impl AccountProvider for OpenCodeAccounts {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<AccountUsage, ProviderError> {
         self.inner.usage(query, spawner, keeper)
+    }
+
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        self.inner.models(query, spawner, keeper)
     }
 }
 

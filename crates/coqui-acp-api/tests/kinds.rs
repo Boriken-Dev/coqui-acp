@@ -12,16 +12,16 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
     Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo,
-    AccountLoss, AccountOffer, AccountProviderInfo, AccountProviderVtable, AccountRef,
-    AccountRenewal, AccountUsage, AccountUsageQuery, AccountWatchVtable, AcpHarnessVtable, Bucket,
-    CacheChoice, CacheLifetime, ChannelSinkVtable, ChannelVtable, Credentials, EndpointSlot,
-    ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice, HistoryLoss, ImportReport,
-    LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo, LoginOutcome,
-    LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, ModelsRequest, NAMES,
+    AccountLoss, AccountModelsQuery, AccountOffer, AccountProviderInfo, AccountProviderVtable,
+    AccountRef, AccountRenewal, AccountUsage, AccountUsageQuery, AccountWatchVtable,
+    AcpHarnessVtable, Bucket, CacheChoice, CacheLifetime, ChannelSinkVtable, ChannelVtable,
+    Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice,
+    HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo,
+    LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, NAMES,
     NonDefault, NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest,
     Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile,
     SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize,
-    UnknownKind, UsageQuery, UsageReport, UsageSupport, WatchRequest,
+    UnknownKind, UsageReport, UsageSupport, WatchRequest,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -102,7 +102,6 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("ErrorOutput", schema_of::<ErrorOutput>()),
         ("NoticeKind", schema_of::<NoticeKind>()),
         ("HarnessNotice", schema_of::<HarnessNotice>()),
-        ("UsageQuery", schema_of::<UsageQuery>()),
         ("UsageReport", schema_of::<UsageReport>()),
         ("Bucket", schema_of::<Bucket>()),
         ("LimitHit", schema_of::<LimitHit>()),
@@ -125,7 +124,6 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("LoginOutcome", schema_of::<LoginOutcome>()),
         ("RenewRequest", schema_of::<RenewRequest>()),
         ("RenewReport", schema_of::<RenewReport>()),
-        ("ModelsRequest", schema_of::<ModelsRequest>()),
         ("AccountRenewal", schema_of::<AccountRenewal>()),
         ("AccountLoss", schema_of::<AccountLoss>()),
         ("OpenUrl", schema_of::<OpenUrl>()),
@@ -135,6 +133,7 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("AccountOffer", schema_of::<AccountOffer>()),
         ("WatchRequest", schema_of::<WatchRequest>()),
         ("AccountUsageQuery", schema_of::<AccountUsageQuery>()),
+        ("AccountModelsQuery", schema_of::<AccountModelsQuery>()),
         ("AccountUsage", schema_of::<AccountUsage>()),
     ]
 }
@@ -157,7 +156,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 53] = [
+    let pinned: [(&str, &[&str], &[&str]); 52] = [
         (
             "StartRequest",
             &[
@@ -307,7 +306,6 @@ fn every_models_keys_are_pinned() {
         ("ProcessExit", &["code", "running", "signal"], &["running"]),
         ("LinkState", &["drops", "up"], &["drops", "up"]),
         ("HarnessNotice", &["kind", "text"], &["kind", "text"]),
-        ("UsageQuery", &["account", "environment"], &[]),
         (
             "UsageReport",
             &[
@@ -498,7 +496,6 @@ fn every_models_keys_are_pinned() {
             &["credentials", "expires_at", "not_renewed_because"],
             &[],
         ),
-        ("ModelsRequest", &["account", "environment"], &[]),
         (
             "AccountRenewal",
             &[
@@ -519,10 +516,15 @@ fn every_models_keys_are_pinned() {
         ("LoginForm", &["schema", "title"], &["title"]),
         ("LoginAnswer", &["secrets", "values"], &[]),
         ("AccountProviderInfo", &["description", "title"], &["title"]),
-        ("AccountOffer", &["kinds", "logins", "usage"], &[]),
+        ("AccountOffer", &["kinds", "local", "logins", "usage"], &[]),
         ("WatchRequest", &["account"], &["account"]),
         (
             "AccountUsageQuery",
+            &["account", "environment"],
+            &["account"],
+        ),
+        (
+            "AccountModelsQuery",
             &["account", "environment"],
             &["account"],
         ),
@@ -541,7 +543,7 @@ fn every_models_keys_are_pinned() {
         ),
     ];
     let schemas = schemas();
-    assert_eq!(pinned.len(), 53);
+    assert_eq!(pinned.len(), 52);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()
@@ -628,10 +630,6 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     spec.set("program", "sh");
     spec.set("sandbox", "strict");
     assert!(SpawnSpec::from_value(&Value::from(spec)).is_err());
-    let mut usage = Map::new();
-    usage.set("account", "pool/alice");
-    usage.set("refresh", true);
-    assert!(UsageQuery::from_value(&Value::from(usage)).is_err());
     let grant = |extra: Option<(&str, bool)>| {
         let mut grant = Map::new();
         grant.set("id", "account-1");
@@ -654,9 +652,6 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     renew.set("account", grant(None));
     renew.set("force", true);
     assert!(RenewRequest::from_value(&Value::from(renew)).is_err());
-    let mut models = Map::new();
-    models.set("filter", "all");
-    assert!(ModelsRequest::from_value(&Value::from(models)).is_err());
     let mut watch = Map::new();
     watch.set("account", grant(None));
     assert!(WatchRequest::from_value(&Value::from(watch.clone())).is_ok());
@@ -667,6 +662,11 @@ fn a_request_with_a_key_nobody_declared_is_refused() {
     assert!(AccountUsageQuery::from_value(&Value::from(account_usage.clone())).is_ok());
     account_usage.set("session_id", "0f8fad5b-d9cb-469f-a165-70867728950e");
     assert!(AccountUsageQuery::from_value(&Value::from(account_usage)).is_err());
+    let mut account_models = Map::new();
+    account_models.set("account", grant(None));
+    assert!(AccountModelsQuery::from_value(&Value::from(account_models.clone())).is_ok());
+    account_models.set("filter", "all");
+    assert!(AccountModelsQuery::from_value(&Value::from(account_models)).is_err());
 }
 
 /// Tokens a session or a run spent are ACP's, never an account's: the account's usage has no field
@@ -768,14 +768,14 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(AccountWatchVtable::FLOOR_HASH, ACCOUNT_WATCH_HASH);
 }
 
-const HARNESS_HASH: u32 = 2105385007;
+const HARNESS_HASH: u32 = 3025339842;
 const CHANNEL_HASH: u32 = 3787630980;
 const SINK_HASH: u32 = 4115266557;
 const SPAWNER_HASH: u32 = 4038904472;
 const PROCESS_HASH: u32 = 3306532587;
 const KEEPER_HASH: u32 = 708146915;
 const PROMPTER_HASH: u32 = 2606822037;
-const ACCOUNT_PROVIDER_HASH: u32 = 767683853;
+const ACCOUNT_PROVIDER_HASH: u32 = 4172086390;
 const ACCOUNT_WATCH_HASH: u32 = 589148782;
 
 const HASHES: [(&str, u32); 9] = [

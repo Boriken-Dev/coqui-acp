@@ -20,9 +20,8 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, HarnessInfo, HistoryLoss, ImportReport, ModelListing, ModelsRequest, Narrowing,
-    ProcessSpawner, Requirement, SeedPoint, SessionExport, SessionImport, SpawnSpec, StartRequest,
-    UsageQuery, UsageReport, WorkingRoots,
+    ExportPage, HarnessInfo, HistoryLoss, ImportReport, Narrowing, ProcessSpawner, Requirement,
+    SeedPoint, SessionExport, SessionImport, SpawnSpec, StartRequest, WorkingRoots,
 };
 use coqui_acp_history::replay::{Replay, ReplaySettings};
 use coqui_acp_history::{Document, HistoryError, RedactionSettings, Redactor};
@@ -252,14 +251,6 @@ impl StdioProvider {
             .map(Some)
     }
 
-    /// Reads the account of a call that runs nothing, so that a grant the kind refuses is refused as it is everywhere.
-    fn glance(&self, account: Option<&AccountGrant>) -> Result<(), ProviderError> {
-        if let Some(grant) = account {
-            Self::applied(grant, self.def())?;
-        }
-        Ok(())
-    }
-
     /// What the program is started with: the host's environment, less the harness's credential variables when an account
     /// is applied, plus the account's.
     fn spec(
@@ -484,29 +475,5 @@ impl AcpHarness for StdioProvider {
                 "this provider does not read a session out of an agent it does not keep the sessions of"
             }
         }))
-    }
-
-    fn models(
-        &self,
-        request: ModelsRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ModelListing, ProviderError> {
-        drop(spawner);
-        self.glance(request.account.as_ref())?;
-        Ok(ModelListing::unknown(
-            "the agent lists its models in its session, not before it",
-        ))
-    }
-
-    fn usage(
-        &self,
-        query: UsageQuery,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<UsageReport, ProviderError> {
-        drop(spawner);
-        self.glance(query.account.as_ref())?;
-        Ok(UsageReport::unsupported(
-            "this harness reports no usage outside a turn",
-        ))
     }
 }

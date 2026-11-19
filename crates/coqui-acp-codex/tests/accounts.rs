@@ -12,7 +12,7 @@ use std::time::Duration;
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountGrant, AcpHarness, ChannelSink, Credentials, ModelsRequest, ProcessSpawner, StartRequest,
+    AccountGrant, AcpHarness, ChannelSink, Credentials, ProcessSpawner, StartRequest,
 };
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
 use coqui_acp_harness::LocalSpawner;
@@ -289,26 +289,6 @@ fn no_endpoint_or_refresh_lever_of_the_host_reaches_codex_beside_an_account() {
         assert!(!seen.contains(&name.to_string()), "{name} reached Codex");
     }
     assert!(seen.contains(&"CODEX_HOME".to_string()));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_token_is_saved_once_for_a_home_however_often_the_account_is_used() {
-    let provider = provider();
-    let dir = scratch("once");
-    let grant = AccountGrant::new("acct", "codex-access-token")
-        .credentials(credentials_of(&[("access_token", CANARY)]))
-        .state_dir(dir.to_string_lossy());
-    for _ in 0..3 {
-        provider
-            .models(ModelsRequest::new().account(grant.clone()), spawner(&dir))
-            .expect("listed");
-    }
-    let saves = log(&dir)
-        .iter()
-        .filter(|e| e["args"] == serde_json::json!(["login", "--with-access-token"]))
-        .count();
-    assert_eq!(saves, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

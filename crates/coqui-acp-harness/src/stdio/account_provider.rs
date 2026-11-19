@@ -11,9 +11,9 @@ use core::time::Duration;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
-    AccountKeeper, AccountOffer, AccountProvider, AccountProviderInfo, AccountUsage,
-    AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest, ProcessSpawner,
-    RenewReport, RenewRequest, WatchRequest,
+    AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
+    AccountUsage, AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest,
+    ModelListing, ProcessSpawner, RenewReport, RenewRequest, WatchRequest,
 };
 
 use super::StdioHarness;
@@ -180,5 +180,18 @@ impl AccountProvider for StdioAccounts {
         drop((spawner, keeper));
         self.keeping
             .usage(&query, "this harness reports no usage outside a turn")
+    }
+
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        drop((spawner, keeper));
+        self.keeping.models(
+            &query,
+            "the agent lists its models in its session, not before it",
+        )
     }
 }

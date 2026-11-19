@@ -15,8 +15,9 @@ use coqui_acp_api::contract::AccountContract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
-    AccountKeeper, AccountOffer, AccountProvider, AccountProviderInfo, AccountUsage,
-    AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest, ProcessSpawner,
+    AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
+    AccountProviderInfo, AccountUsage, AccountUsageQuery, AccountWatch, Credentials, HARNESS_LOGIN,
+    LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner,
     RenewReport, RenewRequest, WatchRequest,
 };
 
@@ -192,6 +193,36 @@ impl AccountProvider for Breaks {
         }
         self.inner.usage(query, spawner, keeper)
     }
+
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError> {
+        if self.breaking == "models that show the environment" {
+            let shown: String = query
+                .environment
+                .expose()
+                .iter()
+                .map(|(_, value)| value.clone())
+                .collect();
+            drop((spawner, keeper));
+            return Ok(ModelListing::unknown(shown));
+        }
+        if self.breaking == "models of any kind" {
+            drop((spawner, keeper));
+            return Ok(ModelListing::of(vec![ModelInfo::new("echo")]));
+        }
+        if self.breaking == "models listed twice" {
+            let mut listing = self.inner.models(query, spawner, keeper)?;
+            if let Some(first) = listing.models.first().cloned() {
+                listing.models.push(first);
+            }
+            return Ok(listing);
+        }
+        self.inner.models(query, spawner, keeper)
+    }
 }
 
 /// A watch that tells nothing, ever.
@@ -249,6 +280,126 @@ fn a_usage_report_that_shows_the_environment_is_named() {
         "usage that shows the environment",
         "reports plan usage as it lists",
     );
+}
+
+#[test]
+fn a_models_listing_that_shows_the_environment_is_named() {
+    broken_by(
+        "models that show the environment",
+        "lists the models of an account",
+    );
+}
+
+#[test]
+fn models_asked_of_a_kind_the_provider_does_not_list_must_be_refused() {
+    broken_by("models of any kind", "lists the models of an account");
+}
+
+#[test]
+fn a_model_listed_twice_is_named() {
+    broken_by("models listed twice", "lists the models of an account");
+}
+
+/// The echo lists for the kinds it makes and for the login its program has where it runs, and refuses any other.
+#[test]
+fn the_echo_lists_the_models_of_each_account_it_is_asked_for() {
+    let (_registry, provider) = echo();
+    let ask = |grant: AccountGrant| {
+        provider.models(
+            AccountModelsQuery::new(grant),
+            Nothing.into_object(),
+            Hears.into_object(),
+        )
+    };
+    let own = ask(AccountGrant::new("mine", HARNESS_LOGIN)).expect("the login it has");
+    assert!(own.known);
+    assert_eq!(model_ids(&own), ["echo"]);
+    let key = ask(AccountGrant::new("key", "echo-key")
+        .credentials(Credentials::from_iter([("api_key", "secret")])))
+    .expect("a key");
+    assert_eq!(model_ids(&key), ["echo", "echo-large"]);
+    let unlisted =
+        ask(AccountGrant::new("other", "no-such-kind")).expect_err("not a kind it lists");
+    assert_eq!(
+        unlisted.status,
+        coqui_acp_api::guatiao::Status::GUATIAO_ERR_BAD_VALUE
+    );
+}
+
+/// A spawner and a keeper the echo's models never use.
+struct Hears;
+
+struct Nothing;
+
+impl ProcessSpawner for Nothing {
+    fn notice(&self, _notice: coqui_acp_api::HarnessNotice) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn describe(&self) -> Result<coqui_acp_api::SpawnerInfo, ProviderError> {
+        Ok(coqui_acp_api::SpawnerInfo::new(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            false,
+        ))
+    }
+
+    fn spawn(
+        &self,
+        _spec: coqui_acp_api::SpawnSpec,
+    ) -> Result<Object<dyn coqui_acp_api::SpawnedProcess>, ProviderError> {
+        Err(unused())
+    }
+
+    fn write_file(
+        &self,
+        _path: &str,
+        _bytes: coqui_acp_api::guatiao::Secret<coqui_acp_api::SecretBytes>,
+        _private: bool,
+    ) -> Result<(), ProviderError> {
+        Err(unused())
+    }
+
+    fn read_file(
+        &self,
+        _path: &str,
+        _max_bytes: u64,
+    ) -> Result<coqui_acp_api::guatiao::Secret<coqui_acp_api::SecretBytes>, ProviderError> {
+        Err(unused())
+    }
+
+    fn file_info(&self, _path: &str) -> Result<Option<coqui_acp_api::FileInfo>, ProviderError> {
+        Err(unused())
+    }
+
+    fn remove_file(&self, _path: &str) -> Result<(), ProviderError> {
+        Err(unused())
+    }
+}
+
+impl AccountKeeper for Hears {
+    fn renewed(&self, _renewal: coqui_acp_api::AccountRenewal) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn lost(&self, _loss: coqui_acp_api::AccountLoss) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}
+
+fn unused() -> ProviderError {
+    ProviderError::new(
+        coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED,
+        "unused",
+    )
+}
+
+fn model_ids(listing: &ModelListing) -> Vec<&str> {
+    listing
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect()
 }
 
 /// The `check` example, `target/<profile>/examples/check`, built once for the run.

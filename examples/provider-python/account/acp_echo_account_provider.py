@@ -36,6 +36,9 @@ LOGIN_KEYS = {"method", "inputs", "state_dir", "timeout_ms"}
 RENEW_KEYS = {"account"}
 WATCH_KEYS = {"account"}
 USAGE_KEYS = {"account", "environment"}
+MODELS_KEYS = {"account", "environment"}
+HARNESS_LOGIN = "harness-login"
+LOCAL_ACCOUNT = "local"
 GRANT_KEYS = {"id", "kind", "settings", "credentials", "state_dir", "revision", "provides"}
 
 
@@ -124,7 +127,7 @@ def _offer(logins: bool, usage: bool) -> Dict[str, Any]:
                 "remote": False,
             },
         ]
-    return {"kinds": kinds, "logins": methods, "usage": [FILE_KIND] if usage else []}
+    return {"kinds": kinds, "logins": methods, "usage": [FILE_KIND] if usage else [], "local": True}
 
 
 def _is_account_id(text: Any) -> bool:
@@ -142,6 +145,8 @@ def _read_grant(offer: Dict[str, Any], grant: Any, spawner: ProcessSpawner) -> D
     if not _is_account_id(grant.get("id")):
         raise BadValue("an account id is 1 to 128 bytes with no control character")
     kind = grant.get("kind")
+    if kind == HARNESS_LOGIN:
+        return grant
     if kind not in [k["id"] for k in offer["kinds"]]:
         raise BadValue("the echo makes no account of that kind")
     settings = grant.get("settings", {})
@@ -539,7 +544,11 @@ class EchoAccounts(provide.Provider, AccountProvider, display_name="Echo account
         if grant["kind"] not in offer["usage"]:
             return {
                 "supported": False,
-                "unsupported_because": "the echo reports no usage for this kind",
+                "unsupported_because": (
+                    "the echo's own login reports no usage"
+                    if grant["kind"] == HARNESS_LOGIN
+                    else "the echo reports no usage for this kind"
+                ),
                 "sources": [],
                 "account": grant["id"],
                 "revision": 0,
@@ -581,6 +590,22 @@ class EchoAccounts(provide.Provider, AccountProvider, display_name="Echo account
             "observed_at": at,
             "buckets": buckets,
         }
+
+    def models(self, query: Ref, spawner: ProcessSpawner, keeper: AccountKeeper) -> Dict[str, Any]:
+        keeper.destroy()
+        try:
+            asked = query.to_python()
+            if not isinstance(asked, dict) or not set(asked) <= MODELS_KEYS:
+                raise BadValue("the query has a key the echo does not know")
+            offer = _offer(self.logins, self.usage_on)
+            grant = _read_grant(offer, asked.get("account"), spawner)
+        finally:
+            spawner.destroy()
+        # The account's own kind decides: a key reaches the large model, a login does not.
+        models = [{"id": "echo"}]
+        if grant["kind"] == KEY_KIND:
+            models.append({"id": "echo-large"})
+        return {"known": True, "models": models}
 
 
 def _bucket(id: str, **fields: Any) -> Dict[str, Any]:

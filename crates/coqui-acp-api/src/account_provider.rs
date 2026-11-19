@@ -1,6 +1,6 @@
 //! The `account_provider` kind: a provider that owns accounts of its kinds. It signs a person in to
-//! make one, renews its credentials, watches them for a change nobody told the host of, and reports
-//! how much of the account's plan is used.
+//! make one, renews its credentials, watches them for a change nobody told the host of, reports
+//! how much of the account's plan is used, and lists the models the account may use.
 //!
 //! An account provider is not an ACP harness. A harness **accepts** the standards it can start on
 //! ([`AccountCatalog::accepts`]); an account provider **provides** them
@@ -17,6 +17,7 @@ use crate::account::{
     LoginRequest, RenewReport, RenewRequest,
 };
 use crate::environment::Environment;
+use crate::models::ModelListing;
 use crate::spawner::ProcessSpawner;
 use crate::usage::{Bucket, Source, UsageReport};
 
@@ -56,9 +57,18 @@ pub struct AccountOffer {
     #[map(default)]
     pub logins: Vec<LoginMethodInfo>,
     /// The kinds whose accounts report their plan's usage through [`AccountProvider::usage`]: ids
-    /// listed in `kinds`. A kind not here answers `usage` with "not offered".
+    /// listed in `kinds`, or [`HARNESS_LOGIN`](crate::HARNESS_LOGIN) when `local` is true. A kind
+    /// not here answers `usage` with "not offered".
     #[map(default)]
     pub usage: Vec<String>,
+    /// Whether the provider's program has a login of its own that the provider offers as an
+    /// automatic account named [`LOCAL_ACCOUNT`](crate::LOCAL_ACCOUNT), of kind
+    /// [`HARNESS_LOGIN`](crate::HARNESS_LOGIN): the program run on the configuration as it stands,
+    /// nothing applied. A host lists it without anyone adding it, and `usage` and `models` answer
+    /// for a grant of that kind. A provider that offers none refuses such a grant as a kind it
+    /// does not list.
+    #[map(default)]
+    pub local: bool,
 }
 
 impl AccountOffer {
@@ -72,6 +82,21 @@ impl AccountOffer {
     #[must_use]
     pub fn kind(&self, id: &str) -> Option<&AccountKindInfo> {
         self.kinds.iter().find(|kind| kind.id == id)
+    }
+
+    /// The offer of a provider whose program has a login of its own: this offer, with the automatic
+    /// `local` account.
+    #[must_use]
+    pub const fn with_local(mut self) -> Self {
+        self.local = true;
+        self
+    }
+
+    /// Whether `id` is a kind a grant may carry to `usage` and `models`: a listed kind, or the
+    /// login of the program itself when the provider offers it.
+    #[must_use]
+    pub fn takes(&self, id: &str) -> bool {
+        self.kind(id).is_some() || (self.local && id == crate::HARNESS_LOGIN)
     }
 
     /// Whether accounts of kind `id` report usage.
@@ -113,6 +138,38 @@ pub struct AccountUsageQuery {
 }
 
 impl AccountUsageQuery {
+    /// A query for `account`, adding nothing to the provider's configuration.
+    #[must_use]
+    pub fn new(account: AccountGrant) -> Self {
+        Self {
+            account,
+            environment: Secret::default(),
+        }
+    }
+
+    /// The variables for what the provider runs.
+    #[must_use]
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environment = Secret::new(environment);
+        self
+    }
+}
+
+/// What a host asks [`AccountProvider::models`]: refuses a key it does not declare.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq)]
+#[map(crate = ::guatiao, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AccountModelsQuery {
+    /// The account to list for: one of the kinds the provider lists, or, when it offers the
+    /// automatic `local` account, [`HARNESS_LOGIN`](crate::HARNESS_LOGIN), for which nothing is applied.
+    pub account: AccountGrant,
+    /// Variables for what the provider runs to ask, over its configuration's. A provider shows
+    /// none of them in an answer, a refusal, an error or a log.
+    #[map(default)]
+    pub environment: Secret<Environment>,
+}
+
+impl AccountModelsQuery {
     /// A query for `account`, adding nothing to the provider's configuration.
     #[must_use]
     pub fn new(account: AccountGrant) -> Self {
@@ -215,7 +272,7 @@ impl Default for AccountUsage {
 }
 
 /// Owns accounts: the kinds it makes, the sign-in that makes one, the renewal and watching of its
-/// credentials, and the usage of its plan.
+/// credentials, the usage of its plan and the models it may use.
 ///
 /// An account provider does not run an agent. A harness (`acp_harness`) applies an account the
 /// host hands it when the account's `provides` meets what the harness accepts, and never asks how
@@ -307,8 +364,10 @@ pub trait AccountProvider: Send + Sync {
     /// turn: the account's windows, how much of each is used, when each resets and which models it
     /// covers. Cheap, so a host may poll it as often as it likes. A kind the provider lists in
     /// `offers().usage` answers `supported`; any other kind it lists answers "not offered",
-    /// [`AccountUsage::unsupported`], which is a true answer. A kind it does not
-    /// list is `GUATIAO_ERR_BAD_VALUE`, as is an id that is not 1 to 128 bytes without a control
+    /// [`AccountUsage::unsupported`], which is a true answer. The automatic `local` account (kind
+    /// [`HARNESS_LOGIN`](crate::HARNESS_LOGIN), when `offers().local`) is asked of the program on
+    /// the configuration as it stands. A kind it neither lists nor offers as `local` is
+    /// `GUATIAO_ERR_BAD_VALUE`, as is an id that is not 1 to 128 bytes without a control
     /// character.
     ///
     /// **Plan usage only.** The tokens a session or a run spent are not an account's: ACP reports
@@ -323,6 +382,29 @@ pub trait AccountProvider: Send + Sync {
         spawner: Object<dyn ProcessSpawner>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<AccountUsage, ProviderError>;
+
+    /// The models the account behind `query.account` may use, with no model turn and no session:
+    /// what a host shows a person choosing one before a session starts. The listing is the
+    /// account's, so an account of another kind (another login, another key) may list others. A
+    /// provider that cannot list for a kind (the program lists its models only in a session, or
+    /// has no way to) answers [`ModelListing::unknown`] with the reason, which is a true answer,
+    /// and one that tried and could not answers [`ModelListing::unavailable`]; it never guesses.
+    ///
+    /// Takes every kind the provider lists in `offers().kinds`, and [`HARNESS_LOGIN`](crate::HARNESS_LOGIN)
+    /// (the automatic `local` account) when `offers().local`: the program asked as its
+    /// configuration stands, with nothing applied. Any other kind is `GUATIAO_ERR_BAD_VALUE`, as
+    /// is an id that is not 1 to 128 bytes without a control character. Never carries a value of
+    /// the environment or the credentials.
+    ///
+    /// A provider that runs a program to ask runs it through `spawner`, on the account's directory,
+    /// and destroys it; `keeper` is handed over as `watch`'s is, for a login the call sees renewed
+    /// or lost, and is destroyed before the call answers.
+    fn models(
+        &self,
+        query: AccountModelsQuery,
+        spawner: Object<dyn ProcessSpawner>,
+        keeper: Object<dyn AccountKeeper>,
+    ) -> Result<ModelListing, ProviderError>;
 }
 
 /// A watch of one account, from [`AccountProvider::watch`]. Destroying it stops it, as

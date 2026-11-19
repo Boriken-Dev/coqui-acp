@@ -34,13 +34,13 @@ pub use guatiao_channel::{Channel, ChannelSink, ChannelSinkVtable, ChannelVtable
 pub use account::{
     ACCOUNT_ID_MAX, ASK, AUTH, Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeper,
     AccountKeeperVtable, AccountKindInfo, AccountLoss, AccountRef, AccountRenewal, Credentials,
-    DEFAULT_LOGIN_TIMEOUT_MS, EndpointSlot, HARNESS_LOGIN, LoginAnswer, LoginForm, LoginMethodInfo,
-    LoginOutcome, LoginPrompter, LoginPrompterVtable, LoginRequest, MODEL_API, ModelsRequest,
+    DEFAULT_LOGIN_TIMEOUT_MS, EndpointSlot, HARNESS_LOGIN, LOCAL_ACCOUNT, LoginAnswer, LoginForm,
+    LoginMethodInfo, LoginOutcome, LoginPrompter, LoginPrompterVtable, LoginRequest, MODEL_API,
     OPEN_URL, OpenUrl, PASTE_CODE, PROXY, RenewReport, RenewRequest, USER_CODE, is_account_id,
 };
 pub use account_provider::{
-    AccountOffer, AccountProvider, AccountProviderInfo, AccountProviderVtable, AccountUsage,
-    AccountUsageQuery, AccountWatch, AccountWatchVtable, WatchRequest,
+    AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo, AccountProviderVtable,
+    AccountUsage, AccountUsageQuery, AccountWatch, AccountWatchVtable, WatchRequest,
 };
 pub use environment::Environment;
 pub mod standard;
@@ -66,5 +66,5 @@ pub use spawner::{
 pub use usage::{
     Bucket, Coverage, DEFAULT_LIMIT_PHRASES, LIMIT_META_KEY, LimitHit, ModelSpend, Refill, Source,
     Spend, Status, USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit,
-    UsageQuery, UsageReport, UsageSupport, infer_limit,
+    UsageReport, UsageSupport, infer_limit,
 };
