@@ -132,6 +132,13 @@ struct Person {
     /// The ways to keep a typed secret the form offers, and what the frontend was told to keep: field, value, way.
     keeps: Mutex<Vec<Keep>>,
     kept: Mutex<Vec<(String, String, String)>>,
+    /// Whether the person is away from the screen, and the longest the frontend states it waits.
+    away: std::sync::atomic::AtomicBool,
+    longest: Mutex<Option<Duration>>,
+    /// What the frontend was told to wait: one entry per question put with a limit.
+    waited: Mutex<Vec<Duration>>,
+    /// The person lets the limit run out instead of answering.
+    silent: std::sync::atomic::AtomicBool,
 }
 
 struct Keys {
@@ -176,6 +183,10 @@ impl Person {
             held: Mutex::default(),
             keeps: Mutex::default(),
             kept: Mutex::default(),
+            away: std::sync::atomic::AtomicBool::new(false),
+            longest: Mutex::new(None),
+            waited: Mutex::default(),
+            silent: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -250,6 +261,27 @@ impl Frontend for Person {
         };
         self.wire.lock().unwrap().push(reply.to_value().to_string());
         Ok(reply)
+    }
+
+    fn attended(&self) -> bool {
+        !self.away.load(Ordering::SeqCst)
+    }
+
+    fn longest_wait(&self) -> Option<Duration> {
+        *self.longest.lock().unwrap()
+    }
+
+    fn request_within(
+        &self,
+        params: &RequestParams,
+        wait: Duration,
+    ) -> Result<Option<RequestReply>, Error> {
+        self.waited.lock().unwrap().push(wait);
+        if self.silent.load(Ordering::SeqCst) {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            return Ok(None);
+        }
+        self.request(params).map(Some)
     }
 
     fn show_open(&self, open: &ShowOpen) -> Result<ShowOpened, Error> {
@@ -2305,4 +2337,154 @@ fn a_form_answered_without_the_keep_question_is_kept_as_the_form_started() {
             "session".to_owned()
         )]
     );
+}
+
+#[test]
+fn a_request_with_no_one_at_the_screen_is_answered_at_once_and_nothing_is_asked() {
+    let setup = setup("away");
+    setup.person.away.store(true, Ordering::SeqCst);
+    setup
+        .person
+        .will_type(r#"{"user":"ana"}"#, &[("password", PASSWORD)]);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "The deploy needs a login", "schema": schema()}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(result["status"], "no_one_present", "{result}");
+    assert!(
+        result["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("No one is at the screen"))
+    );
+    assert_eq!(
+        setup.person.requests.load(Ordering::SeqCst),
+        0,
+        "nothing was put to the frontend"
+    );
+    assert_eq!(setup.tools.handle_count(), 0);
+    // The person coming back is the only change: the same request is asked.
+    setup.person.away.store(false, Ordering::SeqCst);
+    let (result, _) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "The deploy needs a login", "schema": schema()}),
+    );
+    assert_eq!(result["status"], "accepted", "{result}");
+}
+
+#[test]
+fn what_the_frontend_holds_is_answered_even_when_no_one_is_at_the_screen() {
+    let setup = setup("away_held");
+    setup.person.away.store(true, Ordering::SeqCst);
+    setup
+        .person
+        .held
+        .lock()
+        .unwrap()
+        .insert("token".to_owned(), PASSWORD.to_owned());
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": token_schema()}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(result["status"], "accepted", "{result}");
+    assert_eq!(setup.person.requests.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn the_longest_wait_is_in_the_schema_and_the_agents_wait_is_kept_within_it() {
+    let setup = setup("waits");
+    // No limit stated: the property has no maximum and no wait is put to the frontend.
+    let tools = setup.tools.definitions();
+    let request = tools
+        .iter()
+        .find(|tool| tool.name == "secret_request")
+        .unwrap();
+    assert!(
+        request.input_schema["properties"]["wait_seconds"]
+            .get("maximum")
+            .is_none()
+    );
+    setup
+        .person
+        .will_type(r#"{"user":"ana"}"#, &[("password", PASSWORD)]);
+    let (result, _) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": schema()}),
+    );
+    assert_eq!(result["status"], "accepted");
+    assert!(setup.person.waited.lock().unwrap().is_empty());
+
+    *setup.person.longest.lock().unwrap() = Some(Duration::from_secs(120));
+    let tools = setup.tools.definitions();
+    let request = tools
+        .iter()
+        .find(|tool| tool.name == "secret_request")
+        .unwrap();
+    let property = &request.input_schema["properties"]["wait_seconds"];
+    assert_eq!(property["maximum"], 120, "{property}");
+    assert!(
+        property["description"]
+            .as_str()
+            .unwrap()
+            .contains("at most 120")
+    );
+    for (asked, waited) in [(Some(30), 30), (Some(900), 120), (None, 120)] {
+        setup
+            .person
+            .will_type(r#"{"user":"ana"}"#, &[("password", PASSWORD)]);
+        let mut args = json!({"message": "m", "schema": schema()});
+        if let Some(asked) = asked {
+            args["wait_seconds"] = json!(asked);
+        }
+        let (result, error) = call(&setup.tools, "secret_request", &args);
+        assert!(!error, "{result}");
+        assert_eq!(result["status"], "accepted", "{result}");
+        assert_eq!(
+            setup.person.waited.lock().unwrap().last().copied(),
+            Some(Duration::from_secs(waited))
+        );
+    }
+    for bad in [json!(0), json!(-3), json!(1.5), json!("30")] {
+        let (result, error) = call(
+            &setup.tools,
+            "secret_request",
+            &json!({"message": "m", "schema": schema(), "wait_seconds": bad}),
+        );
+        assert!(error, "{result}");
+    }
+}
+
+#[test]
+fn a_question_nobody_answers_in_time_says_so_and_the_next_one_is_asked_afresh() {
+    let setup = setup("timed_out");
+    *setup.person.longest.lock().unwrap() = Some(Duration::from_secs(60));
+    setup.person.silent.store(true, Ordering::SeqCst);
+    let (result, error) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": schema(), "wait_seconds": 5}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(result["status"], "timed_out", "{result}");
+    assert_eq!(
+        setup.person.waited.lock().unwrap().as_slice(),
+        [Duration::from_secs(5)]
+    );
+    assert_eq!(setup.tools.handle_count(), 0);
+    // The session is free for the next question, which has a new request id.
+    setup.person.silent.store(false, Ordering::SeqCst);
+    setup
+        .person
+        .will_type(r#"{"user":"ana"}"#, &[("password", PASSWORD)]);
+    let (result, _) = call(
+        &setup.tools,
+        "secret_request",
+        &json!({"message": "m", "schema": schema()}),
+    );
+    assert_eq!(result["status"], "accepted", "{result}");
 }

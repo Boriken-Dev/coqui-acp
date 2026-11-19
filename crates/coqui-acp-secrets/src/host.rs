@@ -1,3 +1,4 @@
+use core::time::Duration;
 use std::path::PathBuf;
 
 use zeroize::Zeroizing;
@@ -26,6 +27,35 @@ pub trait Frontend: Send + Sync {
     /// # Errors
     /// [`Error::Frontend`] when the frontend or the link to it fails.
     fn request(&self, params: &RequestParams) -> Result<RequestReply, Error>;
+
+    /// Whether the person can answer now. A request that needs them while this is false is answered at once with the status
+    /// `no_one_present` and nothing is put to the frontend; a request the frontend can answer from what it holds
+    /// ([`Frontend::recall`]) is answered all the same. The default is true.
+    fn attended(&self) -> bool {
+        true
+    }
+
+    /// The longest a request waits for the person, whatever the agent asks for. When it is given, the tool states it in its schema
+    /// (`wait_seconds` has this as its maximum) and a request that names no wait waits this long. The default is none: the
+    /// frontend alone decides how long a request waits.
+    fn longest_wait(&self) -> Option<Duration> {
+        None
+    }
+
+    /// As [`Frontend::request`], but gives up after `wait`: `Ok(None)` when the person had not answered by then, and the question
+    /// is withdrawn from their screen. A frontend that gives a [`Frontend::longest_wait`], or is asked to wait less, overrides this;
+    /// the default ignores `wait` and waits as `request` does.
+    ///
+    /// # Errors
+    /// [`Error::Frontend`] when the frontend or the link to it fails.
+    fn request_within(
+        &self,
+        params: &RequestParams,
+        wait: Duration,
+    ) -> Result<Option<RequestReply>, Error> {
+        let _ = wait;
+        self.request(params).map(Some)
+    }
 
     /// Sends `_coqui_acp/secret_show_open`.
     ///
