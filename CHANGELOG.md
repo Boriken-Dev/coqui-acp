@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `coqui-acp-harness` (feature `antigravity`): a Windows TCP table that claims more rows than its bytes hold is read as far as the bytes go, where it was walked for every row it claimed (a table claiming 4 billion rows spent minutes finding nothing).
 - `coqui_acp_api::is_http_url` is the one check of an `http(s)` address, where seven copies had different rules; one of them, the stdio provider's account settings, refused an address over 2,048 bytes. An address of any length is taken, and `http://a` (the scheme and one character) is taken where it was refused.
 - `coqui-acp-harness` and `coqui-acp-bridge` on Windows: a program that had already ended when it was to join its job object no longer fails the start. The system refuses such a process with "access denied", which showed as `Failed to assign job` now and then under load; it is now nothing to contain and starts as usual, its status readable. Any other refusal names the system's own error.
 

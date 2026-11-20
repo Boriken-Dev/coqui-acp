@@ -11,9 +11,15 @@ command that puts a stdio agent on the network under a proven identity. It build
 | --- | --- |
 | `crates/coqui-acp` | the Rust library |
 | `crates/coqui-acp-bridge` | the bridge command |
+| `crates/coqui-acp-api` | the Guatiao kinds: an agent driver (`acp_harness`), its accounts, usage and the spawner its programs start through |
 | `crates/coqui-acp-claude` | [Claude Code as an ACP agent](docs/harnesses.md), over its stream-json protocol, and a command of the same name |
 | `crates/coqui-acp-codex` | [Codex as an ACP agent](docs/harnesses.md), over its app server, and a command of the same name |
-| `crates/coqui-acp-harness` | what those translators share: process trees, bounded lines, neutral events, and an ACP agent in versions 1 and 2 |
+| `crates/coqui-acp-pi` | [Pi as an ACP agent](docs/harnesses.md), over its RPC mode, and a command of the same name |
+| `crates/coqui-acp-harness` | what those translators share, and Grok, Antigravity and OpenCode as providers over their own ACP: process trees, bounded lines, neutral events, and an ACP agent in versions 1 and 2 |
+| `crates/coqui-acp-history` | one file format for a session's history: write, read, bound, redact, and move it between harnesses |
+| `crates/coqui-acp-hub` | one live session served to any number of attached clients, with no I/O of its own |
+| `crates/coqui-acp-secrets` | the host side of secret prompts: a handle store, the tools that request and use a secret, and the person's approval |
+| `crates/coqui-acp-page` | a person's agents from a Rust page compiled to WebAssembly |
 | `crates/coqui-acp-provider` | [agents as Guatiao providers](docs/provider.md), in any language, and a facade serving one over ACP |
 | `examples/provider-python` | an echo agent written in Python, through that facade |
 | `bindings/dart/coqui_acp` | the Dart client, for browsers and Flutter |

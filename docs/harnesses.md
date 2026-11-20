@@ -7,6 +7,9 @@ Each runs the installed command line over the protocol it already speaks on stan
 | --- | --- | --- | --- |
 | `coqui-acp-claude` | `claude` | stream-json: `-p --input-format stream-json --output-format stream-json` | Claude Code 2.1.318 |
 | `coqui-acp-codex` | `codex app-server` | the app server's JSON-RPC | Codex 0.164.0 and 0.166.0 |
+| `coqui-acp-pi` | `pi --mode rpc` | Pi's RPC mode | Pi 1.5.2 |
+
+Grok (`grok agent stdio`), Antigravity (`agy acp`) and OpenCode (`opencode acp`) speak ACP themselves: `coqui-acp-harness` serves them as providers (`stdio`, `opencode`) with their accounts and, for OpenCode, its sessions.
 
 `coqui-acp-harness` holds what they share: starting the process and ending it with everything it started, reading its lines within
 bounds, events in no protocol's terms, and the ACP agent itself. A version not tested runs, with a warning: a notice in ACP version
@@ -19,7 +22,7 @@ hears that a harness ended mid-session.
 | --- | --- | --- |
 | `cwd` | the process's directory | the thread's `cwd` |
 | `mcpServers` (stdio, HTTP; SSE in version 1 for Claude) | `--mcp-config` | the thread's `mcp_servers` configuration |
-| `systemPrompt`, appended | `--append-system-prompt` | developer instructions |
+| `systemPrompt`, appended | `--append-system-prompt-file`, a private file made for the session, whatever the length | developer instructions |
 | `additionalDirectories` | `--add-dir` | the Agent Skills directory of each one, and writable roots |
 | skills | `_meta.claudeCode.options.plugins` as `--plugin-dir`, skills named `<plugin>:<skill>`, once the host allows client plugins | `additionalDirectories`, as above |
 | model and effort | config options `model` and `effort`, changed between turns | the same |
