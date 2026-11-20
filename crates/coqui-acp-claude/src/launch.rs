@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use coqui_acp_harness::{Access, Launch, McpServer, McpTransport, Target};
+use crate::access::TARGET;
+use coqui_acp_harness::{Access, Launch, McpServer, McpTransport};
 use serde_json::{Map, Value, json};
 
 /// Which session Claude Code opens.
@@ -169,7 +170,7 @@ impl ClaudeLaunch {
         if let Some(mode) = &self.permission_mode {
             return Some(mode.clone());
         }
-        let mode = self.access?.translate(Target::Claude).mode()?;
+        let mode = self.access?.translate(&TARGET).mode()?;
         Some(mode.to_string())
     }
 
@@ -180,7 +181,7 @@ impl ClaudeLaunch {
     /// Code's sandbox has no switch that forbids every write.
     #[must_use]
     pub fn access_settings(&self) -> Option<Value> {
-        let sandbox = self.access?.translate(Target::Claude).json()?;
+        let sandbox = self.access?.translate(&TARGET).json()?;
         Some(json!({ "sandbox": sandbox }))
     }
 

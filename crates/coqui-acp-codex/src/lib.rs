@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod access;
 mod account_provider;
 pub mod account_usage;
 pub mod accounts;

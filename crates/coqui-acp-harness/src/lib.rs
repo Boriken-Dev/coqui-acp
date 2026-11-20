@@ -31,7 +31,18 @@ pub mod spawner;
 #[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
 pub mod stdio;
 pub mod stream;
+#[cfg(feature = "kind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
+pub mod vendors;
 pub mod version;
+
+/// What the macros of this crate name.
+#[cfg(feature = "kind")]
+#[doc(hidden)]
+pub mod __private {
+    pub extern crate alloc;
+    pub use coqui_acp_api as api;
+}
 
 pub use access::{ACCESS_META, Access, Approvals, Part, Sandbox, Target, Translation};
 pub use acp::{

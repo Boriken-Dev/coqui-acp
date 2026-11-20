@@ -21,9 +21,9 @@ use coqui_acp_api::{
     WatchRequest,
 };
 use coqui_acp_harness::LocalSpawner;
-use coqui_acp_harness::stdio::{
-    StdioAccountSettings, StdioAccounts, StdioHarness, StdioProvider, StdioSettings,
-};
+use coqui_acp_harness::stdio::StdioDef;
+use coqui_acp_harness::stdio::{StdioAccountSettings, StdioAccounts, StdioProvider, StdioSettings};
+use coqui_acp_harness::vendors::{antigravity, grok};
 
 /// The credential the contract suite grants, which no argument list or environment may carry.
 const CANARY: &str = "coqui-acp-contract-canary-6b1d";
@@ -115,24 +115,20 @@ fn grok_keeps_every_rule_of_the_kind_for_each_kind() {
 
 #[test]
 fn opencode_keeps_every_rule_of_the_kind_for_each_kind() {
-    for harness in ["opencode", "opencode-own"] {
-        for kind in [
-            "harness-login",
-            "opencode-login",
-            "opencode-api-key",
-            "opencode-provider-key",
-        ] {
-            run_suite("harness", harness, kind, false);
-        }
+    for kind in [
+        "harness-login",
+        "opencode-login",
+        "opencode-api-key",
+        "opencode-provider-key",
+    ] {
+        run_suite("harness", "opencode", kind, false);
     }
 }
 
 #[test]
 fn opencode_accounts_keep_every_rule_of_the_account_kind_for_each_kind_and_login() {
-    for harness in ["opencode", "opencode-own"] {
-        for kind in ["opencode-login", "opencode-provider-key"] {
-            run_suite("accounts", harness, kind, true);
-        }
+    for kind in ["opencode-login", "opencode-provider-key"] {
+        run_suite("accounts", "opencode", kind, true);
     }
 }
 
@@ -159,17 +155,11 @@ fn the_suite_inside() {
     registry
         .load_file(&library())
         .expect("the library loads once cargo built it");
-    // `opencode-own` is OpenCode through the provider that has the harness fixed, under its own ids.
-    let own = harness == "opencode-own";
-    let (harness_id, accounts_id) = if own {
-        ("opencode", "opencode_accounts")
-    } else {
-        ("stdio", "stdio_accounts")
-    };
+    // Each harness is a provider of its own, and its accounts another, under ids made of its name.
+    let harness_id = harness.as_str();
+    let accounts_id = format!("{harness}_accounts");
+    let accounts_id = accounts_id.as_str();
     let mut settings = Map::new();
-    if !own {
-        settings.set("harness", Value::from(harness.as_str()));
-    }
     settings.set("executable", Value::from(fake().as_str()));
     let outcome = if side == "accounts" {
         settings.set("renew_poll_ms", 100);
@@ -201,16 +191,13 @@ fn the_suite_inside() {
             .expect("a link");
         assert_eq!(linked.provider, accounts_id);
         assert!(linked.shared_settings.iter().any(|key| key == "executable"));
-        assert_eq!(
-            linked.shared_settings.contains(&"harness".to_string()),
-            !own
-        );
+        assert_eq!(linked.shared_settings, ["executable"]);
         let outcome = Contract::new(format!("stdio {harness} {kind}"))
             .program_agent(true)
             .imports(false)
             // OpenCode writes a session into the store its environment names (the home's data folder, for the stand-in),
             // which the stand-in cannot hold a session of the protocol's making in; the others seed none.
-            .imports_into_a_store(own || harness == "opencode")
+            .imports_into_a_store(harness == "opencode")
             .holds(Vec::new())
             .account(kind)
             .run(&provider);
@@ -234,10 +221,10 @@ impl ChannelSink for Sink {
     fn closed(&mut self, _status: u32, _reason: &str) {}
 }
 
-fn provider(harness: StdioHarness) -> StdioProvider {
-    let mut settings = StdioSettings::new(harness);
+fn provider(def: &'static StdioDef) -> StdioProvider {
+    let mut settings = StdioSettings::new();
     settings.executable = Some(fake());
-    StdioProvider::new(settings)
+    StdioProvider::new(def, settings)
 }
 
 /// Starts a connection, initializes it and closes it, so that the stand-in has logged its start.
@@ -301,7 +288,7 @@ fn a_key_account_clears_the_other_credentials_and_sets_its_own() {
         .environment(environment)
         .account(grant)
         .build();
-    start_and_close(&provider(StdioHarness::Grok), request, &dir);
+    start_and_close(&provider(&grok::STDIO), request, &dir);
     let entries = logged(&log);
     let entry = entries.last().expect("a start");
     let names = names_of(entry);
@@ -353,7 +340,7 @@ fn an_account_removes_the_endpoint_variables_of_the_host_and_sets_its_own() {
         .environment(environment)
         .account(grant)
         .build();
-    start_and_close(&provider(StdioHarness::Grok), request, &dir);
+    start_and_close(&provider(&grok::STDIO), request, &dir);
     let entries = logged(&log);
     let entry = entries.last().expect("a start");
     assert_eq!(
@@ -409,7 +396,7 @@ fn inherited_inside() {
         .credentials(Credentials::from_iter([("api_key", "grok-key-value-3f9a")]))
         .state_dir(dir.to_str().expect("text"));
     start_and_close(
-        &provider(StdioHarness::Grok),
+        &provider(&grok::STDIO),
         StartRequest::builder().account(grok).build(),
         &dir,
     );
@@ -422,11 +409,11 @@ fn inherited_inside() {
     );
 }
 
-fn accounts_of(harness: StdioHarness) -> StdioAccounts {
-    let mut settings = StdioAccountSettings::new(harness);
+fn accounts_of(def: &'static StdioDef) -> StdioAccounts {
+    let mut settings = StdioAccountSettings::new();
     settings.executable = Some(fake());
     settings.renew_poll_ms = 50;
-    StdioAccounts::new(settings)
+    StdioAccounts::new(def, settings)
 }
 
 /// A renewal that leaves the login of another account in the file is refused and undone; one that keeps the account is
@@ -448,7 +435,7 @@ fn a_renewal_that_changes_whose_login_it_is_is_refused() {
         let grant = AccountGrant::new("an-account", "grok-login")
             .credentials(Credentials::from_iter([("auth_json", mine)]))
             .state_dir(dir.to_str().expect("text"));
-        let answer = accounts_of(StdioHarness::Grok).renew(
+        let answer = accounts_of(&grok::STDIO).renew(
             coqui_acp_api::RenewRequest::new(grant),
             LocalSpawner::new().files(&dir).into_object(),
         );
@@ -494,7 +481,7 @@ fn a_half_written_login_is_never_reported_as_a_renewal() {
     let grant = AccountGrant::new("an-account", "grok-login")
         .credentials(Credentials::from_iter([("auth_json", whole)]))
         .state_dir(dir.to_str().expect("text"));
-    let watch = accounts_of(StdioHarness::Grok)
+    let watch = accounts_of(&grok::STDIO)
         .watch(
             WatchRequest::new(grant),
             LocalSpawner::new().files(&dir).into_object(),
@@ -541,7 +528,7 @@ impl LoginPrompter for NoPrompter {
 /// The harness lists no way to sign in and renews nothing: its account provider does both.
 #[test]
 fn the_harness_lists_no_login_and_no_renewal() {
-    let provider = provider(StdioHarness::Grok);
+    let provider = provider(&grok::STDIO);
     let catalog = provider.accounts().expect("listed");
     assert!(catalog.logins.is_empty());
     assert!(catalog.kinds.iter().all(|kind| !kind.renews));
@@ -549,7 +536,7 @@ fn the_harness_lists_no_login_and_no_renewal() {
 
 #[test]
 fn antigravity_has_no_account_to_keep_and_says_why_it_signs_no_one_in() {
-    let accounts = accounts_of(StdioHarness::Antigravity);
+    let accounts = accounts_of(&antigravity::STDIO);
     let offer = accounts.offers().expect("offers");
     assert!(offer.kinds.is_empty() && offer.logins.is_empty());
     let dir = scratch("agy");
@@ -572,7 +559,7 @@ fn antigravity_has_no_account_to_keep_and_says_why_it_signs_no_one_in() {
 #[test]
 fn what_is_applied_is_held_as_a_secret() {
     use coqui_acp_api::guatiao::Secret;
-    use coqui_acp_harness::stdio::accounts::{apply, grok};
+    use coqui_acp_harness::stdio::accounts::apply;
     let grant = AccountGrant::new("a-key", "xai-api-key")
         .credentials(Credentials::from_iter([("api_key", "grok-key-value-3f9a")]))
         .state_dir("/some/dir");

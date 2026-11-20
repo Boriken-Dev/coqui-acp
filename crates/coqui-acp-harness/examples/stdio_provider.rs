@@ -7,7 +7,9 @@
 )]
 
 use coqui_acp_api::guatiao::{self, Status};
-use coqui_acp_harness::stdio::{OpenCodeAccounts, OpenCodeProvider, StdioAccounts, StdioProvider};
+use coqui_acp_harness::vendors::antigravity::{AntigravityAccounts, AntigravityProvider};
+use coqui_acp_harness::vendors::grok::{GrokAccounts, GrokProvider};
+use coqui_acp_harness::vendors::opencode::{OpenCodeAccounts, OpenCodeProvider};
 
 // The library's say in being unloaded: busy while a thread of its connections still runs.
 extern "C" fn unload() -> Status {
@@ -18,8 +20,10 @@ guatiao::providers!(
     id = "coqui_acp_harness_stdio",
     version = env!("CARGO_PKG_VERSION"),
     providers = [
-        StdioProvider,
-        StdioAccounts,
+        GrokProvider,
+        GrokAccounts,
+        AntigravityProvider,
+        AntigravityAccounts,
         OpenCodeProvider,
         OpenCodeAccounts
     ],

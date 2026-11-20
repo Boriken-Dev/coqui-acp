@@ -19,9 +19,10 @@ use coqui_acp_api::{
     SessionImport, StartRequest,
 };
 use coqui_acp_harness::LocalSpawner;
-use coqui_acp_harness::stdio::{
-    OpenCodeAccountSettings, OpenCodeAccounts, OpenCodeProvider, OpenCodeSettings, StdioHarness,
-    StdioProvider, StdioSettings,
+use coqui_acp_harness::stdio::{StdioProvider, StdioSettings};
+use coqui_acp_harness::vendors::opencode::accounts::STDIO;
+use coqui_acp_harness::vendors::opencode::{
+    OpenCodeAccountSettings, OpenCodeAccounts, OpenCodeProvider, OpenCodeSettings,
 };
 use coqui_acp_history::{Body, Document};
 use serde_json::json;
@@ -618,13 +619,15 @@ fn the_account_provider_offers_the_sign_in_and_the_key_it_makes() {
     );
 }
 
-/// The one provider and the generic one are the same harness.
+/// The provider is the generic one over OpenCode's table.
 #[test]
-fn opencode_is_the_stdio_provider_with_the_harness_fixed() {
+fn opencode_is_the_stdio_provider_over_its_table() {
     let own = provider().describe().expect("described");
-    let mut settings = StdioSettings::new(StdioHarness::OpenCode);
+    let mut settings = StdioSettings::new();
     settings.executable = Some(fake());
-    let generic = StdioProvider::new(settings).describe().expect("described");
+    let generic = StdioProvider::new(&STDIO, settings)
+        .describe()
+        .expect("described");
     assert_eq!(own.title, generic.title);
     assert_eq!(own.title, "OpenCode");
     assert_eq!(

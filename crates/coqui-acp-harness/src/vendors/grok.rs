@@ -20,12 +20,16 @@ use serde_json::json;
 
 use coqui_acp_api::standard;
 
-use super::{AcceptDef, Credential, Endpoint, HarnessDef, KindDef, Setting, SlotDef};
+use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
 use crate::cli::address_in;
 use crate::login::reason;
 use crate::process::{Exit, Launch};
 use crate::provider::schema;
+use crate::stdio::accounts::{
+    AcceptDef, Credential, Endpoint, HarnessDef, KindDef, Setting, SlotDef,
+};
 use crate::stdio::login::{self, Ctx};
+use crate::stdio::{StdioAccountSettings, StdioDef, StdioSettings};
 
 /// The kind of a login made by `grok login`, kept in `auth.json`.
 pub const LOGIN: &str = "grok-login";
@@ -261,8 +265,72 @@ pub static DEF: HarnessDef = HarnessDef {
     variables: VARIABLES,
     // `grok models` renews a login within `GROK_AUTH_EARLY_INVALIDATION_SECS` (300) of its end.
     renew_args: Some(&["models"]),
+
     login_unsupported: "",
 };
+
+/// How the stdio provider runs it.
+pub static STDIO: StdioDef = StdioDef {
+    accounts: &DEF,
+    accounts_description: "Signs in to Grok, renews and watches its logins, and says its accounts report no plan usage.",
+    logins,
+    sign_in: Some(sign_in),
+    session_ids: None,
+    import: None,
+    export: None,
+    import_unsupported: "this provider does not seed a session in an agent it does not keep the sessions of; set replay_max_bytes to replay the history as context in the first prompt",
+    export_unsupported: "this provider does not read a session out of an agent it does not keep the sessions of",
+};
+
+crate::stdio_vendor! {
+    /// Grok, as a provider of `acp_harness` under the id `grok`: `grok agent stdio`.
+    harness: GrokProvider, id: "grok",
+    /// Grok's accounts, as a provider of `account_provider` under the id `grok_accounts`.
+    accounts: GrokAccounts, id: "grok_accounts",
+    def: STDIO,
+    settings: StdioSettings, account_settings: StdioAccountSettings,
+}
+
+/// Grok's access settings in its words, under the AOS harness id `grok`.
+pub const TARGET: Target = Target::new("grok", translate);
+
+const fn translate(access: Access) -> Translation {
+    let sandbox = match access.sandbox {
+        Sandbox::Workspace => Part::env(
+            &[("GROK_SANDBOX", "workspace")],
+            "Grok's sandbox profile workspace (GROK_SANDBOX)",
+        ),
+        Sandbox::ReadOnly => Part::env(
+            &[("GROK_SANDBOX", "read-only")],
+            "Grok's sandbox profile read-only (GROK_SANDBOX)",
+        ),
+        _ => Part::env(
+            &[("GROK_SANDBOX", "off")],
+            "Grok's sandbox profile off (GROK_SANDBOX)",
+        ),
+    };
+    let network = match (access.network, access.sandbox) {
+        (true, Sandbox::ReadOnly) => Part::cannot(
+            "Grok's read-only profile blocks its commands' network, on Linux by its documentation",
+        ),
+        (true, _) => Part::said("the profile's own: its commands may use the network"),
+        (false, Sandbox::ReadOnly) => Part::said(
+            "Grok's read-only profile blocks its commands' network, on Linux by its documentation",
+        ),
+        (false, _) => Part::cannot(
+            "Grok's built-in sandbox profiles have no network switch: a custom profile's restrict_network has",
+        ),
+    };
+    let approvals = match access.approvals {
+        Approvals::Never => Part::json(
+            r#"{"yoloMode":true}"#,
+            "Grok's always-approve for the session (_meta yoloMode)",
+        ),
+        Approvals::Edits => Part::cannot("Grok's agent mode has no accept-edits setting"),
+        _ => Part::said("Grok asks before it runs a tool, as it does by default"),
+    };
+    Translation::new(sandbox, network, approvals)
+}
 
 /// The ways to sign in.
 ///
@@ -458,4 +526,157 @@ pub fn sign_in(
             _ => api_key(ctx, &program, &dir),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stdio::accounts::{apply, catalog};
+    use coqui_acp_api::standard;
+    use coqui_acp_api::{AccountGrant, Credentials, HARNESS_LOGIN};
+
+    const CANARY: &str = "sk-canary-3b7c";
+
+    fn foreign(standards: &[&str], key: &str) -> AccountGrant {
+        AccountGrant::new("a", "someone-elses-kind")
+            .provides(standards.iter().copied())
+            .credentials(Credentials::from_iter([(key, CANARY)]))
+            .state_dir("/some/dir")
+    }
+
+    fn names(applied: &crate::stdio::accounts::Applied) -> Vec<String> {
+        applied
+            .environment
+            .expose()
+            .names()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_table_is_well_formed() {
+        assert_eq!(TARGET.well_formed(), Ok(()));
+    }
+
+    #[test]
+    fn the_standard_access_turns_the_sandbox_off_and_adds_no_metadata() {
+        let standard = Access::STANDARD.translate(&TARGET);
+        assert_eq!(standard.env(), vec![("GROK_SANDBOX", "off")]);
+        assert_eq!(standard.json(), None);
+    }
+
+    #[test]
+    fn the_sandbox_is_a_variable_and_never_approvals_are_session_metadata() {
+        let mut access = Access::STANDARD;
+        access.sandbox = Sandbox::Workspace;
+        access.approvals = Approvals::Never;
+        let grok = access.translate(&TARGET);
+        assert_eq!(grok.env(), vec![("GROK_SANDBOX", "workspace")]);
+        assert_eq!(
+            grok.json().and_then(|json| json.get("yoloMode").cloned()),
+            Some(serde_json::Value::Bool(true))
+        );
+        assert!(grok.args().is_empty());
+    }
+
+    #[test]
+    fn what_is_applied_shows_names_and_no_value() {
+        let grant = AccountGrant::new("a", "xai-api-key")
+            .credentials(Credentials::from_iter([("api_key", "secret-value-1f3a")]))
+            .state_dir("/some/dir");
+        let applied = apply(&DEF, &grant).expect("it applies").expect("a kind");
+        let shown = alloc::format!("{applied:?}");
+        assert!(shown.contains("XAI_API_KEY"), "{shown}");
+        assert!(!shown.contains("secret-value-1f3a"), "{shown}");
+    }
+
+    #[test]
+    fn grok_lists_what_it_provides_and_accepts() {
+        let catalog = catalog(&DEF);
+        assert_eq!(
+            catalog.kind(LOGIN).expect("login").provides,
+            [standard::GROK]
+        );
+        assert_eq!(
+            catalog.kind(API_KEY).expect("key").provides,
+            [standard::XAI_API]
+        );
+        assert_eq!(
+            catalog.kind(HARNESS_LOGIN).expect("own").provides,
+            [standard::GROK]
+        );
+        let accepted: Vec<&str> = catalog
+            .accepts
+            .iter()
+            .map(|a| a.standard.as_str())
+            .collect();
+        assert_eq!(accepted, [standard::GROK, standard::XAI_API]);
+    }
+
+    #[test]
+    fn an_xai_api_key_from_elsewhere_is_applied_with_its_endpoint_in_a_directory_of_groks() {
+        let grant = foreign(&[standard::XAI_API], "api_key").settings(crate::provider::schema(
+            &json!({"base_url": "https://gateway.example/v1"}),
+        ));
+        let applied = apply(&DEF, &grant).expect("accepted").expect("a kind");
+        let seen = names(&applied);
+        for variable in ["XAI_API_KEY", "GROK_XAI_API_BASE_URL", "GROK_HOME"] {
+            assert!(
+                seen.contains(&variable.to_string()),
+                "{variable} in {seen:?}"
+            );
+        }
+        assert!(!alloc::format!("{applied:?}").contains(CANARY));
+    }
+
+    #[test]
+    fn a_grok_login_from_elsewhere_is_the_file_it_watches() {
+        let applied = apply(&DEF, &foreign(&[standard::GROK], "auth_json"))
+            .expect("accepted")
+            .expect("a kind");
+        assert_eq!(applied.watched.expect("watched").path, "auth.json");
+    }
+
+    #[test]
+    fn what_grok_does_not_accept_is_refused_with_its_list() {
+        for standards in [&[standard::ANTHROPIC_API][..], &[][..]] {
+            let grant = foreign(standards, "api_key");
+            let Err(error) = apply(&DEF, &grant) else {
+                panic!("{standards:?} was taken");
+            };
+            let said = error.message();
+            assert!(said.contains("grok, xai-api"), "{said}");
+            assert!(!said.contains(CANARY), "{said}");
+            assert!(crate::stdio::accounts::known(&DEF, &grant.reference()).is_err());
+        }
+        // The right standard with a credential or an endpoint the slot does not take.
+        assert!(apply(&DEF, &foreign(&[standard::XAI_API], "token")).is_err());
+        assert!(
+            apply(
+                &DEF,
+                &foreign(&[standard::GROK], "auth_json").settings(crate::provider::schema(
+                    &json!({"base_url": "https://x.example"})
+                ))
+            )
+            .is_err()
+        );
+    }
+
+    /// An address setting is any length an address can be: a gateway's path or query is the person's own.
+    #[test]
+    fn an_address_setting_has_no_length_ceiling() {
+        let long = format!("https://gateway.example/{}", "a".repeat(5000));
+        let grant = AccountGrant::new("a", API_KEY)
+            .settings(crate::provider::schema(&json!({"proxy_base_url": long})))
+            .credentials(Credentials::from_iter([("api_key", CANARY)]))
+            .state_dir("/some/dir");
+        assert!(apply(&DEF, &grant).is_ok());
+        let bad = AccountGrant::new("a", API_KEY)
+            .settings(crate::provider::schema(
+                &json!({"proxy_base_url": "gateway.example"}),
+            ))
+            .credentials(Credentials::from_iter([("api_key", CANARY)]))
+            .state_dir("/some/dir");
+        assert!(apply(&DEF, &bad).is_err());
+    }
 }

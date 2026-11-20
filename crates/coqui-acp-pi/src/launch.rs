@@ -8,8 +8,9 @@ use core::fmt;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use crate::access::TARGET;
 use coqui_acp_harness::acp::within_roots;
-use coqui_acp_harness::{Access, Launch, Mode, Target};
+use coqui_acp_harness::{Access, Launch, Mode};
 
 use crate::{Error, paths};
 
@@ -287,7 +288,7 @@ impl PiLaunch {
     pub fn start_mode(&self) -> Mode {
         self.mode.unwrap_or_else(|| {
             self.access
-                .and_then(|access| access.translate(Target::Pi).mode())
+                .and_then(|access| access.translate(&TARGET).mode())
                 .and_then(Mode::from_id)
                 .unwrap_or(Mode::Manual)
         })

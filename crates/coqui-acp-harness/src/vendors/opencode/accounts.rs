@@ -25,11 +25,16 @@ use serde_json::json;
 
 use coqui_acp_api::standard;
 
-use super::{AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef, check_variable_name};
+use super::provider::{export_session, import_session};
+use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
 use crate::login::reason;
 use crate::process::Launch;
 use crate::provider::schema;
+use crate::stdio::accounts::{
+    AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef, check_variable_name,
+};
 use crate::stdio::login::{self, Ctx};
+use crate::stdio::{SessionIds, StdioDef};
 
 /// The kind of a sign-in kept in `auth.json`.
 pub const LOGIN: &str = "opencode-login";
@@ -240,7 +245,24 @@ pub static DEF: HarnessDef = HarnessDef {
     ],
     variables: VARIABLES,
     renew_args: None,
+
     login_unsupported: "OpenCode is signed in with the `provider-key`, `provider-code` and `api-key` methods; its own sign-in that returns the browser to a port on the machine it runs on is not offered",
+};
+
+/// How the stdio provider runs it.
+pub static STDIO: StdioDef = StdioDef {
+    accounts: &DEF,
+    accounts_description: "Makes an OpenCode account from a provider's key, watches the sign-in OpenCode keeps in `auth.json`, and says its accounts report no plan usage.",
+    logins,
+    sign_in: Some(sign_in),
+    session_ids: Some(SessionIds {
+        native: super::history::native_id_of,
+        host: super::history::host_id_of,
+    }),
+    import: Some(import_session),
+    export: Some(export_session),
+    import_unsupported: "this provider does not seed a session in an agent it does not keep the sessions of; set replay_max_bytes to replay the history as context in the first prompt",
+    export_unsupported: "this provider does not read a session out of an agent it does not keep the sessions of",
 };
 
 /// The ways to sign in: OpenCode's own `auth login` for a provider, which asks for a key (`provider-key`) or shows a code to
@@ -596,9 +618,100 @@ pub fn sign_in(
     }
 }
 
+/// OpenCode's access settings in its words, under the AOS harness id `opencode`.
+pub const TARGET: Target = Target::new("opencode", translate);
+
+/// OpenCode's `OPENCODE_PERMISSION`, a JSON object of tool -> `allow`, `ask` or `deny` it reads when it starts. A tool set to
+/// `deny` is not offered to the model at all.
+const fn translate(access: Access) -> Translation {
+    let sandbox = match access.sandbox {
+        Sandbox::Unrestricted => Part::said("OpenCode has no sandbox"),
+        Sandbox::ReadOnly => Part::env(
+            &[("OPENCODE_PERMISSION", r#"{"edit":"deny"}"#)],
+            "OpenCode's edit permission set to deny (OPENCODE_PERMISSION), which takes its edit and write tools away; its commands are not restricted",
+        ),
+        _ => Part::cannot(
+            "OpenCode has no sandbox: its external_directory rule asks about paths outside the session's directory unless approvals are never",
+        ),
+    };
+    let network = if access.network {
+        Part::said("OpenCode has no network setting; it is on")
+    } else {
+        Part::cannot("OpenCode has no network setting")
+    };
+    let approvals = match (access.sandbox, access.approvals) {
+        (Sandbox::ReadOnly, _) => {
+            Part::cannot("a read-only sandbox denies every edit, so nothing is asked about one")
+        }
+        (_, Approvals::Edits) => Part::env(
+            &[("OPENCODE_PERMISSION", r#"{"edit":"allow","bash":"ask"}"#)],
+            "OpenCode's edit permission allow and bash permission ask (OPENCODE_PERMISSION)",
+        ),
+        (_, Approvals::Never) => Part::env(
+            &[(
+                "OPENCODE_PERMISSION",
+                r#"{"edit":"allow","bash":"allow","read":"allow","external_directory":"allow","doom_loop":"allow"}"#,
+            )],
+            "OpenCode's permissions all allow, none asks (OPENCODE_PERMISSION)",
+        ),
+        _ => Part::env(
+            &[("OPENCODE_PERMISSION", r#"{"edit":"ask","bash":"ask"}"#)],
+            "OpenCode's edit and bash permissions ask (OPENCODE_PERMISSION)",
+        ),
+    };
+    Translation::new(sandbox, network, approvals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_access_table_is_well_formed() {
+        assert_eq!(TARGET.well_formed(), Ok(()));
+    }
+
+    #[test]
+    fn the_standard_access_asks_about_edits_and_commands() {
+        assert_eq!(
+            Access::STANDARD.translate(&TARGET).env(),
+            vec![("OPENCODE_PERMISSION", r#"{"edit":"ask","bash":"ask"}"#)]
+        );
+    }
+
+    #[test]
+    fn permissions_are_one_variable() {
+        let permission = |sandbox, approvals| {
+            let mut access = Access::STANDARD;
+            access.sandbox = sandbox;
+            access.approvals = approvals;
+            let translation = access.translate(&TARGET);
+            let env = translation.env();
+            assert_eq!(env.len(), 1, "{access:?}: {env:?}");
+            assert_eq!(env[0].0, "OPENCODE_PERMISSION");
+            serde_json::from_str::<serde_json::Value>(env[0].1).expect("a JSON object")
+        };
+        assert_eq!(
+            permission(Sandbox::Workspace, Approvals::Edits),
+            serde_json::json!({"edit": "allow", "bash": "ask"})
+        );
+        assert_eq!(
+            permission(Sandbox::Unrestricted, Approvals::Never)["external_directory"],
+            "allow"
+        );
+        // A read-only sandbox denies edits whatever the approvals are, and says nothing else about them.
+        for approvals in [Approvals::Ask, Approvals::Edits, Approvals::Never] {
+            assert_eq!(
+                permission(Sandbox::ReadOnly, approvals),
+                serde_json::json!({"edit": "deny"})
+            );
+        }
+        let mut access = Access::STANDARD;
+        access.sandbox = Sandbox::ReadOnly;
+        assert!(!access.translate(&TARGET).approvals.applies());
+        assert_eq!(access.translate(&TARGET).mode(), None);
+    }
+
     use crate::stdio::accounts::{apply, catalog};
     use coqui_acp_api::AccountGrant;
 

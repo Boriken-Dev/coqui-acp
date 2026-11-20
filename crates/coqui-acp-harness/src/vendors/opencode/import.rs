@@ -25,7 +25,7 @@ use coqui_acp_history::{
 };
 use serde_json::{Map, Value, json};
 
-use super::opencode_history::{HARNESS, native_id_of};
+use super::history::{HARNESS, native_id_of};
 use crate::event::context_block;
 
 /// A loss the tool table has no name for: content the target cannot take at all.

@@ -16,10 +16,7 @@ use serde_json::{Map, Value, json};
 
 use crate::provider::{credential, schema};
 
-pub mod antigravity;
-pub mod grok;
 mod keeping;
-pub mod opencode;
 
 pub use keeping::Keeping;
 
@@ -578,8 +575,8 @@ pub fn login_usable(text: &str) -> bool {
     !text.starts_with(['{', '[']) || serde_json::from_str::<Value>(text).is_ok()
 }
 
-/// The names under which a login file may say whose login it is. Not measured: no signed-in Grok file was seen, so these
-/// are the usual ones, and a file with none is not checked.
+/// The names under which a login file may say whose login it is. Not measured for every harness, so these are the
+/// usual ones, and a file with none is not checked.
 const IDENTITY_KEYS: [&str; 4] = ["account_id", "user_id", "sub", "email"];
 
 /// Whose login the file's text says it is, when it says: the first of `account_id`, `user_id`, `sub` or `email` in the object or in an object one
@@ -626,155 +623,7 @@ mod tests {
 
     #[test]
     fn names_compare_by_the_systems_rules() {
-        assert!(same_name("GROK_HOME", "GROK_HOME"));
-        assert_eq!(same_name("GROK_HOME", "grok_home"), cfg!(windows));
-    }
-
-    #[test]
-    fn what_is_applied_shows_names_and_no_value() {
-        let grant = AccountGrant::new("a", "xai-api-key")
-            .credentials(coqui_acp_api::Credentials::from_iter([(
-                "api_key",
-                "secret-value-1f3a",
-            )]))
-            .state_dir("/some/dir");
-        let applied = apply(&grok::DEF, &grant)
-            .expect("it applies")
-            .expect("a kind");
-        let shown = alloc::format!("{applied:?}");
-        assert!(shown.contains("XAI_API_KEY"), "{shown}");
-        assert!(!shown.contains("secret-value-1f3a"), "{shown}");
-    }
-}
-
-#[cfg(test)]
-mod standards_tests {
-    use super::*;
-    use coqui_acp_api::Credentials;
-    use coqui_acp_api::standard;
-
-    const CANARY: &str = "sk-canary-3b7c";
-
-    fn foreign(standards: &[&str], key: &str) -> AccountGrant {
-        AccountGrant::new("a", "someone-elses-kind")
-            .provides(standards.iter().copied())
-            .credentials(Credentials::from_iter([(key, CANARY)]))
-            .state_dir("/some/dir")
-    }
-
-    fn names(applied: &Applied) -> Vec<String> {
-        applied
-            .environment
-            .expose()
-            .names()
-            .map(ToString::to_string)
-            .collect()
-    }
-
-    #[test]
-    fn grok_lists_what_it_provides_and_accepts() {
-        let catalog = catalog(&grok::DEF);
-        assert_eq!(
-            catalog.kind(grok::LOGIN).expect("login").provides,
-            [standard::GROK]
-        );
-        assert_eq!(
-            catalog.kind(grok::API_KEY).expect("key").provides,
-            [standard::XAI_API]
-        );
-        assert_eq!(
-            catalog.kind(HARNESS_LOGIN).expect("own").provides,
-            [standard::GROK]
-        );
-        let accepted: Vec<&str> = catalog
-            .accepts
-            .iter()
-            .map(|a| a.standard.as_str())
-            .collect();
-        assert_eq!(accepted, [standard::GROK, standard::XAI_API]);
-    }
-
-    #[test]
-    fn an_xai_api_key_from_elsewhere_is_applied_with_its_endpoint_in_a_directory_of_groks() {
-        let grant = foreign(&[standard::XAI_API], "api_key").settings(crate::provider::schema(
-            &json!({"base_url": "https://gateway.example/v1"}),
-        ));
-        let applied = apply(&grok::DEF, &grant)
-            .expect("accepted")
-            .expect("a kind");
-        let seen = names(&applied);
-        for variable in ["XAI_API_KEY", "GROK_XAI_API_BASE_URL", "GROK_HOME"] {
-            assert!(
-                seen.contains(&variable.to_string()),
-                "{variable} in {seen:?}"
-            );
-        }
-        assert!(!alloc::format!("{applied:?}").contains(CANARY));
-    }
-
-    #[test]
-    fn a_grok_login_from_elsewhere_is_the_file_it_watches() {
-        let applied = apply(&grok::DEF, &foreign(&[standard::GROK], "auth_json"))
-            .expect("accepted")
-            .expect("a kind");
-        assert_eq!(applied.watched.expect("watched").path, "auth.json");
-    }
-
-    #[test]
-    fn what_a_harness_does_not_accept_is_refused_with_both_lists() {
-        for (def, standards, accepts) in [
-            (&grok::DEF, &[standard::ANTHROPIC_API][..], "grok, xai-api"),
-            (&grok::DEF, &[][..], "grok, xai-api"),
-            (&antigravity::DEF, &[standard::XAI_API][..], "none"),
-        ] {
-            let grant = foreign(standards, "api_key");
-            let Err(error) = apply(def, &grant) else {
-                panic!("{standards:?} was taken");
-            };
-            let said = error.message();
-            assert!(said.contains(accepts), "{said}");
-            assert!(!said.contains(CANARY), "{said}");
-            assert!(known(def, &grant.reference()).is_err());
-        }
-        // The right standard with a credential or an endpoint the slot does not take.
-        assert!(apply(&grok::DEF, &foreign(&[standard::XAI_API], "token")).is_err());
-        assert!(
-            apply(
-                &grok::DEF,
-                &foreign(&[standard::GROK], "auth_json").settings(crate::provider::schema(
-                    &json!({"base_url": "https://x.example"})
-                ))
-            )
-            .is_err()
-        );
-    }
-
-    /// An address setting is any length an address can be: a gateway's path or query is the person's own.
-    #[test]
-    fn an_address_setting_has_no_length_ceiling() {
-        let long = format!("https://gateway.example/{}", "a".repeat(5000));
-        let grant = AccountGrant::new("a", grok::API_KEY)
-            .settings(crate::provider::schema(&json!({"proxy_base_url": long})))
-            .credentials(Credentials::from_iter([("api_key", CANARY)]))
-            .state_dir("/some/dir");
-        assert!(apply(&grok::DEF, &grant).is_ok());
-        let bad = AccountGrant::new("a", grok::API_KEY)
-            .settings(crate::provider::schema(
-                &json!({"proxy_base_url": "gateway.example"}),
-            ))
-            .credentials(Credentials::from_iter([("api_key", CANARY)]))
-            .state_dir("/some/dir");
-        assert!(apply(&grok::DEF, &bad).is_err());
-    }
-
-    #[test]
-    fn antigravitys_own_login_provides_its_standard_and_nothing_else_is_taken() {
-        let catalog = catalog(&antigravity::DEF);
-        assert_eq!(catalog.kinds.len(), 1);
-        assert_eq!(
-            catalog.kind(HARNESS_LOGIN).expect("own").provides,
-            [standard::ANTIGRAVITY]
-        );
-        assert!(catalog.accepts.is_empty());
+        assert!(same_name("EXAMPLE_HOME", "EXAMPLE_HOME"));
+        assert_eq!(same_name("EXAMPLE_HOME", "example_home"), cfg!(windows));
     }
 }

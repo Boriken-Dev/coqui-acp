@@ -17,7 +17,8 @@ use coqui_acp_api::{
     SessionImport, StartRequest,
 };
 use coqui_acp_harness::LocalSpawner;
-use coqui_acp_harness::stdio::{StdioHarness, StdioProvider, StdioSettings};
+use coqui_acp_harness::stdio::{StdioProvider, StdioSettings};
+use coqui_acp_harness::vendors::{antigravity, grok};
 use coqui_acp_history::{Document, Header, Line, Origin, Stop, StopReason};
 use serde_json::{Value, json};
 
@@ -57,10 +58,10 @@ impl ChannelSink for Sink {
 }
 
 fn provider(replay_max_bytes: u64) -> StdioProvider {
-    let mut settings = StdioSettings::new(StdioHarness::Antigravity);
+    let mut settings = StdioSettings::new();
     settings.executable = Some(fake());
     settings.replay_max_bytes = replay_max_bytes;
-    StdioProvider::new(settings)
+    StdioProvider::new(&antigravity::STDIO, settings)
 }
 
 fn spawner() -> Object<dyn ProcessSpawner> {
@@ -207,9 +208,9 @@ fn an_antigravity_session_is_not_read_out_of_the_agent_and_the_refusal_says_why(
         "{why}"
     );
     // Grok has no such store to describe, and is refused in the words that held before.
-    let mut settings = StdioSettings::new(StdioHarness::Grok);
+    let mut settings = StdioSettings::new();
     settings.executable = Some(fake());
-    let refused = StdioProvider::new(settings)
+    let refused = StdioProvider::new(&grok::STDIO, settings)
         .export_session(
             SessionExport::new(SESSION, dir.to_str().expect("text")),
             spawner(),
@@ -418,11 +419,11 @@ fn an_open_the_checks_refuse_leaves_the_import_waiting() {
 #[test]
 fn patterns_are_removed_from_the_history_before_it_is_replayed() {
     let dir = scratch("redact");
-    let mut settings = StdioSettings::new(StdioHarness::Antigravity);
+    let mut settings = StdioSettings::new();
     settings.executable = Some(fake());
     settings.replay_max_bytes = 4096;
     settings.replay_redact_patterns = vec!["hunter[0-9]+".to_owned()];
-    let provider = StdioProvider::new(settings);
+    let provider = StdioProvider::new(&antigravity::STDIO, settings);
     import(
         &provider,
         SESSION,
@@ -471,10 +472,10 @@ fn a_real_antigravity_opens_a_session_imported_by_replay_at_its_id() {
     environment.insert("LOCALAPPDATA", text(&home.join("AppData").join("Local")));
     environment.insert("TEMP", text(&home.join("tmp")));
     environment.insert("TMP", text(&home.join("tmp")));
-    let mut settings = StdioSettings::new(StdioHarness::Antigravity);
+    let mut settings = StdioSettings::new();
     settings.executable = Some(real);
     settings.replay_max_bytes = 4096;
-    let provider = StdioProvider::new(settings);
+    let provider = StdioProvider::new(&antigravity::STDIO, settings);
     let report = import(
         &provider,
         SESSION,

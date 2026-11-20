@@ -1,7 +1,5 @@
-//! OpenCode as a provider of its own: the stdio provider and its account provider with the harness fixed, under the ids
-//! `opencode` and `opencode_accounts`, so a host that runs several agents through `stdio` can still say which one an entry
-//! and its accounts are. Reading a session out of OpenCode (`opencode export`) and writing one into its store
-//! (`opencode import`) are here too.
+//! OpenCode as a provider of its own, under the ids `opencode` and `opencode_accounts`, and its sessions: reading one out
+//! of OpenCode (`opencode export`) and writing one into its store (`opencode import`).
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -10,29 +8,22 @@ use core::time::Duration;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use coqui_acp_api::guatiao::Secret;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
-use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
+use coqui_acp_api::guatiao::{FromValue, Schema, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
-    AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, AccountsLink,
-    AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, HistoryLoss,
-    ImportReport, LINE_TOO_LARGE, LoginOutcome, LoginPrompter, LoginRequest, ModelListing,
-    ProcessSpawner, RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport,
-    SessionImport, StartRequest, WatchRequest,
+    Environment, ExportPage, HistoryLoss, ImportReport, LINE_TOO_LARGE, ProcessSpawner, SeedPoint,
+    SessionExport, SessionImport,
 };
 use coqui_acp_history::paging::{PageError, page};
 use coqui_acp_history::{Document, Header, HistoryError, Origin, RedactionSettings, Redactor};
 
-use super::accounts;
-use super::{
-    StdioAccountSettings, StdioAccounts, StdioHarness, StdioProvider, StdioSettings,
-    opencode_history, opencode_import,
-};
+use super::{history as opencode_history, import as opencode_import};
 use crate::ThroughSpawner;
 use crate::account::Files;
 use crate::cli;
 use crate::process::Launch;
+use crate::stdio::accounts;
+use crate::stdio::{StdioAccountSettings, StdioProvider, StdioSettings};
 
 /// The longest `opencode export` may run, and the most it may print.
 const EXPORT_LIMIT: Duration = Duration::from_secs(60);
@@ -77,7 +68,7 @@ impl OpenCodeSettings {
     /// The defaults.
     #[must_use]
     pub fn new() -> Self {
-        let own = StdioSettings::new(StdioHarness::OpenCode);
+        let own = StdioSettings::new();
         Self {
             executable: None,
             max_requests: own.max_requests,
@@ -100,7 +91,7 @@ impl Default for OpenCodeSettings {
 
 impl From<OpenCodeSettings> for StdioSettings {
     fn from(settings: OpenCodeSettings) -> Self {
-        let mut own = Self::new(StdioHarness::OpenCode);
+        let mut own = Self::new();
         own.executable = settings.executable;
         own.max_requests = settings.max_requests;
         own.max_message_bytes = settings.max_message_bytes;
@@ -111,89 +102,6 @@ impl From<OpenCodeSettings> for StdioSettings {
         own.replay_remembered_ids = settings.replay_remembered_ids;
         own.replay_waiting_max = settings.replay_waiting_max;
         own
-    }
-}
-
-/// OpenCode, as a provider of `acp_harness` under the id `opencode`: `opencode acp` through the stdio provider.
-#[derive(Provider, Debug)]
-#[provider(
-    AcpHarness,
-    id = "opencode",
-    config = OpenCodeSettings,
-    new = OpenCodeProvider::unconfigured,
-    crate = ::coqui_acp_api::guatiao
-)]
-pub struct OpenCodeProvider {
-    inner: StdioProvider,
-}
-
-impl From<OpenCodeSettings> for OpenCodeProvider {
-    fn from(settings: OpenCodeSettings) -> Self {
-        Self {
-            inner: StdioProvider::new(settings.into()),
-        }
-    }
-}
-
-impl OpenCodeProvider {
-    /// A provider configured as `settings` say.
-    #[must_use]
-    pub fn new(settings: OpenCodeSettings) -> Self {
-        settings.into()
-    }
-
-    fn unconfigured() -> Self {
-        Self::new(OpenCodeSettings::new())
-    }
-}
-
-impl AcpHarness for OpenCodeProvider {
-    fn describe(&self) -> Result<HarnessInfo, ProviderError> {
-        let mut info = self.inner.describe()?;
-        info.accounts = Some(AccountsLink::new(ACCOUNT_PROVIDER).sharing(["executable"]));
-        Ok(info)
-    }
-
-    fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
-        self.inner.accounts()
-    }
-
-    fn start(
-        &self,
-        request: StartRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        sink: Object<dyn ChannelSink>,
-    ) -> Result<Object<dyn Channel>, ProviderError> {
-        self.inner.start(request, spawner, sink)
-    }
-
-    fn refusal(
-        &self,
-        requirements: Vec<Requirement>,
-        environment: Secret<Environment>,
-        account: Option<AccountRef>,
-    ) -> Result<Option<String>, ProviderError> {
-        self.inner.refusal(requirements, environment, account)
-    }
-
-    fn program(&self) -> Result<Option<String>, ProviderError> {
-        self.inner.program()
-    }
-
-    fn import_session(
-        &self,
-        session: SessionImport,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ImportReport, ProviderError> {
-        self.inner.import_session(session, spawner)
-    }
-
-    fn export_session(
-        &self,
-        export: SessionExport,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<ExportPage, ProviderError> {
-        self.inner.export_session(export, spawner)
     }
 }
 
@@ -213,103 +121,35 @@ pub struct OpenCodeAccountSettings {
     pub command_timeout_ms: u64,
 }
 
-/// The id [`OpenCodeAccounts`] is registered under, which the harness's description names as its link.
-const ACCOUNT_PROVIDER: &str = "opencode_accounts";
-
-/// OpenCode's accounts, as a provider of `account_provider` under the id `opencode_accounts`: the sign-in kept in
-/// `auth.json` and a key for one provider.
-#[derive(Provider, Debug)]
-#[provider(
-    AccountProvider,
-    id = "opencode_accounts",
-    config = OpenCodeAccountSettings,
-    new = OpenCodeAccounts::unconfigured,
-    crate = ::coqui_acp_api::guatiao
-)]
-pub struct OpenCodeAccounts {
-    inner: StdioAccounts,
-}
-
-impl From<OpenCodeAccountSettings> for OpenCodeAccounts {
-    fn from(settings: OpenCodeAccountSettings) -> Self {
-        let mut own = StdioAccountSettings::new(StdioHarness::OpenCode);
-        own.executable = settings.executable;
-        own.renew_poll_ms = settings.renew_poll_ms;
-        own.command_timeout_ms = settings.command_timeout_ms;
+impl Default for OpenCodeAccountSettings {
+    fn default() -> Self {
+        let own = StdioAccountSettings::new();
         Self {
-            inner: StdioAccounts::new(own),
+            executable: None,
+            renew_poll_ms: own.renew_poll_ms,
+            command_timeout_ms: own.command_timeout_ms,
         }
     }
 }
 
-impl OpenCodeAccounts {
-    /// A provider configured as `settings` say.
-    #[must_use]
-    pub fn new(settings: OpenCodeAccountSettings) -> Self {
-        settings.into()
-    }
-
-    fn unconfigured() -> Self {
-        Self::new(OpenCodeAccountSettings {
-            executable: None,
-            renew_poll_ms: 30_000,
-            command_timeout_ms: 60_000,
-        })
+impl From<OpenCodeAccountSettings> for StdioAccountSettings {
+    fn from(settings: OpenCodeAccountSettings) -> Self {
+        let mut own = Self::new();
+        own.executable = settings.executable;
+        own.renew_poll_ms = settings.renew_poll_ms;
+        own.command_timeout_ms = settings.command_timeout_ms;
+        own
     }
 }
 
-impl AccountProvider for OpenCodeAccounts {
-    fn describe(&self) -> Result<AccountProviderInfo, ProviderError> {
-        self.inner.describe()
-    }
-
-    fn offers(&self) -> Result<AccountOffer, ProviderError> {
-        self.inner.offers()
-    }
-
-    fn login(
-        &self,
-        request: LoginRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        prompter: Object<dyn LoginPrompter>,
-    ) -> Result<LoginOutcome, ProviderError> {
-        self.inner.login(request, spawner, prompter)
-    }
-
-    fn renew(
-        &self,
-        request: RenewRequest,
-        spawner: Object<dyn ProcessSpawner>,
-    ) -> Result<RenewReport, ProviderError> {
-        self.inner.renew(request, spawner)
-    }
-
-    fn watch(
-        &self,
-        request: WatchRequest,
-        spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
-    ) -> Result<Object<dyn AccountWatch>, ProviderError> {
-        self.inner.watch(request, spawner, keeper)
-    }
-
-    fn usage(
-        &self,
-        query: AccountUsageQuery,
-        spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
-    ) -> Result<AccountUsage, ProviderError> {
-        self.inner.usage(query, spawner, keeper)
-    }
-
-    fn models(
-        &self,
-        query: AccountModelsQuery,
-        spawner: Object<dyn ProcessSpawner>,
-        keeper: Object<dyn AccountKeeper>,
-    ) -> Result<ModelListing, ProviderError> {
-        self.inner.models(query, spawner, keeper)
-    }
+crate::stdio_vendor! {
+    /// OpenCode, as a provider of `acp_harness` under the id `opencode`: `opencode acp`.
+    harness: OpenCodeProvider, id: "opencode",
+    /// OpenCode's accounts, as a provider of `account_provider` under the id `opencode_accounts`: the sign-in kept in
+    /// `auth.json` and a key for one provider.
+    accounts: OpenCodeAccounts, id: "opencode_accounts",
+    def: super::accounts::STDIO,
+    settings: OpenCodeSettings, account_settings: OpenCodeAccountSettings,
 }
 
 fn error(status: Status, why: &str) -> ProviderError {
@@ -412,6 +252,25 @@ fn imported_id(output: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// What a session import does for OpenCode: the history as a document, then written into its store.
+pub(super) fn import_session(
+    provider: &StdioProvider,
+    session: &SessionImport,
+    spawner: Object<dyn ProcessSpawner>,
+) -> Result<ImportReport, ProviderError> {
+    let document = provider.opencode_history(session)?;
+    provider.import_opencode(session, &document, spawner)
+}
+
+/// What a session export does for OpenCode: `opencode export` on the account's data folder.
+pub(super) fn export_session(
+    provider: &StdioProvider,
+    export: &SessionExport,
+    spawner: Object<dyn ProcessSpawner>,
+) -> Result<ExportPage, ProviderError> {
+    provider.export_opencode(export, spawner)
+}
+
 impl StdioProvider {
     /// A launch of the program with `args` on the account's data folder (or the environment's, with no account): the
     /// host's variables, less what is a credential of the harness when an account applies, and the account's folder, which is
@@ -422,7 +281,7 @@ impl StdioProvider {
         environment: &Environment,
         applied: Option<&accounts::Applied>,
     ) -> Launch {
-        let def = self.def();
+        let def = self.def().accounts;
         let mut launch = Launch::new(self.program_name()).args(args);
         for (name, value) in environment.iter() {
             let credential = def
@@ -455,7 +314,7 @@ impl StdioProvider {
         export: &SessionExport,
         spawner: Object<dyn ProcessSpawner>,
     ) -> Result<ExportPage, ProviderError> {
-        let def = self.def();
+        let def = self.def().accounts;
         let native = if opencode_history::is_native_id(&export.session_id) {
             export.session_id.clone()
         } else if let Some(native) = opencode_history::native_id_of(&export.session_id) {
@@ -553,11 +412,11 @@ impl StdioProvider {
                 _ => bad("the history is not one this provider can read"),
             })?
         };
-        if !self.settings.replay_redact_patterns.is_empty() {
+        if !self.settings().replay_redact_patterns.is_empty() {
             let mut redaction = RedactionSettings::default();
             redaction
                 .patterns
-                .clone_from(&self.settings.replay_redact_patterns);
+                .clone_from(&self.settings().replay_redact_patterns);
             let mut redactor = Redactor::try_new(&redaction).map_err(|_| {
                 bad("a pattern to redact from a history is not a usable expression")
             })?;
@@ -587,7 +446,7 @@ impl StdioProvider {
         history: &Document,
         spawner: Object<dyn ProcessSpawner>,
     ) -> Result<ImportReport, ProviderError> {
-        let def = self.def();
+        let def = self.def().accounts;
         let account = match &session.account {
             Some(grant) => accounts::apply(def, grant)?.map(|applied| (grant, applied)),
             None => None,
