@@ -111,17 +111,22 @@ the model must never see, and a display of values the person chose to look at. T
 ## Composer
 
 `Composer({controller, onSend, focusNode, enabled, working, starting, onStop, canQueue, onSuggestions, suggestionLimit, onSteer, enterSteers, commands, centred, hint, header, attachments, pickFiles,
-pickFolder, clipboard, pasteAsFile, before, after, trailing, plusItems, onShiftTab, recall, actions, commandsTitle, actionsTitle,
-mentions})`: the field, `/` suggestions from the agent's commands (and the host's own `actions`), `@` mentions from the host, paste, the attachment chips, the `+` menu, and Send (Queue and Stop while `working`, a spinner while `starting`). With `onSteer`, a running turn also shows Steer (keys `composer-steer`, `composer-queue`): Enter does Queue (`onSend`), or Steer when `enterSteers`, and Alt+Enter the other; each tooltip names its key.
+pickFolder, clipboard, pasteAsFile, primary, holdPrimary, below, plusItems, onShiftTab, recall, actions, commandsTitle, actionsTitle,
+mentions})`: one rounded box (key `composer`) holding `+` at the left (`composer-plus`), the field, and at the right one button; above the field, the attachment cards, under the box the host's line. The field has `/` suggestions from the agent's commands (and the host's own `actions`), `@` mentions from the host and paste. `hint` defaults to "Message".
+The right end: while the message is empty (no text but spaces, nothing attached) the host's `primary` widget (key `composer-primary`); once it holds text or an attachment, Send (`composer-send`) in its place, or with no `primary`, Send always. `holdPrimary` keeps `primary` beside Send for a control that is mid-action (a dictation that is listening ends if its button leaves). While `working`, Stop (`composer-stop`) is always there beside the primary control, and a message typed also shows Queue (`composer-queue`, with `canQueue`) and, with `onSteer`, Steer (`composer-steer`); a spinner stands in while `starting`. Enter does Queue (`onSend`), or Steer when `enterSteers`, and Alt+Enter the other; each tooltip names its key.
 When the `/` list shows, the arrow keys, Enter, Tab and Escape are its (`onSuggestions` says so); `canQueue: false` leaves Stop alone while a turn runs.
 `ComposerState.onKey` handles Shift+Tab (`onShiftTab`), Up in an empty message (`recall`: the last message sent, or null) and Ctrl+V (⌘V)
 itself, whatever `focusNode` it is given; `paste()` is public.
 
-- Slots: `header` above the message; `before` and `after` the `+` at the row's left; `trailing` beside Send; `plusItems` at the top of the
-  `+` menu. A source picker, a mode or model chooser, an overlays control go there; `ComposerPill({label, icon, leading, danger, status, enabled})` is
-  the control's look; `leading` takes the app's own mark (a source's or an agent's logo) where the icon would go, drawn at the pill's size and colour.
+- Slots: `header` at the top of the box; `primary` at its right; `plusItems` at the top of the `+` menu; `below: List<Widget>` the line
+  under the box, right-aligned from `Composer.wideFrom` (600 px) and, narrower, from the left, wrapping onto more lines. A source picker, a mode or
+  model chooser, an overlays control go in `below`; `ComposerPill({label, icon, leading, danger, status, enabled, quiet})` is the control's look: in
+  `below` (`ComposerQuiet`, which `below` wraps its children in) it is plain muted text with no icon and no chevron, elsewhere it has both; `leading`
+  takes the app's own mark (a source's or an agent's logo), drawn at the pill's size and colour in either.
 - `ComposerAttachments` (the app implements it): `canAttach`, `chips: List<ComposerChip>`, `addFiles(List<PickedFile>)`,
-  `addPaths`, `addImage`, `addText`, `addFolder`, `remove(key)`; each `add` answers problems to tell the person. The package adds the
+  `addPaths`, `addImage`, `addText`, `addFolder`, `remove(key)`; each `add` answers problems to tell the person. A chip is a card: an
+  image's own picture (72 px square, its name, size and note in the tooltip), a file or folder as an icon with its name and size or note, a refusal outlined
+  in the look's danger colour, each with an × (`Remove <name>`). The package adds the
   "Add files or images…", "Add a folder reference…" and "Paste from clipboard" entries when it is given one, using `pickFiles` and
   `pickFolder`. `ClipboardReader` (`image`, `files`, `text`) is the paste source; `TextClipboard` is the default.
 - `actions: List<ComposerAction>` (`name`, `description`, `run`): the host's own `/` entries. With any, `/` lists two groups under titles
