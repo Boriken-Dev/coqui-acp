@@ -131,6 +131,13 @@ fn main() {
                         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                         .unwrap_or_else(|| json!({}))
                 }
+                Some("skills/list") if std::env::var_os("COQUI_ACP_CODEX_SKILLS").is_some() => {
+                    let path = std::env::var_os("COQUI_ACP_CODEX_SKILLS").unwrap();
+                    std::fs::read(path)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_else(|| json!({}))
+                }
                 Some("thread/start") if std::env::var_os("COQUI_ACP_CODEX_THREAD").is_some() => {
                     json!({"thread": {"id": std::env::var("COQUI_ACP_CODEX_THREAD").unwrap()}})
                 }

@@ -142,6 +142,7 @@ fn process_session_restarts_and_resumes_with_the_same_provider_thread() {
             "initialized",
             "model/list",
             "thread/resume",
+            "skills/list",
             "turn/start"
         ]
     );
@@ -331,6 +332,62 @@ fn a_config_key_that_cannot_be_written_is_refused() {
     launch.config_overrides = vec![("model=x".into(), Value::Bool(true))];
     let refused = CodexSession::start(&launch, &PlainSpawn, CodexSettings::new(), |_| true);
     assert!(matches!(refused, Err(coqui_acp_codex::Error::Refused(_))));
+}
+
+/// Codex's skills are the session's commands, and a prompt that opens with one's name is sent as that skill.
+#[test]
+fn the_skills_codex_lists_are_commands_and_a_slash_prompt_runs_one() {
+    let scratch = Scratch::new("skills");
+    let skills = scratch.0.join("skills.json");
+    std::fs::write(
+        &skills,
+        r#"{"data": [{"cwd": "x", "skills": [
+            {"name": "review-helper", "description": "Reviews a diff", "path": "/s/review-helper/SKILL.md", "enabled": true},
+            {"name": "deploy-notes", "shortDescription": "Writes release notes", "path": "/s/deploy-notes/SKILL.md"},
+            {"name": "switched-off", "description": "No", "path": "/s/off/SKILL.md", "enabled": false}
+        ], "errors": []}]}"#,
+    )
+    .unwrap();
+    let written = scratch.0.join("inputs.jsonl");
+    let mut launch = replaying(Some("turn"), &scratch.0);
+    launch
+        .env
+        .insert("COQUI_ACP_CODEX_SKILLS".into(), skills.into());
+    launch
+        .env
+        .insert("COQUI_ACP_CODEX_INPUTS".into(), written.clone().into());
+    let (session, events) = start(&launch);
+    let session = session.unwrap();
+    let listed = events
+        .try_iter()
+        .find_map(|event| match event {
+            Event::Commands(commands) => Some(commands),
+            _ => None,
+        })
+        .expect("the skills were reported as commands");
+    let names: Vec<_> = listed.iter().map(|command| command.name.as_str()).collect();
+    assert_eq!(names, ["review-helper", "deploy-notes"]);
+    assert_eq!(listed[0].description, "Reviews a diff");
+    assert_eq!(listed[1].description, "Writes release notes");
+
+    session
+        .prompt(&[Content::Text("/review-helper the last commit".into())])
+        .unwrap();
+    let _ = until_end(
+        &events,
+        &mut ["accept", "decline", "accept_for_session", "accept"].into_iter(),
+    );
+    session.close();
+    let sent = inputs(&written);
+    let turn = sent
+        .iter()
+        .find(|input| input["method"] == "turn/start")
+        .unwrap();
+    let items = turn["params"]["input"].as_array().unwrap();
+    assert_eq!(items[0]["text"], "$review-helper the last commit");
+    assert_eq!(items[1]["type"], "skill");
+    assert_eq!(items[1]["name"], "review-helper");
+    assert_eq!(items[1]["path"], "/s/review-helper/SKILL.md");
 }
 
 /// The real Codex's commands end with its process tree: with a terminal and without, sandboxed by its own default and
