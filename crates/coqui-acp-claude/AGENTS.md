@@ -159,7 +159,6 @@ pub fn settings(self, settings: ClaudeSettings) -> Self
 pub const fn client_plugins(self, allowed: bool) -> Self   // default false; each path held to the working roots and network rule
 pub fn cli_version(&self) -> Option<String>                 // claude --version, once, within ClaudeSettings::version_wait
 impl Harness for ClaudeAgent
-pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub const DEFAULT: &str = "default";
 ```
 
@@ -179,7 +178,7 @@ What a client may choose is capped by the launch: the launch's own `permission_m
 
 Leaving Plan, measured on Claude Code 2.1.311 (one real turn, `claude-haiku-5-5`, started in `plan`): allowing the `ExitPlanMode` permission once is answered with `behavior: allow` and no `setMode`, and the CLI writes, right after the answer, one `{"type":"system","subtype":"status","status":null,"permissionMode":"default","uuid":...,"session_id":...}` line, the mode the session was in before Plan. So the mode shown follows that line like any other, and the translator adds nothing of its own; the `COQUI_ACP_CLAUDE_MODE_LINE` stand-in writes that shape.
 
-Config options: `model` (category `model`): the models Claude Code lists, and the current one; `effort` (category `thought_level`): `default` and the current model's efforts, else `EFFORTS`. Setting one not offered is refused; setting one sends `set_model` or `apply_flag_settings` for the turns that follow.
+Config options: `model` (category `model`): the models Claude Code lists, and the current one; `effort` (category `thought_level`): `default` and the efforts Claude Code lists for the current model, none when it lists none. Setting one not offered is refused; setting one sends `set_model` or `apply_flag_settings` for the turns that follow.
 
 ## Provider (`ClaudeProvider`, id `claude`)
 
