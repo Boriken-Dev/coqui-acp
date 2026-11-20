@@ -18,7 +18,8 @@ pub struct ClaudeLaunch {
     pub session: SessionStart,             // New(uuid) | Chosen | Resume(id)
     pub model: Option<String>,
     pub effort: Option<String>,            // low, medium, high, xhigh, max
-    pub append_system_prompt: Option<String>,
+    pub append_system_prompt: Option<String>,   // any length: `start` writes it to a private file; never on the command line
+    pub append_system_prompt_file: Option<PathBuf>,   // the file --append-system-prompt-file names; set it when the process runs elsewhere
     pub mcp_servers: Vec<McpServer>,
     pub mcp_config_file: Option<PathBuf>,  // the file --mcp-config names
     pub strict_mcp_config: bool,           // false
@@ -44,7 +45,7 @@ pub fn mcp_config(servers: &[McpServer]) -> Value        // {"mcpServers": {name
 pub fn valid_session_id(id: &str) -> bool                // letters, digits and dashes, 1 to 128
 ```
 
-`launch` gives `-p --input-format=stream-json --output-format=stream-json --verbose --replay-user-messages --permission-prompts=host --permission-prompt-tool=stdio`, `--include-partial-messages` when set, `--session-id=` or `--resume=`, then `--model=`, `--effort=`, `--append-system-prompt=`, `--permission-mode=`, `--setting-sources=` (comma-separated), `--max-budget-usd=` (dollars, six decimals), `--mcp-config=<mcp_config_file>` when set (MCP servers never go on the command line, since their environment and headers may be credentials), `--strict-mcp-config`, one `--add-dir=` and one `--plugin-dir=` per directory, and `extra_args`. Every value is one `--flag=value` argument, so a value that starts with `-` is never read as an option.
+`launch` gives `-p --input-format=stream-json --output-format=stream-json --verbose --replay-user-messages --permission-prompts=host --permission-prompt-tool=stdio`, `--include-partial-messages` when set, `--session-id=` or `--resume=`, then `--model=`, `--effort=`, `--append-system-prompt-file=<append_system_prompt_file>` when set (the text itself never goes on the command line, since Windows stops a process started with more than 32,767 characters), `--permission-mode=`, `--setting-sources=` (comma-separated), `--max-budget-usd=` (dollars, six decimals), `--mcp-config=<mcp_config_file>` when set (MCP servers never go on the command line, since their environment and headers may be credentials), `--strict-mcp-config`, one `--add-dir=` and one `--plugin-dir=` per directory, and `extra_args`. Every value is one `--flag=value` argument, so a value that starts with `-` is never read as an option.
 
 ## Session (`ClaudeSession`)
 
@@ -70,7 +71,7 @@ pub fn version_of(resolved: &str) -> Option<String>      // "Opus 5.5" for claud
 pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error>
 ```
 
-`start` writes `mcp_config` of the launch's MCP servers to a new file in the system's temporary directory, readable only by this user on Unix and on Windows taking that directory's access, names it as `mcp_config_file` unless the launch names one, and removes it on `close` and drop; it then spawns Claude Code, writes an `initialize` control request, which Claude Code answers with no model turn and before any message, and waits for it up to `initialize_timeout`; it then sends `Event::Commands` with the commands of that answer, and an `Event::Notice` when the version is not one of `TESTED_VERSIONS`. Events reach `sink` from a thread of the session's own; one that answers `false` is not called again. The output's end is one `Event::Exited`, saying how Claude Code ended (`exited with code N`, `was ended by signal N`) and the last lines it wrote that were not protocol, standard error's included; none after `close`. A session that reports an id other than its own is killed and ends with `Event::Exited` saying so; nothing of the other session is told.
+`start` writes `mcp_config` of the launch's MCP servers, and the launch's `append_system_prompt` when it is not empty, each to a new file in the system's temporary directory, readable only by this user on Unix and on Windows taking that directory's access, names them as `mcp_config_file` and `append_system_prompt_file` unless the launch names its own, and removes them on `close` and drop; it then spawns Claude Code, writes an `initialize` control request, which Claude Code answers with no model turn and before any message, and waits for it up to `initialize_timeout`; it then sends `Event::Commands` with the commands of that answer, and an `Event::Notice` when the version is not one of `TESTED_VERSIONS`. Events reach `sink` from a thread of the session's own; one that answers `false` is not called again. The output's end is one `Event::Exited`, saying how Claude Code ended (`exited with code N`, `was ended by signal N`) and the last lines it wrote that were not protocol, standard error's included; none after `close`. A session that reports an id other than its own is killed and ends with `Event::Exited` saying so; nothing of the other session is told.
 
 `prompt` writes one `user` message: text; an image as a base64 source; a resource link as `[@name](uri)`; a text resource as `<context ref="uri">…</context>`, the address's `&"<>` escaped and every `</context` of the text written `&lt;/context`, so it cannot close the block; an image resource as an image. Any other resource is `Error::Refused`. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` writes an `interrupt` control request and does not wait; the turn's error result then ends it as `Stop::Cancelled`. `set_model` sends `set_model`, `set_effort` sends `apply_flag_settings` with `effortLevel`, each waiting up to `control_timeout`. Each line is one write.
 
@@ -281,4 +282,4 @@ The account's side, with no harness, session or program: `GET <endpoint>/api/oau
 - Everything Claude Code writes is the model's or the harness's: untrusted.
 - A plugin's hooks and MCP servers run with no permission asked, whatever `--strict-mcp-config` and `--setting-sources` say: they are off until a host says `client_plugins(true)`, or the arguments say `--allow-client-plugins`.
 - A diagnostic line on standard error longer than `max_line` is noted and the rest of standard error read and dropped, so Claude Code never writes to a closed pipe.
-- An appended system prompt goes on the command line: past the platform's limit (128 KiB for one argument on Linux, 32 767 characters for a command line on Windows) Claude Code does not start.
+- An appended system prompt goes in a file whatever its length: a command line stops a process past a platform's limit (128 KiB for one argument on Linux, 32 767 characters on Windows). The file is in the system's temporary directory and holds the text as the person wrote it.

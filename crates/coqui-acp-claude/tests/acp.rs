@@ -370,6 +370,7 @@ fn what_the_client_gives_a_session_reaches_claude_codes_command_line() {
     let scratch = Scratch::new("parts");
     let args = scratch.0.join("args.json");
     let copy = scratch.0.join("mcp.json");
+    let prompt_copy = scratch.0.join("prompt.txt");
     let mut defaults = ClaudeLaunch::new(".");
     defaults.executable = replay_program().into();
     defaults
@@ -378,6 +379,10 @@ fn what_the_client_gives_a_session_reaches_claude_codes_command_line() {
     defaults
         .env
         .insert("COQUI_ACP_CLAUDE_COPY".into(), copy.clone().into());
+    defaults.env.insert(
+        "COQUI_ACP_CLAUDE_PROMPT_COPY".into(),
+        prompt_copy.clone().into(),
+    );
     let mut peer = Peer::serve(
         ClaudeAgent::new().defaults(defaults).client_plugins(true),
         Settings::new(),
@@ -402,7 +407,15 @@ fn what_the_client_gives_a_session_reaches_claude_codes_command_line() {
     assert!(opened["result"]["sessionId"].is_string(), "{opened}");
     let args: Vec<String> = serde_json::from_slice(&std::fs::read(&args).unwrap()).unwrap();
     let has = |expected: &str| args.iter().any(|arg| arg == expected);
-    assert!(has("--append-system-prompt=Answer briefly."), "{args:?}");
+    assert!(
+        args.iter()
+            .any(|arg| arg.starts_with("--append-system-prompt-file=")),
+        "{args:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&prompt_copy).unwrap(),
+        "Answer briefly."
+    );
     assert!(
         has(&format!("--add-dir={}", extra.to_string_lossy())),
         "{args:?}"

@@ -39,8 +39,14 @@ pub struct ClaudeLaunch {
     pub model: Option<String>,
     /// The effort: `low`, `medium`, `high`, `xhigh` or `max` in Claude Code 2.1.318.
     pub effort: Option<String>,
-    /// Text appended to Claude Code's system prompt (`--append-system-prompt`).
+    /// Text appended to Claude Code's system prompt. However long, it never goes on the command line (a long argument
+    /// stops a process starting): [`ClaudeSession::start`](crate::ClaudeSession::start) writes it to a file only this
+    /// user can read and names that file as `append_system_prompt_file`.
     pub append_system_prompt: Option<String>,
+    /// The file `--append-system-prompt-file` names, holding the text; `launch` passes the prompt only through it. Set
+    /// it when the process does not run on this machine, as a [`ClaudeSession`](crate::ClaudeSession) writes its own
+    /// file here otherwise; it then writes none, whatever `append_system_prompt` holds.
+    pub append_system_prompt_file: Option<PathBuf>,
     /// MCP servers. Their configuration holds their environment and headers, which may be credentials, so it never
     /// goes on the command line: [`ClaudeSession::start`](crate::ClaudeSession::start) writes it to a file only this
     /// user can read and names that file as `mcp_config_file`.
@@ -97,6 +103,7 @@ impl core::fmt::Debug for ClaudeLaunch {
             .field("session", &self.session)
             .field("model", &self.model)
             .field("effort", &self.effort)
+            .field("append_system_prompt_file", &self.append_system_prompt_file)
             .field("mcp_servers", &self.mcp_servers)
             .field("mcp_config_file", &self.mcp_config_file)
             .field("add_dirs", &self.add_dirs)
@@ -125,6 +132,7 @@ impl ClaudeLaunch {
             model: None,
             effort: None,
             append_system_prompt: None,
+            append_system_prompt_file: None,
             mcp_servers: Vec::new(),
             mcp_config_file: None,
             strict_mcp_config: false,
@@ -206,27 +214,32 @@ impl ClaudeLaunch {
             SessionStart::Resume(id) => args.push(format!("--resume={id}").into()),
             SessionStart::Chosen => {}
         }
-        let mut flag = |name: &str, value: &str| args.push(format!("--{name}={value}").into());
+        let flag = |args: &mut Vec<OsString>, name: &str, value: &str| {
+            args.push(format!("--{name}={value}").into());
+        };
         if let Some(model) = &self.model {
-            flag("model", model);
+            flag(&mut args, "model", model);
         }
         if let Some(effort) = &self.effort {
-            flag("effort", effort);
+            flag(&mut args, "effort", effort);
         }
-        if let Some(prompt) = &self.append_system_prompt {
-            flag("append-system-prompt", prompt);
+        if let Some(file) = &self.append_system_prompt_file {
+            let mut arg = OsString::from("--append-system-prompt-file=");
+            arg.push(file);
+            args.push(arg);
         }
         if let Some(mode) = &permission_mode {
-            flag("permission-mode", mode);
+            flag(&mut args, "permission-mode", mode);
         }
         if let Some(settings) = self.access_settings() {
-            flag("settings", &settings.to_string());
+            flag(&mut args, "settings", &settings.to_string());
         }
         if let Some(sources) = &self.setting_sources {
-            flag("setting-sources", &sources.join(","));
+            flag(&mut args, "setting-sources", &sources.join(","));
         }
         if let Some(micro) = self.max_budget_micro_usd {
             flag(
+                &mut args,
                 "max-budget-usd",
                 &format!("{}.{:06}", micro / 1_000_000, micro % 1_000_000),
             );
@@ -314,13 +327,13 @@ mod tests {
     #[test]
     fn launch_option_values_are_never_read_as_options() {
         let mut launch = ClaudeLaunch::new("/w");
-        launch.append_system_prompt = Some("- a bullet".into());
+        launch.append_system_prompt_file = Some(PathBuf::from("--prompt.md"));
         launch.model = Some("--dangerously-skip-permissions".into());
         launch.effort = Some("-p".into());
         launch.add_dirs = vec![PathBuf::from("--x")];
         let args = args(&launch);
         for expected in [
-            "--append-system-prompt=- a bullet",
+            "--append-system-prompt-file=--prompt.md",
             "--model=--dangerously-skip-permissions",
             "--effort=-p",
             "--add-dir=--x",

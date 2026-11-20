@@ -34,7 +34,7 @@ fn launch_of(case: &str) -> ClaudeLaunch {
         "turn" => {
             let mut launch = base("00000000c0de");
             launch.effort = Some("low".into());
-            launch.append_system_prompt = Some("Answer briefly.".into());
+            launch.append_system_prompt_file = Some(at("prompt.md"));
             launch.add_dirs = vec![at("extra")];
             launch
         }

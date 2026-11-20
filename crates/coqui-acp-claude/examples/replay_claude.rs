@@ -16,7 +16,8 @@
 //! `session_id`).
 //!
 //! `COQUI_ACP_CLAUDE_ARGS` names a file its arguments are written to, as JSON, and `COQUI_ACP_CLAUDE_COPY` a file the
-//! file `--mcp-config=` names is copied to. `COQUI_ACP_CLAUDE_STDERR` makes it write that many bytes of diagnostics on
+//! file `--mcp-config=` names is copied to, `COQUI_ACP_CLAUDE_PROMPT_COPY` a file the one `--append-system-prompt-file=`
+//! names is copied to. `COQUI_ACP_CLAUDE_STDERR` makes it write that many bytes of diagnostics on
 //! one line first, then a line of them per line told, failing if standard error is closed. `COQUI_ACP_CLAUDE_EXIT` makes it write
 //! one line of diagnostics after its first input line and exit with that code, and `COQUI_ACP_CLAUDE_END` exit once the
 //! recording is told. The recorded session id is written as the one `--session-id=` or `--resume=` names, as Claude Code
@@ -60,6 +61,13 @@ fn main() {
     ) && !config.starts_with('{')
     {
         std::fs::copy(config, copy).unwrap();
+    }
+    if let (Some(copy), Some(file)) = (
+        std::env::var_os("COQUI_ACP_CLAUDE_PROMPT_COPY"),
+        args.iter()
+            .find_map(|arg| arg.strip_prefix("--append-system-prompt-file=")),
+    ) {
+        std::fs::copy(file, copy).unwrap();
     }
     let (sender, inputs) = mpsc::channel::<Value>();
     std::thread::spawn(move || {

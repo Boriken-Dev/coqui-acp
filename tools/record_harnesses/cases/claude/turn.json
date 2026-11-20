@@ -11,12 +11,13 @@
   "--session-id=6f2c1b0e-0000-4000-8000-00000000c0de",
   "--model=claude-haiku-5-5",
   "--effort=low",
-  "--append-system-prompt=Answer briefly.",
+  "--append-system-prompt-file={ROOT}/prompt.md",
   "--setting-sources=",
   "--strict-mcp-config",
   "--add-dir={ROOT}/extra"
  ],
  "files": {
+  "prompt.md": "Answer briefly.",
   "w/notes.txt": "one\ntwo\n",
   "extra/readme.txt": "extra\n"
  },

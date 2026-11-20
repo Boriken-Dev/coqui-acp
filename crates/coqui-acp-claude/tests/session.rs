@@ -75,7 +75,13 @@ fn process_session_restarts_and_resumes_with_the_same_provider_id() {
     assert!(
         recorded_args(&args)
             .iter()
-            .any(|arg| arg == "--append-system-prompt=context before the prompt")
+            .any(|arg| arg.starts_with("--append-system-prompt-file="))
+    );
+    assert!(
+        !recorded_args(&args)
+            .iter()
+            .any(|arg| arg.contains("context before the prompt")),
+        "the prompt's text is not on the command line"
     );
     assert!(
         recorded_args(&args)
@@ -329,6 +335,71 @@ fn mcp_secrets_never_reach_the_command_line_and_their_file_is_removed_on_close()
         !std::path::Path::new(config).exists(),
         "the configuration file outlived the session"
     );
+}
+
+/// A prompt longer than any command line takes (Windows stops at 32,767 characters) still starts the session: it goes
+/// in a file, whole, and the file is removed on close.
+#[test]
+fn a_long_appended_prompt_goes_in_a_file_whole_and_not_on_the_command_line() {
+    let scratch = Scratch::new("long-prompt");
+    let args = scratch.0.join("args.json");
+    let copy = scratch.0.join("prompt.txt");
+    let prompt: String = (0..40_000)
+        .map(|n| {
+            format!(
+                "- rule {n}: \"quoted\" and multi-line
+"
+            )
+        })
+        .collect();
+    assert!(prompt.len() > 1_000_000);
+    let mut launch = replaying(None, &scratch.0);
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_ARGS".into(), args.clone().into());
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_PROMPT_COPY".into(), copy.clone().into());
+    launch.append_system_prompt = Some(prompt.clone());
+    let (session, _events) = start(&launch);
+    let session = session.unwrap();
+    let written = recorded_args(&args);
+    assert!(
+        written.iter().all(|arg| arg.len() < 1024),
+        "no argument holds the text"
+    );
+    let file = written
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--append-system-prompt-file="))
+        .expect("the prompt's file");
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), prompt);
+    session.close();
+    drop(session);
+    assert!(
+        !std::path::Path::new(file).exists(),
+        "the prompt's file outlived the session"
+    );
+}
+
+/// A file the caller names is the one passed, and none is written.
+#[test]
+fn an_appended_prompt_file_the_caller_names_is_passed_as_it_is() {
+    let scratch = Scratch::new("named-prompt");
+    let args = scratch.0.join("args.json");
+    let mut launch = replaying(None, &scratch.0);
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_ARGS".into(), args.clone().into());
+    launch.append_system_prompt = Some("ignored".into());
+    launch.append_system_prompt_file = Some(scratch.0.join("their.md"));
+    let (session, _events) = start(&launch);
+    let session = session.unwrap();
+    let expected = format!(
+        "--append-system-prompt-file={}",
+        scratch.0.join("their.md").to_string_lossy()
+    );
+    assert!(recorded_args(&args).contains(&expected));
+    session.close();
 }
 
 #[test]
