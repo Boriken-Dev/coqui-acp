@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `bindings/dart/coqui_acp_chat_ui`: `MentionCandidate.group` and `icon`: an `@` list can offer more than files, each kind under a heading with its own icon (the conversations of the host, say); a candidate with no group is listed as before.
 - `bindings/dart/coqui_acp_chat_ui`: `ComposerAction.group` lists a host action under a heading of its own in the `/` menu, so a host can offer more than one group beside the agent's commands (the skills it gave the session, the servers it attached); entries of a group stay together.
 - `coqui-acp-codex`: the skills Codex lists (`skills/list` for the session's directory) are the session's commands, so a client's `/` menu shows them, and a prompt that opens with `/name` of one is sent as that skill (a `skill` input item, with `$name` as its text) instead of as plain text. A listing Codex refuses leaves the commands empty and stops nothing.
 - `coqui_acp_chat`: `Choice.description`, the `description` ACP gives an option's value or a mode (a model's price, what it suits), read like the label and written back by `ConfigOption.toJson`, so a client can show what a person is choosing between.

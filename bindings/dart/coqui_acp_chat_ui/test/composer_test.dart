@@ -179,6 +179,21 @@ class _Mentions implements ComposerMentions {
   }
 }
 
+/// A mention source that offers [all] whatever is typed, and records the key of each pick.
+class _Groups implements ComposerMentions {
+  _Groups(this.all, this.picked);
+  final List<MentionCandidate> all;
+  final List<Object?> picked;
+
+  @override
+  Future<List<MentionCandidate>> search(String query) async => all;
+
+  @override
+  String? pick(MentionCandidate candidate) {
+    picked.add(candidate.key);
+    return null;
+  }
+}
 void main() {
   testWidgets('Send sends, and so does the keyboard\'s send', (tester) async {
     var sent = 0;
@@ -611,6 +626,31 @@ void main() {
       expect(find.byKey(const Key('mention-suggestions')), findsNothing, reason: 'the space ended the mention');
     });
 
+    testWidgets('candidates with a group are listed under its heading, an icon of their own, and a pick reaches the host with its key', (tester) async {
+      final picked = <Object?>[];
+      final source = _Groups(
+        [
+          const MentionCandidate(label: 'src/main.dart'),
+          const MentionCandidate(label: 'Fix login', group: 'Conversations', icon: Icons.chat_bubble_outline, key: 'chat-1'),
+          const MentionCandidate(label: 'Plan release', group: 'Conversations', key: 'chat-2'),
+        ],
+        picked,
+      );
+      final controller = await pump(tester, mentions: source);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('mention-group Conversations')), findsOneWidget, reason: 'one heading for the two');
+      expect(find.byIcon(Icons.chat_bubble_outline), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('mention src/main.dart'))).dy,
+        lessThan(tester.getTopLeft(find.byKey(const Key('mention-group Conversations'))).dy),
+      );
+      await tester.tap(find.byKey(const ValueKey('mention Conversations Fix login')));
+      await tester.pump();
+      expect(picked, ['chat-1']);
+      expect(controller.text, '@Fix login ');
+    });
     testWidgets('a choice the host refuses is said and leaves the text as it was', (tester) async {
       final source = _Mentions({'': ['../secret']}, refuse: 'That is outside the folder.');
       final controller = await pump(tester, mentions: source);

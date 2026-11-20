@@ -135,7 +135,7 @@ itself, whatever `focusNode` it is given; `paste()` is public.
   whenever its state does; it is kept to one line and ends in an ellipsis when the field is narrower.
 - `mentions: ComposerMentions` (the app implements it): `search(query) -> Future<List<MentionCandidate>>` and `pick(candidate) -> String?`
   (a problem to tell the person, or null once taken). An `@` at the start or after whitespace, up to the caret, lists up to 8
-  candidates (`MentionCandidate({label, detail, folder, key})`); choosing one writes `@label ` in its place after `pick` accepts it, and a
+  candidates (`MentionCandidate({label, detail, folder, key, group, icon})` (candidates with a `group` are listed under its heading, each group together; an `icon` replaces the file or folder one)); choosing one writes `@label ` in its place after `pick` accepts it, and a
   refusal is shown and leaves the text. An answer to a query that has since changed is dropped. `mentionAt(text, caret)` finds the `@`.
   The package never reads a file: what a mention is, and what it may name, is the host's.
 - `UsagePill({report, warnPermille, now})` and `UsageMenu`: an account's usage buckets (`UsageReport` of `coqui_acp_chat`); the words

@@ -61,7 +61,7 @@ enum ChipKind { image, text, file, folder }
 
 /// What `@` can name: a file or folder the host knows, as the list shows it.
 final class MentionCandidate {
-  const MentionCandidate({required this.label, this.detail, this.folder = false, this.key});
+  const MentionCandidate({required this.label, this.detail, this.folder = false, this.key, this.group, this.icon});
 
   /// What is written after the `@` when it is chosen, and what the list shows.
   final String label;
@@ -72,6 +72,13 @@ final class MentionCandidate {
 
   /// What the host knows it by; [label] when null.
   final Object? key;
+
+  /// The heading the list shows over it, when the host offers more than files: candidates of one group should be together. None
+  /// puts no heading.
+  final String? group;
+
+  /// Its icon; a folder's or a file's when null.
+  final IconData? icon;
 }
 
 /// What the composer asks of a host that lets the person name things with `@`.
@@ -1009,16 +1016,26 @@ class _MentionSuggestionsState extends State<MentionSuggestions> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (final candidate in _found)
+          for (final (index, candidate) in _found.indexed) ...[
+            if (candidate.group != null && (index == 0 || _found[index - 1].group != candidate.group))
+              Padding(
+                key: Key('mention-group ${candidate.group}'),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(candidate.group!, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: look.muted)),
+                ),
+              ),
             ListTile(
-              key: ValueKey('mention ${candidate.label}'),
+              key: ValueKey(candidate.group == null ? 'mention ${candidate.label}' : 'mention ${candidate.group} ${candidate.label}'),
               dense: true,
               visualDensity: VisualDensity.compact,
-              leading: Icon(candidate.folder ? Icons.folder_outlined : Icons.description_outlined, size: 18, color: look.muted),
+              leading: Icon(candidate.icon ?? (candidate.folder ? Icons.folder_outlined : Icons.description_outlined), size: 18, color: look.muted),
               title: Text(candidate.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontFamily: look.codeFont)),
               subtitle: candidate.detail == null ? null : Text(candidate.detail!, maxLines: 1, overflow: TextOverflow.ellipsis),
               onTap: () => widget.onPick(candidate),
             ),
+          ],
         ],
       ),
     );
