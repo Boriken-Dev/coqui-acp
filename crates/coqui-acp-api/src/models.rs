@@ -90,31 +90,49 @@ pub struct HarnessInfo {
     /// What the harness does with [`StartRequest::cache_lifetime`], in a sentence for people (the
     /// variables it sets, say); absent when it has no such control and ignores the hint.
     pub cache_lifetime: Option<String>,
-    /// The lifetimes beyond [`CacheLifetime::Default`] the harness honours, each with the name it
-    /// gives it; empty when the hint is ignored. A host offers these and no others.
+    /// The lifetimes beyond [`CacheLifetime::Default`] the harness honours; empty when the hint is
+    /// ignored. A host offers these and no others, under names of its own.
     #[map(default)]
-    pub cache_choices: Vec<CacheChoice>,
+    pub cache_choices: Vec<CacheLifetime>,
+    /// The account provider that signs people in to this harness's accounts, when there is one.
+    /// A host reads it where it would otherwise have to guess the provider's id from the harness's.
+    pub accounts: Option<AccountsLink>,
 }
 
-/// A prompt-cache lifetime a harness honours and what it calls it, such as `1 hour`.
+/// How a harness and the provider of `account_provider` that makes its accounts are tied together,
+/// declared by the harness in [`HarnessInfo::accounts`].
 #[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
 #[map(crate = ::guatiao)]
 #[non_exhaustive]
-pub struct CacheChoice {
-    /// The lifetime.
-    pub lifetime: CacheLifetime,
-    /// Its name for people, in the harness's own terms.
-    pub label: String,
+pub struct AccountsLink {
+    /// The id the account provider is registered under, such as `claude_accounts`.
+    pub provider: String,
+    /// The keys of the harness's own settings that name what the account provider runs too (the
+    /// program, a Node and a script): a host configures the account provider with these keys' values
+    /// from the harness's configuration, under the same keys, unless the person set them apart.
+    #[map(default)]
+    pub shared_settings: Vec<String>,
 }
 
-impl CacheChoice {
-    /// `lifetime` under `label`.
+impl AccountsLink {
+    /// A link to the account provider `provider` that shares no setting.
     #[must_use]
-    pub fn new(lifetime: CacheLifetime, label: impl Into<String>) -> Self {
+    pub fn new(provider: impl Into<String>) -> Self {
         Self {
-            lifetime,
-            label: label.into(),
+            provider: provider.into(),
+            shared_settings: Vec::new(),
         }
+    }
+
+    /// The same link sharing the settings `keys`.
+    #[must_use]
+    pub fn sharing<I, S>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.shared_settings = keys.into_iter().map(Into::into).collect();
+        self
     }
 }
 
@@ -131,6 +149,7 @@ impl HarnessInfo {
             usage: UsageSupport::none(),
             cache_lifetime: None,
             cache_choices: Vec::new(),
+            accounts: None,
         }
     }
 }

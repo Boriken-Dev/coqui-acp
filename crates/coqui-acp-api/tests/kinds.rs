@@ -13,15 +13,15 @@ use coqui_acp_api::guatiao::{FromValue, Map, Schema, Value};
 use coqui_acp_api::{
     Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo,
     AccountLoss, AccountModelsQuery, AccountOffer, AccountProviderInfo, AccountProviderVtable,
-    AccountRef, AccountRenewal, AccountUsage, AccountUsageQuery, AccountWatchVtable,
-    AcpHarnessVtable, Bucket, CacheChoice, CacheLifetime, ChannelSinkVtable, ChannelVtable,
-    Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice,
-    HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo,
-    LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, NAMES,
-    NonDefault, NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest,
-    Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile,
-    SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize,
-    UnknownKind, UsageReport, UsageSupport, WatchRequest,
+    AccountRef, AccountRenewal, AccountUsage, AccountUsageQuery, AccountWatchVtable, AccountsLink,
+    AcpHarnessVtable, Bucket, CacheLifetime, ChannelSinkVtable, ChannelVtable, Credentials,
+    EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice, HistoryLoss,
+    ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo, LoginOutcome,
+    LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, NAMES, NonDefault,
+    NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement,
+    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, SpawnSpec,
+    SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize, UnknownKind,
+    UsageReport, UsageSupport, WatchRequest,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -109,7 +109,7 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("ModelSpend", schema_of::<ModelSpend>()),
         ("UsageSupport", schema_of::<UsageSupport>()),
         ("CacheLifetime", schema_of::<CacheLifetime>()),
-        ("CacheChoice", schema_of::<CacheChoice>()),
+        ("AccountsLink", schema_of::<AccountsLink>()),
         ("FileInfo", schema_of::<FileInfo>()),
         ("Credentials", schema_of::<Credentials>()),
         ("AccountGrant", schema_of::<AccountGrant>()),
@@ -169,9 +169,9 @@ fn every_models_keys_are_pinned() {
             &[],
         ),
         (
-            "CacheChoice",
-            &["label", "lifetime"],
-            &["label", "lifetime"],
+            "AccountsLink",
+            &["provider", "shared_settings"],
+            &["provider"],
         ),
         ("Requirement", &["name", "value"], &["name"]),
         (
@@ -228,6 +228,7 @@ fn every_models_keys_are_pinned() {
         (
             "HarnessInfo",
             &[
+                "accounts",
                 "cache_choices",
                 "cache_lifetime",
                 "resumes_wider",
@@ -418,13 +419,7 @@ fn every_models_keys_are_pinned() {
         ),
         (
             "AccountCatalog",
-            &[
-                "accepts",
-                "credential_variables",
-                "kinds",
-                "logins",
-                "secret_variables",
-            ],
+            &["accepts", "credential_variables", "kinds", "logins"],
             &[],
         ),
         ("Accepted", &["slots", "standard"], &["standard"]),

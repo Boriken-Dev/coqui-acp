@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountRef, AcpHarness, CacheChoice, CacheLifetime, Channel,
+    AccountCatalog, AccountGrant, AccountRef, AccountsLink, AcpHarness, CacheLifetime, Channel,
     ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner,
     Requirement, SessionExport, SessionImport, StartRequest,
 };
@@ -23,6 +23,7 @@ use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
 
 use crate::accounts;
+use crate::account_provider::ACCOUNT_PROVIDER;
 use crate::{ClaudeAgent, ClaudeLaunch, SessionSettings};
 
 /// What a connection with `cache_lifetime` short sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and its sub-agent twin to.
@@ -284,10 +285,11 @@ impl AcpHarness for ClaudeProvider {
             TTL_VARIABLES[0], TTL_VARIABLES[1]
         ));
         info.cache_choices = vec![
-            CacheChoice::new(CacheLifetime::Off, "Off"),
-            CacheChoice::new(CacheLifetime::Short, "5 minutes"),
-            CacheChoice::new(CacheLifetime::Long, "1 hour"),
+            CacheLifetime::Off,
+            CacheLifetime::Short,
+            CacheLifetime::Long,
         ];
+        info.accounts = Some(AccountsLink::new(ACCOUNT_PROVIDER).sharing(["executable"]));
         Ok(info)
     }
 
@@ -333,8 +335,8 @@ impl AcpHarness for ClaudeProvider {
                     .fresh_sessions(fresh)
                     .defaults(launch)
                     .spawn(spawn)
-                    .client_plugins(plugins)
                     .settings(session)
+                    .client_plugins(plugins)
                     .client_access(client_access),
             ))
         })

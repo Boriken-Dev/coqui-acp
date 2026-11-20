@@ -254,19 +254,17 @@ fn it_describes_what_it_does_with_the_cache_hint_and_the_usage_it_reports() {
     assert!(
         text.contains("CLAUDE_CODE_PROMPT_CACHE_TTL") && text.contains("5m") && text.contains("1h")
     );
-    let offered: Vec<(CacheLifetime, &str)> = info
-        .cache_choices
-        .iter()
-        .map(|choice| (choice.lifetime, choice.label.as_str()))
-        .collect();
     assert_eq!(
-        offered,
+        info.cache_choices,
         [
             CacheLifetime::Off,
             CacheLifetime::Short,
             CacheLifetime::Long
         ]
     );
+    let link = info.accounts.expect("it declares its account provider");
+    assert_eq!(link.provider, "claude_accounts");
+    assert_eq!(link.shared_settings, ["executable"]);
     assert!(info.takes.resume && info.takes.load && info.takes.images);
 }
 
@@ -414,6 +412,8 @@ fn modes_and_setting_sources_are_written_as_snake_case_lists_and_round_trip() {
     assert!(none.connection.modes.is_none() && none.setting_sources.is_none());
     let empty = settings_from(r#"{"setting_sources": []}"#).expect("read");
     assert_eq!(empty.setting_sources, Some(Vec::new()));
+}
+
 /// The limits a connection and a session hold to are keys of the same settings, written flat, and what is left out
 /// keeps its default.
 #[test]
@@ -474,8 +474,6 @@ fn a_prompt_limit_in_the_settings_reaches_the_connection() {
     channel.close(0, "");
     drop(channel);
     let _ = std::fs::remove_dir_all(&dir);
-}
-
 }
 
 #[test]

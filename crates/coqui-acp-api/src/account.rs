@@ -345,14 +345,6 @@ pub struct AccountCatalog {
     /// chosen kind's.
     #[map(default)]
     pub credential_variables: Vec<String>,
-    /// The part of `credential_variables` that is itself a credential: a key, a token, a secret, or what names
-    /// where one is kept (a configuration or credentials file, a profile). Not an endpoint, a switch that picks a
-    /// cloud provider, a region or a project, which `credential_variables` also lists because applying an account
-    /// clears them. A host that refuses a variable because it would stand in for the account's credential reads this
-    /// and leaves the endpoints and switches to the person. A catalog that does not say lists none; every name here
-    /// is also in `credential_variables`.
-    #[map(default)]
-    pub secret_variables: Vec<String>,
     /// The standards the harness starts on, most preferred first, and how each is applied. An
     /// account whose `kind` this catalog does not list is applied as the first of these that it
     /// provides ([`accepted_by`](Self::accepted_by)).
@@ -368,7 +360,6 @@ impl AccountCatalog {
             kinds: alloc::vec![AccountKindInfo::harness_login()],
             logins: Vec::new(),
             credential_variables: Vec::new(),
-            secret_variables: Vec::new(),
             accepts: Vec::new(),
         }
     }

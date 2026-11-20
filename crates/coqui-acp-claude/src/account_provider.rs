@@ -25,7 +25,10 @@ use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
 
 use crate::account_usage::{ReadOptions, read_limits};
-use crate::{ClaudeLaunch, ClaudeSession, ClaudeSettings, accounts, signin};
+use crate::{ClaudeLaunch, ClaudeSession, ClaudeSettings, SessionSettings, accounts, signin};
+
+/// The id the account provider is registered under, which the harness's description names as its link.
+pub(crate) const ACCOUNT_PROVIDER: &str = "claude_accounts";
 
 /// How the Claude Code account provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -50,12 +53,12 @@ pub struct AccountSettings {
     /// The longest, in milliseconds, a plan limits read may take in all.
     #[map(default = 10_000)]
     pub usage_timeout_ms: u64,
-}
-
-impl Default for AccountSettings {
     /// How the session that lists an account's models reads Claude Code's output, waits for it and ends it.
     #[map(flatten)]
     pub session: SessionSettings,
+}
+
+impl Default for AccountSettings {
     fn default() -> Self {
         Self {
             executable: "claude".into(),
@@ -63,10 +66,10 @@ impl Default for AccountSettings {
             command_timeout_ms: 60_000,
             usage_endpoint: None,
             usage_timeout_ms: 10_000,
+            session: SessionSettings::default(),
         }
     }
 }
-            session: SessionSettings::default(),
 
 /// The accounts of Claude Code, as a provider of `account_provider` under the id `claude_accounts`.
 ///

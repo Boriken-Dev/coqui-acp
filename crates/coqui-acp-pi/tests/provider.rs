@@ -150,6 +150,9 @@ fn it_says_what_pi_takes_and_that_it_reports_no_usage() {
         "Pi reads its MCP servers from its own configuration"
     );
     assert!(info.resumes_wider);
+    let link = info.accounts.expect("it declares its account provider");
+    assert_eq!(link.provider, "pi_accounts");
+    assert_eq!(link.shared_settings, ["executable", "node", "script"]);
     let one = ProviderSettings {
         connection: ConnectionSettings {
             max_acp_version: 1,

@@ -130,6 +130,9 @@ fn it_says_the_cache_hint_is_ignored_and_that_usage_needs_no_turn() {
         "no lifetime, Off included, is offered"
     );
     assert!(info.takes.resume && info.takes.load && !info.takes.mcp_sse);
+    let link = info.accounts.expect("it declares its account provider");
+    assert_eq!(link.provider, "codex_accounts");
+    assert_eq!(link.shared_settings, ["executable"]);
 }
 
 #[test]
@@ -279,9 +282,6 @@ fn modes_are_written_as_a_snake_case_list_and_round_trip() {
     );
 }
 
-#[test]
-fn a_mode_it_does_not_know_is_refused() {
-    for text in [
 /// The limits a connection and a session hold to are keys of the same settings, written flat, and what is left out
 /// keeps its default.
 #[test]
@@ -394,6 +394,9 @@ fn the_configuration_the_settings_name_reaches_codexs_command_line() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_mode_it_does_not_know_is_refused() {
+    for text in [
         r#"{"modes": ["yolo"]}"#,
         r#"{"modes": ["acceptEdits"]}"#,
         r#"{"modes": "plan"}"#,

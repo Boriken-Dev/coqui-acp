@@ -19,9 +19,9 @@ use core::time::Duration;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, HarnessInfo, HistoryLoss, ImportReport, Narrowing, ProcessSpawner, Requirement,
-    SeedPoint, SessionExport, SessionImport, SpawnSpec, StartRequest, WorkingRoots,
+    AccountCatalog, AccountGrant, AccountRef, AccountsLink, AcpHarness, Channel, ChannelSink,
+    Environment, ExportPage, HarnessInfo, HistoryLoss, ImportReport, Narrowing, ProcessSpawner,
+    Requirement, SeedPoint, SessionExport, SessionImport, SpawnSpec, StartRequest, WorkingRoots,
 };
 use coqui_acp_history::replay::{Replay, ReplaySettings};
 use coqui_acp_history::{Document, HistoryError, RedactionSettings, Redactor};
@@ -289,7 +289,12 @@ impl AcpHarness for StdioProvider {
             vec![1]
         };
         // The program answers `initialize` itself: nothing is claimed of what it takes beyond the protocol.
-        Ok(HarnessInfo::new(self.def().name, versions))
+        let mut info = HarnessInfo::new(self.def().name, versions);
+        info.accounts = Some(
+            AccountsLink::new(account_provider::ACCOUNT_PROVIDER)
+                .sharing(["harness", "executable"]),
+        );
+        Ok(info)
     }
 
     fn accounts(&self) -> Result<AccountCatalog, ProviderError> {

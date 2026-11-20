@@ -20,6 +20,9 @@ use super::StdioHarness;
 use super::accounts::{self, Keeping};
 use crate::account::DEFAULT_POLL_MS;
 
+/// The id [`StdioAccounts`] is registered under, which the harness's description names as its link.
+pub(super) const ACCOUNT_PROVIDER: &str = "stdio_accounts";
+
 /// How the stdio account provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
 #[map(crate = ::coqui_acp_api::guatiao)]

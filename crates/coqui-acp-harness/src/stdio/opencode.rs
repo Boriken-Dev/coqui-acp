@@ -15,11 +15,11 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
     AccountCatalog, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
-    AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, AcpHarness,
-    Channel, ChannelSink, Environment, ExportPage, HarnessInfo, HistoryLoss, ImportReport,
-    LINE_TOO_LARGE, LoginOutcome, LoginPrompter, LoginRequest, ModelListing, ProcessSpawner,
-    RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, StartRequest,
-    WatchRequest,
+    AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, AccountsLink,
+    AcpHarness, Channel, ChannelSink, Environment, ExportPage, HarnessInfo, HistoryLoss,
+    ImportReport, LINE_TOO_LARGE, LoginOutcome, LoginPrompter, LoginRequest, ModelListing,
+    ProcessSpawner, RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport,
+    SessionImport, StartRequest, WatchRequest,
 };
 use coqui_acp_history::paging::{PageError, page};
 use coqui_acp_history::{Document, Header, HistoryError, Origin, RedactionSettings, Redactor};
@@ -149,7 +149,9 @@ impl OpenCodeProvider {
 
 impl AcpHarness for OpenCodeProvider {
     fn describe(&self) -> Result<HarnessInfo, ProviderError> {
-        self.inner.describe()
+        let mut info = self.inner.describe()?;
+        info.accounts = Some(AccountsLink::new(ACCOUNT_PROVIDER).sharing(["executable"]));
+        Ok(info)
     }
 
     fn accounts(&self) -> Result<AccountCatalog, ProviderError> {
@@ -210,6 +212,9 @@ pub struct OpenCodeAccountSettings {
     #[map(default = 60_000)]
     pub command_timeout_ms: u64,
 }
+
+/// The id [`OpenCodeAccounts`] is registered under, which the harness's description names as its link.
+const ACCOUNT_PROVIDER: &str = "opencode_accounts";
 
 /// OpenCode's accounts, as a provider of `account_provider` under the id `opencode_accounts`: the sign-in kept in
 /// `auth.json` and a key for one provider.

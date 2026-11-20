@@ -193,6 +193,18 @@ fn the_suite_inside() {
             .expect("its table is this kind")
             .instantiate(&Value::from(settings))
             .expect("the settings are taken");
+        // The harness names the account provider that makes its accounts, and what it shares with it.
+        let linked = provider
+            .describe()
+            .expect("described")
+            .accounts
+            .expect("a link");
+        assert_eq!(linked.provider, accounts_id);
+        assert!(linked.shared_settings.iter().any(|key| key == "executable"));
+        assert_eq!(
+            linked.shared_settings.contains(&"harness".to_string()),
+            !own
+        );
         let outcome = Contract::new(format!("stdio {harness} {kind}"))
             .program_agent(true)
             .imports(false)

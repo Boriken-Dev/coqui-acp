@@ -24,7 +24,12 @@ use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
 
 use crate::account_usage::{ReadOptions, read_limits};
-use crate::{CodexLaunch, CodexSession, CodexSettings, ModelRead, accounts, signin};
+use crate::{
+    CodexLaunch, CodexSession, CodexSettings, ModelRead, SessionSettings, accounts, signin,
+};
+
+/// The id the account provider is registered under, which the harness's description names as its link.
+pub(crate) const ACCOUNT_PROVIDER: &str = "codex_accounts";
 
 /// How the Codex account provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -49,26 +54,26 @@ pub struct AccountSettings {
     /// The longest, in milliseconds, a plan limits read may take in all.
     #[map(default = 10_000)]
     pub usage_timeout_ms: u64,
+    /// How the sessions that list an account's models, read its allowances and refresh its login read the app server's
+    /// output, wait for it and end it.
+    #[map(flatten)]
+    pub session: SessionSettings,
 }
 
 impl Default for AccountSettings {
     fn default() -> Self {
         Self {
-    /// How the sessions that list an account's models, read its allowances and refresh its login read the app server's
-    /// output, wait for it and end it.
-    #[map(flatten)]
-    pub session: SessionSettings,
             executable: "codex".into(),
             renew_poll_ms: 30_000,
             command_timeout_ms: 60_000,
             usage_endpoint: None,
             usage_timeout_ms: 10_000,
+            session: SessionSettings::default(),
         }
     }
 }
 
 /// The accounts of Codex, as a provider of `account_provider` under the id `codex_accounts`.
-            session: SessionSettings::default(),
 ///
 /// Register it beside a host's own providers with `Registry::register_local`, or build it into a library with
 /// `guatiao::providers!`.

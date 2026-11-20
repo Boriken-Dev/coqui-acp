@@ -26,7 +26,10 @@ use coqui_acp_harness::stdio::accounts::Keeping;
 use crate::account_usage::read_limits;
 use crate::accounts::DEF;
 use crate::provider::apply_to;
-use crate::{PiLaunch, PiSession, PiSettings};
+use crate::{PiLaunch, PiSession, PiSettings, SessionSettings};
+
+/// The id the account provider is registered under, which the harness's description names as its link.
+pub(crate) const ACCOUNT_PROVIDER: &str = "pi_accounts";
 
 /// How the Pi account provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -45,22 +48,22 @@ pub struct AccountSettings {
     pub node: Option<String>,
     /// Pi's CLI script, an absolute path, which `node` runs.
     pub script: Option<String>,
-}
-
-impl Default for AccountSettings {
     /// How the session that lists an account's models reads Pi's output, waits for it and ends it.
     #[map(flatten)]
     pub session: SessionSettings,
+}
+
+impl Default for AccountSettings {
     fn default() -> Self {
         Self {
             renew_poll_ms: DEFAULT_POLL_MS,
             executable: "pi".into(),
             node: None,
             script: None,
+            session: SessionSettings::default(),
         }
     }
 }
-            session: SessionSettings::default(),
 
 /// The accounts of Pi, as a provider of `account_provider` under the id `pi_accounts`.
 ///

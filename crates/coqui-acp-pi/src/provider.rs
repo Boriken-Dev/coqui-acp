@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AcpHarness, Channel, ChannelSink,
-    Environment, ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner, Requirement,
-    SessionExport, SessionImport, StartRequest,
+    AccountCatalog, AccountGrant, AccountKeeper, AccountRef, AccountsLink, AcpHarness, Channel,
+    ChannelSink, Environment, ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner,
+    Requirement, SessionExport, SessionImport, StartRequest,
 };
 use coqui_acp_harness::ConnectionSettings;
 use coqui_acp_harness::Mode;
@@ -25,6 +25,7 @@ use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
 use coqui_acp_harness::stdio::accounts::{Applied, apply, known, login_usable};
 
+use crate::account_provider::ACCOUNT_PROVIDER;
 use crate::accounts::{self, DEF};
 use crate::{PiAgent, PiLaunch, SessionSettings};
 
@@ -270,6 +271,8 @@ impl AcpHarness for PiProvider {
         let agent = PiAgent::new();
         let mut info = HarnessInfo::new("Pi", self.settings.connection.versions());
         info.takes = takes_of(&agent.takes());
+        info.accounts =
+            Some(AccountsLink::new(ACCOUNT_PROVIDER).sharing(["executable", "node", "script"]));
         // A session's record is Pi's own, in its agent directory, not tied to what a connection was held to.
         info.resumes_wider = true;
         info.usage = agent.usage();
@@ -313,10 +316,10 @@ impl AcpHarness for PiProvider {
         serving.open_shared(spawner, sink, move |spawn| {
             Ok(shared(
                 PiAgent::new()
+                    .settings(session)
                     .client_access(client_access)
                     .defaults(launch)
                     .spawn(spawn),
-                    .settings(session)
             ))
         })
     }

@@ -635,37 +635,47 @@
       "cache_choices": {
         "type": "array",
         "items": {
-          "type": "object",
-          "properties": {
-            "lifetime": {
-              "type": "string",
-              "enum": [
-                "default",
-                "off",
-                "short",
-                "long"
-              ],
-              "x-enum-labels": {
-                "default": "The harness's own default.",
-                "off": "No prompt cache at all, for a harness that can switch it off (see [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.",
-                "short": "The short cache (about five minutes): for one-shot and background runs and loops that wake more often than that.",
-                "long": "The long cache (about an hour): for an interactive session while someone is active."
-              },
-              "description": "The lifetime."
-            },
-            "label": {
-              "type": "string",
-              "description": "Its name for people, in the harness's own terms."
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "lifetime",
-            "label"
-          ]
+          "type": "string",
+          "enum": [
+            "default",
+            "off",
+            "short",
+            "long"
+          ],
+          "x-enum-labels": {
+            "default": "The harness's own default.",
+            "off": "No prompt cache at all, for a harness that can switch it off (see [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.",
+            "short": "The short cache (about five minutes): for one-shot and background runs and loops that wake more often than that.",
+            "long": "The long cache (about an hour): for an interactive session while someone is active."
+          }
         },
-        "description": "The lifetimes beyond [`CacheLifetime::Default`] the harness honours, each with the name it gives it; empty when the hint is ignored. A host offers these and no others.",
+        "description": "The lifetimes beyond [`CacheLifetime::Default`] the harness honours; empty when the hint is ignored. A host offers these and no others, under names of its own.",
         "default": []
+      },
+      "accounts": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "The id the account provider is registered under, such as `claude_accounts`."
+          },
+          "shared_settings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The keys of the harness's own settings that name what the account provider runs too (the program, a Node and a script): a host configures the account provider with these keys' values from the harness's configuration, under the same keys, unless the person set them apart.",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "provider"
+        ],
+        "description": "The account provider that signs people in to this harness's accounts, when there is one. A host reads it where it would otherwise have to guess the provider's id from the harness's."
       }
     },
     "additionalProperties": false,
@@ -2406,35 +2416,26 @@
     },
     "properties": {}
   },
-  "CacheChoice": {
+  "AccountsLink": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "lifetime": {
+      "provider": {
         "type": "string",
-        "enum": [
-          "default",
-          "off",
-          "short",
-          "long"
-        ],
-        "x-enum-labels": {
-          "default": "The harness's own default.",
-          "off": "No prompt cache at all, for a harness that can switch it off (see [`HarnessInfo::cache_choices`]); one that cannot ignores it like any other hint.",
-          "short": "The short cache (about five minutes): for one-shot and background runs and loops that wake more often than that.",
-          "long": "The long cache (about an hour): for an interactive session while someone is active."
-        },
-        "description": "The lifetime."
+        "description": "The id the account provider is registered under, such as `claude_accounts`."
       },
-      "label": {
-        "type": "string",
-        "description": "Its name for people, in the harness's own terms."
+      "shared_settings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The keys of the harness's own settings that name what the account provider runs too (the program, a Node and a script): a host configures the account provider with these keys' values from the harness's configuration, under the same keys, unless the person set them apart.",
+        "default": []
       }
     },
     "additionalProperties": false,
     "required": [
-      "lifetime",
-      "label"
+      "provider"
     ]
   },
   "FileInfo": {
@@ -2728,14 +2729,6 @@
           "type": "string"
         },
         "description": "Every variable any of its kinds reads: applying an account clears all of them, then sets the chosen kind's.",
-        "default": []
-      },
-      "secret_variables": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "description": "The part of `credential_variables` that is itself a credential: a key, a token, a secret, or what names where one is kept (a configuration or credentials file, a profile). Not an endpoint, a switch that picks a cloud provider, a region or a project, which `credential_variables` also lists because applying an account clears them. A host that refuses a variable because it would stand in for the account's credential reads this and leaves the endpoints and switches to the person. A catalog that does not say lists none; every name here is also in `credential_variables`.",
         "default": []
       },
       "accepts": {

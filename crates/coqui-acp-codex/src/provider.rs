@@ -17,15 +17,16 @@ use serde_json::Value;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
-    AccountCatalog, AccountGrant, AccountRef, AcpHarness, Channel, ChannelSink, Environment,
-    ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner, Requirement, SessionExport,
-    SessionImport, StartRequest,
+    AccountCatalog, AccountGrant, AccountRef, AccountsLink, AcpHarness, Channel, ChannelSink,
+    Environment, ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner, Requirement,
+    SessionExport, SessionImport, StartRequest,
 };
 use coqui_acp_harness::ConnectionSettings;
 use coqui_acp_harness::account::{Accounts, Files, Hold};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
 
+use crate::account_provider::ACCOUNT_PROVIDER;
 use crate::accounts;
 use crate::{CodexAgent, CodexLaunch, SessionSettings};
 
@@ -58,7 +59,6 @@ pub struct ProviderSettings {
     /// take; 0 ends it at once.
     #[map(default = 60_000)]
     pub command_timeout_ms: u64,
-}
     /// The Codex version an imported history's rollout names as its writer; the newest version this crate was tested
     /// with when absent.
     pub import_version: Option<String>,
@@ -74,6 +74,7 @@ pub struct ProviderSettings {
     /// How each session reads the app server's output, waits for it and ends it.
     #[map(flatten)]
     pub session: SessionSettings,
+}
 
 impl Default for ProviderSettings {
     fn default() -> Self {
@@ -86,11 +87,11 @@ impl Default for ProviderSettings {
             connection: ConnectionSettings::default(),
             client_mcp_servers: true,
             command_timeout_ms: 60_000,
-        }
             import_version: None,
             import_model_provider: None,
             config: BTreeMap::new(),
             session: SessionSettings::default(),
+        }
     }
 }
 
@@ -237,6 +238,7 @@ impl AcpHarness for CodexProvider {
         let agent = CodexAgent::new();
         let mut info = HarnessInfo::new("Codex", self.settings.connection.versions());
         info.takes = takes_of(&agent.takes());
+        info.accounts = Some(AccountsLink::new(ACCOUNT_PROVIDER).sharing(["executable"]));
         if !self.settings.client_mcp_servers {
             info.takes.mcp_http = false;
             info.takes.mcp_sse = false;
@@ -283,9 +285,9 @@ impl AcpHarness for CodexProvider {
         serving.open_shared(spawner, sink, move |spawn| {
             Ok(shared(
                 CodexAgent::new()
+                    .settings(session)
                     .client_access(client_access)
                     .seeded_sessions(seeds)
-                    .settings(session)
                     .defaults(launch)
                     .spawn(spawn),
             ))
