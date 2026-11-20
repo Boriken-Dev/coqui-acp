@@ -48,6 +48,9 @@ pub struct AccountSettings {
 }
 
 impl Default for AccountSettings {
+    /// How the session that lists an account's models reads Pi's output, waits for it and ends it.
+    #[map(flatten)]
+    pub session: SessionSettings,
     fn default() -> Self {
         Self {
             renew_poll_ms: DEFAULT_POLL_MS,
@@ -57,6 +60,7 @@ impl Default for AccountSettings {
         }
     }
 }
+            session: SessionSettings::default(),
 
 /// The accounts of Pi, as a provider of `account_provider` under the id `pi_accounts`.
 ///
@@ -196,7 +200,11 @@ impl AccountProvider for PiAccounts {
         } else {
             apply_to(grant, &mut launch, &spawner, (&self.accounts, Some(keeper)))?
         };
-        let listing = listing(&launch, &ThroughSpawner::shared(spawner));
+        let listing = listing(
+            &launch,
+            &ThroughSpawner::shared(spawner),
+            self.settings.session.settings(),
+        );
         if let Some(hold) = hold {
             hold.finish();
         }
@@ -205,8 +213,8 @@ impl AccountProvider for PiAccounts {
 }
 
 /// The models Pi lists once started on `launch`, with no turn.
-fn listing(launch: &PiLaunch, spawn: &ThroughSpawner) -> ModelListing {
-    match PiSession::read_models(launch, spawn, PiSettings::new()) {
+fn listing(launch: &PiLaunch, spawn: &ThroughSpawner, settings: PiSettings) -> ModelListing {
+    match PiSession::read_models(launch, spawn, settings) {
         Ok(models) if models.is_empty() => {
             ModelListing::unknown("Pi lists no model: none has a credential")
         }

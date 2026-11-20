@@ -54,6 +54,10 @@ pub struct AccountSettings {
 impl Default for AccountSettings {
     fn default() -> Self {
         Self {
+    /// How the sessions that list an account's models, read its allowances and refresh its login read the app server's
+    /// output, wait for it and end it.
+    #[map(flatten)]
+    pub session: SessionSettings,
             executable: "codex".into(),
             renew_poll_ms: 30_000,
             command_timeout_ms: 60_000,
@@ -64,6 +68,7 @@ impl Default for AccountSettings {
 }
 
 /// The accounts of Codex, as a provider of `account_provider` under the id `codex_accounts`.
+            session: SessionSettings::default(),
 ///
 /// Register it beside a host's own providers with `Registry::register_local`, or build it into a library with
 /// `guatiao::providers!`.
@@ -178,7 +183,13 @@ impl AccountProvider for CodexAccounts {
         request: RenewRequest,
         spawner: Object<dyn ProcessSpawner>,
     ) -> Result<RenewReport, ProviderError> {
-        signin::renew(&self.accounts, &self.executable(), &request, spawner)
+        signin::renew(
+            &self.accounts,
+            &self.executable(),
+            &request,
+            spawner,
+            self.settings.session.settings(),
+        )
     }
 
     fn watch(
@@ -238,7 +249,7 @@ impl AccountProvider for CodexAccounts {
             usage.account = Some(query.account.id.clone());
             // A login with no allowances answers with an error, and nothing is reported.
             if let Ok(mut buckets) =
-                CodexSession::read_account_usage(&launch, &spawn, CodexSettings::new())
+                CodexSession::read_account_usage(&launch, &spawn, self.settings.session.settings())
             {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -299,7 +310,11 @@ impl AccountProvider for CodexAccounts {
             )?
             .hold_keeping(&self.accounts, &files, Some(keeper))?
         };
-        let listing = listing(&launch, &ThroughSpawner::shared(spawner));
+        let listing = listing(
+            &launch,
+            &ThroughSpawner::shared(spawner),
+            self.settings.session.settings(),
+        );
         if let Some(hold) = hold {
             hold.finish();
         }
@@ -308,8 +323,8 @@ impl AccountProvider for CodexAccounts {
 }
 
 /// The models Codex lists once started on `launch`, with no thread.
-fn listing(launch: &CodexLaunch, spawn: &ThroughSpawner) -> ModelListing {
-    match CodexSession::read_models(launch, spawn, CodexSettings::new()) {
+fn listing(launch: &CodexLaunch, spawn: &ThroughSpawner, settings: CodexSettings) -> ModelListing {
+    match CodexSession::read_models(launch, spawn, settings) {
         Ok(ModelRead {
             models: Some(models),
             signed_out,

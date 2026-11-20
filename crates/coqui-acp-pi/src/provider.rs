@@ -18,15 +18,15 @@ use coqui_acp_api::{
     Environment, ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner, Requirement,
     SessionExport, SessionImport, StartRequest,
 };
-use coqui_acp_harness::Settings;
+use coqui_acp_harness::ConnectionSettings;
+use coqui_acp_harness::Mode;
 use coqui_acp_harness::account::{Accounts, Files, Hold, Watched, same_name};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
 use coqui_acp_harness::stdio::accounts::{Applied, apply, known, login_usable};
-use coqui_acp_harness::{Access, Mode};
 
 use crate::accounts::{self, DEF};
-use crate::{PiAgent, PiLaunch};
+use crate::{PiAgent, PiLaunch, SessionSettings};
 
 /// How the Pi provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -49,19 +49,12 @@ pub struct ProviderSettings {
     /// The mode every session starts in, and the loosest a client may choose unless `modes` names more: `manual` when
     /// absent.
     pub mode: Option<Mode>,
-    /// The access every session starts with when `mode` is absent, in the words every harness shares: a read-only sandbox
-    /// starts in Plan, else the approvals decide the mode. Pi has no sandbox and no network setting.
-    pub access: Option<Access>,
-    /// Whether a client may give a session its own access through `_meta` (`dev.boriken.coqui.acp/access`).
-    #[map(default = false)]
-    pub allow_client_access: bool,
-    /// Whether the Bypass mode may be chosen: nothing is asked.
-    #[map(default = false)]
-    pub allow_bypass: bool,
-    /// The modes a client may choose, written by id (`manual`, `accept_edits`, `plan`, `bypass`): these widen the mode and
-    /// every stricter one. Bypass is offered only with `allow_bypass`, and `auto` is never offered. Absent, a client
-    /// chooses the starting mode and every stricter one.
-    pub modes: Option<Vec<Mode>>,
+    /// What a connection holds to and offers. Its `access` starts a session when `mode` is absent, in the words every
+    /// harness shares: a read-only sandbox starts in Plan, else the approvals decide the mode (Pi has no sandbox and no
+    /// network setting). Its `modes` widen the mode and every stricter one; Bypass is offered only with `allow_bypass`,
+    /// and `auto` is never offered.
+    #[map(flatten)]
+    pub connection: ConnectionSettings,
     /// Whether Manual mode asks even before a tool that only reads.
     #[map(default = false)]
     pub ask_for_reads: bool,
@@ -77,19 +70,9 @@ pub struct ProviderSettings {
     /// a search from there reads them, so a session is refused otherwise.
     #[map(default = false)]
     pub allow_credential_roots: bool,
-    /// The highest ACP version `initialize` answers: 1 or 2.
-    #[map(default = 2)]
-    pub max_acp_version: u64,
-    /// Sessions one connection may hold.
-    #[map(default = 8)]
-    pub max_sessions: u64,
-    /// Requests one connection works on at once; a request past it is refused, and a client that sends faster than the
-    /// answers are taken is held back.
-    #[map(default = 32)]
-    pub max_requests: u64,
-    /// The largest message a connection takes, in bytes; one more ends it.
-    #[map(default = 67_108_864)]
-    pub max_message_bytes: u64,
+    /// How each session reads Pi's output, waits for it and ends it.
+    #[map(flatten)]
+    pub session: SessionSettings,
 }
 
 impl Default for ProviderSettings {
@@ -101,18 +84,12 @@ impl Default for ProviderSettings {
             model: None,
             effort: None,
             mode: None,
-            access: None,
-            allow_client_access: false,
-            allow_bypass: false,
-            modes: None,
+            connection: ConnectionSettings::default(),
             ask_for_reads: false,
             isolated: false,
             protected: None,
             allow_credential_roots: false,
-            max_acp_version: 2,
-            max_sessions: 8,
-            max_requests: 32,
-            max_message_bytes: 64 * 1024 * 1024,
+            session: SessionSettings::default(),
         }
     }
 }
@@ -185,9 +162,9 @@ impl PiProvider {
         launch.model.clone_from(&self.settings.model);
         launch.effort.clone_from(&self.settings.effort);
         launch.mode = self.settings.mode;
-        launch.access = self.settings.access;
-        launch.allow_bypass = self.settings.allow_bypass;
-        launch.modes.clone_from(&self.settings.modes);
+        launch.access = self.settings.connection.access;
+        launch.allow_bypass = self.settings.connection.allow_bypass;
+        launch.modes.clone_from(&self.settings.connection.modes);
         launch.ask_for_reads = self.settings.ask_for_reads;
         launch.isolated = self.settings.isolated;
         launch.allow_credential_roots = self.settings.allow_credential_roots;
@@ -291,12 +268,7 @@ pub(crate) fn apply_to(
 impl AcpHarness for PiProvider {
     fn describe(&self) -> Result<HarnessInfo, ProviderError> {
         let agent = PiAgent::new();
-        let versions = if self.settings.max_acp_version >= 2 {
-            vec![1, 2]
-        } else {
-            vec![1]
-        };
-        let mut info = HarnessInfo::new("Pi", versions);
+        let mut info = HarnessInfo::new("Pi", self.settings.connection.versions());
         info.takes = takes_of(&agent.takes());
         // A session's record is Pi's own, in its agent directory, not tied to what a connection was held to.
         info.resumes_wider = true;
@@ -325,31 +297,26 @@ impl AcpHarness for PiProvider {
         let mut launch = self.launch(request.environment.expose());
         let spawner = Arc::new(spawner);
         let hold = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
-        let mut settings = Settings::new();
-        settings.max_sessions = usize::try_from(self.settings.max_sessions).unwrap_or(usize::MAX);
-        settings.max_requests = usize::try_from(self.settings.max_requests).unwrap_or(usize::MAX);
-        settings.max_version = if self.settings.max_acp_version >= 2 {
-            2
-        } else {
-            1
-        };
+        let mut settings = self.settings.connection.serving();
         // Pi reads its MCP servers from its own configuration: a session that brings some is refused by the agent.
         settings.working_roots = request.working_roots.iter().map(PathBuf::from).collect();
         settings
             .account
             .clone_from(&request.account.as_ref().map(|account| account.id.clone()));
-        let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
+        let limit = self.settings.connection.message_limit();
         let mut serving = Serving::new(settings, limit);
         if let Some(hold) = hold {
             serving = serving.ending(move || hold.finish());
         }
-        let client_access = self.settings.allow_client_access;
+        let client_access = self.settings.connection.allow_client_access;
+        let session = self.settings.session.settings();
         serving.open_shared(spawner, sink, move |spawn| {
             Ok(shared(
                 PiAgent::new()
                     .client_access(client_access)
                     .defaults(launch)
                     .spawn(spawn),
+                    .settings(session)
             ))
         })
     }

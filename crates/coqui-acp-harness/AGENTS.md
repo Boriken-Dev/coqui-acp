@@ -4,7 +4,7 @@ Header-file-style reference for the `coqui-acp-harness` crate: every public item
 
 MSRV Rust 1.89. A default build depends on `coqui-acp-api` (for the usage model), `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Feature `kind` (off by default) adds `spawner`, the `acp_harness` kind's spawner on this machine and `Spawn` through any host's, and `provider`, which serves a harness over the kind's channel (with `guatiao-serde`, for catalogs). Feature `antigravity` (off by default) adds `antigravity`, which reads Antigravity's quota from its loopback port, and with it `serde`, `time` (parsing) and `ureq` (rustls with ring, no default features); its tests also use `rcgen` and `rustls`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
-Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes`, `UsageTracker` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `ErrorStream`, `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `Starter`, `ending_once`, `exit_text`, `line_writer`, `set_starter` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The root also re-exports `mode`'s `Mode`, and with `kind` `spawner`'s `LocalSpawner` and `ThroughSpawner`. The modules `acp`, `event`, `lines`, `mode`, `process`, `stream` and `version` are public, `spawner` and `provider` with `kind` and `antigravity` with `antigravity`.
+Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes`, `UsageTracker` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `ErrorStream`, `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `Starter`, `ending_once`, `exit_text`, `line_writer`, `set_starter` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The root also re-exports `mode`'s `Mode` and `settings`'s `ConnectionSettings` and `SessionLimits`, and with `kind` `spawner`'s `LocalSpawner` and `ThroughSpawner`. The modules `acp`, `event`, `lines`, `mode`, `process`, `settings`, `stream` and `version` are public, `spawner` and `provider` with `kind` and `antigravity` with `antigravity`.
 
 No `unsafe` code but one Windows module (`#![deny(unsafe_code)]`): `antigravity/ports/win32.rs`, which asks `GetExtendedTcpTable` (with `windows-sys`, feature `antigravity`) for the listening sockets. No process-wide state.
 
@@ -363,6 +363,28 @@ No redirects, no proxy, the body counted as it is read against `limits.body` (an
 Buckets, `reported`, unit `permille`, `limit` 1000, `used` unset: one for each distinct reset time (the Gemini 4 Argon models share seven days, the others five hours), id `agy:<first model's id>` (its `modelId`, else its label), `remaining` the least of its models' `round(remainingFraction * 1000)` (1000 only for exactly 1, 0 only for exactly 0, and 1 to 999 between), `exhausted` at 0 and `ok` otherwise (agy gives no warning). A fraction left out beside a valid reset is 0: the answer is protobuf JSON, which omits zero values (not yet seen from a real exhausted account). A model with no `quotaInfo`, a fraction that is present but not a number in `0..=1`, or a reset that is not RFC 3339 is left out. At fraction 1 the window has not started and agy reports a reset a whole window away that moves with every reading, so `resets_at` is `None` and the window length (reset less now, to the minute) is remembered for each of the group's models; a used bucket takes the length its models remember, so one that splits off a group keeps it, and carries the real `resets_at`. A reading is complete: pass its buckets to `UsageTracker::replace(BUCKET_PREFIX, ..)`, so a bucket a group no longer makes is dropped. The `label` is the length (`5 h`, `7 d`) when known. Coverage is `only` the ACP ids its models match, by `modelId` then by `label` against `AcpModel::name`, and `unknown` when any does not match (counted by `unmatched()`). `min_interval` answers a reading sooner than that after the last success with its buckets.
 
 Not read: `planStatus` credits (the unit is unclear) and `userTier.name` (the host owns the account label). Recorded answer: `tests/fixtures/agy-1.5.3/getuserstatus.json`, with the account's address, name and picture replaced.
+
+## Settings (`coqui_acp_harness::settings`)
+
+The sections every harness provider's configuration flattens (`#[map(flatten)]`), so their keys sit beside the provider's own; every number is a setting and any value is taken, and a key left out keeps its default.
+
+```rust
+pub struct ConnectionSettings {            // ToValue, FromValue, Schema, Default, Debug, Clone, PartialEq, Eq
+    pub access: Option<Access>, pub allow_client_access: bool /* false */, pub allow_bypass: bool /* false */, pub modes: Option<Vec<Mode>>,
+    pub max_acp_version: u64 /* 2 */, pub max_sessions: u64 /* 8 */, pub max_requests: u64 /* 32 */, pub max_message_bytes: u64 /* 64 MiB */,
+    pub max_prompt_bytes: Option<u64> /* 16 MiB */, pub cancel_grace_ms: Option<u64> /* 10000 */, pub permission_timeout_ms: Option<u64> /* none: waits as long as the person takes */,
+    pub max_tracked_tools: Option<u64> /* 4096 */, pub max_queued_events: Option<u64> /* 4096 */, pub max_tool_content_bytes: Option<u64> /* 1 MiB */,
+    pub max_tool_content_items: Option<u64> /* 256 */, pub max_open_questions: Option<u64> /* 64 */ }
+pub fn versions(&self) -> Vec<u16>          // [1, 2], or [1] when max_acp_version is below 2
+pub fn message_limit(&self) -> usize        // max_message_bytes, for `Serving::new`
+pub fn serving(&self) -> Settings           // `acp::Settings::new()` with the values given; a provider sets the working roots, the account and `client_mcp_servers` itself
+pub struct SessionLimits { /* every field Option<u64>; absent keeps the translator's own default */
+    max_line_bytes, tail_lines, tail_line_bytes, initialize_timeout_ms, request_timeout_ms, exit_wait_ms, exit_poll_ms, close_wait_ms,
+    max_tools, max_queued_writes, title_bytes, version_wait_ms, version_bytes }   // ToValue, FromValue, Schema, Default
+pub fn SessionLimits::{millis, count, bytes}(value: Option<u64>, slot: &mut Duration | usize | u64)   // sets the slot when a value is given
+```
+
+A section flattened beside another must not repeat one of its keys: the schema is then invalid and a library built on it offers no provider, which the contract suite shows as a provider that is not there. `coqui-acp-claude`, `-codex` and `-pi` each add a `SessionSettings` that flattens `SessionLimits` and holds what only that translator bounds.
 
 ## Versions (`coqui_acp_harness::version`)
 

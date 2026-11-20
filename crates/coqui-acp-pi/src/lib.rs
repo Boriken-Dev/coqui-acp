@@ -22,6 +22,7 @@ mod provider;
 #[cfg(feature = "history")]
 mod provider_history;
 mod session;
+mod session_settings;
 
 use alloc::string::String;
 use core::fmt;
@@ -37,6 +38,7 @@ pub use mode::Scope;
 pub use parse::{Parser, ParserLimits};
 pub use provider::{PiProvider, ProviderSettings};
 pub use session::{Model, PiSession, PiSettings, models_of, user_input};
+pub use session_settings::SessionSettings;
 
 /// The Pi versions this crate was tested with. Another one runs, with a warning.
 pub const TESTED_VERSIONS: &[&str] = &["1.5.2"];

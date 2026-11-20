@@ -3,6 +3,7 @@
 //! Each connection serves a [`CodexAgent`] over the channel, and the agent starts `codex app-server` through the
 //! spawner the host handed over, so Codex runs wherever the host's spawner runs it.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -11,6 +12,8 @@ use core::time::Duration;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use serde_json::Value;
+
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Secret, Status, ToValue};
 use coqui_acp_api::{
@@ -18,14 +21,13 @@ use coqui_acp_api::{
     ExportPage, HarnessInfo, ImportReport, Narrowing, ProcessSpawner, Requirement, SessionExport,
     SessionImport, StartRequest,
 };
-use coqui_acp_harness::Settings;
+use coqui_acp_harness::ConnectionSettings;
 use coqui_acp_harness::account::{Accounts, Files, Hold};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
-use coqui_acp_harness::{Access, Mode};
 
 use crate::accounts;
-use crate::{CodexAgent, CodexLaunch};
+use crate::{CodexAgent, CodexLaunch, SessionSettings};
 
 /// How the Codex provider is configured.
 #[derive(ToValue, FromValue, Schema, Debug, Clone)]
@@ -44,38 +46,11 @@ pub struct ProviderSettings {
     /// The sandbox every session starts in: `read-only`, `workspace-write` or `danger-full-access`. Codex's own when
     /// absent.
     pub sandbox: Option<String>,
-    /// The access every session starts with, in the words every harness shares: the sandbox, the network and the approvals,
-    /// turned into Codex's approval policy, sandbox and the workspace sandbox's network setting. Absent, only `approval_policy`
-    /// and `sandbox` above decide, and Codex's own configuration where they are absent too.
-    pub access: Option<Access>,
-    /// Whether a client may give a session its own access through `_meta` (`dev.boriken.coqui.acp/access`).
-    #[map(default = false)]
-    pub allow_client_access: bool,
-    /// Whether the Bypass mode may be chosen: never ask, no sandbox.
-    #[map(default = false)]
-    pub allow_bypass: bool,
-    /// The modes a client may choose, written by id (`manual`, `accept_edits`, `auto`, `plan`, `bypass`): these widen what
-    /// the approval policy and sandbox amount to and every stricter mode. Bypass is offered only with `allow_bypass`,
-    /// whatever this names. Absent, a client chooses that mode and every stricter one.
-    pub modes: Option<Vec<Mode>>,
-    /// The highest ACP version `initialize` answers: 1 or 2.
-    /// The Codex version an imported history's rollout names as its writer; the newest version this crate was tested
-    /// with when absent.
-    pub import_version: Option<String>,
-    /// The model provider an imported history's rollout names; `openai` when absent.
-    pub import_model_provider: Option<String>,
-    #[map(default = 2)]
-    pub max_acp_version: u64,
-    /// Sessions one connection may hold.
-    #[map(default = 8)]
-    pub max_sessions: u64,
-    /// Requests one connection works on at once; a request past it is refused, and a client that sends faster than the
-    /// answers are taken is held back.
-    #[map(default = 32)]
-    pub max_requests: u64,
-    /// The largest message a connection takes, in bytes; one more ends it.
-    #[map(default = 67_108_864)]
-    pub max_message_bytes: u64,
+    /// What a connection holds to and offers. Its `access` is turned into Codex's approval policy, sandbox and the
+    /// workspace sandbox's network setting (`approval_policy` and `sandbox` above decide where it is absent); `modes`
+    /// widen what the approval policy and sandbox amount to and every stricter mode.
+    #[map(flatten)]
+    pub connection: ConnectionSettings,
     /// Whether a client may give a session MCP servers, which start programs.
     #[map(default = true)]
     pub client_mcp_servers: bool,
@@ -84,28 +59,38 @@ pub struct ProviderSettings {
     #[map(default = 60_000)]
     pub command_timeout_ms: u64,
 }
+    /// The Codex version an imported history's rollout names as its writer; the newest version this crate was tested
+    /// with when absent.
+    pub import_version: Option<String>,
+    /// The model provider an imported history's rollout names; `openai` when absent.
+    pub import_model_provider: Option<String>,
+    /// Codex's own configuration for every session, as `codex -c key=value` takes it: a dotted key to a value written
+    /// as JSON (`true`, `30`, `["a"]`) or, when that is not JSON, as the text itself, passed as `--config key=value`.
+    /// Nothing is set by this provider for `shell_environment_policy`, so Codex's default decides which of the
+    /// host's variables reach the commands the model runs; `shell_environment_policy.inherit` and its `set`,
+    /// `exclude` and `include_only` change that. A key Codex does not read is refused when the session starts.
+    #[map(default)]
+    pub config: BTreeMap<String, String>,
+    /// How each session reads the app server's output, waits for it and ends it.
+    #[map(flatten)]
+    pub session: SessionSettings,
 
 impl Default for ProviderSettings {
     fn default() -> Self {
-            import_version: None,
-            import_model_provider: None,
         Self {
             executable: "codex".into(),
             model: None,
             effort: None,
             approval_policy: None,
             sandbox: None,
-            access: None,
-            allow_client_access: false,
-            allow_bypass: false,
-            modes: None,
-            max_acp_version: 2,
-            max_sessions: 8,
-            max_requests: 32,
-            max_message_bytes: 64 * 1024 * 1024,
+            connection: ConnectionSettings::default(),
             client_mcp_servers: true,
             command_timeout_ms: 60_000,
         }
+            import_version: None,
+            import_model_provider: None,
+            config: BTreeMap::new(),
+            session: SessionSettings::default(),
     }
 }
 
@@ -172,9 +157,13 @@ impl CodexProvider {
             .approval_policy
             .clone_from(&self.settings.approval_policy);
         launch.sandbox.clone_from(&self.settings.sandbox);
-        launch.access = self.settings.access;
-        launch.allow_bypass = self.settings.allow_bypass;
-        launch.modes.clone_from(&self.settings.modes);
+        launch.access = self.settings.connection.access;
+        launch.allow_bypass = self.settings.connection.allow_bypass;
+        launch.modes.clone_from(&self.settings.connection.modes);
+        for (key, text) in &self.settings.config {
+            let value = serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()));
+            launch.config_overrides.push((key.clone(), value));
+        }
         for (name, value) in environment.iter() {
             launch.env.insert(name.into(), value.into());
         }
@@ -246,12 +235,7 @@ impl CodexProvider {
 impl AcpHarness for CodexProvider {
     fn describe(&self) -> Result<HarnessInfo, ProviderError> {
         let agent = CodexAgent::new();
-        let versions = if self.settings.max_acp_version >= 2 {
-            vec![1, 2]
-        } else {
-            vec![1]
-        };
-        let mut info = HarnessInfo::new("Codex", versions);
+        let mut info = HarnessInfo::new("Codex", self.settings.connection.versions());
         info.takes = takes_of(&agent.takes());
         if !self.settings.client_mcp_servers {
             info.takes.mcp_http = false;
@@ -284,29 +268,24 @@ impl AcpHarness for CodexProvider {
         let spawner = Arc::new(spawner);
         let applying = self.apply(request.account.as_ref(), &spawner, &mut launch)?;
         let account_id = request.account.as_ref().map(|account| account.id.clone());
-        let mut settings = Settings::new();
-        settings.max_sessions = usize::try_from(self.settings.max_sessions).unwrap_or(usize::MAX);
-        settings.max_requests = usize::try_from(self.settings.max_requests).unwrap_or(usize::MAX);
-        settings.max_version = if self.settings.max_acp_version >= 2 {
-            2
-        } else {
-            1
-        };
+        let mut settings = self.settings.connection.serving();
         settings.client_mcp_servers = self.settings.client_mcp_servers;
         settings.working_roots = request.working_roots.iter().map(PathBuf::from).collect();
         settings.account.clone_from(&account_id);
-        let limit = usize::try_from(self.settings.max_message_bytes).unwrap_or(usize::MAX);
+        let limit = self.settings.connection.message_limit();
         let mut serving = Serving::new(settings, limit);
         if let Some(hold) = applying.hold {
             serving = serving.ending(move || hold.finish());
         }
         let seeds = Arc::clone(&self.seeds);
-        let client_access = self.settings.allow_client_access;
+        let client_access = self.settings.connection.allow_client_access;
+        let session = self.settings.session.settings();
         serving.open_shared(spawner, sink, move |spawn| {
             Ok(shared(
                 CodexAgent::new()
                     .client_access(client_access)
                     .seeded_sessions(seeds)
+                    .settings(session)
                     .defaults(launch)
                     .spawn(spawn),
             ))

@@ -20,7 +20,7 @@ use coqui_acp_api::{
     ProcessSpawner, READ_ONLY, Requirement, StartRequest,
 };
 use coqui_acp_claude::{ClaudeProvider, ProviderSettings, SettingSource};
-use coqui_acp_harness::{LocalSpawner, Mode};
+use coqui_acp_harness::{ConnectionSettings, LocalSpawner, Mode};
 use guatiao_serde::Presentation;
 use guatiao_serde::text::json;
 
@@ -262,9 +262,9 @@ fn it_describes_what_it_does_with_the_cache_hint_and_the_usage_it_reports() {
     assert_eq!(
         offered,
         [
-            (CacheLifetime::Off, "Off"),
-            (CacheLifetime::Short, "5 minutes"),
-            (CacheLifetime::Long, "1 hour")
+            CacheLifetime::Off,
+            CacheLifetime::Short,
+            CacheLifetime::Long
         ]
     );
     assert!(info.takes.resume && info.takes.load && info.takes.images);
@@ -397,7 +397,7 @@ fn modes_and_setting_sources_are_written_as_snake_case_lists_and_round_trip() {
     )
     .expect("read");
     assert_eq!(
-        settings.modes,
+        settings.connection.modes,
         Some(vec![Mode::Plan, Mode::AcceptEdits, Mode::Bypass])
     );
     assert_eq!(
@@ -407,13 +407,75 @@ fn modes_and_setting_sources_are_written_as_snake_case_lists_and_round_trip() {
     let written = settings.to_value().expect("written");
     let again = ProviderSettings::from_value(&written).expect("read again");
     assert_eq!(again.to_value().expect("written"), written);
-    assert_eq!(again.modes, settings.modes);
+    assert_eq!(again.connection.modes, settings.connection.modes);
     assert_eq!(again.setting_sources, settings.setting_sources);
 
     let none = settings_from("{}").expect("read");
-    assert!(none.modes.is_none() && none.setting_sources.is_none());
+    assert!(none.connection.modes.is_none() && none.setting_sources.is_none());
     let empty = settings_from(r#"{"setting_sources": []}"#).expect("read");
     assert_eq!(empty.setting_sources, Some(Vec::new()));
+/// The limits a connection and a session hold to are keys of the same settings, written flat, and what is left out
+/// keeps its default.
+#[test]
+fn connection_and_session_limits_are_flat_keys_with_the_defaults_left_alone() {
+    let settings = settings_from(
+        r#"{"max_sessions": 3, "max_prompt_bytes": 100, "cancel_grace_ms": 0, "permission_timeout_ms": 50,
+            "initialize_timeout_ms": 7, "request_timeout_ms": 8, "max_transcript_bytes": 9, "max_tasks": 10}"#,
+    )
+    .expect("read");
+    assert_eq!(settings.connection.max_sessions, 3);
+    assert_eq!(settings.connection.max_requests, 32);
+    let serving = settings.connection.serving();
+    assert_eq!(serving.max_prompt_bytes, 100);
+    assert_eq!(serving.cancel_grace, Duration::ZERO);
+    assert_eq!(serving.permission_timeout, Some(Duration::from_millis(50)));
+    let session = settings.session.settings();
+    assert_eq!(session.initialize_timeout, Duration::from_millis(7));
+    assert_eq!(session.control_timeout, Duration::from_millis(8));
+    assert_eq!(session.max_transcript_bytes, 9);
+    assert_eq!(session.parser.max_tasks, 10);
+    let none = settings_from("{}").expect("read");
+    assert_eq!(
+        none.session.settings().version_wait,
+        Duration::from_secs(10)
+    );
+    assert_eq!(none.connection.serving().max_prompt_bytes, 16 * 1024 * 1024);
+    let written = settings.to_value().expect("written");
+    let again = ProviderSettings::from_value(&written).expect("read again");
+    assert_eq!(again.session, settings.session);
+    assert_eq!(again.connection, settings.connection);
+}
+
+/// A limit in the settings is the connection's: a prompt past `max_prompt_bytes` is refused, and one under it is not.
+#[test]
+fn a_prompt_limit_in_the_settings_reaches_the_connection() {
+    let dir = scratch("prompt-limit");
+    let log = dir.join("log.jsonl");
+    let mut settings = ProviderSettings {
+        executable: fake(),
+        ..ProviderSettings::default()
+    };
+    settings.connection.max_prompt_bytes = Some(200);
+    let request = StartRequest::builder()
+        .environment(stand_in_environment(&dir, &log))
+        .build();
+    let (channel, received, opened) = connect_opened(&ClaudeProvider::new(settings), request, &dir);
+    let session = opened["result"]["sessionId"].as_str().expect("a session");
+    channel
+        .send(
+            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": {"sessionId": session, "prompt": [{"type": "text", "text": "x".repeat(500)}]}})
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("taken");
+    let answer = answer_to(&received, 3);
+    assert_eq!(answer["error"]["code"], -32602, "{answer}");
+    channel.close(0, "");
+    drop(channel);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 }
 
 #[test]
@@ -442,9 +504,12 @@ fn what_the_settings_name_reaches_the_command_line_and_the_modes_a_client_may_ch
         let log = dir.join("log.jsonl");
         let provider = ClaudeProvider::new(ProviderSettings {
             executable: fake(),
-            allow_bypass,
+            connection: ConnectionSettings {
+                allow_bypass,
+                modes: Some(vec![Mode::AcceptEdits, Mode::Auto, Mode::Bypass]),
+                ..ConnectionSettings::default()
+            },
             setting_sources: Some(vec![SettingSource::User, SettingSource::Project]),
-            modes: Some(vec![Mode::AcceptEdits, Mode::Auto, Mode::Bypass]),
             ..ProviderSettings::default()
         });
         let request = StartRequest::builder()

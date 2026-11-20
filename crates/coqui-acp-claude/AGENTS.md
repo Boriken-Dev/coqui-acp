@@ -75,6 +75,8 @@ pub fn user_blocks(content: &[Content]) -> Result<Vec<Value>, Error>
 
 `prompt` writes one `user` message: text; an image as a base64 source; a resource link as `[@name](uri)`; a text resource as `<context ref="uri">…</context>`, the address's `&"<>` escaped and every `</context` of the text written `&lt;/context`, so it cannot close the block; an image resource as an image. Any other resource is `Error::Refused`. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` writes an `interrupt` control request and does not wait; the turn's error result then ends it as `Stop::Cancelled`. `set_model` sends `set_model`, `set_effort` sends `apply_flag_settings` with `effortLevel`, each waiting up to `control_timeout`. Each line is one write.
 
+`SessionSettings` (`ToValue`, `FromValue`, `Schema`, `Default`; `.settings() -> ClaudeSettings`) is every one of these as a setting of a provider, written flat and optional (absent keeps the default below): the `SessionLimits` keys of `coqui_acp_harness` (`max_line_bytes`, `tail_lines`, `tail_line_bytes`, `initialize_timeout_ms`, `request_timeout_ms` as `control_timeout`, `exit_wait_ms`, `exit_poll_ms`, `close_wait_ms`, `max_tools`, `max_queued_writes`, `title_bytes`, `version_wait_ms`, `version_bytes`), `max_transcript_bytes`, `max_tool_title_bytes`, `max_streamed_messages`, `max_tasks` and `max_child_text_bytes`.
+
 `ClaudeSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB; a longer output line ends the session), `tail_lines` (8) and `tail_line_bytes` (512) quoted by an exit, `initialize_timeout` (30 s), `control_timeout` (30 s), `exit_wait` (1 s for the exit status), `max_tools` (4096 tool calls kept for their results), `max_transcript_bytes` (64 MiB replayed). Also: `parser` (`ParserLimits`: `max_title_bytes` 256, `max_streamed` 64, `max_tasks` 1024), `exit_poll` (100 ms; an exit is noticed even with the output held open), `close_wait` (2 s), `max_queued_writes` (1024; past it a write fails rather than waits), `title_bytes` (80), `version_wait` (10 s; 0 does not ask), `version_bytes` (4096), `on_line: Option<LineHook>` (each line before anything reads it; `false` ends Claude Code).
 
 `models_of` reads `models[]` of an `initialize` answer: `value` as the id, `displayName`, `description` as it stands, `resolvedModel` as `resolved` and its `version`, and `supportedEffortLevels` when `supportsEffort`. The answer's `account` is never read.
@@ -188,18 +190,12 @@ pub fn ClaudeProvider::new(settings: ProviderSettings) -> ClaudeProvider  // als
 pub struct ProviderSettings {                                        // ToValue, FromValue, Schema, Default; every field defaults
     pub executable: String,              // "claude": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>, pub permission_mode: Option<String>,
-    pub access: Option<Access>,          // None
-    pub allow_client_access: bool,       // false: a session's `_meta` access is ignored unless true (then it replaces `access`)
-    pub allow_bypass: bool,              // false
-    pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen the permission mode's own and every stricter one (Bypass still needs allow_bypass, and is left out without it)
+    #[flatten] pub connection: ConnectionSettings,   // coqui_acp_harness: `access` (None), `allow_client_access` (false: a session's `_meta` access is ignored unless true, then it replaces `access`), `allow_bypass` (false), `modes` (None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen the permission mode's own and every stricter one; Bypass still needs allow_bypass), `max_acp_version` (2), `max_sessions` (8), `max_requests` (32), `max_message_bytes` (64 MiB) and the optional limits listed under `coqui_acp_harness` "Settings"; every key is written flat, beside this struct's own
     pub setting_sources: Option<Vec<SettingSource>>,   // None: Claude Code's default; `user`, `project`, `local`; an empty list loads none (`--setting-sources=`)
-    pub max_acp_version: u64,            // 2 (1 or 2)
-    pub import_version: Option<String>,  // None: the version a seeded transcript names as its writer; the newest in TESTED_VERSIONS when absent
-    pub max_sessions: u64,               // 8
-    pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused
-    pub max_message_bytes: u64,          // 64 MiB: one byte more ends the connection GUATIAO_ERR_BAD_VALUE
     pub allow_client_plugins: bool,      // false
     pub client_mcp_servers: bool,        // true
+    pub import_version: Option<String>,  // None: the version a seeded transcript names as its writer; the newest in TESTED_VERSIONS when absent
+    #[flatten] pub session: SessionSettings,   // how each session reads Claude Code's output, waits for it and ends it (below)
 }
 #[non_exhaustive] pub enum SettingSource { User, Project, Local }   // ToValue, FromValue, Schema; written `user`, `project`, `local`; `as_str()` is the name `--setting-sources` takes
 pub mod accounts { pub fn catalog() -> AccountCatalog;  pub fn offer() -> AccountOffer;  pub fn apply(grant: &AccountGrant, launch: &mut ClaudeLaunch, files: &Files) -> Result<Applied, ProviderError>;
@@ -230,6 +226,7 @@ pub struct AccountSettings {                                          // ToValue
     pub command_timeout_ms: u64,         // 60000: the longest `claude auth status` may take
     pub usage_endpoint: Option<String>,  // None: https://api.anthropic.com (the OAuth API; also the model API for a key with no base_url)
     pub usage_timeout_ms: u64,           // 10000: the longest a plan-limits read may take in all
+    #[flatten] pub session: SessionSettings,   // the same section: the session that lists an account's models
 }
 ```
 

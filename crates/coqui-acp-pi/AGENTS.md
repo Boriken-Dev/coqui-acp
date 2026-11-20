@@ -100,6 +100,8 @@ pub fn user_input(content: &[Content]) -> Result<(String, Vec<Value>), Error>
 
 `interrupt` answers every dialog the person was shown `cancelled` first (Pi's `abort` alone hangs behind an open dialog), then sends `abort_retry` when Pi is waiting to retry and `abort`; the run ends as `cancelled`. With no run it does nothing. A question answered `Cancelled` by the client with no `session/cancel` before it ends the run the same way, as the contract has every harness do.
 
+`SessionSettings` (`ToValue`, `FromValue`, `Schema`, `Default`; `.settings() -> PiSettings`) is every one of these as a setting of a provider, written flat and optional (absent keeps the default below): the `SessionLimits` keys of `coqui_acp_harness` (`max_line_bytes`, `tail_lines`, `tail_line_bytes`, `initialize_timeout_ms`, `request_timeout_ms`, `exit_wait_ms`, `exit_poll_ms`, `close_wait_ms`, `max_tools`, `max_queued_writes`, `title_bytes`, `version_wait_ms`, `version_bytes`), `prompt_timeout_ms`, `max_history_messages`, `list_models`, `max_tool_title_bytes`, `max_told_bytes` and `max_old_bytes`.
+
 `PiSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB), `tail_lines` (8), `tail_line_bytes` (512), `initialize_timeout` (30 s: the first command), `request_timeout` (30 s), `prompt_timeout` (5 min: a command of an extension answers `prompt` when it is done), `exit_wait` (1 s), `max_tools` (4096), `max_history_messages` (5000), `parser` (`ParserLimits`: `max_title_bytes` 256, `max_told_bytes` 16 KiB, `max_old_bytes` 1 MiB), `list_models` (true), `exit_poll` (100 ms), `close_wait` (2 s), `max_queued_writes` (1024), `title_bytes` (80), `version_wait` (10 s; 0 does not ask), `version_bytes` (4096), `known_version: Option<String>` (what `pi --version` said; the agent sets it), `on_line: Option<LineHook>`.
 
 ## Parser (`coqui_acp_pi::parse`)
@@ -206,18 +208,12 @@ pub struct ProviderSettings {                                        // ToValue,
     pub script: Option<String>,          // None; Pi's CLI script, absolute
     pub model: Option<String>, pub effort: Option<String>,
     pub mode: Option<Mode>,              // None: manual
-    pub access: Option<Access>,          // None
-    pub allow_client_access: bool,       // false: a session's `_meta` access is ignored unless true
-    pub allow_bypass: bool,              // false
-    pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `plan`, `bypass`
+    #[flatten] pub connection: ConnectionSettings,   // coqui_acp_harness: `access` (None), `allow_client_access` (false: a session's `_meta` access is ignored unless true), `allow_bypass` (false), `modes` (None; here `manual`, `accept_edits`, `plan` and `bypass` are offered, never `auto`), `max_acp_version` (2), `max_sessions` (8), `max_requests` (32), `max_message_bytes` (64 MiB) and the optional limits listed under `coqui_acp_harness` "Settings"; every key is written flat, beside this struct's own
     pub ask_for_reads: bool,             // false
     pub isolated: bool,                  // false: Pi loads only the gate (--no-extensions --no-mcp)
     pub protected: Option<Vec<String>>,  // None: the recommended list; a list replaces it
     pub allow_credential_roots: bool,    // false: a working directory that holds the places credentials are kept in is refused
-    pub max_acp_version: u64,            // 2 (1 or 2)
-    pub max_sessions: u64,               // 8
-    pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused
-    pub max_message_bytes: u64,          // 64 MiB: one byte more ends the connection GUATIAO_ERR_BAD_VALUE
+    #[flatten] pub session: SessionSettings,   // how each session reads Pi's output, waits for it and ends it
 }
 pub mod accounts { pub static DEF: HarnessDef;  pub fn catalog() -> AccountCatalog;  pub const API_KEY, OAUTH: &str; }
 ```
@@ -228,7 +224,8 @@ The account provider, `PiAccounts` (id `pi_accounts`), is offered by the same li
 #[derive(Provider)] pub struct PiAccounts;                             // an `account_provider` provider; Debug
 pub fn PiAccounts::new(settings: AccountSettings) -> PiAccounts          // also From<AccountSettings>
 pub struct AccountSettings { pub renew_poll_ms: u64 /* 30000: how often a watch looks at auth.json; 0 looks only when it begins and ends */,
-    pub executable: String /* "pi": what `models` starts */, pub node: Option<String>, pub script: Option<String> /* a Node and Pi's CLI script, as the harness's settings of the same names */ }   // ToValue, FromValue, Schema, Default
+    pub executable: String /* "pi": what `models` starts */, pub node: Option<String>, pub script: Option<String> /* a Node and Pi's CLI script, as the harness's settings of the same names */,
+    #[flatten] pub session: SessionSettings /* the session that lists models */ }   // ToValue, FromValue, Schema, Default
 ```
 
 Register it with `Registry::register_local`, or build it into a library with `guatiao::providers!` (`examples/pi_provider.rs`, built by `cargo test`). Each connection serves a `PiAgent` over the channel with `coqui_acp_harness::provider::Serving`; it starts `pi --mode rpc` through the host's spawner. `examples/fake_pi.rs` is a stand-in for Pi that behaves as the contract agent does (it needs `PI_CODING_AGENT_DIR` or the suite's home, keeps sessions there as Pi does (`sessions/--<directory>--/<time>_<id>.jsonl`, a header and entries; `--session` finds a file by its header, and an imported session is resumed), and logs its arguments, the names (never the values) of its environment and the gate it was given to `COQUI_ACP_FAKE_PI_LOG` and to `fake-pi.log` of the home); the suite runs against it as `check harness --library <pi_provider> --provider pi --settings '{"executable": "<fake_pi>"}' --program-agent --no-logins --holds none` (with `--no-imports` when built without the `history` feature).

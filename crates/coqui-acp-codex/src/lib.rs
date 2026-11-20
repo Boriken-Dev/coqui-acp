@@ -22,6 +22,7 @@ mod provider;
 #[cfg(feature = "history")]
 mod provider_history;
 mod session;
+mod session_settings;
 mod signin;
 
 use alloc::string::String;
@@ -40,6 +41,7 @@ pub use provider::{CodexProvider, ProviderSettings};
 pub use session::{
     AnswerCheck, CodexSession, CodexSettings, Model, ModelRead, models_of, user_input, version_of,
 };
+pub use session_settings::SessionSettings;
 
 /// The Codex versions this crate was tested with. Another one runs, with a warning.
 pub const TESTED_VERSIONS: &[&str] = &["0.164.0", "0.166.0"];

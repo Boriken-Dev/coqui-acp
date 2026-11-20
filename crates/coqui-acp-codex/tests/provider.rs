@@ -14,7 +14,7 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{FromValue, Map, Status, ToValue, Value};
 use coqui_acp_api::{AcpHarness, ProcessSpawner, READ_ONLY, Requirement};
 use coqui_acp_codex::{CodexProvider, ProviderSettings};
-use coqui_acp_harness::{LocalSpawner, Mode};
+use coqui_acp_harness::{ConnectionSettings, LocalSpawner, Mode};
 use guatiao_serde::Presentation;
 use guatiao_serde::text::json;
 
@@ -256,16 +256,25 @@ fn modes_offered(settings: ProviderSettings, dir: &Path) -> Vec<String> {
 fn modes_are_written_as_a_snake_case_list_and_round_trip() {
     let settings = settings_from(r#"{"modes": ["plan", "accept_edits", "bypass"]}"#).expect("read");
     assert_eq!(
-        settings.modes,
+        settings.connection.modes,
         Some(vec![Mode::Plan, Mode::AcceptEdits, Mode::Bypass])
     );
     let written = settings.to_value().expect("written");
     let again = ProviderSettings::from_value(&written).expect("read again");
     assert_eq!(again.to_value().expect("written"), written);
-    assert_eq!(again.modes, settings.modes);
-    assert!(settings_from("{}").expect("read").modes.is_none());
+    assert_eq!(again.connection.modes, settings.connection.modes);
+    assert!(
+        settings_from("{}")
+            .expect("read")
+            .connection
+            .modes
+            .is_none()
+    );
     assert_eq!(
-        settings_from(r#"{"modes": []}"#).expect("read").modes,
+        settings_from(r#"{"modes": []}"#)
+            .expect("read")
+            .connection
+            .modes,
         Some(Vec::new())
     );
 }
@@ -273,6 +282,118 @@ fn modes_are_written_as_a_snake_case_list_and_round_trip() {
 #[test]
 fn a_mode_it_does_not_know_is_refused() {
     for text in [
+/// The limits a connection and a session hold to are keys of the same settings, written flat, and what is left out
+/// keeps its default.
+#[test]
+fn connection_and_session_limits_are_flat_keys_with_the_defaults_left_alone() {
+    let settings = settings_from(
+        r#"{"max_sessions": 3, "max_prompt_bytes": 100, "initialize_timeout_ms": 7, "request_timeout_ms": 8,
+            "max_history_turns": 9, "list_models": false}"#,
+    )
+    .expect("read");
+    assert_eq!(settings.connection.max_sessions, 3);
+    assert_eq!(settings.connection.serving().max_prompt_bytes, 100);
+    let session = settings.session.settings();
+    assert_eq!(
+        session.initialize_timeout,
+        std::time::Duration::from_millis(7)
+    );
+    assert_eq!(session.request_timeout, std::time::Duration::from_millis(8));
+    assert_eq!(session.max_history_turns, 9);
+    assert!(!session.list_models);
+    let none = settings_from("{}").expect("read");
+    assert_eq!(
+        none.session.settings().initialize_timeout,
+        std::time::Duration::from_secs(20)
+    );
+    let written = settings.to_value().expect("written");
+    let again = ProviderSettings::from_value(&written).expect("read again");
+    assert_eq!(again.session, settings.session);
+    assert_eq!(again.connection, settings.connection);
+}
+
+/// A `config` entry reaches Codex as `--config key=value`, its value read as JSON when it is JSON and as text
+/// otherwise, and a provider with none passes none.
+#[test]
+fn the_configuration_the_settings_name_reaches_codexs_command_line() {
+    let dir = scratch("config");
+    let log = dir.join("log.jsonl");
+    let mut settings = ProviderSettings {
+        executable: fake(),
+        ..ProviderSettings::default()
+    };
+    settings
+        .config
+        .insert("shell_environment_policy.inherit".into(), "none".into());
+    settings.config.insert(
+        "shell_environment_policy.exclude".into(),
+        r#"["AGENTS_*"]"#.into(),
+    );
+    settings
+        .config
+        .insert("tool_output_token_limit".into(), "4000".into());
+    let (sender, received) = std::sync::mpsc::channel();
+    let request = coqui_acp_api::StartRequest::builder()
+        .environment(
+            [
+                ("CODEX_HOME", dir.to_string_lossy().into_owned()),
+                (
+                    "COQUI_ACP_FAKE_CODEX_LOG",
+                    log.to_string_lossy().into_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect::<coqui_acp_api::Environment>(),
+        )
+        .build();
+    let channel = CodexProvider::new(settings)
+        .start(request, spawner(), Frames(sender).into_object())
+        .expect("it starts");
+    let send =
+        |message: serde_json::Value| channel.send(message.to_string().as_bytes()).expect("taken");
+    let until = |id: u64| loop {
+        let answer = received
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("an answer");
+        if answer["id"] == id && answer.get("method").is_none() {
+            break answer;
+        }
+    };
+    send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}),
+    );
+    until(1);
+    send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": {"cwd": dir.to_string_lossy(), "mcpServers": []}}),
+    );
+    until(2);
+    channel.close(0, "");
+    let started: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&log)
+            .expect("it was started")
+            .lines()
+            .last()
+            .expect("a start"),
+    )
+    .expect("a log line");
+    let args: Vec<&str> = started["args"]
+        .as_array()
+        .expect("arguments")
+        .iter()
+        .map(|arg| arg.as_str().expect("text"))
+        .collect();
+    for expected in [
+        "--config=shell_environment_policy.inherit=\"none\"",
+        "--config=shell_environment_policy.exclude=[\"AGENTS_*\"]",
+        "--config=tool_output_token_limit=4000",
+    ] {
+        assert!(args.contains(&expected), "{expected} in {args:?}");
+    }
+    drop(channel);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
         r#"{"modes": ["yolo"]}"#,
         r#"{"modes": ["acceptEdits"]}"#,
         r#"{"modes": "plan"}"#,
@@ -296,8 +417,11 @@ fn the_modes_it_names_widen_what_a_client_may_choose_and_bypass_needs_its_switch
                 executable: fake(),
                 approval_policy: Some("on-request".into()),
                 sandbox: Some("workspace-write".into()),
-                allow_bypass,
-                modes: Some(vec![Mode::Auto, Mode::Bypass]),
+                connection: ConnectionSettings {
+                    allow_bypass,
+                    modes: Some(vec![Mode::Auto, Mode::Bypass]),
+                    ..ConnectionSettings::default()
+                },
                 ..ProviderSettings::default()
             },
             &dir,
@@ -308,7 +432,10 @@ fn the_modes_it_names_widen_what_a_client_may_choose_and_bypass_needs_its_switch
                 executable: fake(),
                 approval_policy: Some("on-request".into()),
                 sandbox: Some("workspace-write".into()),
-                allow_bypass,
+                connection: ConnectionSettings {
+                    allow_bypass,
+                    ..ConnectionSettings::default()
+                },
                 ..ProviderSettings::default()
             },
             &dir,

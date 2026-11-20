@@ -53,6 +53,9 @@ pub struct AccountSettings {
 }
 
 impl Default for AccountSettings {
+    /// How the session that lists an account's models reads Claude Code's output, waits for it and ends it.
+    #[map(flatten)]
+    pub session: SessionSettings,
     fn default() -> Self {
         Self {
             executable: "claude".into(),
@@ -63,6 +66,7 @@ impl Default for AccountSettings {
         }
     }
 }
+            session: SessionSettings::default(),
 
 /// The accounts of Claude Code, as a provider of `account_provider` under the id `claude_accounts`.
 ///
@@ -336,7 +340,11 @@ impl AccountProvider for ClaudeAccounts {
             )?
         };
         drop(files);
-        let listing = listing(&launch, &ThroughSpawner::shared(spawner));
+        let listing = listing(
+            &launch,
+            &ThroughSpawner::shared(spawner),
+            self.settings.session.settings(),
+        );
         if let Some(hold) = hold {
             hold.finish();
         }
@@ -345,8 +353,12 @@ impl AccountProvider for ClaudeAccounts {
 }
 
 /// The models Claude Code lists once started on `launch`, with no turn.
-fn listing(launch: &ClaudeLaunch, spawn: &ThroughSpawner) -> ModelListing {
-    match ClaudeSession::start(launch, spawn, ClaudeSettings::new(), |_| true) {
+fn listing(
+    launch: &ClaudeLaunch,
+    spawn: &ThroughSpawner,
+    settings: ClaudeSettings,
+) -> ModelListing {
+    match ClaudeSession::start(launch, spawn, settings, |_| true) {
         Ok(session) => {
             let signed_out = session.signed_out();
             let listing = session.models().map_or_else(

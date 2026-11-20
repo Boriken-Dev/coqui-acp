@@ -79,6 +79,8 @@ pub fn user_input(content: &[Content]) -> Result<Vec<Value>, Error>
 
 A `turn/start` that goes unanswered within `request_timeout` fails the prompt, and that turn is interrupted whenever it shows itself: its answer, its start and its end touch no later turn. `prompt` sends `turn/start` with the input (text; an image as a data URL; a link as `[@name](uri)`; a text resource in `<context ref="uri">…</context>`; an image resource as an image; any other resource is `Error::Refused`) and the chosen model and effort, and returns once Codex has answered. The first prompt's first line, cut to 80 bytes, is the `Event::Title`. `interrupt` sends `turn/interrupt` with the running turn's id and does not wait; with no turn running it does nothing.
 
+`SessionSettings` (`ToValue`, `FromValue`, `Schema`, `Default`; `.settings() -> CodexSettings`) is every one of these as a setting of a provider, written flat and optional (absent keeps the default below): the `SessionLimits` keys of `coqui_acp_harness` (`max_line_bytes`, `tail_lines`, `tail_line_bytes`, `initialize_timeout_ms`, `request_timeout_ms`, `exit_wait_ms`, `exit_poll_ms`, `close_wait_ms`, `max_tools`, `max_queued_writes`, `title_bytes`, `version_wait_ms`, `version_bytes`), `max_model_pages`, `max_history_turns`, `list_models`, `max_tool_title_bytes`, `max_told_bytes` and `max_streamed_messages`.
+
 `CodexSettings` (`new()`, `Default`; set its fields): `max_line` (64 MiB), `tail_lines` (8), `tail_line_bytes` (512), `initialize_timeout` (20 s), `request_timeout` (30 s), `exit_wait` (1 s), `max_tools` (4096 items kept), `max_model_pages` (10), `max_history_turns` (1000). Also: `parser` (`ParserLimits`: `max_title_bytes` 256, `max_told_bytes` 16 KiB, `max_streamed` 64), `list_models` (true; Codex's models failing to list stops nothing), `exit_poll` (100 ms), `close_wait` (2 s), `max_queued_writes` (1024), `title_bytes` (80), `version_wait` (10 s; 0 does not ask), `version_bytes` (4096), `on_line: Option<LineHook>`, `check_config: Option<AnswerCheck>` (asks `config/read` before the thread; a refusal fails the start), `check_thread: Option<AnswerCheck>` (the answer that opened the thread; the same). A resumed or loaded thread whose own directory lies outside `working_roots`, links followed, is refused.
 
 ## Parser (`coqui_acp_codex::parse`)
@@ -199,18 +201,13 @@ pub struct ProviderSettings {                                        // ToValue,
     pub executable: String,              // "codex": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>,
     pub approval_policy: Option<String>, pub sandbox: Option<String>,
-    pub access: Option<Access>,          // None
-    pub allow_client_access: bool,       // false: a session's `_meta` access is ignored unless true
-    pub allow_bypass: bool,              // false
-    pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen what approval_policy and sandbox amount to and every stricter mode (Bypass still needs allow_bypass, and is left out without it)
-    pub max_acp_version: u64,            // 2 (1 or 2)
-    pub import_version: Option<String>,  // None: the version a seeded rollout names as its writer; the newest in TESTED_VERSIONS when absent
-    pub import_model_provider: Option<String>,   // None: the model provider a seeded rollout names; `openai` when absent
-    pub max_sessions: u64,               // 8
-    pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused
-    pub max_message_bytes: u64,          // 64 MiB: one byte more ends the connection GUATIAO_ERR_BAD_VALUE
+    #[flatten] pub connection: ConnectionSettings,   // coqui_acp_harness: `access` (None), `allow_client_access` (false: a session's `_meta` access is ignored unless true), `allow_bypass` (false), `modes` (None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen what approval_policy and sandbox amount to and every stricter mode; Bypass still needs allow_bypass), `max_acp_version` (2), `max_sessions` (8), `max_requests` (32), `max_message_bytes` (64 MiB) and the optional limits listed under `coqui_acp_harness` "Settings"; every key is written flat, beside this struct's own
     pub client_mcp_servers: bool,        // true
     pub command_timeout_ms: u64,         // 60000: the longest `codex login` may take to save a key or token for an account
+    pub import_version: Option<String>,  // None: the version a seeded rollout names as its writer; the newest in TESTED_VERSIONS when absent
+    pub import_model_provider: Option<String>,   // None: the model provider a seeded rollout names; `openai` when absent
+    pub config: BTreeMap<String, String>,   // empty: Codex's own configuration, `codex -c key=value`: a dotted key to a value written as JSON (`true`, `30`, `["a"]`) or, when it is not JSON, as the text itself; each is a `--config key=value` of the app server. This crate sets no `shell_environment_policy`, so Codex's own default decides which of the host's variables reach the commands the model runs (`config/read` of 0.164.0 reports every key of it unset); `shell_environment_policy.inherit`, `.set`, `.exclude` and `.include_only` change that. A key Codex does not read is refused when the session starts
+    #[flatten] pub session: SessionSettings,   // how each session reads the app server's output, waits for it and ends it
 }
 pub mod accounts { pub fn catalog() -> AccountCatalog;  pub fn offer() -> AccountOffer;  pub fn apply(grant: &AccountGrant, launch: &mut CodexLaunch, files: &Files) -> Result<Applied, ProviderError>;
     pub fn apply_with(grant, launch, files, options: &ApplyOptions) -> Result<Applied, ProviderError>;  pub struct ApplyOptions { pub timeout: Duration /* 60 s */, pub leading: Vec<OsString> /* before `login`, for a wrapper program */ }  /* #[non_exhaustive]; ApplyOptions::new().timeout(..).leading(..) */
@@ -242,6 +239,7 @@ pub struct AccountSettings {                                          // ToValue
     pub command_timeout_ms: u64,         // 60000: the longest `codex login` may take
     pub usage_endpoint: Option<String>,  // None: the account's own chatgpt_base_url, then ChatGPT's (also the model API for a key with no openai_base_url)
     pub usage_timeout_ms: u64,           // 10000: the longest a plan-limits read may take in all
+    #[flatten] pub session: SessionSettings,   // the same section: the sessions that list models, read allowances and refresh a login
 }
 ```
 

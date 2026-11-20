@@ -505,6 +505,7 @@ pub(crate) fn renew(
     executable: &OsString,
     request: &RenewRequest,
     spawner: Object<dyn ProcessSpawner>,
+    session: CodexSettings,
 ) -> Result<RenewReport, ProviderError> {
     accounts::own(&request.account)?;
     let grant = &request.account;
@@ -554,7 +555,7 @@ pub(crate) fn renew(
     }
     launch.config_overrides.clone_from(&applied.config);
     let spawn = ThroughSpawner::shared(spawner);
-    let answer = CodexSession::refresh_account(&launch, &spawn, CodexSettings::new())
+    let answer = CodexSession::refresh_account(&launch, &spawn, session)
         .map_err(|_| internal("Codex could not be asked to refresh the login"))?;
     lost(&hold)?;
     if answer.get("account").is_none_or(Value::is_null) {

@@ -16,7 +16,7 @@ use coqui_acp_api::{
     AcpHarness, ChannelSink, ProcessSpawner, READ_ONLY, Requirement, SpawnSpec, SpawnedProcess,
     SpawnerInfo, StartRequest,
 };
-use coqui_acp_harness::{LocalSpawner, Mode};
+use coqui_acp_harness::{ConnectionSettings, LocalSpawner, Mode};
 use coqui_acp_pi::{PiProvider, ProviderSettings};
 use guatiao_serde::Presentation;
 use guatiao_serde::text::json;
@@ -151,7 +151,10 @@ fn it_says_what_pi_takes_and_that_it_reports_no_usage() {
     );
     assert!(info.resumes_wider);
     let one = ProviderSettings {
-        max_acp_version: 1,
+        connection: ConnectionSettings {
+            max_acp_version: 1,
+            ..ConnectionSettings::default()
+        },
         ..ProviderSettings::default()
     };
     assert_eq!(PiProvider::new(one).describe().unwrap().versions, vec![1]);
@@ -299,7 +302,10 @@ fn the_settings_are_read_by_id_and_a_mode_that_is_none_is_refused() {
     let settings = settings_from(r#"{"executable": "p", "mode": "accept_edits", "modes": ["plan", "bypass"], "allow_bypass": true}"#)
         .expect("read");
     assert_eq!(settings.mode, Some(Mode::AcceptEdits));
-    assert_eq!(settings.modes, Some(vec![Mode::Plan, Mode::Bypass]));
+    assert_eq!(
+        settings.connection.modes,
+        Some(vec![Mode::Plan, Mode::Bypass])
+    );
     assert!(settings_from(r#"{"mode": "yolo"}"#).is_err());
     assert_eq!(settings_from("{}").unwrap().executable, "pi");
 }

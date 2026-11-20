@@ -23,6 +23,7 @@ pub mod process;
 #[cfg(feature = "kind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
 pub mod provider;
+pub mod settings;
 #[cfg(feature = "kind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
 pub mod spawner;
@@ -43,6 +44,7 @@ pub use process::{
     ErrorStream, Exit, Launch, LineWriter, PlainSpawn, Process, Spawn, Spawned, Starter,
     ending_once, exit_text, line_writer, set_program_dirs, set_starter, watch_exit,
 };
+pub use settings::{ConnectionSettings, SessionLimits};
 #[cfg(feature = "kind")]
 pub use spawner::{LocalSpawner, ThroughSpawner};
 pub use stream::{Answer, LineHook, Step, Stream, Waiting};
