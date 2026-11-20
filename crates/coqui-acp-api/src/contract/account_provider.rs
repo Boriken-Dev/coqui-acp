@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::accounts::{
-    BAD_VALUE, GONE, ROTATED, SECOND, SignIn, UNSUPPORTED, distinct, grant_of, inputs_for,
-    kind_rules, login_rules, sign_in, why,
+    BAD_VALUE, GONE, ROTATED, SECOND, SignIn, UNSUPPORTED, can_provide, distinct, grant_of,
+    inputs_for, kind_rules, login_rules, provided_by, sign_in, why,
 };
 use super::checks::{CANARY, Outcome, Place, text};
 use super::host::{self, GRACE, PATIENCE, Script, status};
@@ -170,8 +170,8 @@ fn offers(contract: &AccountContract, provider: &dyn AccountProvider) -> Outcome
     kind_rules(&offer.kinds)?;
     for info in &offer.kinds {
         ensure!(
-            !info.provides.is_empty(),
-            "{} provides no standard, so no harness could be given an account of it",
+            can_provide(info),
+            "{} provides no standard, neither itself nor by a setting's value, so no harness could be given an account of it",
             info.id
         );
     }
@@ -358,7 +358,7 @@ fn make(
     let mut grant = AccountGrant::new("contract-signed-in", &info.id)
         .settings(outcome.settings.clone())
         .credentials(outcome.credentials.expose().clone())
-        .provides(info.provides.clone())
+        .provides(provided_by(info, &super::json::to_json(&outcome.settings)))
         .revision(1);
     if info.state_dir {
         grant = grant.state_dir(text(&dir));

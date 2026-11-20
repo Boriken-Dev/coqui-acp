@@ -235,6 +235,17 @@ impl KindDef {
         })
     }
 
+    /// Whether an account of the kind provides a standard: the kind lists some, or one of its settings picks them by the
+    /// value an account holds ([`PROVIDES_BY_VALUE`]).
+    #[must_use]
+    pub fn provides_some(&self) -> bool {
+        !self.provides.is_empty()
+            || self
+                .settings
+                .iter()
+                .any(|setting| !setting.provides.is_empty())
+    }
+
     pub(crate) fn info(&self) -> AccountKindInfo {
         let mut info = AccountKindInfo::new(self.id, self.title);
         info.description = self.description.to_string();
@@ -342,7 +353,7 @@ fn is_reserved_variable(name: &str) -> bool {
 /// # Errors
 ///
 /// `GUATIAO_ERR_BAD_VALUE`, saying why. The message holds the name, which is no credential.
-pub(crate) fn check_variable_name(name: &str) -> Result<(), ProviderError> {
+pub fn check_variable_name(name: &str) -> Result<(), ProviderError> {
     let first = name.bytes().next();
     let usable = first.is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
         && name.len() <= 255

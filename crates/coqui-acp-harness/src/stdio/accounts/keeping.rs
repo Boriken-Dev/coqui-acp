@@ -44,8 +44,8 @@ impl Keeping {
         }
     }
 
-    /// What the provider offers: the kinds of `def` that provide a standard (a kind whose standard the account chooses
-    /// is made by its owner, not by a provider), `logins`, the ways to sign in, and the harness's own login as the
+    /// What the provider offers: the kinds of `def` that provide a standard, whether the kind lists it or a setting's
+    /// value picks it (a kind that provides none is made by its owner, not by a provider), `logins`, the ways to sign in, and the harness's own login as the
     /// automatic `local` account. No kind reports usage.
     #[must_use]
     pub fn offer(&self, logins: Vec<LoginMethodInfo>) -> AccountOffer {
@@ -54,7 +54,7 @@ impl Keeping {
             .def
             .kinds
             .iter()
-            .filter(|kind| !kind.provides.is_empty())
+            .filter(|kind| kind.provides_some())
             .map(KindDef::info)
             .collect();
         offer.logins = logins;
@@ -71,7 +71,7 @@ impl Keeping {
         grant.check_id()?;
         self.def
             .kind(&grant.kind)
-            .filter(|kind| !kind.provides.is_empty())
+            .filter(|kind| kind.provides_some())
             .ok_or_else(|| bad("this provider keeps no account of that kind"))
     }
 

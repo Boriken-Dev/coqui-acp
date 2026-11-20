@@ -28,7 +28,8 @@ use super::json::{from_json, to_json};
 use crate::{
     ACCOUNT_ID_MAX, AccountCatalog, AccountGrant, AccountKindInfo, AccountRef, AcpHarness,
     Credentials, HARNESS_LOGIN, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
-    ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest, is_account_id,
+    PROVIDES_BY_VALUE, ProcessSpawner, Requirement, SessionExport, SessionImport, StartRequest,
+    is_account_id,
 };
 
 pub(super) const OK: u32 = 0;
@@ -286,6 +287,41 @@ pub(super) fn kind_rules(kinds: &[AccountKindInfo]) -> Outcome {
         }
     }
     Ok(())
+}
+
+/// Whether an account of `info` can provide a standard: the kind lists some, or a setting of its schema picks them by value
+/// ([`PROVIDES_BY_VALUE`]).
+pub(super) fn can_provide(info: &AccountKindInfo) -> bool {
+    !info.provides.is_empty()
+        || properties(&to_json(&info.settings))
+            .values()
+            .any(|property| {
+                property
+                    .get(PROVIDES_BY_VALUE)
+                    .is_some_and(|by| by.as_object().is_some_and(|by| !by.is_empty()))
+            })
+}
+
+/// The standards the account of `info` holding `settings` provides: what the setting marked [`PROVIDES_BY_VALUE`] lists for the
+/// value held, else the kind's own.
+pub(super) fn provided_by(info: &AccountKindInfo, settings: &Value) -> Vec<String> {
+    let held = to_json(&info.settings);
+    for (name, property) in &properties(&held) {
+        let by_value = property.get(PROVIDES_BY_VALUE);
+        let value = settings.get(name).and_then(Value::as_str);
+        if let Some(listed) = by_value
+            .zip(value)
+            .and_then(|(by, value)| by.get(value))
+            .and_then(Value::as_array)
+        {
+            return listed
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+        }
+    }
+    info.provides.clone()
 }
 
 /// What every login method is held to.
