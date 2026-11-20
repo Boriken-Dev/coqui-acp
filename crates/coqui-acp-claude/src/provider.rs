@@ -93,6 +93,9 @@ pub struct ProviderSettings {
     /// Absent, a client chooses the permission mode's own and every stricter one.
     pub modes: Option<Vec<Mode>>,
     /// The setting sources Claude Code loads, any of `user`, `project` and `local`; an empty list loads none. Claude Code's
+    /// The Claude Code version an imported history's transcript names as its writer; the newest version this crate was
+    /// tested with when absent.
+    pub import_version: Option<String>,
     /// own default, every source, when absent.
     pub setting_sources: Option<Vec<SettingSource>>,
     /// The highest ACP version `initialize` answers: 1 or 2.
@@ -109,6 +112,7 @@ pub struct ProviderSettings {
     #[map(default = 67_108_864)]
     pub max_message_bytes: u64,
     /// Whether a client may load plugins through `_meta.claudeCode.options.plugins`. Their hooks and MCP servers run
+            import_version: None,
     /// with no permission asked.
     #[map(default = false)]
     pub allow_client_plugins: bool,
@@ -402,7 +406,9 @@ impl AcpHarness for ClaudeProvider {
         }
         #[cfg(feature = "history")]
         {
-            crate::provider_history::import(&session, &spawner, &self.fresh)
+            let mut options = crate::history::ImportOptions::default();
+            options.version.clone_from(&self.settings.import_version);
+            crate::provider_history::import(&session, &spawner, &self.fresh, &options)
         }
         #[cfg(not(feature = "history"))]
         {

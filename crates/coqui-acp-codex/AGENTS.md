@@ -204,6 +204,8 @@ pub struct ProviderSettings {                                        // ToValue,
     pub allow_bypass: bool,              // false
     pub modes: Option<Vec<Mode>>,        // None; ids `manual`, `accept_edits`, `auto`, `plan`, `bypass`: widen what approval_policy and sandbox amount to and every stricter mode (Bypass still needs allow_bypass, and is left out without it)
     pub max_acp_version: u64,            // 2 (1 or 2)
+    pub import_version: Option<String>,  // None: the version a seeded rollout names as its writer; the newest in TESTED_VERSIONS when absent
+    pub import_model_provider: Option<String>,   // None: the model provider a seeded rollout names; `openai` when absent
     pub max_sessions: u64,               // 8
     pub max_requests: u64,               // 32: requests worked on at once; a request past it is refused
     pub max_message_bytes: u64,          // 64 MiB: one byte more ends the connection GUATIAO_ERR_BAD_VALUE

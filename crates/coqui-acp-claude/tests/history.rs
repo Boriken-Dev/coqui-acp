@@ -381,6 +381,41 @@ mod through_the_provider {
         LocalSpawner::new().into_object()
     }
 
+    /// A seeded transcript names the version a setting gives, and the newest tested one only when none is given.
+    #[test]
+    fn a_seeded_transcript_names_the_version_the_settings_give() {
+        let text = export(&fixture("turn.transcript.jsonl"), ID)
+            .unwrap()
+            .to_string()
+            .unwrap();
+        for (setting, written) in [(Some("9.9.9"), "9.9.9"), (None, "2.1.318")] {
+            let scratch = Scratch::new("provider-history-version");
+            let work = scratch.0.join("work");
+            let config = scratch.0.join("home");
+            let mut environment = Environment::new();
+            environment.insert("CLAUDE_CONFIG_DIR", config.to_string_lossy());
+            let mut settings = ProviderSettings::default();
+            settings.import_version = setting.map(str::to_owned);
+            ClaudeProvider::new(settings)
+                .import_session(
+                    SessionImport::new(ID, work.to_string_lossy(), text.clone())
+                        .environment(environment),
+                    spawner(),
+                )
+                .expect("imported");
+            let transcript = coqui_acp_claude::transcript(&config, &work, ID).expect("written");
+            let first: Value = serde_json::from_str(
+                std::fs::read_to_string(transcript)
+                    .unwrap()
+                    .lines()
+                    .find(|line| line.contains("\"version\""))
+                    .expect("a line naming a version"),
+            )
+            .unwrap();
+            assert_eq!(first["version"], written);
+        }
+    }
+
     #[test]
     fn a_host_seeds_a_session_and_reads_it_back_in_pages() {
         let scratch = Scratch::new("provider-history");

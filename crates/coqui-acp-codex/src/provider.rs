@@ -59,6 +59,11 @@ pub struct ProviderSettings {
     /// whatever this names. Absent, a client chooses that mode and every stricter one.
     pub modes: Option<Vec<Mode>>,
     /// The highest ACP version `initialize` answers: 1 or 2.
+    /// The Codex version an imported history's rollout names as its writer; the newest version this crate was tested
+    /// with when absent.
+    pub import_version: Option<String>,
+    /// The model provider an imported history's rollout names; `openai` when absent.
+    pub import_model_provider: Option<String>,
     #[map(default = 2)]
     pub max_acp_version: u64,
     /// Sessions one connection may hold.
@@ -82,6 +87,8 @@ pub struct ProviderSettings {
 
 impl Default for ProviderSettings {
     fn default() -> Self {
+            import_version: None,
+            import_model_provider: None,
         Self {
             executable: "codex".into(),
             model: None,
@@ -335,7 +342,12 @@ impl AcpHarness for CodexProvider {
         }
         #[cfg(feature = "history")]
         {
-            crate::provider_history::import(&session, &spawner, &self.seeds)
+            let mut options = crate::history::ImportOptions::default();
+            options.version.clone_from(&self.settings.import_version);
+            options
+                .model_provider
+                .clone_from(&self.settings.import_model_provider);
+            crate::provider_history::import(&session, &spawner, &self.seeds, &options)
         }
         #[cfg(not(feature = "history"))]
         {

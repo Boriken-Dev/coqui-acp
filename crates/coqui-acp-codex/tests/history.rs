@@ -459,6 +459,46 @@ mod through_the_provider {
         LocalSpawner::new().into_object()
     }
 
+    /// A seeded rollout names the version and model provider the settings give, and the defaults only when none is.
+    #[test]
+    fn a_seeded_rollout_names_the_version_and_model_provider_the_settings_give() {
+        let text = export(&fixture("turn.rollout.jsonl"), ID)
+            .unwrap()
+            .to_string()
+            .unwrap();
+        for (version, provider, written) in [
+            (Some("9.9.9"), Some("proxy"), ("9.9.9", "proxy")),
+            (None, None, ("0.166.0", "openai")),
+        ] {
+            let scratch = Scratch::new("provider-history-meta");
+            let work = scratch.0.join("work");
+            let home = scratch.0.join("home");
+            let mut environment = Environment::new();
+            environment.insert("CODEX_HOME", home.to_string_lossy());
+            let mut settings = ProviderSettings::default();
+            settings.import_version = version.map(str::to_owned);
+            settings.import_model_provider = provider.map(str::to_owned);
+            CodexProvider::new(settings)
+                .import_session(
+                    SessionImport::new(ID, work.to_string_lossy(), text.clone())
+                        .environment(environment),
+                    spawner(),
+                )
+                .expect("imported");
+            let rollout = coqui_acp_codex::history::rollout(&home, ID).expect("written");
+            let meta: Value = serde_json::from_str(
+                std::fs::read_to_string(rollout)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(meta["payload"]["cli_version"], written.0);
+            assert_eq!(meta["payload"]["model_provider"], written.1);
+        }
+    }
+
     #[test]
     fn a_host_seeds_a_session_and_reads_it_back_in_pages() {
         let scratch = Scratch::new("provider-history");
