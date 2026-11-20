@@ -576,8 +576,8 @@ class ComposerState extends State<Composer> {
 }
 
 /// What goes with the next message, as cards in a row above the text: an image's own picture, a file's icon and name. A note says
-/// how it will reach the agent when that is not as it is (in the card, or as the tooltip of a picture), a refused one is outlined in
-/// the look's danger colour, and each has a way to take it back.
+/// how it will reach the agent when that is not as it is (in the card, or for a picture in a line under the row), a refused one is
+/// outlined in the look's danger colour, and each has a way to take it back.
 class AttachmentChips extends StatelessWidget {
   const AttachmentChips({super.key, required this.chips, required this.onRemove});
 
@@ -589,9 +589,19 @@ class AttachmentChips extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final look = context.chatLook;
+    // A picture has no room for its note, so it is said under the row.
+    final noted = [for (final chip in chips) if (chip.kind == ChipKind.image && chip.thumbnail != null && chip.note != null) chip];
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
-      child: Wrap(spacing: 8, runSpacing: 8, children: [for (final chip in chips) _AttachmentCard(chip: chip, onRemove: onRemove)]),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        Wrap(spacing: 8, runSpacing: 8, children: [for (final chip in chips) _AttachmentCard(chip: chip, onRemove: onRemove)]),
+        for (final chip in noted)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text('${chip.name}: ${chip.note}', style: TextStyle(fontSize: 11, color: chip.refused ? look.danger : look.muted)),
+          ),
+      ]),
     );
   }
 }

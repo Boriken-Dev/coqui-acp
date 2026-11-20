@@ -672,11 +672,13 @@ void main() {
       expect(host.log, ['remove a']);
     });
 
-    testWidgets('a refused picture says why in its tooltip and is outlined', (tester) async {
+    testWidgets('a picture with a note says it in a line under the cards, a refused one outlined and marked', (tester) async {
       final host = FakeAttachments()..chips = [ComposerChip(key: 'a', name: 'shot.png', detail: '12 KB', kind: ChipKind.image, thumbnail: png, note: 'Too large to attach', refused: true)];
       await pump(tester, attachments: host);
+      expect(find.text('shot.png: Too large to attach'), findsOneWidget);
       expect(find.byTooltip('shot.png\nToo large to attach'), findsOneWidget);
       expect(find.byIcon(Icons.error_outline), findsOneWidget);
+      expect(tester.getTopLeft(find.text('shot.png: Too large to attach')).dy, lessThan(tester.getTopLeft(find.byType(TextField)).dy), reason: 'above the text');
     });
   });
 
