@@ -24,6 +24,11 @@ pub const HARNESS_LOGIN: &str = "harness-login";
 /// without anyone adding it.
 pub const LOCAL_ACCOUNT: &str = "local";
 
+/// The annotation of a property of a kind's settings schema whose value picks the standards an account provides: an object from
+/// each value the property takes to the list of standards. An account holding a value it lists provides those, and any other
+/// provides what [`AccountKindInfo::provides`] says.
+pub const PROVIDES_BY_VALUE: &str = "x-provides-by-value";
+
 /// The longest [`AccountGrant::id`], in bytes.
 pub const ACCOUNT_ID_MAX: usize = 128;
 

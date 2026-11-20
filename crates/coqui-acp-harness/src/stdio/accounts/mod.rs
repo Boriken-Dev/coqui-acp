@@ -53,9 +53,7 @@ pub struct Setting {
     pub provides: &'static [(&'static str, &'static str)],
 }
 
-/// The annotation of a setting's schema property whose value picks the standards an account provides, as an object from
-/// each value to the list of standards. The kind's own `provides` is what an account whose value is not listed provides.
-pub const PROVIDES_BY_VALUE: &str = "x-provides-by-value";
+pub use coqui_acp_api::PROVIDES_BY_VALUE;
 
 /// A URL a kind talks to, as [`EndpointSlot`].
 #[derive(Debug)]

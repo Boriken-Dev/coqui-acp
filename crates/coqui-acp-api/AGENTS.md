@@ -343,6 +343,7 @@ AccountCatalog::new() /* only harness-login */;  .kind(id);  .accepts_reference(
 #[non_exhaustive] pub struct AccountKindInfo { pub id: String, pub title: String, pub description: String, pub settings: Value,
     pub endpoints: Vec<EndpointSlot>, pub rotates: bool, pub history_portable: bool, pub state_dir: bool, pub renews: bool, pub notices: Vec<String>, pub provides: Vec<String> }
 AccountKindInfo::new(id, title);  .provides(standards);  AccountKindInfo::harness_login()
+pub const PROVIDES_BY_VALUE: &str = "x-provides-by-value";   // a settings property carrying it is an object from each value the property takes to the standards an account holding that value provides; any other value provides the kind's `provides`
 #[non_exhaustive] pub struct EndpointSlot { pub key: Option<String>, pub purpose: String /* MODEL_API AUTH PROXY */, pub default: Option<String> }
 EndpointSlot::new(purpose).key(k).default_url(u)
 #[non_exhaustive] pub struct LoginMethodInfo { pub id: String, pub title: String, pub description: String, pub produces: String,

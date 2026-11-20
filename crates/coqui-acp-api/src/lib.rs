@@ -36,7 +36,8 @@ pub use account::{
     AccountKeeperVtable, AccountKindInfo, AccountLoss, AccountRef, AccountRenewal, Credentials,
     DEFAULT_LOGIN_TIMEOUT_MS, EndpointSlot, HARNESS_LOGIN, LOCAL_ACCOUNT, LoginAnswer, LoginForm,
     LoginMethodInfo, LoginOutcome, LoginPrompter, LoginPrompterVtable, LoginRequest, MODEL_API,
-    OPEN_URL, OpenUrl, PASTE_CODE, PROXY, RenewReport, RenewRequest, USER_CODE, is_account_id,
+    OPEN_URL, OpenUrl, PASTE_CODE, PROVIDES_BY_VALUE, PROXY, RenewReport, RenewRequest, USER_CODE,
+    is_account_id,
 };
 pub use account_provider::{
     AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo, AccountProviderVtable,
