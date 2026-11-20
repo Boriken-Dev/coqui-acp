@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `coqui_acp_chat`: `Choice.description`, the `description` ACP gives an option's value or a mode (a model's price, what it suits), read like the label and written back by `ConfigOption.toJson`, so a client can show what a person is choosing between.
 - `coqui_acp_harness::provider::{endpoint_setting, own_kind}`: the address setting of an account and the check that an account provider keeps its kind, which the Claude and Codex account helpers each wrote; their `accounts` modules call these. Claude's plan windows are one table (`limits::WINDOWS`) read by the stream's events and the account's plan limits, and each vendor's API address is one constant.
 - `coqui_acp_api::AccountsLink` and `HarnessInfo::accounts`: a harness declares the `account_provider` that makes its accounts (its id) and the keys of its own settings the two share (`executable`, and for Pi `node` and `script`, for the stdio harnesses `harness`), so a host reads the link instead of guessing the provider's id from the harness's. Claude, Codex, Pi, the stdio provider and OpenCode declare theirs.
 - `coqui-acp-codex`: `ProviderSettings::config`, Codex's own configuration as `codex -c key=value` takes it (each value JSON, or else text), passed as `--config` of the app server; the header says that this crate sets no `shell_environment_policy`, so Codex's default decides which of the host's variables reach the commands the model runs.

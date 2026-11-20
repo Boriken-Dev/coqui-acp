@@ -175,7 +175,8 @@ void main() {
       expect(
         agent.calls,
         ['config:model=b', 'config:mode=plan'],
-        reason: 'both are in flight before either answers, and the effort waits',
+        reason:
+            'both are in flight before either answers, and the effort waits',
       );
       modeGate.complete();
       await settle();
@@ -193,11 +194,9 @@ void main() {
         'config:effort=high',
         'prompt:go',
       ]);
-      expect(
-        reported,
-        [(OptionRole.mode, 'plan')],
-        reason: 'the model and effort were defaults',
-      );
+      expect(reported, [
+        (OptionRole.mode, 'plan'),
+      ], reason: 'the model and effort were defaults');
       store.dispose();
     },
   );
@@ -347,6 +346,54 @@ void main() {
       ], limits)!;
       expect(more.single.choices.map((c) => c.value), ['x', 'y']);
       expect(parseConfigOptions('nope', limits), isNull);
+    },
+  );
+
+  test(
+    'the description of a value is what the agent says it is, shown to the person and sent back as it came',
+    () {
+      final raw = {
+        'id': 'model',
+        'name': 'Model',
+        'category': 'model',
+        'currentValue': 'opus',
+        'options': [
+          {
+            'value': 'opus',
+            'name': 'Opus',
+            'description': 'Best for \x07everyday tasks',
+          },
+          {'value': 'haiku', 'name': 'Haiku'},
+          {'value': 'blank', 'name': 'Blank', 'description': '  '},
+        ],
+      };
+      final option = parseConfigOptions([raw], const ChatLimits())!.single;
+      expect(
+        option.choices.map((c) => c.description),
+        ['Best for  everyday tasks', null, null],
+        reason: 'a control character is a space, and none or blank is none',
+      );
+      final back = option.toJson()['options']! as List;
+      expect((back[0]! as Map)['description'], 'Best for  everyday tasks');
+      expect(
+        (back[1]! as Map).containsKey('description'),
+        isFalse,
+        reason: 'a value with none says none',
+      );
+      final modes = parseModes({
+        'currentModeId': 'plan',
+        'availableModes': [
+          {'id': 'plan', 'name': 'Plan', 'description': 'Reads only'},
+        ],
+      }, const ChatLimits())!;
+      expect(modes.choices.single.description, 'Reads only');
+      expect(
+        parseConfigOptions([
+          raw,
+        ], const ChatLimits(shortText: 8))!.single.choices.first.description,
+        'Best for…',
+        reason: 'a long description is cut like any other text shown',
+      );
     },
   );
 }
