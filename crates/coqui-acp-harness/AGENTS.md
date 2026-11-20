@@ -370,7 +370,7 @@ Not read: `planStatus` credits (the unit is unclear) and `userTier.name` (the ho
 pub fn untested(harness: &str, found: &str, tested: &[&str]) -> Option<String>
 ```
 
-The warning for a version a driver was not tested with, or `None`. Nothing is refused for it.
+The warning for a version a driver was not tested with, or `None`. Nothing is refused for it. A release whose `major.minor` is a tested version's counts as tested (point releases come weekly, and a warning on each is noise); a version that is not dotted numbers is compared whole.
 
 ## Errors
 
