@@ -451,11 +451,14 @@ fn connection_and_session_limits_are_flat_keys_with_the_defaults_left_alone() {
 fn a_prompt_limit_in_the_settings_reaches_the_connection() {
     let dir = scratch("prompt-limit");
     let log = dir.join("log.jsonl");
-    let mut settings = ProviderSettings {
+    let settings = ProviderSettings {
         executable: fake(),
+        connection: ConnectionSettings {
+            max_prompt_bytes: Some(200),
+            ..ConnectionSettings::default()
+        },
         ..ProviderSettings::default()
     };
-    settings.connection.max_prompt_bytes = Some(200);
     let request = StartRequest::builder()
         .environment(stand_in_environment(&dir, &log))
         .build();

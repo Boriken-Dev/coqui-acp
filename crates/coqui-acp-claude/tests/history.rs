@@ -394,8 +394,10 @@ mod through_the_provider {
             let config = scratch.0.join("home");
             let mut environment = Environment::new();
             environment.insert("CLAUDE_CONFIG_DIR", config.to_string_lossy());
-            let mut settings = ProviderSettings::default();
-            settings.import_version = setting.map(str::to_owned);
+            let settings = ProviderSettings {
+                import_version: setting.map(str::to_owned),
+                ..ProviderSettings::default()
+            };
             ClaudeProvider::new(settings)
                 .import_session(
                     SessionImport::new(ID, work.to_string_lossy(), text.clone())

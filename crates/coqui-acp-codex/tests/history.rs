@@ -475,9 +475,11 @@ mod through_the_provider {
             let home = scratch.0.join("home");
             let mut environment = Environment::new();
             environment.insert("CODEX_HOME", home.to_string_lossy());
-            let mut settings = ProviderSettings::default();
-            settings.import_version = version.map(str::to_owned);
-            settings.import_model_provider = provider.map(str::to_owned);
+            let settings = ProviderSettings {
+                import_version: version.map(str::to_owned),
+                import_model_provider: provider.map(str::to_owned),
+                ..ProviderSettings::default()
+            };
             CodexProvider::new(settings)
                 .import_session(
                     SessionImport::new(ID, work.to_string_lossy(), text.clone())

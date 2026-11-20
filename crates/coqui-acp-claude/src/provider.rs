@@ -22,8 +22,8 @@ use coqui_acp_harness::account::{Accounts, Files, Hold};
 use coqui_acp_harness::acp::Harness;
 use coqui_acp_harness::provider::{Serving, shared, takes_of};
 
-use crate::accounts;
 use crate::account_provider::ACCOUNT_PROVIDER;
+use crate::accounts;
 use crate::{ClaudeAgent, ClaudeLaunch, SessionSettings};
 
 /// What a connection with `cache_lifetime` short sets `CLAUDE_CODE_PROMPT_CACHE_TTL` and its sub-agent twin to.

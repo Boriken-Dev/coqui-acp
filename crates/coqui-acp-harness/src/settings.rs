@@ -215,11 +215,13 @@ mod tests {
         assert_eq!(defaults.max_prompt_bytes, Settings::new().max_prompt_bytes);
         assert_eq!(defaults.cancel_grace, Settings::new().cancel_grace);
         assert_eq!(defaults.permission_timeout, None);
-        let mut given = ConnectionSettings::default();
-        given.max_prompt_bytes = Some(1);
-        given.cancel_grace_ms = Some(0);
-        given.permission_timeout_ms = Some(5);
-        given.max_open_questions = Some(u64::MAX);
+        let mut given = ConnectionSettings {
+            max_prompt_bytes: Some(1),
+            cancel_grace_ms: Some(0),
+            permission_timeout_ms: Some(5),
+            max_open_questions: Some(u64::MAX),
+            ..ConnectionSettings::default()
+        };
         let settings = given.serving();
         assert_eq!(settings.max_prompt_bytes, 1);
         assert_eq!(settings.cancel_grace, Duration::ZERO);
