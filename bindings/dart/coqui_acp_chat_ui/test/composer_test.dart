@@ -598,6 +598,16 @@ void main() {
       expect(tester.widget<IconButton>(find.byKey(const Key('composer-plus'))).onPressed, isNull);
     });
 
+    testWidgets('an entry of the host keeps + on while nothing can be attached, and the entries that attach are off', (tester) async {
+      final host = FakeAttachments()..canAttach = false;
+      await pump(tester, attachments: host, pickFiles: () async => const [], plusItems: [MenuItemButton(onPressed: () {}, child: const Text('Host item'))]);
+      await tester.tap(find.byKey(const Key('composer-plus')));
+      await tester.pumpAndSettle();
+      expect(find.text('Host item'), findsOneWidget);
+      expect(tester.widget<MenuItemButton>(find.byKey(const Key('add-files'))).onPressed, isNull);
+      expect(tester.widget<MenuItemButton>(find.byKey(const Key('paste'))).onPressed, isNull);
+    });
+
     testWidgets('pasting an image, copied files or a long text goes to the host; a short text stays text', (tester) async {
       final host = FakeAttachments();
       final key = GlobalKey<ComposerState>();

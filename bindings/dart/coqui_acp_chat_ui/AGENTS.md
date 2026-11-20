@@ -128,7 +128,7 @@ itself, whatever `focusNode` it is given; `paste()` is public.
   image's own picture (72 px square, its name, size and note in the tooltip), a file or folder as an icon with its name and size or note, a refusal outlined
   in the look's danger colour, each with an × (`Remove <name>`). The package adds the
   "Add files or images…", "Add a folder reference…" and "Paste from clipboard" entries when it is given one, using `pickFiles` and
-  `pickFolder`. `ClipboardReader` (`image`, `files`, `text`) is the paste source; `TextClipboard` is the default.
+  `pickFolder`; they are off while `canAttach` is false, and `+` stays on for the host's `plusItems`. `ClipboardReader` (`image`, `files`, `text`) is the paste source; `TextClipboard` is the default.
 - `actions: List<ComposerAction>` (`name`, `description`, `run`): the host's own `/` entries. With any, `/` lists two groups under titles
   (`commandsTitle`, default "Agent commands", and `actionsTitle`, default "Host actions"); choosing an action runs it, clears the typed
   text and sends nothing. With none, the list is the agent's commands alone, untitled. `hint` is the placeholder, so a host changes it

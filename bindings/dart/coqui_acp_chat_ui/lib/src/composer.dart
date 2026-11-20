@@ -682,19 +682,19 @@ class _PlusButton extends StatelessWidget {
           MenuItemButton(
             key: const Key('add-files'),
             leadingIcon: const Icon(Icons.attach_file, size: 18),
-            onPressed: widget.pickFiles == null ? null : () => unawaited(composer._addFiles()),
+            onPressed: widget.pickFiles == null || !host.canAttach ? null : () => unawaited(composer._addFiles()),
             child: const Text('Add files or images…'),
           ),
           MenuItemButton(
             key: const Key('add-folder'),
             leadingIcon: const Icon(Icons.folder_outlined, size: 18),
-            onPressed: widget.pickFolder == null ? null : () => unawaited(composer._addFolder()),
+            onPressed: widget.pickFolder == null || !host.canAttach ? null : () => unawaited(composer._addFolder()),
             child: const Text('Add a folder reference…'),
           ),
           MenuItemButton(
             key: const Key('paste'),
             leadingIcon: const Icon(Icons.content_paste, size: 18),
-            onPressed: () => unawaited(composer.paste()),
+            onPressed: host.canAttach ? () => unawaited(composer.paste()) : null,
             child: const Text('Paste from clipboard'),
           ),
         ],
@@ -703,7 +703,7 @@ class _PlusButton extends StatelessWidget {
         key: const Key('composer-plus'),
         tooltip: 'Add to the message',
         visualDensity: VisualDensity.compact,
-        onPressed: widget.enabled && (host?.canAttach ?? widget.plusItems.isNotEmpty)
+        onPressed: widget.enabled && ((host?.canAttach ?? false) || widget.plusItems.isNotEmpty)
             ? () => controller.isOpen ? controller.close() : controller.open()
             : null,
         icon: const Icon(Icons.add),
