@@ -38,7 +38,7 @@ mod tests {
     use coqui_acp_api::Credentials;
 
     #[test]
-    fn a_key_and_a_sign_in_are_not_offered_and_a_refused_grant_is_refused() {
+    fn a_key_and_a_sign_in_report_no_limits_and_a_refused_grant_is_refused() {
         let key = AccountGrant::new("k", API_KEY)
             .settings(coqui_acp_harness::provider::schema(
                 &serde_json::json!({"variable": "OPENAI_API_KEY"}),

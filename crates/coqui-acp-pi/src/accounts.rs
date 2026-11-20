@@ -1,10 +1,14 @@
 //! The accounts Pi takes, read from Pi 1.5.0's source and its documentation; a real sign-in was not run.
 //!
 //! `PI_CODING_AGENT_DIR` places `auth.json`, the settings and the sessions. Pi's own sign-in (`/login`, `pi auth login`)
-//! needs a terminal, so this provider lists no login method: an API key account is made from its settings.
+//! needs a terminal, so the one way this provider signs in is a provider's key, typed in and kept as an account.
 
-use coqui_acp_api::AccountCatalog;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use coqui_acp_api::standard;
+use coqui_acp_api::{ASK, AccountCatalog, LoginMethodInfo};
 use coqui_acp_harness::stdio::accounts::{
     self, AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef,
 };
@@ -13,6 +17,8 @@ use coqui_acp_harness::stdio::accounts::{
 pub const API_KEY: &str = "pi-api-key";
 /// The kind of a sign-in kept in `auth.json`.
 pub const OAUTH: &str = "pi-oauth";
+/// The login method that makes a [`API_KEY`] account: the variable and the key, typed in.
+pub const KEY_METHOD: &str = "api-key";
 
 /// The variables Pi reads a provider's key from: what a form suggests for a key account's `variable`, which may name any
 /// other variable (a provider a later Pi adds).
@@ -155,8 +161,8 @@ pub static DEF: HarnessDef = HarnessDef {
     kinds: &[
         KindDef {
             id: API_KEY,
-            // Which API the key is for is the `variable` setting's (`KEY_STANDARDS`), so the kind provides nothing
-            // of its own.
+            // Which API the key is for is the `variable` setting's value (`KEY_STANDARDS`), so the kind lists no
+            // standard of its own: a key of a variable Pi has no API for provides none.
             provides: &[],
             title: "Pi provider key",
             description: "A key for one provider, read from the variable `variable` names, with Pi started in a directory of its own so that no key in `auth.json` and no `baseUrl` in the person's own `models.json` overrides it.",
@@ -237,13 +243,35 @@ pub static DEF: HarnessDef = HarnessDef {
     ],
     variables: VARIABLES,
     renew_args: None,
-    login_unsupported: "Pi signs in only inside its terminal interface (`/login`), which this provider does not drive; a key account is made from its settings",
+    login_unsupported: "Pi signs in only inside its terminal interface (`/login`), which this provider does not drive; a provider's key is the one way it signs in (`api-key`)",
 };
 
-/// What the provider lists as the accounts Pi takes: the two kinds, and no login method.
+/// What the provider lists as the accounts Pi takes: the two kinds.
 #[must_use]
 pub fn catalog() -> AccountCatalog {
     accounts::catalog(&DEF)
+}
+
+/// The ways to sign in: a provider's key, with the variable it is read from named first (a provider's own is suggested, any
+/// other name works) and the key asked for after.
+#[must_use]
+pub fn logins() -> Vec<LoginMethodInfo> {
+    let mut key = LoginMethodInfo::new(KEY_METHOD, "Provider API key", API_KEY);
+    key.description = "Asks which environment variable the key goes in and then the key. It sends nothing to the provider; the account provides the API the variable is a key of.".to_string();
+    key.inputs = coqui_acp_harness::provider::schema(&serde_json::json!({
+        "type": "object",
+        "properties": {"variable": {
+            "type": "string",
+            "title": "Variable",
+            "description": "The environment variable Pi reads the key from.",
+            "examples": KEY_VARIABLES,
+        }},
+        "required": ["variable"],
+        "additionalProperties": false,
+    }));
+    key.steps = vec![ASK.to_string()];
+    key.remote = true;
+    vec![key]
 }
 
 #[cfg(test)]
@@ -285,6 +313,7 @@ mod tests {
             [standard::PI]
         );
         assert!(catalog.kind(API_KEY).expect("key").provides.is_empty());
+        assert!(DEF.kinds.iter().all(KindDef::provides_some));
         for slot in catalog.accepts.iter().flat_map(|a| &a.slots) {
             assert!(catalog.kind(&slot.kind).is_some());
             if let Some(variable) = &slot.variable {

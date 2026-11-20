@@ -1,5 +1,6 @@
-//! The Pi account provider: the sign-in Pi's own `/login` wrote is watched for a change nobody told the host of, and the
-//! provider keeps every rule of the kind. It signs no one in, renews nothing and has no plan limits to read.
+//! The Pi account provider: the sign-in Pi's own `/login` wrote is watched for a change nobody told the host of, a
+//! provider's key is signed in, and the provider keeps every rule of the kind. It renews nothing and has no plan limits to
+//! read.
 #![allow(
     clippy::std_instead_of_core,
     clippy::std_instead_of_alloc,
@@ -181,7 +182,7 @@ fn a_watch_never_puts_the_grants_copy_back_and_tells_a_sign_in_that_is_gone_at_o
 }
 
 #[test]
-fn it_signs_no_one_in_renews_nothing_and_reads_no_limits() {
+fn it_signs_in_only_a_key_renews_nothing_and_reads_no_limits() {
     let provider = provider();
     let dir = scratch("none");
     let error = provider
@@ -191,7 +192,7 @@ fn it_signs_no_one_in_renews_nothing_and_reads_no_limits() {
             NoPrompter.into_object(),
         )
         .expect_err("refused");
-    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
     assert!(error.message().contains("terminal"), "{}", error.message());
     let grant = sign_in(&dir, r#"{"anthropic":{}}"#);
     let error = provider
@@ -222,40 +223,152 @@ fn it_signs_no_one_in_renews_nothing_and_reads_no_limits() {
 }
 
 #[test]
-fn a_key_is_no_account_it_keeps_and_neither_is_another_providers_kind() {
+fn a_key_whose_variable_names_an_api_is_an_account_it_keeps_and_another_providers_kind_is_not() {
     let provider = provider();
     let dir = scratch("foreign");
     let offer = provider.offers().expect("offered");
     let ids: Vec<&str> = offer.kinds.iter().map(|kind| kind.id.as_str()).collect();
-    assert_eq!(ids, ["pi-oauth"]);
-    assert!(offer.logins.is_empty() && offer.usage.is_empty());
+    assert_eq!(ids, ["pi-api-key", "pi-oauth"]);
+    let logins: Vec<&str> = offer.logins.iter().map(|login| login.id.as_str()).collect();
+    assert_eq!(logins, ["api-key"]);
+    assert_eq!(offer.logins[0].produces, "pi-api-key");
+    assert!(offer.usage.is_empty());
     let key = AccountGrant::new("k", "pi-api-key")
+        .settings(coqui_acp_harness::provider::schema(
+            &serde_json::json!({"variable": "ANTHROPIC_API_KEY"}),
+        ))
         .credentials(Credentials::from_iter([("api_key", CANARY)]))
         .state_dir(dir.to_string_lossy());
+    let report = provider
+        .usage(
+            AccountUsageQuery::new(key.clone()),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .expect("a key is kept");
+    assert!(!report.supported);
+    // A key has no file Pi rewrites, so there is nothing to watch.
+    let error = provider
+        .watch(
+            WatchRequest::new(key),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .map(|_| ())
+        .expect_err("nothing to watch");
+    assert_eq!(error.status, Status::GUATIAO_ERR_UNSUPPORTED);
     let foreign = AccountGrant::new("a", "someone-elses-kind")
         .provides(["pi"])
         .credentials(Credentials::from_iter([("auth_json", CANARY)]))
         .state_dir(dir.to_string_lossy());
-    for grant in [key, foreign] {
-        let error = provider
-            .watch(
-                WatchRequest::new(grant.clone()),
-                spawner(&dir),
-                Heard::default().into_object(),
-            )
-            .map(|_| ())
-            .expect_err("not its kind");
-        assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
-        let error = provider
-            .usage(
-                AccountUsageQuery::new(grant),
-                spawner(&dir),
-                Heard::default().into_object(),
-            )
-            .expect_err("not its kind");
-        assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let error = provider
+        .watch(
+            WatchRequest::new(foreign.clone()),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .map(|_| ())
+        .expect_err("not its kind");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    let error = provider
+        .usage(
+            AccountUsageQuery::new(foreign),
+            spawner(&dir),
+            Heard::default().into_object(),
+        )
+        .expect_err("not its kind");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
+    assert!(!error.message().contains(CANARY));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A prompter that answers the key form with the key it was made with.
+struct Typing(&'static str);
+
+impl LoginPrompter for Typing {
+    fn say(&self, _text: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn open_url(&self, _open: OpenUrl) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn ask(&self, form: LoginForm) -> Result<LoginAnswer, ProviderError> {
+        let schema = coqui_acp_harness::provider::to_json(&form.schema);
+        assert_eq!(
+            schema["properties"]["api_key"]["writeOnly"],
+            serde_json::json!(true),
+            "{schema}"
+        );
+        Ok(LoginAnswer::new(
+            Value::from(Map::new()),
+            Credentials::from_iter([("api_key", self.0)]),
+        ))
+    }
+
+    fn cancelled(&self) -> Result<bool, ProviderError> {
+        Ok(false)
+    }
+}
+
+fn key_login(
+    variable: &str,
+    typed: &'static str,
+) -> Result<coqui_acp_api::LoginOutcome, ProviderError> {
+    let dir = scratch("key-login");
+    let inputs = coqui_acp_harness::provider::schema(&serde_json::json!({"variable": variable}));
+    let outcome = provider().login(
+        LoginRequest::new("api-key", dir.to_string_lossy()).inputs(inputs),
+        spawner(&dir),
+        Typing(typed).into_object(),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome
+}
+
+#[test]
+fn the_key_login_keeps_the_key_and_its_variable_and_the_account_provides_that_api() {
+    let outcome = key_login("ANTHROPIC_API_KEY", CANARY).expect("signed in");
+    assert_eq!(outcome.kind, "pi-api-key");
+    assert_eq!(outcome.credentials.expose().get("api_key"), Some(CANARY));
+    let settings = coqui_acp_harness::provider::to_json(&outcome.settings);
+    assert_eq!(
+        settings,
+        serde_json::json!({"variable": "ANTHROPIC_API_KEY"})
+    );
+    assert!(!outcome.checked);
+    let catalog = coqui_acp_pi::accounts::catalog();
+    let kind = catalog.kind("pi-api-key").expect("listed");
+    assert_eq!(
+        coqui_acp_harness::stdio::accounts::provided(kind, &outcome.settings),
+        [coqui_acp_api::standard::ANTHROPIC_API]
+    );
+    // A variable of a provider Pi has no API for is kept as it is and provides none.
+    let other = key_login("MISTRAL_API_KEY", CANARY).expect("signed in");
+    assert!(coqui_acp_harness::stdio::accounts::provided(kind, &other.settings).is_empty());
+}
+
+#[test]
+fn the_key_login_refuses_a_variable_that_is_none_a_blank_key_and_a_way_it_does_not_have() {
+    for variable in ["", "A=B", "1ST", "TWO WORDS", "AOS_X"] {
+        let error = key_login(variable, CANARY).expect_err("refused");
+        assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE, "{variable:?}");
+    }
+    for typed in ["", "   ", "two\nlines"] {
+        let error = key_login("OPENAI_API_KEY", typed).expect_err("refused");
+        assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE, "{typed:?}");
         assert!(!error.message().contains(CANARY));
     }
+    let dir = scratch("other-way");
+    let error = provider()
+        .login(
+            LoginRequest::new("browser", dir.to_string_lossy()),
+            spawner(&dir),
+            Typing(CANARY).into_object(),
+        )
+        .expect_err("refused");
+    assert_eq!(error.status, Status::GUATIAO_ERR_BAD_VALUE);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -303,7 +416,7 @@ fn the_suite_inside() {
         .instantiate(&Value::from(settings))
         .expect("the settings are taken");
     let outcome = AccountContract::new("pi")
-        .logins(false)
+        .logins(true)
         .program(true)
         .run(&provider);
     drop(provider);

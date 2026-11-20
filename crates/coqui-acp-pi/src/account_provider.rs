@@ -1,8 +1,8 @@
 //! Pi's accounts as a provider of the `account_provider` kind.
 //!
-//! The one account it keeps is the sign-in Pi's own `/login` wrote into `auth.json`, which it watches for a change nobody
-//! told the host of. Pi signs in only inside its terminal interface and refreshes a sign-in itself, so it signs no one in
-//! and renews nothing, and it has no plan limits to read. It runs no agent: the harness
+//! It keeps the sign-in Pi's own `/login` wrote into `auth.json`, which it watches for a change nobody told the host of,
+//! and a provider's key. Pi signs in only inside its terminal interface and refreshes a sign-in itself, so the one way it
+//! signs anyone in is a key typed in, and it renews nothing and has no plan limits to read. It runs no agent: the harness
 //! ([`PiProvider`](crate::PiProvider)) applies an account the host hands it.
 
 use alloc::string::String;
@@ -15,16 +15,18 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
     AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
-    AccountUsage, AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginOutcome, LoginPrompter,
-    LoginRequest, ModelInfo, ModelListing, ProcessSpawner, RenewReport, RenewRequest, UnknownKind,
-    WatchRequest,
+    AccountUsage, AccountUsageQuery, AccountWatch, Credentials, HARNESS_LOGIN, LoginForm,
+    LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner,
+    RenewReport, RenewRequest, UnknownKind, WatchRequest,
 };
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, DEFAULT_POLL_MS};
-use coqui_acp_harness::stdio::accounts::Keeping;
+use coqui_acp_harness::login::{asked, supervise};
+use coqui_acp_harness::provider::{credential, schema, to_json};
+use coqui_acp_harness::stdio::accounts::{Keeping, check_variable_name};
 
 use crate::account_usage::read_limits;
-use crate::accounts::DEF;
+use crate::accounts::{API_KEY, DEF, KEY_METHOD, logins};
 use crate::provider::apply_to;
 use crate::{PiLaunch, PiSession, PiSettings, SessionSettings};
 
@@ -122,25 +124,63 @@ impl AccountProvider for PiAccounts {
     fn describe(&self) -> Result<AccountProviderInfo, ProviderError> {
         let mut info = AccountProviderInfo::new("Pi accounts");
         info.description =
-            "Watches the sign-in Pi's own `/login` wrote; it signs no one in, renews nothing and reads no plan limits."
+            "Watches the sign-in Pi's own `/login` wrote and signs a provider's key in; it renews nothing and reads no plan limits."
                 .into();
         Ok(info)
     }
 
     fn offers(&self) -> Result<AccountOffer, ProviderError> {
-        Ok(self.keeping.offer(Vec::new()))
+        Ok(self.keeping.offer(logins()))
     }
 
     fn login(
         &self,
-        _request: LoginRequest,
-        _spawner: Object<dyn ProcessSpawner>,
-        _prompter: Object<dyn LoginPrompter>,
+        request: LoginRequest,
+        spawner: Object<dyn ProcessSpawner>,
+        prompter: Object<dyn LoginPrompter>,
     ) -> Result<LoginOutcome, ProviderError> {
-        Err(ProviderError::new(
-            Status::GUATIAO_ERR_UNSUPPORTED,
-            DEF.login_unsupported,
-        ))
+        if request.method != KEY_METHOD {
+            return Err(bad(DEF.login_unsupported));
+        }
+        let variable = to_json(&request.inputs)
+            .get("variable")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .ok_or_else(|| bad("login refused: the variable the key is for is missing"))?;
+        check_variable_name(&variable)?;
+        // Nothing runs: the key is asked for and kept, and Pi reads it from the variable when an agent starts on the account.
+        supervise(
+            Arc::new(spawner),
+            prompter,
+            request.timeout_ms,
+            Box::new(move |_spawner, prompter, _job| {
+                let form = LoginForm::new(
+                    "Pi provider key",
+                    schema(&serde_json::json!({
+                        "type": "object",
+                        "properties": {"api_key": credential()},
+                        "required": ["api_key"],
+                    })),
+                );
+                let answer = asked(prompter.ask(form))?;
+                let key = answer
+                    .secrets
+                    .expose()
+                    .get("api_key")
+                    .unwrap_or_default()
+                    .to_string();
+                if key.trim().is_empty() || key.chars().any(char::is_control) {
+                    return Err(bad("login refused: no usable key was given"));
+                }
+                let mut credentials = Credentials::new();
+                credentials.insert("api_key", key);
+                let mut outcome = LoginOutcome::new(API_KEY, credentials);
+                outcome.settings = schema(&serde_json::json!({"variable": variable}));
+                // Whether the provider accepts it is not known without a model turn.
+                outcome.checked = false;
+                Ok(outcome)
+            }),
+        )
     }
 
     fn renew(
@@ -213,6 +253,10 @@ impl AccountProvider for PiAccounts {
         }
         Ok(listing)
     }
+}
+
+fn bad(why: &str) -> ProviderError {
+    ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why)
 }
 
 /// The models Pi lists once started on `launch`, with no turn.

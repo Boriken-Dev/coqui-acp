@@ -215,7 +215,7 @@ pub struct ProviderSettings {                                        // ToValue,
     pub allow_credential_roots: bool,    // false: a working directory that holds the places credentials are kept in is refused
     #[flatten] pub session: SessionSettings,   // how each session reads Pi's output, waits for it and ends it
 }
-pub mod accounts { pub static DEF: HarnessDef;  pub fn catalog() -> AccountCatalog;  pub const API_KEY, OAUTH: &str; }
+pub mod accounts { pub static DEF: HarnessDef;  pub fn catalog() -> AccountCatalog;  pub fn logins() -> Vec<LoginMethodInfo> /* the `api-key` method */;  pub const API_KEY, OAUTH, KEY_METHOD: &str; }
 ```
 
 The account provider, `PiAccounts` (id `pi_accounts`), is offered by the same library file:
@@ -239,10 +239,10 @@ Register it with `Registry::register_local`, or build it into a library with `gu
 
 ## Account provider (`PiAccounts`, id `pi_accounts`)
 
-`AccountContract` holds it to the kind with no login method (`tests/account_provider.rs`). It runs no agent and no program.
+`AccountContract` holds it to the kind, with its one login method (`tests/account_provider.rs`). It runs no agent and no program.
 
-- `describe`, `offers`: title `Pi accounts`; one kind, `pi-oauth` (provides `pi`, rotating, keeps a directory; `renews` false), no login method and no usage kind. `pi-api-key` provides no standard as a kind (an account's `variable` picks it, as above) and is not offered. Every call but `describe` and `offers` refuses `BAD_VALUE` an id that is not one and a kind it does not list, **including a kind of another provider that provides `pi`**.
-- `login`: `UNSUPPORTED`, with the terminal reason above. `renew`: `UNSUPPORTED` (Pi refreshes a sign-in itself, under a lock, when it needs one; it has no command that does so without a model turn).
+- `describe`, `offers`: title `Pi accounts`; two kinds, `pi-api-key` (provides no standard as a kind: an account's `variable` picks it, as above) and `pi-oauth` (provides `pi`, rotating, keeps a directory; `renews` false); one login method, `api-key` (below), and no usage kind. Every call but `describe` and `offers` refuses `BAD_VALUE` an id that is not one and a kind it does not list, **including a kind of another provider that provides `pi`**.
+- `login`: `api-key` (`accounts::KEY_METHOD`, `accounts::logins()`) takes the input `variable` (any variable name `check_variable_name` takes; Pi's provider variables are the schema's `examples`), asks for the key in a form (`api_key`, sensitive), runs no program and makes a `pi-api-key` account whose settings are `{variable}`, not checked (whether the provider accepts the key is not known without a model turn); a blank or control-character key, or a variable that is none, is `BAD_VALUE`. Any other method is `BAD_VALUE` with the terminal reason above: Pi's own sign-in needs its terminal interface. `renew`: `UNSUPPORTED` (Pi refreshes a sign-in itself, under a lock, when it needs one; it has no command that does so without a model turn).
 - `watch`: looks at `auth.json` every `renew_poll_ms` through the spawner and tells the keeper `renewed` (whole credentials, `from_revision` the grant's) or `lost` (missing or blank), once each; a half-written file is neither; it writes nothing.
 - `usage`: `AccountUsage` of `account_usage::read_limits`: not offered, with the reason; the automatic `local` account (Pi's own sign-in, `offers().local`) the same.
 - `models`: starts `pi --mode rpc --no-session` (`AccountSettings::executable`, `node` and `script`, the query's `environment` added) through the spawner on the account, with the grant applied as `start` applies it and its login file placed and held for the call (the keeper hears a login Pi renews meanwhile), lists `get_available_models` and ends it (no session, no turn); for the `local` account nothing is applied. No model with a credential is `unknown`. `is_default` marks the model Pi would use, and only that model has `efforts` (its `get_available_thinking_levels`) and `default_effort` (Pi's starting level): Pi lists levels for the model in use only, so the others have none and `resolved` and `version` are unset.
