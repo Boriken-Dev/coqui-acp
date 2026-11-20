@@ -1,5 +1,6 @@
 
 import 'dart:async';
+import 'dart:convert' show base64Decode;
 
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
@@ -83,14 +84,15 @@ Future<TextEditingController> pump(
   VoidCallback? onShiftTab,
   String? Function()? recall,
   Widget? header,
-  List<Widget> before = const [],
-  List<Widget> after = const [],
-  List<Widget> trailing = const [],
+  Widget? primary,
+  bool holdPrimary = false,
+  List<Widget> below = const [],
   List<Widget> plusItems = const [],
   double width = 900,
+  String text = '',
   GlobalKey<ComposerState>? key,
 }) async {
-  final controller = TextEditingController();
+  final controller = TextEditingController(text: text);
   addTearDown(controller.dispose);
   tester.view.physicalSize = Size(width, 700);
   tester.view.devicePixelRatio = 1;
@@ -119,9 +121,9 @@ Future<TextEditingController> pump(
       onShiftTab: onShiftTab,
       recall: recall,
       header: header,
-      before: before,
-      after: after,
-      trailing: trailing,
+      primary: primary,
+      holdPrimary: holdPrimary,
+      below: below,
       plusItems: plusItems,
     ),
   )));
@@ -165,15 +167,90 @@ void main() {
     expect(sent, 2);
   });
 
+  group('the one button at the right of the box', () {
+    const mic = Icon(Icons.mic_none, key: Key('the-mic'));
+
+    testWidgets('an empty message shows the host\'s primary control and no Send', (tester) async {
+      await pump(tester, primary: mic);
+      expect(find.byKey(const Key('the-mic')), findsOneWidget);
+      expect(find.byTooltip('Send'), findsNothing);
+    });
+
+    testWidgets('typing puts the primary control away for Send, and emptying the message brings it back', (tester) async {
+      var sent = 0;
+      final controller = await pump(tester, primary: mic, onSend: () => sent++);
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.pump();
+      expect(find.byKey(const Key('the-mic')), findsNothing);
+      await tester.tap(find.byTooltip('Send'));
+      expect(sent, 1);
+      controller.clear();
+      await tester.pump();
+      expect(find.byKey(const Key('the-mic')), findsOneWidget);
+      expect(find.byTooltip('Send'), findsNothing);
+      // Spaces are no message.
+      controller.text = '   ';
+      await tester.pump();
+      expect(find.byKey(const Key('the-mic')), findsOneWidget);
+    });
+
+    testWidgets('an attachment with no text is a message: Send shows', (tester) async {
+      final host = FakeAttachments()..chips = const [ComposerChip(key: 'a', name: 'shot.png', detail: '12 KB', kind: ChipKind.image, thumbnail: [0])];
+      await pump(tester, primary: mic, attachments: host);
+      expect(find.byTooltip('Send'), findsOneWidget);
+      expect(find.byKey(const Key('the-mic')), findsNothing);
+    });
+
+    testWidgets('holdPrimary keeps the primary control beside Send while it is mid-action', (tester) async {
+      await pump(tester, primary: mic, holdPrimary: true, text: 'hello');
+      expect(find.byKey(const Key('the-mic')), findsOneWidget);
+      expect(find.byTooltip('Send'), findsOneWidget);
+      expect(tester.getTopLeft(find.byTooltip('Send')).dx, lessThan(tester.getTopLeft(find.byKey(const Key('the-mic'))).dx));
+    });
+
+    testWidgets('the primary control sits at the right end of the box, + at the left, the text between', (tester) async {
+      await pump(tester, primary: mic);
+      final box = tester.getRect(find.byKey(const Key('composer')));
+      final plus = tester.getRect(find.byKey(const Key('composer-plus')));
+      final field = tester.getRect(find.byType(TextField));
+      final primary = tester.getRect(find.byKey(const Key('the-mic')));
+      expect(plus.left - box.left, lessThan(16));
+      expect(box.right - primary.right, lessThan(16));
+      expect(field.left, greaterThan(plus.right - 1));
+      expect(field.right, lessThan(primary.left + 1));
+    });
+
+    testWidgets('while a turn runs and nothing is typed, Stop shows beside the primary control, and neither Queue nor Steer', (tester) async {
+      var stopped = 0;
+      await pump(tester, primary: mic, working: true, onSteer: () {}, onStop: () => stopped++);
+      expect(find.byKey(const Key('the-mic')), findsOneWidget);
+      expect(find.byKey(const Key('composer-queue')), findsNothing);
+      expect(find.byKey(const Key('composer-steer')), findsNothing);
+      await tester.tap(find.byTooltip('Stop'));
+      expect(stopped, 1);
+    });
+
+    testWidgets('while a turn runs and something is typed, Queue, Steer and Stop show and the primary control is away', (tester) async {
+      await pump(tester, primary: mic, working: true, onSteer: () {}, onStop: () {}, text: 'next');
+      expect(find.byKey(const Key('the-mic')), findsNothing);
+      expect(find.byKey(const Key('composer-queue')), findsOneWidget);
+      expect(find.byKey(const Key('composer-steer')), findsOneWidget);
+      expect(find.byTooltip('Stop'), findsOneWidget);
+    });
+  });
+
   testWidgets('a disabled composer takes no text and sends nothing', (tester) async {
     await pump(tester, enabled: false);
     expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
-    expect(tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.arrow_upward_rounded)).onPressed, isNull);
+    expect(tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.keyboard_return)).onPressed, isNull);
   });
 
-  testWidgets('while the agent works, Send is Queue and Stop appears; starting shows a spinner instead', (tester) async {
+  testWidgets('while the agent works, a typed message is queued and Stop appears; starting shows a spinner instead', (tester) async {
     var stopped = false;
     await pump(tester, working: true, onStop: () => stopped = true);
+    expect(find.byTooltip('Queue'), findsNothing, reason: 'nothing is typed to queue');
+    await tester.enterText(find.byType(TextField), 'next');
+    await tester.pump();
     expect(find.byTooltip('Queue'), findsOneWidget);
     expect(find.byTooltip('Send'), findsNothing);
     await tester.tap(find.byTooltip('Stop'));
@@ -186,7 +263,7 @@ void main() {
   group('steering while the agent works', () {
     testWidgets('Queue, Steer and Stop sit together, and each tooltip says its key', (tester) async {
       final log = <String>[];
-      await pump(tester, working: true, onSend: () => log.add('queue'), onSteer: () => log.add('steer'), onStop: () => log.add('stop'));
+      await pump(tester, working: true, onSend: () => log.add('queue'), onSteer: () => log.add('steer'), onStop: () => log.add('stop'), text: 'next');
       await tester.tap(find.byKey(const Key('composer-steer')));
       await tester.tap(find.byKey(const Key('composer-queue')));
       await tester.tap(find.byTooltip('Stop'));
@@ -211,7 +288,7 @@ void main() {
 
     testWidgets('with enterSteers it is the other way round, and the tooltips follow', (tester) async {
       final log = <String>[];
-      await pump(tester, working: true, enterSteers: true, onSend: () => log.add('queue'), onSteer: () => log.add('steer'));
+      await pump(tester, working: true, enterSteers: true, onSend: () => log.add('queue'), onSteer: () => log.add('steer'), text: 'next');
       await tester.tap(find.byType(TextField));
       await tester.enterText(find.byType(TextField), 'hello');
       await tester.testTextInput.receiveAction(TextInputAction.send);
@@ -232,7 +309,7 @@ void main() {
       await tester.enterText(find.byType(TextField), 'hello');
       await tester.testTextInput.receiveAction(TextInputAction.send);
       expect(log, ['send']);
-      await pump(tester, working: true);
+      await pump(tester, working: true, text: 'next');
       expect(find.byKey(const Key('composer-steer')), findsNothing);
       expect(find.byTooltip('Queue'), findsOneWidget);
     });
@@ -252,32 +329,74 @@ void main() {
     expect(find.byType(ListTile), findsNothing, reason: 'a typed space ends the suggestions');
   });
 
-  testWidgets('the host\'s slots sit in the row: before and after the +, beside Send, in the + menu, above the message', (tester) async {
+  testWidgets('the host\'s slots: the header in the box, the primary control at its right, the choices under it, the entries in the + menu', (tester) async {
     await pump(
       tester,
       header: const Text('HEADER'),
-      before: const [Text('BEFORE')],
-      after: const [Text('AFTER')],
-      trailing: const [Text('TRAILING')],
+      primary: const Text('PRIMARY'),
+      below: const [Text('BELOW')],
       plusItems: [MenuItemButton(onPressed: () {}, child: const Text('Host item'))],
     );
-    expect(find.text('HEADER'), findsOneWidget);
-    final x = {for (final label in ['BEFORE', 'AFTER', 'TRAILING']) label: tester.getTopLeft(find.text(label)).dx};
-    final plus = tester.getTopLeft(find.byKey(const Key('composer-plus'))).dx;
-    expect(x['BEFORE'], lessThan(plus));
-    expect(x['AFTER'], greaterThan(plus));
-    expect(x['TRAILING'], greaterThan(x['AFTER']!));
-    expect(tester.getTopLeft(find.byTooltip('Send')).dx, greaterThan(x['TRAILING']!));
+    final box = tester.getRect(find.byKey(const Key('composer')));
+    expect(box.contains(tester.getCenter(find.text('HEADER'))), isTrue);
+    expect(box.contains(tester.getCenter(find.text('PRIMARY'))), isTrue);
+    expect(tester.getTopLeft(find.text('PRIMARY')).dx, greaterThan(tester.getTopLeft(find.byKey(const Key('composer-plus'))).dx));
+    expect(tester.getTopLeft(find.text('BELOW')).dy, greaterThan(box.bottom - 1), reason: 'the line is under the box');
     await tester.tap(find.byKey(const Key('composer-plus')));
     await tester.pumpAndSettle();
     expect(find.text('Host item'), findsOneWidget);
     expect(find.text('Add files or images…'), findsNothing, reason: 'with no attachment host there is nothing to add to');
   });
 
-  testWidgets('narrow, the controls wrap under the message and Send stays at the end', (tester) async {
-    await pump(tester, width: 420, before: const [Text('BEFORE')], trailing: const [Text('TRAILING')]);
+  group('the line under the box', () {
+    // The test font draws every glyph a 12 px square, so these are far wider than they would be.
+    const labels = ['Opus', 'High', 'Bypass', 'Work', 'Local'];
+    List<Widget> choices() => [for (final label in labels) ComposerPill(label: label, icon: Icons.tune)];
+
+    testWidgets('wide, it is right-aligned on one line, as plain text with no icon or chevron', (tester) async {
+      await pump(tester, below: choices());
+      final box = tester.getRect(find.byKey(const Key('composer')));
+      final line = tester.getRect(find.byKey(const Key('composer-below')));
+      expect(find.text('Opus'), findsOneWidget);
+      expect(find.byIcon(Icons.tune), findsNothing);
+      expect(find.byIcon(Icons.expand_more), findsNothing);
+      final first = tester.getRect(find.text('Opus')), last = tester.getRect(find.text('Local'));
+      expect(first.top, last.top, reason: 'one line');
+      expect(first.left, greaterThan(box.left + box.width / 3), reason: 'pushed to the right');
+      expect(box.right - last.right, lessThan(24));
+      expect(line.top, greaterThanOrEqualTo(box.bottom));
+    });
+
+    testWidgets('at a phone\'s width it starts at the left and wraps, with nothing overflowing', (tester) async {
+      await pump(tester, width: 360, below: choices());
+      expect(tester.takeException(), isNull);
+      final box = tester.getRect(find.byKey(const Key('composer')));
+      final first = tester.getRect(find.text('Opus')), last = tester.getRect(find.text('Local'));
+      expect(last.top, greaterThan(first.top), reason: 'on more than one line');
+      expect(first.left - box.left, lessThan(24), reason: 'from the left');
+      for (final label in labels) {
+        expect(tester.getRect(find.text(label)).right, lessThanOrEqualTo(box.right));
+      }
+    });
+
+    testWidgets('a pill outside it keeps its icon and chevron', (tester) async {
+      await tester.pumpWidget(host(const ComposerPill(label: 'Manual', icon: Icons.tune)));
+      expect(find.byIcon(Icons.tune), findsOneWidget);
+      expect(find.byIcon(Icons.expand_more), findsOneWidget);
+    });
+
+    testWidgets('with nothing to put there there is no line', (tester) async {
+      await pump(tester);
+      expect(find.byKey(const Key('composer-below')), findsNothing);
+    });
+  });
+
+  testWidgets('narrow, the box still holds +, the text and the button, and a long hint stays on a line', (tester) async {
+    await pump(tester, width: 320, primary: const Icon(Icons.mic_none), below: const [Text('BELOW')]);
     expect(tester.takeException(), isNull);
-    expect(find.text('TRAILING'), findsOneWidget);
+    expect(find.byKey(const Key('composer-plus')), findsOneWidget);
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.byIcon(Icons.mic_none), findsOneWidget);
   });
 
   testWidgets('Shift+Tab goes to the host, and only when it has asked for it', (tester) async {
@@ -511,7 +630,7 @@ void main() {
       expect(controller.text.length, 9000);
     });
 
-    testWidgets('chips show what goes with the message, a note, a refusal, and take it back', (tester) async {
+    testWidgets('cards show what goes with the message, a note, a refusal, and take it back', (tester) async {
       final host = FakeAttachments()
         ..chips = [
           const ComposerChip(key: 'a', name: 'shot.png', detail: '12 KB', kind: ChipKind.image, thumbnail: [0]),
@@ -519,11 +638,35 @@ void main() {
           const ComposerChip(key: 'c', name: 'src', detail: 'Folder', kind: ChipKind.folder, note: 'The agent runs elsewhere', refused: true),
         ];
       await pump(tester, attachments: host);
-      expect(find.text('12 KB'), findsOneWidget);
+      expect(find.text('big.log'), findsOneWidget);
       expect(find.text('Larger than 1 MB: it goes as a link'), findsOneWidget);
       expect(find.text('Folder'), findsNothing, reason: 'a note replaces the detail');
       await tester.tap(find.byTooltip('Remove big.log'));
       expect(host.log, ['remove b']);
+    });
+
+    // A 1x1 PNG.
+    final png = base64Decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+
+    testWidgets('an image is a picture card above the text, and its x takes it back', (tester) async {
+      final host = FakeAttachments()..chips = [ComposerChip(key: 'a', name: 'shot.png', detail: '12 KB', kind: ChipKind.image, thumbnail: png)];
+      await pump(tester, attachments: host, primary: const Icon(Icons.mic_none), text: 'look at this');
+      final card = tester.getRect(find.byKey(const ValueKey('attachment shot.png')));
+      final box = tester.getRect(find.byKey(const Key('composer')));
+      expect(find.byType(Image), findsOneWidget, reason: 'the picture itself');
+      expect(card.size, const Size.square(AttachmentChips.cardSize + 2), reason: 'a card, not a one-line chip');
+      expect(box.contains(card.center), isTrue, reason: 'inside the box');
+      expect(card.bottom, lessThan(tester.getTopLeft(find.byType(TextField)).dy), reason: 'above the text');
+      expect(find.text('shot.png'), findsNothing, reason: 'a picture says nothing more than its tooltip');
+      await tester.tap(find.byTooltip('Remove shot.png'));
+      expect(host.log, ['remove a']);
+    });
+
+    testWidgets('a refused picture says why in its tooltip and is outlined', (tester) async {
+      final host = FakeAttachments()..chips = [ComposerChip(key: 'a', name: 'shot.png', detail: '12 KB', kind: ChipKind.image, thumbnail: png, note: 'Too large to attach', refused: true)];
+      await pump(tester, attachments: host);
+      expect(find.byTooltip('shot.png\nToo large to attach'), findsOneWidget);
+      expect(find.byIcon(Icons.error_outline), findsOneWidget);
     });
   });
 

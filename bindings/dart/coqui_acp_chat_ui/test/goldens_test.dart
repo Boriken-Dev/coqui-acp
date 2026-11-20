@@ -153,8 +153,8 @@ void main() {
         onSend: () {},
         commands: const [AgentCommandInfo('compact', 'Make room in the context'), AgentCommandInfo('cost', 'Show what this cost')],
         attachments: attachments,
-        before: const [ComposerPill(label: 'Manual', icon: Icons.tune)],
-        trailing: const [ComposerPill(label: 'Opus 5.5', icon: Icons.memory), ComposerPill(label: 'High', icon: Icons.speed)],
+        primary: const Icon(Icons.mic_none),
+        below: const [ComposerPill(label: 'Opus 5.5'), ComposerPill(label: 'High'), ComposerPill(label: 'Bypass permissions', status: true)],
       ),
     )));
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/composer.png'));

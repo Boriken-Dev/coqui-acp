@@ -131,9 +131,19 @@ abstract interface class ComposerAttachments {
   void remove(Object key);
 }
 
-/// A compact control in the row under the message.
+/// Makes the [ComposerPill]s below it plain text: no icon and no chevron, as in [Composer.below].
+class ComposerQuiet extends InheritedWidget {
+  const ComposerQuiet({super.key, required super.child});
+
+  static bool of(BuildContext context) => context.dependOnInheritedWidgetOfExactType<ComposerQuiet>() != null;
+
+  @override
+  bool updateShouldNotify(ComposerQuiet old) => false;
+}
+
+/// A compact control: in the line under the composer's box, plain text; elsewhere, with its icon and a chevron when it opens a menu.
 class ComposerPill extends StatelessWidget {
-  const ComposerPill({super.key, required this.label, this.icon, this.leading, this.danger = false, this.status = false, this.enabled = true, this.maxWidth = 180});
+  const ComposerPill({super.key, required this.label, this.icon, this.leading, this.danger = false, this.status = false, this.enabled = true, this.maxWidth = 180, this.quiet});
 
   final String label;
   final IconData? icon;
@@ -147,35 +157,42 @@ class ComposerPill extends StatelessWidget {
   /// The widest the label gets before it is cut short.
   final double maxWidth;
 
+  /// Whether it draws only its label, in the muted colour; null follows [ComposerQuiet], which [Composer.below] puts its children
+  /// in. The app's own [leading] mark stays, since it says what the control is about.
+  final bool? quiet;
+
   @override
   Widget build(BuildContext context) {
     final look = context.chatLook;
+    final plain = quiet ?? ComposerQuiet.of(context);
     final color = danger ? look.danger : status ? look.warning : (enabled ? null : look.muted);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      padding: EdgeInsets.symmetric(horizontal: plain ? 6 : 8, vertical: plain ? 4 : 6),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        if (icon != null) ...[Icon(icon, size: 16, color: color ?? look.muted), const SizedBox(width: 4)],
+        if (icon != null && !plain) ...[Icon(icon, size: 16, color: color ?? look.muted), const SizedBox(width: 4)],
         if (leading != null) ...[
-          IconTheme(data: IconThemeData(size: 16, color: color ?? look.muted), child: leading!),
+          IconTheme(data: IconThemeData(size: plain ? 14 : 16, color: color ?? look.muted), child: leading!),
           const SizedBox(width: 4),
         ],
         Flexible(
           child: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: maxWidth),
-            child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, color: color)),
+            child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: plain ? 12 : 12.5, color: color ?? (plain ? look.muted : null))),
           ),
         ),
-        if (enabled) Icon(Icons.expand_more, size: 16, color: color ?? look.muted),
+        if (enabled && !plain) Icon(Icons.expand_more, size: 16, color: color ?? look.muted),
       ]),
     );
   }
 }
 
-/// The message being written, what goes with it, and a row of controls under it: `+`, the host's controls, and Send.
+/// The message being written, in one rounded box: the attachments as cards above the text, `+` at its left, and at its right the
+/// host's [primary] control while the message is empty, then Send once it holds something (Queue, Steer and Stop while a turn runs).
+/// A line of the host's own choices sits under the box.
 ///
-/// What is the host's goes in slots: [header] above the message, [before] and [after] the `+` at the left of the row, [trailing]
-/// beside Send, [plusItems] in the `+` menu. The package supplies the field, the `/` suggestions, paste, the attachment chips and
-/// the files and folder entries of `+`, and Send, Queue and Stop.
+/// What is the host's goes in slots: [header] at the top of the box, [primary] at the right, [plusItems] in the `+` menu and
+/// [below] under the box. The package supplies the field, the `/` suggestions, paste, the attachment cards and the files and
+/// folder entries of `+`, and Send, Queue, Steer and Stop.
 class Composer extends StatefulWidget {
   const Composer({
     super.key,
@@ -197,16 +214,16 @@ class Composer extends StatefulWidget {
     this.actionsTitle = 'Host actions',
     this.mentions,
     this.centred = false,
-    this.hint = 'Message agent',
+    this.hint = 'Message',
     this.header,
     this.attachments,
     this.pickFiles,
     this.pickFolder,
     this.clipboard = const TextClipboard(),
     this.pasteAsFile = defaultPasteAsFile,
-    this.before = const [],
-    this.after = const [],
-    this.trailing = const [],
+    this.primary,
+    this.holdPrimary = false,
+    this.below = const [],
     this.plusItems = const [],
     this.onShiftTab,
     this.recall,
@@ -215,7 +232,7 @@ class Composer extends StatefulWidget {
   /// The most characters a paste puts in the text; a longer one goes as an attachment of its own.
   static const defaultPasteAsFile = 8000;
 
-  /// From this width the controls stay on one line.
+  /// From this width the line under the box is right-aligned; narrower, it starts at the left and wraps.
   static const double wideFrom = 600;
 
   final TextEditingController controller;
@@ -225,7 +242,7 @@ class Composer extends StatefulWidget {
   /// Whether the field takes text and Send works.
   final bool enabled;
 
-  /// Whether a turn is running: Send becomes Queue, and Stop appears.
+  /// Whether a turn is running: Send becomes Queue (and Steer), and Stop appears.
   final bool working;
 
   /// Stops the turn and sends the message first. With it, a turn running shows Steer beside Queue and Stop; [onSend] is Queue.
@@ -261,14 +278,32 @@ class Composer extends StatefulWidget {
 
   /// Whether it is the middle of a new session's empty view rather than docked under a conversation.
   final bool centred;
+
+  /// The placeholder, kept to one line.
   final String hint;
+
+  /// Drawn at the top of the box, above the attachments.
   final Widget? header;
   final ComposerAttachments? attachments;
   final Future<List<PickedFile>> Function()? pickFiles;
   final Future<String?> Function()? pickFolder;
   final ClipboardReader clipboard;
   final int pasteAsFile;
-  final List<Widget> before, after, trailing, plusItems;
+
+  /// The host's one control at the right of the box, such as a microphone: shown while the message is empty (and has no
+  /// attachment), and put away for Send once it holds something. Without it Send is always shown.
+  final Widget? primary;
+
+  /// Keeps [primary] in view although the message holds text, beside Send: for a control that is mid-action, such as a dictation
+  /// that is listening, which would end if its button left.
+  final bool holdPrimary;
+
+  /// The host's choices (a model, a mode, an account), in a line under the box: [ComposerPill]s there draw as plain text. It is
+  /// right-aligned from [wideFrom] and wraps, from the left, below it. Empty leaves no line.
+  final List<Widget> below;
+
+  /// Entries at the top of the `+` menu.
+  final List<Widget> plusItems;
 
   /// What Shift+Tab does in the field, usually putting the conversation in its next mode; null leaves the key alone.
   final VoidCallback? onShiftTab;
@@ -483,13 +518,16 @@ class ComposerState extends State<Composer> {
     );
     final box = Container(
       key: const Key('composer'),
-      padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
-      decoration: BoxDecoration(color: look.composer, borderRadius: BorderRadius.circular(look.radius + 2)),
+      padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
+      decoration: BoxDecoration(color: look.composer, borderRadius: BorderRadius.circular(look.radius + 8)),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         ?widget.header,
         if (chips.isNotEmpty) AttachmentChips(chips: chips, onRemove: widget.attachments!.remove),
-        Focus(canRequestFocus: false, skipTraversal: true, onKeyEvent: onKey, child: field),
-        _Controls(composer: this),
+        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          _PlusButton(composer: this),
+          Expanded(child: Focus(canRequestFocus: false, skipTraversal: true, onKeyEvent: onKey, child: field)),
+          _Trailing(composer: this, attached: chips.isNotEmpty),
+        ]),
       ]),
     );
     return Column(mainAxisSize: MainAxisSize.min, children: [
@@ -532,77 +570,104 @@ class ComposerState extends State<Composer> {
       ),
       const SizedBox(height: 4),
       box,
+      if (widget.below.isNotEmpty) _Below(children: widget.below),
     ]);
   }
 }
 
-/// What goes with the next message, each with what it is, its size, how it will reach the agent when that is not as it is,
-/// and a way to take it back.
+/// What goes with the next message, as cards in a row above the text: an image's own picture, a file's icon and name. A note says
+/// how it will reach the agent when that is not as it is (in the card, or as the tooltip of a picture), a refused one is outlined in
+/// the look's danger colour, and each has a way to take it back.
 class AttachmentChips extends StatelessWidget {
   const AttachmentChips({super.key, required this.chips, required this.onRemove});
+
+  /// The height of a card, and the side of an image's.
+  static const double cardSize = 72;
 
   final List<ComposerChip> chips;
   final ValueChanged<Object> onRemove;
 
   @override
   Widget build(BuildContext context) {
-    final look = context.chatLook;
-    final error = look.danger;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4, top: 2),
-      child: Wrap(spacing: 6, runSpacing: 6, children: [
-        for (final chip in chips)
-          Builder(builder: (context) {
-            final thumbnail = chip.kind == ChipKind.image && chip.thumbnail != null
-                ? ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: Image.memory(Uint8List.fromList(chip.thumbnail!), width: 28, height: 28, fit: BoxFit.cover,
-                        gaplessPlayback: true, errorBuilder: (_, _, _) => const Icon(Icons.image_outlined, size: 20)),
-                  )
-                : Icon(switch (chip.kind) {
-                    ChipKind.folder => Icons.folder_outlined,
-                    ChipKind.text => Icons.notes,
-                    _ => Icons.description_outlined,
-                  }, size: 20, color: look.muted);
-            final view = Container(
-              key: ValueKey('attachment ${chip.name}'),
-              constraints: const BoxConstraints(maxWidth: 260),
-              padding: const EdgeInsets.fromLTRB(4, 3, 2, 3),
-              decoration: BoxDecoration(
-                border: Border.all(color: chip.refused ? error : look.muted.withValues(alpha: 0.35)),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                thumbnail,
-                const SizedBox(width: 6),
-                Flexible(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(chip.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-                  Text(
-                    chip.note ?? chip.detail,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11, color: chip.refused ? error : look.muted),
-                  ),
-                ])),
-                IconButton(
-                  tooltip: 'Remove ${chip.name}',
-                  visualDensity: VisualDensity.compact,
-                  iconSize: 16,
-                  onPressed: () => onRemove(chip.key),
-                  icon: const Icon(Icons.close),
-                ),
-              ]),
-            );
-            return chip.note == null ? view : Tooltip(message: chip.note!, child: view);
-          }),
-      ]),
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
+      child: Wrap(spacing: 8, runSpacing: 8, children: [for (final chip in chips) _AttachmentCard(chip: chip, onRemove: onRemove)]),
     );
   }
 }
 
-/// The row under the message.
-class _Controls extends StatelessWidget {
-  const _Controls({required this.composer});
+class _AttachmentCard extends StatelessWidget {
+  const _AttachmentCard({required this.chip, required this.onRemove});
+
+  final ComposerChip chip;
+  final ValueChanged<Object> onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final look = context.chatLook;
+    final error = look.danger;
+    final side = chip.refused ? error : look.muted.withValues(alpha: 0.35);
+    final picture = chip.kind == ChipKind.image && chip.thumbnail != null;
+    final Widget body = picture
+        ? Image.memory(
+            Uint8List.fromList(chip.thumbnail!),
+            width: AttachmentChips.cardSize,
+            height: AttachmentChips.cardSize,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) => SizedBox.square(dimension: AttachmentChips.cardSize, child: Icon(Icons.image_outlined, size: 28, color: look.muted)),
+          )
+        : Container(
+            width: 148,
+            height: AttachmentChips.cardSize,
+            padding: const EdgeInsets.fromLTRB(10, 8, 22, 8),
+            child: Column(mainAxisAlignment: MainAxisAlignment.spaceBetween, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Icon(switch (chip.kind) {
+                ChipKind.folder => Icons.folder_outlined,
+                ChipKind.text => Icons.notes,
+                ChipKind.image => Icons.image_outlined,
+                _ => Icons.description_outlined,
+              }, size: 20, color: chip.refused ? error : look.muted),
+              Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(chip.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                Text(
+                  chip.note ?? chip.detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: chip.refused ? error : look.muted),
+                ),
+              ]),
+            ]),
+          );
+    final card = Stack(key: ValueKey('attachment ${chip.name}'), children: [
+      Container(
+        decoration: BoxDecoration(border: Border.all(color: side), borderRadius: BorderRadius.circular(12)),
+        clipBehavior: Clip.antiAlias,
+        child: body,
+      ),
+      if (picture && chip.refused) Positioned(left: 4, bottom: 4, child: Icon(Icons.error_outline, size: 18, color: error)),
+      Positioned(
+        top: 0,
+        right: 0,
+        child: IconButton(
+          tooltip: 'Remove ${chip.name}',
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints.tightFor(width: 24, height: 24),
+          iconSize: 14,
+          onPressed: () => onRemove(chip.key),
+          icon: const Icon(Icons.close),
+        ),
+      ),
+    ]);
+    final tip = picture ? [chip.name, chip.note ?? chip.detail].join('\n') : chip.note;
+    return tip == null ? card : Tooltip(message: tip, child: card);
+  }
+}
+
+/// The `+` at the box's left: the host's entries, then the files, the folder and paste.
+class _PlusButton extends StatelessWidget {
+  const _PlusButton({required this.composer});
 
   final ComposerState composer;
 
@@ -610,98 +675,134 @@ class _Controls extends StatelessWidget {
   Widget build(BuildContext context) {
     final widget = composer.widget;
     final host = widget.attachments;
-    final left = <Widget>[
-      ...widget.before,
-      MenuAnchor(
-        menuChildren: [
-          ...widget.plusItems,
-          if (host != null) ...[
-            MenuItemButton(
-              key: const Key('add-files'),
-              leadingIcon: const Icon(Icons.attach_file, size: 18),
-              onPressed: widget.pickFiles == null ? null : () => unawaited(composer._addFiles()),
-              child: const Text('Add files or images…'),
-            ),
-            MenuItemButton(
-              key: const Key('add-folder'),
-              leadingIcon: const Icon(Icons.folder_outlined, size: 18),
-              onPressed: widget.pickFolder == null ? null : () => unawaited(composer._addFolder()),
-              child: const Text('Add a folder reference…'),
-            ),
-            MenuItemButton(
-              key: const Key('paste'),
-              leadingIcon: const Icon(Icons.content_paste, size: 18),
-              onPressed: () => unawaited(composer.paste()),
-              child: const Text('Paste from clipboard'),
-            ),
-          ],
+    return MenuAnchor(
+      menuChildren: [
+        ...widget.plusItems,
+        if (host != null) ...[
+          MenuItemButton(
+            key: const Key('add-files'),
+            leadingIcon: const Icon(Icons.attach_file, size: 18),
+            onPressed: widget.pickFiles == null ? null : () => unawaited(composer._addFiles()),
+            child: const Text('Add files or images…'),
+          ),
+          MenuItemButton(
+            key: const Key('add-folder'),
+            leadingIcon: const Icon(Icons.folder_outlined, size: 18),
+            onPressed: widget.pickFolder == null ? null : () => unawaited(composer._addFolder()),
+            child: const Text('Add a folder reference…'),
+          ),
+          MenuItemButton(
+            key: const Key('paste'),
+            leadingIcon: const Icon(Icons.content_paste, size: 18),
+            onPressed: () => unawaited(composer.paste()),
+            child: const Text('Paste from clipboard'),
+          ),
         ],
-        builder: (context, controller, _) => IconButton(
-          key: const Key('composer-plus'),
-          tooltip: 'Add to the message',
-          visualDensity: VisualDensity.compact,
-          onPressed: widget.enabled && (host?.canAttach ?? widget.plusItems.isNotEmpty)
-              ? () => controller.isOpen ? controller.close() : controller.open()
-              : null,
-          icon: const Icon(Icons.add),
-        ),
+      ],
+      builder: (context, controller, _) => IconButton(
+        key: const Key('composer-plus'),
+        tooltip: 'Add to the message',
+        visualDensity: VisualDensity.compact,
+        onPressed: widget.enabled && (host?.canAttach ?? widget.plusItems.isNotEmpty)
+            ? () => controller.isOpen ? controller.close() : controller.open()
+            : null,
+        icon: const Icon(Icons.add),
       ),
-      ...widget.after,
-    ];
-    final right = widget.trailing;
-    final steers = widget.working && widget.onSteer != null;
-    final send = widget.working && !widget.canQueue && !steers
-        ? IconButton(tooltip: 'Stop', onPressed: widget.onStop, icon: const Icon(Icons.stop_circle_outlined))
-        : widget.working
-        ? Row(mainAxisSize: MainAxisSize.min, children: [
-            if (steers)
+    );
+  }
+}
+
+/// The box's right end. From the right: the host's primary control while the message is empty, then Send; while a turn runs, Stop
+/// (always), and for a message typed Queue and Steer; a spinner while the conversation starts.
+class _Trailing extends StatelessWidget {
+  const _Trailing({required this.composer, required this.attached});
+
+  final ComposerState composer;
+
+  /// Whether anything is attached, which is a message to send though no text is typed.
+  final bool attached;
+
+  @override
+  Widget build(BuildContext context) {
+    final widget = composer.widget;
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: widget.controller,
+      builder: (context, value, _) {
+        final empty = value.text.trim().isEmpty && !attached;
+        final steers = widget.working && widget.onSteer != null;
+        final primary = widget.primary;
+        final showPrimary = primary != null && (empty || widget.holdPrimary);
+        final Widget? action;
+        if (widget.starting) {
+          action = const Padding(padding: EdgeInsets.all(8), child: SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)));
+        } else if (widget.working) {
+          final waits = widget.canQueue || steers;
+          action = Row(mainAxisSize: MainAxisSize.min, children: [
+            if (steers && !empty)
               IconButton(
                 key: const Key('composer-steer'),
                 tooltip: widget.enterSteers ? 'Steer: stop the turn and send this first (Enter)' : 'Steer: stop the turn and send this first (Alt+Enter)',
                 onPressed: widget.enabled ? widget.onSteer : null,
                 icon: const Icon(Icons.bolt),
               ),
-            IconButton(
-              key: const Key('composer-queue'),
-              tooltip: !steers
-                  ? 'Queue'
-                  : widget.enterSteers
-                  ? 'Queue: send this when the turn ends (Alt+Enter)'
-                  : 'Queue: send this when the turn ends (Enter)',
-              onPressed: widget.enabled ? widget.onSend : null,
-              icon: const Icon(Icons.schedule_send_outlined),
-            ),
-            IconButton(tooltip: 'Stop', onPressed: widget.onStop, icon: const Icon(Icons.stop_circle_outlined)),
-          ])
-        : widget.starting
-        ? const Padding(padding: EdgeInsets.all(12), child: SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)))
-        : IconButton.filled(
+            if (waits && !empty)
+              IconButton(
+                key: const Key('composer-queue'),
+                tooltip: !steers
+                    ? 'Queue'
+                    : widget.enterSteers
+                    ? 'Queue: send this when the turn ends (Alt+Enter)'
+                    : 'Queue: send this when the turn ends (Enter)',
+                onPressed: widget.enabled ? widget.onSend : null,
+                icon: const Icon(Icons.schedule_send_outlined),
+              ),
+            IconButton(key: const Key('composer-stop'), tooltip: 'Stop', onPressed: widget.onStop, icon: const Icon(Icons.stop_rounded)),
+          ]);
+        } else if (!empty || primary == null) {
+          action = IconButton(
+            key: const Key('composer-send'),
             tooltip: 'Send',
             onPressed: widget.enabled ? widget.onSend : null,
-            icon: const Icon(Icons.arrow_upward_rounded),
+            icon: const Icon(Icons.keyboard_return),
           );
-    return LayoutBuilder(builder: (context, box) {
-      // On a narrow window the controls go on to a second line, and Send stays at the end.
-      if (box.maxWidth < Composer.wideFrom) {
-        return Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Expanded(child: Wrap(crossAxisAlignment: WrapCrossAlignment.center, spacing: 2, runSpacing: 2, children: [...left, ...right])),
-          send,
+        } else {
+          action = null;
+        }
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          ?action,
+          if (showPrimary) KeyedSubtree(key: const Key('composer-primary'), child: primary),
         ]);
-      }
-      // Wide, it stays on one line: the row is as wide as the composer, and scales down rather than wrap or overflow.
-      return FittedBox(
-        fit: BoxFit.scaleDown,
-        alignment: Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minWidth: box.maxWidth),
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Row(mainAxisSize: MainAxisSize.min, children: left),
-            Row(mainAxisSize: MainAxisSize.min, children: [...right, send]),
-          ]),
-        ),
-      );
-    });
+      },
+    );
   }
+}
+
+/// The host's choices under the box, as plain text: right-aligned when the composer is [Composer.wideFrom] wide, else from the
+/// left, and on as many lines as they need.
+class _Below extends StatelessWidget {
+  const _Below({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) => ComposerQuiet(
+      child: Padding(
+        key: const Key('composer-below'),
+        padding: const EdgeInsets.fromLTRB(8, 2, 8, 0),
+        child: Align(
+          alignment: box.maxWidth >= Composer.wideFrom ? Alignment.centerRight : Alignment.centerLeft,
+          child: Wrap(
+            alignment: box.maxWidth >= Composer.wideFrom ? WrapAlignment.end : WrapAlignment.start,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 2,
+            runSpacing: 0,
+            children: children,
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// The agent's commands, and the host's own actions, matching what is being typed. Nothing is sent until the person sends it; an
