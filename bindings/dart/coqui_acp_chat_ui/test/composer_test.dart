@@ -540,6 +540,30 @@ void main() {
       expect(controller.text, isEmpty, reason: 'the typed slash is taken back');
     });
 
+    testWidgets('actions with a group are listed under its heading, each group together, and a pick runs it', (tester) async {
+      final ran = <String>[];
+      await pump(
+        tester,
+        actions: [
+          ComposerAction(name: 'settings', description: 'Open Settings', run: () => ran.add('settings')),
+          ComposerAction(name: 'review', description: 'A skill', group: 'Skills', run: () => ran.add('review')),
+          ComposerAction(name: 'github', description: 'An MCP server', group: 'MCP servers', run: () => ran.add('github')),
+          ComposerAction(name: 'setup', description: 'A skill again', group: 'Skills', run: () => ran.add('setup')),
+        ],
+        actionsTitle: 'Canoa actions',
+      );
+      await tester.enterText(find.byType(TextField), '/');
+      await tester.pump();
+      expect(find.text('Canoa actions'), findsOneWidget);
+      expect(find.text('Skills'), findsOneWidget, reason: 'one heading for the two skills, which are not split by another group');
+      expect(find.text('MCP servers'), findsOneWidget);
+      final skills = tester.getTopLeft(find.byKey(const Key('group Skills'))).dy;
+      expect(tester.getTopLeft(find.text('/setup')).dy, greaterThan(skills));
+      expect(tester.getTopLeft(find.text('/setup')).dy, lessThan(tester.getTopLeft(find.byKey(const Key('group MCP servers'))).dy));
+      await tester.tap(find.text('/github'));
+      await tester.pump();
+      expect(ran, ['github']);
+    });
     testWidgets('a group with no match has no title, and with no actions the list has none at all', (tester) async {
       await pump(
         tester,

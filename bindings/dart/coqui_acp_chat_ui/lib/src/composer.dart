@@ -86,9 +86,12 @@ abstract interface class ComposerMentions {
 
 /// An action of the host's own that `/` lists beside the agent's commands. Choosing it runs [run] at once; nothing is sent.
 final class ComposerAction {
-  const ComposerAction({required this.name, required this.description, required this.run});
+  const ComposerAction({required this.name, required this.description, required this.run, this.group});
   final String name, description;
   final VoidCallback run;
+
+  /// The heading the entry is listed under; the composer's `actionsTitle` when null. Entries of one group should be together.
+  final String? group;
 }
 
 /// The `@` being typed at [caret] in [text]: where it starts and the query after it, or null when the caret is not in one.
@@ -896,10 +899,11 @@ class CommandSuggestions extends StatelessWidget {
                   subtitle: command.description.isEmpty ? null : Text(command.description, maxLines: 2, overflow: TextOverflow.ellipsis),
                   onTap: () => onPick(command),
                 ),
-              if (foundActions.isNotEmpty) title(actionsTitle, const Key('actions-group')),
-              for (final (index, action) in foundActions.indexed)
+              for (final (index, action) in foundActions.indexed) ...[
+                if (index == 0 || (action.group ?? actionsTitle) != (foundActions[index - 1].group ?? actionsTitle))
+                  title(action.group ?? actionsTitle, action.group == null ? const Key('actions-group') : Key('group ${action.group}')),
                 ListTile(
-                  key: ValueKey('action ${action.name}'),
+                  key: ValueKey(action.group == null ? 'action ${action.name}' : 'action ${action.group} ${action.name}'),
                   dense: true,
                   visualDensity: VisualDensity.compact,
                   tileColor: highlighted == found.length + index ? selected : null,
@@ -907,6 +911,7 @@ class CommandSuggestions extends StatelessWidget {
                   subtitle: action.description.isEmpty ? null : Text(action.description, maxLines: 2, overflow: TextOverflow.ellipsis),
                   onTap: () => onRun?.call(action),
                 ),
+              ],
             ],
           ),
         ),
@@ -936,9 +941,17 @@ Suggested suggestionsFor(String typed, List<AgentCommandInfo> commands, List<Com
     return [...starts, ...holds].take(limit).toList();
   }
 
+  // A group's entries stay together, the groups in the order the host listed them.
+  final groups = <String?>[];
+  for (final action in actions) {
+    if (!groups.contains(action.group)) groups.add(action.group);
+  }
+  final found = pick(actions, (action) => action.name, (action) => action.description);
   return (
     commands: pick(commands, (command) => command.name, (command) => command.description),
-    actions: pick(actions, (action) => action.name, (action) => action.description),
+    actions: [
+      for (final group in groups) ...found.where((action) => action.group == group),
+    ],
   );
 }
 
