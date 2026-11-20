@@ -504,7 +504,7 @@ class ComposerState extends State<Composer> {
       controller: widget.controller,
       focusNode: widget.focusNode,
       enabled: widget.enabled,
-      minLines: widget.centred ? 3 : 1,
+      minLines: 1,
       maxLines: widget.centred ? 10 : 5,
       textInputAction: TextInputAction.send,
       onSubmitted: (_) => _enter(),
@@ -523,6 +523,9 @@ class ComposerState extends State<Composer> {
     final box = Container(
       key: const Key('composer'),
       padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
+      // A centred box is taller, and what is written grows it upward: the row of +, the text and the button stays at the bottom.
+      constraints: widget.centred ? const BoxConstraints(minHeight: 112) : null,
+      alignment: widget.centred ? Alignment.bottomCenter : null,
       decoration: BoxDecoration(color: look.composer, borderRadius: BorderRadius.circular(look.radius + 8)),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         ?widget.header,

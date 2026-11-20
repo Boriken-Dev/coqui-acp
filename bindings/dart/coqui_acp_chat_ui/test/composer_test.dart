@@ -90,6 +90,7 @@ Future<TextEditingController> pump(
   List<Widget> plusItems = const [],
   double width = 900,
   String text = '',
+  bool centred = false,
   GlobalKey<ComposerState>? key,
 }) async {
   final controller = TextEditingController(text: text);
@@ -121,6 +122,7 @@ Future<TextEditingController> pump(
       onShiftTab: onShiftTab,
       recall: recall,
       header: header,
+      centred: centred,
       primary: primary,
       holdPrimary: holdPrimary,
       below: below,
@@ -379,6 +381,35 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Host item'), findsOneWidget);
     expect(find.text('Add files or images…'), findsNothing, reason: 'with no attachment host there is nothing to add to');
+  });
+
+  group('a centred box', () {
+    for (final width in [900.0, 360.0]) {
+      testWidgets('keeps +, the text and the primary control on one row at ${width.toInt()} px, in a taller box', (tester) async {
+        await pump(tester, centred: true, width: width, primary: const Icon(Icons.mic_none, key: Key('the-mic')));
+        final box = tester.getRect(find.byKey(const Key('composer')));
+        final plus = tester.getRect(find.byKey(const Key('composer-plus')));
+        final field = tester.getRect(find.byType(TextField));
+        final mic = tester.getRect(find.byKey(const Key('the-mic')));
+        expect(box.height, greaterThanOrEqualTo(112), reason: 'taller than the docked box');
+        expect((field.center.dy - plus.center.dy).abs(), lessThan(12), reason: '+ is beside the text');
+        expect((field.center.dy - mic.center.dy).abs(), lessThan(14), reason: 'the primary control is beside the text');
+        expect(box.bottom - field.bottom, lessThan(16), reason: 'the row is at the bottom of the box');
+        expect(plus.right, lessThanOrEqualTo(field.left + 1));
+        expect(mic.left, greaterThanOrEqualTo(field.right - 1));
+      });
+    }
+
+    testWidgets('what is typed grows the box upward: the row stays at the bottom', (tester) async {
+      final controller = await pump(tester, centred: true);
+      final before = tester.getRect(find.byKey(const Key('composer')));
+      controller.text = List.filled(6, 'a line of text').join('\n');
+      await tester.pump();
+      final after = tester.getRect(find.byKey(const Key('composer')));
+      expect(after.height, greaterThan(before.height));
+      expect(after.bottom, before.bottom, reason: 'the box grows toward the top');
+      expect(tester.getRect(find.byKey(const Key('composer-plus'))).bottom, closeTo(after.bottom - 6, 12), reason: '+ stays on the bottom line');
+    });
   });
 
   group('the line under the box', () {
