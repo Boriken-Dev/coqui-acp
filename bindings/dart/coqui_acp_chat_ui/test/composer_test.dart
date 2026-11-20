@@ -130,6 +130,26 @@ Future<TextEditingController> pump(
   return controller;
 }
 
+/// A primary control with state of its own, which says when that state is made.
+class _Counted extends StatefulWidget {
+  const _Counted(this.made);
+  final VoidCallback made;
+
+  @override
+  State<_Counted> createState() => _CountedState();
+}
+
+class _CountedState extends State<_Counted> {
+  @override
+  void initState() {
+    super.initState();
+    widget.made();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox(key: Key('counted'), width: 24, height: 24);
+}
+
 /// A host's mention source over a fixed table, by query; [slow] queries answer only once [release]d.
 class _Mentions implements ComposerMentions {
   _Mentions(this.table, {this.refuse, this.slow = const {}});
@@ -199,6 +219,19 @@ void main() {
       await pump(tester, primary: mic, attachments: host);
       expect(find.byTooltip('Send'), findsOneWidget);
       expect(find.byKey(const Key('the-mic')), findsNothing);
+    });
+
+    testWidgets('the primary control is put away, not rebuilt: what it holds outlives the typing', (tester) async {
+      var made = 0;
+      final controller = await pump(tester, primary: _Counted(() => made++));
+      expect(made, 1);
+      controller.text = 'hello';
+      await tester.pump();
+      expect(find.byKey(const Key('counted')), findsNothing, reason: 'not drawn');
+      controller.clear();
+      await tester.pump();
+      expect(find.byKey(const Key('counted')), findsOneWidget);
+      expect(made, 1, reason: 'the same state throughout');
     });
 
     testWidgets('holdPrimary keeps the primary control beside Send while it is mid-action', (tester) async {

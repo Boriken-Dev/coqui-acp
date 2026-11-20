@@ -291,7 +291,7 @@ class Composer extends StatefulWidget {
   final int pasteAsFile;
 
   /// The host's one control at the right of the box, such as a microphone: shown while the message is empty (and has no
-  /// attachment), and put away for Send once it holds something. Without it Send is always shown.
+  /// attachment), and put away for Send once it holds something, with its state kept. Without it Send is always shown.
   final Widget? primary;
 
   /// Keeps [primary] in view although the message holds text, beside Send: for a control that is mid-action, such as a dictation
@@ -780,7 +780,8 @@ class _Trailing extends StatelessWidget {
         }
         return Row(mainAxisSize: MainAxisSize.min, children: [
           ?action,
-          if (showPrimary) KeyedSubtree(key: const Key('composer-primary'), child: primary),
+          // Kept in the tree while it is put away, so what it holds (a dictation's attachment to the message) outlives the typing.
+          if (primary != null) Visibility(visible: showPrimary, maintainState: true, child: KeyedSubtree(key: const Key('composer-primary'), child: primary)),
         ]);
       },
     );
