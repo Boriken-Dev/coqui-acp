@@ -46,6 +46,7 @@ const URL_SETTINGS: &[Setting] = &[
         url: true,
         choices: &[],
         suggestions: &[],
+        provides: &[],
     },
     Setting {
         name: "xai_api_base_url",
@@ -53,6 +54,7 @@ const URL_SETTINGS: &[Setting] = &[
         url: true,
         choices: &[],
         suggestions: &[],
+        provides: &[],
     },
 ];
 
@@ -63,6 +65,7 @@ const OIDC_SETTINGS: &[Setting] = &[
         url: true,
         choices: &[],
         suggestions: &[],
+        provides: &[],
     },
     Setting {
         name: "client_id",
@@ -70,6 +73,7 @@ const OIDC_SETTINGS: &[Setting] = &[
         url: false,
         choices: &[],
         suggestions: &[],
+        provides: &[],
     },
     Setting {
         name: "proxy_base_url",
@@ -77,6 +81,7 @@ const OIDC_SETTINGS: &[Setting] = &[
         url: true,
         choices: &[],
         suggestions: &[],
+        provides: &[],
     },
 ];
 

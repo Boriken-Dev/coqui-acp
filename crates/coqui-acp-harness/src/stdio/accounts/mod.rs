@@ -48,7 +48,14 @@ pub struct Setting {
     pub choices: &'static [&'static str],
     /// Values a form offers while it takes any other: listed as the schema's `examples`, never checked.
     pub suggestions: &'static [&'static str],
+    /// The standards an account provides for each value of this setting, as `(value, standard)` pairs: listed as the
+    /// schema's [`PROVIDES_BY_VALUE`] and read by [`provided`]. A value with no pair provides what the kind does.
+    pub provides: &'static [(&'static str, &'static str)],
 }
+
+/// The annotation of a setting's schema property whose value picks the standards an account provides, as an object from
+/// each value to the list of standards. The kind's own `provides` is what an account whose value is not listed provides.
+pub const PROVIDES_BY_VALUE: &str = "x-provides-by-value";
 
 /// A URL a kind talks to, as [`EndpointSlot`].
 #[derive(Debug)]
@@ -191,6 +198,18 @@ fn property(setting: &Setting) -> Value {
     if !setting.suggestions.is_empty() {
         property["examples"] = json!(setting.suggestions);
     }
+    if !setting.provides.is_empty() {
+        let mut by_value = Map::new();
+        for (value, standard) in setting.provides {
+            by_value
+                .entry((*value).to_string())
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("a list")
+                .push(json!(standard));
+        }
+        property[PROVIDES_BY_VALUE] = Value::Object(by_value);
+    }
     property
 }
 
@@ -244,6 +263,35 @@ impl KindDef {
         info.provides = self.provides.iter().map(|s| (*s).to_string()).collect();
         info
     }
+}
+
+/// The standards the account of kind `info` with `settings` provides: those its setting marked [`PROVIDES_BY_VALUE`] lists
+/// for the value the account holds, else the kind's own. A setting that is absent, not text or has no listed value
+/// leaves the kind's `provides`, and a listed name that is not a standard is left out.
+#[must_use]
+pub fn provided(info: &AccountKindInfo, settings: &coqui_acp_api::guatiao::Value) -> Vec<String> {
+    let schema = crate::provider::to_json(&info.settings);
+    let settings = crate::provider::to_json(settings);
+    let listed = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .find_map(|(name, property)| {
+            let held = settings.get(name)?.as_str()?;
+            property.get(PROVIDES_BY_VALUE)?.get(held)?.as_array()
+        });
+    listed.map_or_else(
+        || info.provides.clone(),
+        |standards| {
+            standards
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|id| coqui_acp_api::standard::is_standard(id))
+                .map(ToString::to_string)
+                .collect()
+        },
+    )
 }
 
 /// The catalog of `def`: what the harness takes as an account. It signs no one in and renews nothing, so it lists no

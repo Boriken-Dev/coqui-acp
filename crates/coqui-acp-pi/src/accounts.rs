@@ -32,6 +32,16 @@ const KEY_VARIABLES: &[&str] = &[
     "COPILOT_GITHUB_TOKEN",
 ];
 
+/// The API each of those variables carries a key of, for the ones Pi's `accepts` below has a slot for: a key account that
+/// names one provides that standard, so any harness that takes it can use the key. A key of another variable provides
+/// nothing, and an OAuth or bearer token is not a key of the API.
+const KEY_STANDARDS: &[(&str, &str)] = &[
+    ("ANTHROPIC_API_KEY", standard::ANTHROPIC_API),
+    ("OPENAI_API_KEY", standard::OPENAI_API),
+    ("GEMINI_API_KEY", standard::GEMINI_API),
+    ("XAI_API_KEY", standard::XAI_API),
+];
+
 /// Every variable Pi reads for a credential, a cloud identity, an endpoint or for where it keeps them, so a start on an
 /// account removes them all. From Pi 1.5.0's source and `docs/providers.md`; a provider that Pi's dependencies add is not
 /// in it.
@@ -145,8 +155,8 @@ pub static DEF: HarnessDef = HarnessDef {
     kinds: &[
         KindDef {
             id: API_KEY,
-            // Which API the key is for is the `variable` setting's: the account of a standard is made
-            // by `accepts` below, which fixes it.
+            // Which API the key is for is the `variable` setting's (`KEY_STANDARDS`), so the kind provides nothing
+            // of its own.
             provides: &[],
             title: "Pi provider key",
             description: "A key for one provider, read from the variable `variable` names, with Pi started in a directory of its own so that no key in `auth.json` and no `baseUrl` in the person's own `models.json` overrides it.",
@@ -160,6 +170,7 @@ pub static DEF: HarnessDef = HarnessDef {
                 url: false,
                 choices: &[],
                 suggestions: KEY_VARIABLES,
+                provides: KEY_STANDARDS,
             }],
             state_dir: true,
             rotates: false,
@@ -360,6 +371,94 @@ mod tests {
             };
             assert!(!error.message().contains(CANARY));
         }
+    }
+
+    fn key_account(variable: &str) -> AccountGrant {
+        AccountGrant::new("a", API_KEY)
+            .settings(coqui_acp_harness::provider::schema(
+                &serde_json::json!({"variable": variable}),
+            ))
+            .credentials(Credentials::from_iter([("api_key", CANARY)]))
+            .state_dir("/some/dir")
+    }
+
+    fn provided_by(grant: &AccountGrant) -> Vec<String> {
+        let catalog = catalog();
+        accounts::provided(catalog.kind(&grant.kind).expect("kind"), &grant.settings)
+    }
+
+    #[test]
+    fn a_key_account_provides_the_api_of_the_variable_it_names() {
+        for (variable, api) in KEY_STANDARDS {
+            assert_eq!(provided_by(&key_account(variable)), [*api], "{variable}");
+        }
+        // Each pair is a slot of `accepts`, and each slot of a key has its pair: one table said twice would drift.
+        let slots: Vec<(&str, &str)> = DEF
+            .accepts
+            .iter()
+            .filter(|accept| accept.standard != standard::PI)
+            .flat_map(|accept| {
+                accept
+                    .slots
+                    .iter()
+                    .map(|slot| (slot.variable.expect("a key variable"), accept.standard))
+            })
+            .collect();
+        assert_eq!(slots, KEY_STANDARDS);
+    }
+
+    #[test]
+    fn a_key_account_of_another_variable_or_none_provides_nothing() {
+        for variable in [
+            "MISTRAL_API_KEY",
+            "GROQ_API_KEY",
+            "ANTHROPIC_OAUTH_TOKEN",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ACME_GATEWAY_KEY",
+        ] {
+            assert!(provided_by(&key_account(variable)).is_empty(), "{variable}");
+        }
+        let bare = AccountGrant::new("a", API_KEY);
+        assert!(provided_by(&bare).is_empty());
+    }
+
+    #[test]
+    fn claude_takes_a_pi_key_that_provides_its_api_and_refuses_one_that_provides_none() {
+        let claude = coqui_acp_claude::accounts::catalog();
+        let anthropic = key_account("ANTHROPIC_API_KEY");
+        let provides = provided_by(&anthropic);
+        let taken = claude
+            .accepted_by(&provides)
+            .expect("Claude takes a key of the Anthropic API");
+        assert_eq!(taken.standard, standard::ANTHROPIC_API);
+        assert!(
+            taken.slots.iter().any(|slot| slot.credential == "api_key"),
+            "the credential slot stays api_key"
+        );
+        claude
+            .accepts_reference(&anthropic.provides(provides).reference())
+            .expect("accepted");
+        let mistral = key_account("MISTRAL_API_KEY");
+        assert!(
+            claude
+                .accepts_reference(
+                    &mistral
+                        .provides(provided_by(&key_account("MISTRAL_API_KEY")))
+                        .reference()
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_schema_marks_the_setting_whose_value_picks_the_standard() {
+        let info = catalog().kind(API_KEY).expect("key").settings.clone();
+        let variable = &coqui_acp_harness::provider::to_json(&info)["properties"]["variable"];
+        assert_eq!(
+            variable[accounts::PROVIDES_BY_VALUE]["OPENAI_API_KEY"],
+            serde_json::json!([standard::OPENAI_API])
+        );
+        assert!(variable[accounts::PROVIDES_BY_VALUE]["MISTRAL_API_KEY"].is_null());
     }
 
     #[test]
