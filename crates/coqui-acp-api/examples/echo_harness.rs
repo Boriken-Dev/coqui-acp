@@ -1247,9 +1247,7 @@ fn read_account(
         return Err(bad("the settings are not an object"));
     };
     for (key, value) in entries {
-        let url = value
-            .as_str()
-            .is_some_and(|u| u.starts_with("https://") || u.starts_with("http://"));
+        let url = value.as_str().is_some_and(coqui_acp_api::is_http_url);
         if !allowed.contains(&key.as_str()) || (key == "base_url" && !url) {
             return Err(bad("the settings do not fit the kind's schema"));
         }

@@ -6,6 +6,7 @@ extern crate alloc;
 
 mod account;
 mod account_provider;
+mod address;
 pub mod batch;
 #[cfg(feature = "contract")]
 #[cfg_attr(docsrs, doc(cfg(feature = "contract")))]
@@ -43,6 +44,7 @@ pub use account_provider::{
     AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo, AccountProviderVtable,
     AccountUsage, AccountUsageQuery, AccountWatch, AccountWatchVtable, WatchRequest,
 };
+pub use address::is_http_url;
 pub use environment::Environment;
 pub mod standard;
 pub use files::PrivateDir;

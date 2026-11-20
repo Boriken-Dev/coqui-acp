@@ -327,14 +327,6 @@ fn bad(why: impl Into<String>) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, &why.into())
 }
 
-/// Whether `text` is an absolute `http` or `https` URL.
-fn is_url(text: &str) -> bool {
-    (text.starts_with("https://") || text.starts_with("http://"))
-        && text.len() > 8
-        && text.len() <= 2048
-        && !text.chars().any(|c| c.is_whitespace() || c.is_control())
-}
-
 /// Whether `name` is one a consumer of the AOS specification owns: `AOS_*`, `*_OVERLAY_ROOT` and `*_OVERLAY_STATE`,
 /// whatever the ASCII case.
 fn is_reserved_variable(name: &str) -> bool {
@@ -469,7 +461,7 @@ pub fn apply(def: &HarnessDef, grant: &AccountGrant) -> Result<Option<Applied>, 
         if text.len() > MAX_TEXT || text.contains('\0') {
             return Err(bad(alloc::format!("the setting `{name}` is not usable")));
         }
-        if setting.url && !is_url(text) {
+        if setting.url && !coqui_acp_api::is_http_url(text) {
             return Err(bad(alloc::format!(
                 "the setting `{name}` is not an absolute http or https URL"
             )));
@@ -744,6 +736,24 @@ mod standards_tests {
             )
             .is_err()
         );
+    }
+
+    /// An address setting is any length an address can be: a gateway's path or query is the person's own.
+    #[test]
+    fn an_address_setting_has_no_length_ceiling() {
+        let long = format!("https://gateway.example/{}", "a".repeat(5000));
+        let grant = AccountGrant::new("a", grok::API_KEY)
+            .settings(crate::provider::schema(&json!({"proxy_base_url": long})))
+            .credentials(Credentials::from_iter([("api_key", CANARY)]))
+            .state_dir("/some/dir");
+        assert!(apply(&grok::DEF, &grant).is_ok());
+        let bad = AccountGrant::new("a", grok::API_KEY)
+            .settings(crate::provider::schema(
+                &json!({"proxy_base_url": "gateway.example"}),
+            ))
+            .credentials(Credentials::from_iter([("api_key", CANARY)]))
+            .state_dir("/some/dir");
+        assert!(apply(&grok::DEF, &bad).is_err());
     }
 
     #[test]

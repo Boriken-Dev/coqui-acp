@@ -245,6 +245,7 @@ pub enum PathStyle { Windows, Posix }   PathStyle::local();  PathStyle::of_os(os
 pub fn is_plain_absolute(path: &str) -> bool
 pub fn is_session_id(text: &str) -> bool   // a UUID, lowercase, 8-4-4-4-12
 ```
+pub fn is_http_url(text: &str) -> bool     // `http://` or `https://` and something after it, no whitespace or control character; any length. The one check every kind's address setting and the usage readers make
 
 A session's `cwd` and every one of its `additionalDirectories`, on `session/new`, `session/load` and `session/resume`, lie in a working root, or the request is answered `-32602`. A path is in a root when it is absolute, has no `.` or `..` part (refused, never normalised), and its parts begin with every part of the root (`/work-beside` is not in `/work`); on Windows `\` and `/` are one separator and names compare without regard to case. Following links, the path and the roots are resolved through the links that exist, and the resolved path must lie in a resolved root too, so a link inside a root leading out of it is refused. A provider whose agent runs elsewhere compares by that platform's style and follows no link of this machine's.
 

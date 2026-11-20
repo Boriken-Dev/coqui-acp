@@ -211,12 +211,6 @@ pub(super) fn grant_of(
     Ok(grant)
 }
 
-pub(super) fn is_url(text: &str) -> bool {
-    (text.starts_with("https://") || text.starts_with("http://"))
-        && text.len() > 8
-        && !text.chars().any(|c| c.is_whitespace() || c.is_control())
-}
-
 /// What every kind an account provider or a harness lists is held to.
 pub(super) fn kind_rules(kinds: &[AccountKindInfo]) -> Outcome {
     let mut seen = Vec::new();
@@ -275,7 +269,7 @@ pub(super) fn kind_rules(kinds: &[AccountKindInfo]) -> Outcome {
             }
             if let Some(default) = &slot.default {
                 ensure!(
-                    is_url(default),
+                    crate::is_http_url(default),
                     "{}'s endpoint default is not a URL",
                     info.id
                 );
