@@ -73,6 +73,8 @@ pub fn track(thread: JoinHandle<()>);  pub fn to_json(&guatiao::Value) -> Value 
 pub fn threads_done() -> Status                                                    // a library's `unload` hook
 pub fn takes_of(takes: &Takes) -> coqui_acp_api::Takes                              // resume true
 pub fn schema(json: &Value) -> guatiao::Value;  pub fn credential() -> Value        // for a catalog
+pub fn endpoint_setting(settings: &guatiao::Value, key: &str) -> Result<Option<String>, ProviderError>   // an account's one address setting: absent, or an http(s) address of any length (`coqui_acp_api::is_http_url`); BAD_VALUE for anything else, naming no value
+pub fn own_kind(grant: &AccountGrant, offer: &AccountOffer) -> Result<(), ProviderError>   // the id is one and the offer lists the grant's kind; what an account provider asks before it keeps an account
 pub fn account_refusal(catalog: &AccountCatalog, account: &AccountRef) -> Result<Option<String>, ProviderError>
 ```
 

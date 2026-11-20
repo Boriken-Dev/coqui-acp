@@ -76,29 +76,83 @@ pub(crate) fn limit(value: &Value) -> Option<LimitHit> {
     }
 }
 
-/// How long a window named `name` lasts: the five-hour window, and each weekly one (`seven_day`, `seven_day_opus`, ...).
-/// Any other name is no length rather than a guess.
+/// The length of a weekly window, in seconds.
+pub(crate) const WEEK: u64 = 7 * 86_400;
+
+/// One of the windows of a plan, as both the stream's events and the account's plan limits name it.
+pub(crate) struct Window {
+    /// What Claude Code calls it.
+    pub id: &'static str,
+    /// What a person reads it as.
+    pub label: &'static str,
+    /// How long it lasts, in seconds.
+    pub seconds: u64,
+    /// The one model it covers, when it says so by its name.
+    pub model: Option<&'static str>,
+    /// Whether it covers every model, as the account's plan limits say of the two plain windows.
+    pub all_models: bool,
+}
+
+/// The windows Claude Code names, in the order a person reads them.
+pub(crate) const WINDOWS: &[Window] = &[
+    Window {
+        id: "five_hour",
+        label: "Session (5 hours)",
+        seconds: 5 * 3600,
+        model: None,
+        all_models: true,
+    },
+    Window {
+        id: "seven_day",
+        label: "Weekly",
+        seconds: WEEK,
+        model: None,
+        all_models: true,
+    },
+    Window {
+        id: "seven_day_opus",
+        label: "Weekly, Opus",
+        seconds: WEEK,
+        model: Some("opus"),
+        all_models: false,
+    },
+    Window {
+        id: "seven_day_sonnet",
+        label: "Weekly, Sonnet",
+        seconds: WEEK,
+        model: Some("sonnet"),
+        all_models: false,
+    },
+    Window {
+        id: "seven_day_oauth_apps",
+        label: "Weekly, OAuth apps",
+        seconds: WEEK,
+        model: None,
+        all_models: false,
+    },
+];
+
+fn window(name: &str) -> Option<&'static Window> {
+    WINDOWS.iter().find(|window| window.id == name)
+}
+
+/// How long a window named `name` lasts: one of [`WINDOWS`], and any other weekly one (`seven_day_...`). Any other
+/// name is no length rather than a guess.
 fn window_length(name: &str) -> Option<Duration> {
-    if name == "five_hour" {
-        Some(Duration::from_secs(5 * 3600))
-    } else if name == "seven_day" || name.starts_with("seven_day_") {
-        Some(Duration::from_secs(7 * 24 * 3600))
-    } else {
-        None
-    }
+    window(name)
+        .map(|window| window.seconds)
+        .or_else(|| name.starts_with("seven_day_").then_some(WEEK))
+        .map(Duration::from_secs)
 }
 
 /// The models a window named `name` covers: a model-specific weekly window says so by its name, and no other window
 /// says anything.
 fn window_coverage(name: &str) -> Coverage {
-    match name {
-        "seven_day_opus" => Coverage::Only {
-            models: alloc::vec!["opus".to_string()],
+    match window(name).and_then(|window| window.model) {
+        Some(model) => Coverage::Only {
+            models: alloc::vec![model.to_string()],
         },
-        "seven_day_sonnet" => Coverage::Only {
-            models: alloc::vec!["sonnet".to_string()],
-        },
-        _ => Coverage::Unknown,
+        None => Coverage::Unknown,
     }
 }
 

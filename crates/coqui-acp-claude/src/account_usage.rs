@@ -25,6 +25,9 @@ use coqui_acp_api::{AccountGrant, Credentials, HARNESS_LOGIN, UsageReport};
 use serde_json::Value;
 
 use crate::accounts::{self, API_KEY, AUTH_TOKEN, CONSOLE, FILE_KEY, LOGIN, OAUTH_TOKEN};
+use coqui_acp_harness::provider::endpoint_setting;
+
+use crate::limits::{WEEK, WINDOWS};
 
 /// The OAuth API's address, where Claude Code reads its usage.
 pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com";
@@ -218,8 +221,6 @@ pub fn read_limits(
     }
 }
 
-/// The address Claude Code sends model requests to when the account names none.
-const API: &str = "https://api.anthropic.com";
 /// The API version the model list is asked under.
 const API_VERSION: &str = "2023-06-01";
 
@@ -246,11 +247,11 @@ fn read_key(
                 "the credential is missing or not the kind's",
             )
         })?;
-    let custom = accounts::base_url(&grant.settings)?;
+    let custom = endpoint_setting(&grant.settings, "base_url")?;
     let base = custom
         .as_deref()
         .or(options.endpoint.as_deref())
-        .unwrap_or(API)
+        .unwrap_or(DEFAULT_ENDPOINT)
         .trim_end_matches('/');
     let bearer = format!("Bearer {secret}");
     let value = if grant.kind == API_KEY {
@@ -283,30 +284,6 @@ fn read_key(
 fn not_offered(why: &str) -> UsageReport {
     UsageReport::unsupported(why)
 }
-
-/// The windows the document names, by id, with what a person reads them as.
-const WINDOWS: &[(&str, &str, Option<u64>, Option<&str>)] = &[
-    ("five_hour", "Session (5 hours)", Some(5 * 3600), None),
-    ("seven_day", "Weekly", Some(7 * 86_400), None),
-    (
-        "seven_day_opus",
-        "Weekly, Opus",
-        Some(7 * 86_400),
-        Some("opus"),
-    ),
-    (
-        "seven_day_sonnet",
-        "Weekly, Sonnet",
-        Some(7 * 86_400),
-        Some("sonnet"),
-    ),
-    (
-        "seven_day_oauth_apps",
-        "Weekly, OAuth apps",
-        Some(7 * 86_400),
-        None,
-    ),
-];
 
 /// `percent` as thousandths, clamped to 0..=1000 before the cast.
 #[expect(
@@ -375,18 +352,25 @@ fn slug(name: &str) -> String {
 /// `model_scoped`. No window at all is an account with no plan limits.
 fn report_of(document: &Value, now: i64) -> UsageReport {
     let mut buckets: Vec<Bucket> = Vec::new();
-    for (id, label, length, model) in WINDOWS {
-        let Some(fields) = document.get(*id).filter(|fields| fields.is_object()) else {
+    for known in WINDOWS {
+        let Some(fields) = document.get(known.id).filter(|fields| fields.is_object()) else {
             continue;
         };
-        let models = match model {
+        let models = match known.model {
             Some(model) => Coverage::Only {
-                models: alloc::vec![(*model).to_string()],
+                models: alloc::vec![model.to_string()],
             },
-            None if matches!(*id, "five_hour" | "seven_day") => Coverage::All,
+            None if known.all_models => Coverage::All,
             None => Coverage::Unknown,
         };
-        buckets.push(window(id, label, *length, models, fields, now));
+        buckets.push(window(
+            known.id,
+            known.label,
+            Some(known.seconds),
+            models,
+            fields,
+            now,
+        ));
     }
     if let Some(scoped) = document.get("model_scoped").and_then(Value::as_array) {
         for fields in scoped.iter().filter(|fields| fields.is_object()) {
@@ -404,7 +388,7 @@ fn report_of(document: &Value, now: i64) -> UsageReport {
             buckets.push(window(
                 &id,
                 &format!("Weekly, {name}"),
-                Some(7 * 86_400),
+                Some(WEEK),
                 Coverage::Only {
                     models: alloc::vec![name.to_string()],
                 },

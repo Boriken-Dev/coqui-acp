@@ -538,6 +538,52 @@ pub fn to_json(value: &coqui_acp_api::guatiao::Value) -> Value {
     serde_json::to_value(guatiao_serde::Serializable::from(value)).unwrap_or(Value::Null)
 }
 
+/// The address setting `key` of an account's `settings`, the only setting its kind reads: absent, or a plain `http(s)`
+/// address ([`coqui_acp_api::is_http_url`]).
+///
+/// # Errors
+///
+/// `GUATIAO_ERR_BAD_VALUE` when the settings are not an object, name anything but `key`, or hold `key` as something
+/// other than an address. No message shows a value.
+pub fn endpoint_setting(
+    settings: &coqui_acp_api::guatiao::Value,
+    key: &str,
+) -> Result<Option<String>, ProviderError> {
+    let bad = |why: &str| ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why);
+    let settings = to_json(settings);
+    let Some(object) = settings.as_object() else {
+        return Err(bad("the account's settings are not an object"));
+    };
+    if object.keys().any(|name| name != key) {
+        return Err(bad("the account's settings name something the kind lacks"));
+    }
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(url)) if coqui_acp_api::is_http_url(url) => Ok(Some(url.clone())),
+        Some(_) => Err(bad(&alloc::format!("{key} is not an address"))),
+    }
+}
+
+/// Whether an account provider keeps accounts of `grant`'s kind: its id is one, and `offer` lists the kind. Nothing of
+/// another standard is taken: a harness applies those, the provider makes its own.
+///
+/// # Errors
+///
+/// `GUATIAO_ERR_BAD_VALUE` for an id that is not one or a kind `offer` does not list.
+pub fn own_kind(
+    grant: &coqui_acp_api::AccountGrant,
+    offer: &coqui_acp_api::AccountOffer,
+) -> Result<(), ProviderError> {
+    grant.check_id()?;
+    if offer.kind(&grant.kind).is_none() {
+        return Err(ProviderError::new(
+            Status::GUATIAO_ERR_BAD_VALUE,
+            "this provider keeps no account of that kind",
+        ));
+    }
+    Ok(())
+}
+
 /// The grant to apply for `grant`: itself when its kind is one the catalog lists; else, when it provides a standard the
 /// catalog accepts, a grant of the own kind that applies that standard's slot for the credential it carries, with
 /// its `base_url` moved to that kind's setting and the standard's fixed settings added.
@@ -594,4 +640,32 @@ pub fn resolve(
     applied.kind.clone_from(&slot.kind);
     applied.settings = schema(&Value::Object(settings));
     Ok(applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_endpoint_setting_is_absent_or_an_address_of_any_length_and_nothing_else() {
+        let setting = |value: serde_json::Value| endpoint_setting(&schema(&value), "base_url");
+        assert_eq!(setting(json!({})).unwrap(), None);
+        assert_eq!(setting(json!({"base_url": null})).unwrap(), None);
+        let long = format!("https://gateway.example/{}", "a".repeat(5000));
+        assert_eq!(
+            setting(json!({"base_url": long})).unwrap().as_deref(),
+            Some(long.as_str())
+        );
+        for bad in [
+            json!({"base_url": "gateway.example"}),
+            json!({"base_url": 7}),
+            json!({"base_url": "https://a b"}),
+            json!({"base_url": "https://x", "other": "y"}),
+            json!({"other": "https://x"}),
+            json!(["https://x"]),
+        ] {
+            assert!(setting(bad.clone()).is_err(), "{bad}");
+        }
+    }
 }

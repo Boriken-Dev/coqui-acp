@@ -25,7 +25,9 @@ use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{
     Accounts, Files, Hold, Watched, fingerprint, jwt_expiry, same_name,
 };
-use coqui_acp_harness::provider::{credential, resolve, schema, to_json};
+use coqui_acp_harness::provider::{
+    credential, endpoint_setting, own_kind, resolve, schema, to_json,
+};
 use serde_json::{Value, json};
 
 use crate::{CodexLaunch, signin};
@@ -45,6 +47,11 @@ pub const DEVICE_METHOD: &str = "chatgpt-device";
 pub const API_KEY_METHOD: &str = "api-key";
 /// The login method that takes a token and makes [`ACCESS_TOKEN`].
 pub const ACCESS_TOKEN_METHOD: &str = "access-token";
+
+/// The address Codex sends model requests to when the account names no `openai_base_url`.
+pub(crate) const OPENAI_API_URL: &str = "https://api.openai.com/v1";
+/// Where a ChatGPT login's requests go when the account names no `chatgpt_base_url`.
+const CHATGPT_CODEX: &str = "https://chatgpt.com/backend-api/codex";
 
 /// The file in Codex's home directory that holds a login or a key.
 pub const AUTH_FILE: &str = "auth.json";
@@ -112,7 +119,7 @@ fn full() -> AccountCatalog {
     chatgpt.endpoints = vec![
         EndpointSlot::new(MODEL_API)
             .key("chatgpt_base_url")
-            .default_url("https://chatgpt.com/backend-api/codex"),
+            .default_url(CHATGPT_CODEX),
         EndpointSlot::new(AUTH).default_url("https://auth.openai.com"),
     ];
     chatgpt.rotates = true;
@@ -130,7 +137,7 @@ fn full() -> AccountCatalog {
     key.endpoints = vec![
         EndpointSlot::new(MODEL_API)
             .key("openai_base_url")
-            .default_url("https://api.openai.com/v1"),
+            .default_url(OPENAI_API_URL),
     ];
     key.notices = vec!["the key is kept in a file that what the agent runs can read".to_string()];
 
@@ -144,7 +151,7 @@ fn full() -> AccountCatalog {
     token.endpoints = vec![
         EndpointSlot::new(MODEL_API)
             .key("chatgpt_base_url")
-            .default_url("https://chatgpt.com/backend-api/codex"),
+            .default_url(CHATGPT_CODEX),
     ];
     // Codex checks the token's format offline and no refresh credential comes with it, so nothing of it is renewed
     // behind the host's back: the success path was not run, and this is what its failure path shows.
@@ -236,11 +243,7 @@ pub fn offer() -> AccountOffer {
 /// Why an account is not one the account provider keeps: `BAD_VALUE` for an id that is not one or a kind it does not
 /// list. Nothing of another standard is taken: a harness applies those, the provider makes its own.
 pub(crate) fn own(grant: &AccountGrant) -> Result<(), ProviderError> {
-    grant.check_id()?;
-    if offer().kind(&grant.kind).is_none() {
-        return Err(bad("this provider keeps no account of that kind"));
-    }
-    Ok(())
+    own_kind(grant, &offer())
 }
 
 /// The standards Codex starts on, and how each is applied: a Codex login (`auth.json` in `CODEX_HOME`, or an access token
@@ -275,31 +278,6 @@ pub(crate) fn resolved(grant: &AccountGrant) -> Result<AccountGrant, ProviderErr
 
 fn bad(why: &str) -> ProviderError {
     ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why)
-}
-
-/// The endpoint setting `key` of `settings`: absent, or a plain `http(s)` address.
-pub(crate) fn endpoint(
-    settings: &coqui_acp_api::guatiao::Value,
-    key: &str,
-) -> Result<Option<String>, ProviderError> {
-    let settings = to_json(settings);
-    let Some(object) = settings.as_object() else {
-        return Err(bad("the account's settings are not an object"));
-    };
-    if object.keys().any(|name| name != key) {
-        return Err(bad("the account's settings name something the kind lacks"));
-    }
-    match object.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(url))
-            if (url.starts_with("https://") || url.starts_with("http://"))
-                && url.len() > 8
-                && !url.chars().any(|c| c.is_control() || c.is_whitespace()) =>
-        {
-            Ok(Some(url.clone()))
-        }
-        Some(_) => Err(bad("the endpoint is not an address")),
-    }
 }
 
 /// The text holds a login or a key: not blank, and when it is Codex's JSON, a token or key in it.
@@ -378,7 +356,7 @@ pub(crate) fn check(account: &AccountRef) -> Result<(), ProviderError> {
         }
         return Ok(());
     }
-    endpoint(&account.settings, settings_key(&info.id))?;
+    endpoint_setting(&account.settings, settings_key(&info.id))?;
     if account.state_dir.as_deref().is_none_or(str::is_empty) {
         return Err(bad("that kind needs a directory to run in"));
     }
@@ -447,7 +425,7 @@ fn plan_as(grant: &AccountGrant, in_place: bool) -> Result<Option<Plan>, Provide
         .set
         .push(("CODEX_HOME".to_string(), applied.dir.clone()));
     let setting = settings_key(&grant.kind);
-    if let Some(url) = endpoint(&grant.settings, setting)? {
+    if let Some(url) = endpoint_setting(&grant.settings, setting)? {
         applied.config.push((setting.to_string(), json!(url)));
     }
     match grant.kind.as_str() {
