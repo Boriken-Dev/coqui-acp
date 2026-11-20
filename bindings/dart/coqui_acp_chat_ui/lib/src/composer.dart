@@ -884,8 +884,8 @@ class CommandSuggestions extends StatelessWidget {
       borderRadius: BorderRadius.circular(look.radius / 2),
       clipBehavior: Clip.antiAlias,
       child: ConstrainedBox(
-        // Past the default count the list scrolls; within it it is as tall as its rows.
-        constraints: BoxConstraints(maxHeight: limit > shown ? 280 : double.infinity),
+        // The list is as tall as its rows, up to most of the window, and scrolls past that.
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.65),
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
