@@ -6,6 +6,8 @@ Cargo feature `history` (off by default): export and import of Codex's rollout i
 
 Imports: everything is at the crate root, and `parse` is public. `coqui_acp_codex::harness` is `coqui-acp-harness`, for its events, processes and ACP server; `Launch`, `PlainSpawn`, `Spawn` and `Spawned` are re-exported from it.
 
+`access::TARGET: Target` is Codex's table for an `Access`, under the AOS harness id "codex": `Access::translate(&TARGET)` says each setting's words and what it cannot express (`coqui_acp_harness::Target`).
+
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state.
 
 ## Launch (`CodexLaunch`)

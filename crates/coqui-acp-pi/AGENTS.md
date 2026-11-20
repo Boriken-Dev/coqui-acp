@@ -6,6 +6,8 @@ Cargo feature `history` (off by default): export and import of Pi's session file
 
 Imports: everything is at the crate root; `parse`, `mode`, `accounts`, `paths` and, with the feature, `history` are public. `coqui_acp_pi::harness` is `coqui-acp-harness`, for its events, processes and ACP server; `Launch`, `PlainSpawn`, `Spawn` and `Spawned` are re-exported from it.
 
+`access::TARGET: Target` is Pi's table for an `Access`, under the AOS harness id "pi": `Access::translate(&TARGET)` says each setting's words and what it cannot express (`coqui_acp_harness::Target`).
+
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state.
 
 Pi's side is `pi --mode rpc`: JSON lines on standard input and output, commands answered by a `response` and a run reported by events, ending at `agent_settled`. Pi writes nothing before the first command, has no permission system, no command that lists sessions, takes no MCP servers from a client and serves one working directory per process (the process's own).
