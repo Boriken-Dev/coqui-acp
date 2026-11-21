@@ -91,6 +91,8 @@ void main() {
       expect(find.text('5s'), findsOneWidget);
       await show([user('go', 0), thought('hm', 1)]);
       expect(headline(tester), 'Thinking…');
+      await show([user('go', 0), agent('first', 1), user('next', 2)]);
+      expect(headline(tester), 'Working…', reason: 'warm turns say Working instead of Starting again');
       await show([user('go', 0), toolEntry(tool('a', kind: 'execute', title: 'cargo test', status: 'in_progress'), 1)]);
       expect(headline(tester), 'Running cargo test…');
       await show([user('go', 0), toolEntry(tool('a', kind: 'edit', title: 'Edit', status: 'in_progress', content: [diff('src/calc.js', 'a', 'b')]), 1)]);
@@ -288,6 +290,28 @@ void main() {
       conversationText(worked()),
       'Fix addNumbers\n\nThinking\n\nEdit calc.js\n\nnode -e addNumbers(2,3)\n\nI fixed addNumbers in src/calc.js.',
     );
+  });
+
+  testWidgets('streamed thoughts show live while working and a 5px upward drag stays unpinned', (tester) async {
+    final entries = [
+      for (var i = 0; i < 40; i++) agent('line $i', i),
+      user('explain', 40),
+      thought('checking step by step', 41),
+    ];
+    final key = GlobalKey<ChatTranscriptState>();
+    await tester.pumpWidget(transcript(entries, key: key, working: true));
+    await tester.pump();
+    expect(find.text('checking step by step'), findsOneWidget);
+    expect(key.currentState!.following, isTrue);
+
+    await tester.drag(find.byType(ListView), const Offset(0, 26));
+    await tester.pump();
+    expect(key.currentState!.following, isFalse);
+
+    // Further streaming updates keep the viewport unpinned while scrolled up.
+    await tester.pumpWidget(transcript([...entries, agent('more text', 42)], key: key, working: true));
+    await tester.pump();
+    expect(key.currentState!.following, isFalse);
   });
 
   testWidgets('Select all then copy gives the whole conversation, built or not', (tester) async {

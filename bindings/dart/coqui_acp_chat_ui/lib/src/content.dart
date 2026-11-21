@@ -80,9 +80,10 @@ class AgentMarkdown extends StatelessWidget {
 
 /// One entry of a conversation, drawn by its kind and the look in use. A host's [ChatRenderers.entry] renderers see it first.
 class TranscriptEntry extends StatelessWidget {
-  const TranscriptEntry({super.key, required this.entry});
+  const TranscriptEntry({super.key, required this.entry, this.streaming = false});
 
   final ChatEntryData entry;
+  final bool streaming;
 
   @override
   Widget build(BuildContext context) {
@@ -102,7 +103,7 @@ class TranscriptEntry extends StatelessWidget {
     final compaction = entry.compaction;
     return switch (entry.role) {
       MessageRole.tool => tool == null ? const SizedBox.shrink() : ToolEntry(tool: tool),
-      MessageRole.thought => Thought(text: entry.text),
+      MessageRole.thought => Thought(text: entry.text, initiallyExpanded: streaming),
       MessageRole.compaction => compaction == null ? const SizedBox.shrink() : CompactionView(compaction: compaction),
       MessageRole.agent => MessageBox(
         color: look.agent,
@@ -213,11 +214,12 @@ class _CodeBlock extends MarkdownElementBuilder {
   }
 }
 
-/// An agent's thinking, kept out of the way until asked for.
+/// An agent's thinking, kept out of the way until asked for, or open while streaming.
 class Thought extends StatelessWidget {
-  const Thought({super.key, required this.text});
+  const Thought({super.key, required this.text, this.initiallyExpanded = false});
 
   final String text;
+  final bool initiallyExpanded;
 
   @override
   Widget build(BuildContext context) {
@@ -225,6 +227,7 @@ class Thought extends StatelessWidget {
     return Theme(
       data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
       child: ExpansionTile(
+        initiallyExpanded: initiallyExpanded,
         dense: true,
         tilePadding: EdgeInsets.zero,
         leading: Icon(Icons.psychology_outlined, size: 18, color: look.muted),

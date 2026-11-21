@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show SelectedContent;
+import 'package:flutter/rendering.dart' show ScrollDirection, SelectedContent;
 import 'package:flutter/services.dart';
 
 import 'content.dart';
@@ -32,6 +32,7 @@ class ChatTranscript extends StatefulWidget {
     this.narrow = false,
     this.turns = const [],
     this.agentName,
+    this.starting,
     this.clock = DateTime.now,
   });
 
@@ -59,6 +60,9 @@ class ChatTranscript extends StatefulWidget {
   /// Who the working row says is starting, as in "Starting Claude…".
   final String? agentName;
 
+  /// Whether the session itself is still starting; null infers it from whether the conversation has seen any agent output yet.
+  final bool? starting;
+
   /// The time the working row counts to.
   final DateTime Function() clock;
 
@@ -84,11 +88,30 @@ class ChatTranscriptState extends State<ChatTranscript> {
 
   bool _onScroll(ScrollNotification notification) {
     // Only the transcript's own scrolling, not a code box's inside an entry.
-    if (notification.depth != 0 || (notification is! ScrollUpdateNotification && notification is! ScrollEndNotification)) {
+    if (notification.depth != 0) return false;
+    if (notification is UserScrollNotification) {
+      if (notification.direction == ScrollDirection.forward && _following) {
+        setState(() => _following = false);
+      }
       return false;
     }
-    final atEnd = notification.metrics.extentAfter <= nearEnd;
-    if (atEnd != _following) setState(() => _following = atEnd);
+    if (notification is ScrollUpdateNotification) {
+      final delta = notification.scrollDelta ?? 0;
+      if (delta < 0) {
+        if (_following) setState(() => _following = false);
+        return false;
+      }
+      if (delta > 0 && notification.metrics.extentAfter <= 2 && !_following) {
+        setState(() => _following = true);
+      }
+      return false;
+    }
+    if (notification is ScrollEndNotification) {
+      final atEnd = notification.metrics.extentAfter <= nearEnd;
+      if (!atEnd && _following) {
+        setState(() => _following = false);
+      }
+    }
     return false;
   }
 
@@ -104,11 +127,19 @@ class ChatTranscriptState extends State<ChatTranscript> {
     final at = widget.entries.lastIndexWhere((entry) => entry.role == MessageRole.user);
     final turn = at < 0 ? widget.entries : widget.entries.sublist(at + 1);
     final since = at < 0 ? null : widget.entries[at].at;
+    final initialStart = widget.starting ??
+        !widget.entries.any(
+          (entry) => entry.role == MessageRole.agent || entry.role == MessageRole.thought || entry.role == MessageRole.tool,
+        );
     final look = context.chatLook;
     return look.column(
       Padding(
         padding: EdgeInsets.only(bottom: look.gap, top: 2),
-        child: WorkingRow(headline: workingHeadline(turn, agent: widget.agentName), startedAt: running?.startedAt ?? since, clock: widget.clock),
+        child: WorkingRow(
+          headline: workingHeadline(turn, agent: widget.agentName, starting: initialStart),
+          startedAt: running?.startedAt ?? since,
+          clock: widget.clock,
+        ),
       ),
     );
   }
@@ -136,7 +167,13 @@ class ChatTranscriptState extends State<ChatTranscript> {
   Widget build(BuildContext context) {
     final look = context.chatLook;
     final density = widget.density ?? look.density;
-    final items = foldTranscript(widget.entries, density: density, working: widget.working, turns: widget.turns);
+    final items = foldTranscript(
+      widget.entries,
+      density: density,
+      working: widget.working,
+      showThinking: look.showThinking,
+      turns: widget.turns,
+    );
     final planAt = widget.plan.isEmpty ? -1 : items.length;
     final count = items.length + (widget.plan.isEmpty ? 0 : 1) + (widget.working ? 1 : 0);
     return ChatScope(
