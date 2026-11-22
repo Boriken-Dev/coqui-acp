@@ -255,7 +255,7 @@ macro_rules! stdio_vendor {
                 &self,
                 account: $crate::__private::api::AccountRef,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<::std::string::String>,
+                $crate::__private::alloc::vec::Vec<$crate::__private::alloc::string::String>,
                 $crate::__private::api::guatiao::library::ProviderError,
             > {
                 $crate::__private::api::AccountProvider::provides(&self.inner, account)
