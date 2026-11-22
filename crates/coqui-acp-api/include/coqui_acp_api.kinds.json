@@ -555,7 +555,7 @@
     },
     {
       "name": "account_provider",
-      "floor_hash": 4172086390,
+      "floor_hash": 1682791892,
       "object": false,
       "doc": "Owns accounts: the kinds it makes, the sign-in that makes one, the renewal and watching of its\ncredentials, the usage of its plan and the models it may use.\n\nAn account provider does not run an agent. A harness (`acp_harness`) applies an account the\nhost hands it when the account's `provides` meets what the harness accepts, and never asks how\nthe account was made. The host owns which accounts exist, their secrets at rest and who holds\none; the provider owns every fact about how its kinds sign in, renew, rotate and report.\n\nEvery method answers for the provider as configured: a host builds an instance from the\nprovider's settings and asks it. Every method is synchronous; a host calls them from a thread\nof its own. Every object a method is handed (`spawner`, `prompter`, `keeper`) is the provider's\nfrom then on, and it destroys each, even when it refuses.\n\nA credential crosses only as a secret, and nothing a provider answers carries one: not an\nanswer, a refusal, an error, a log line or an argument vector.",
       "slots": [
@@ -578,6 +578,22 @@
             "type": "value"
           },
           "doc": "The kinds of account it makes, the ways to sign in, and which kinds report usage. Cheap,\nthe same on every call, and answered as configured."
+        },
+        {
+          "name": "provides",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "account",
+              "type": "value",
+              "pass": "borrowed"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "The standards the account `account` provides: every one it can be used as, the ids a harness\nmatches against what it accepts. An account names only its kind and settings; this is where\nthey are read. A kind that lists `provides` answers that list, and a kind whose settings pick\nthe standards ([`PROVIDES_BY_VALUE`](crate::PROVIDES_BY_VALUE) is the usual way)\nanswers what the account's settings pick. The answer is the account's, not the credentials':\nit reads `account.settings` and no secret, and `account.provides` is no input. Each id is a\n[`standard`](crate::standard) id, none twice. May be empty for an account that cannot be\nused yet.\n\nTakes every kind the provider lists in `offers().kinds`, and, when `offers().local`, the\nautomatic `local` account ([`HARNESS_LOGIN`](crate::HARNESS_LOGIN)), which provides the\nstandard of the program itself. Any other kind is `GUATIAO_ERR_BAD_VALUE`, as is an id that\nis not 1 to 128 bytes without a control character. Cheap, the same on every call for the\nsame account, and it starts nothing."
         },
         {
           "name": "login",

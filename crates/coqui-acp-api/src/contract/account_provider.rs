@@ -21,13 +21,14 @@ use super::accounts::{
 };
 use super::checks::{CANARY, Outcome, Place, text};
 use super::host::{self, GRACE, PATIENCE, Script, status};
+use super::json::{from_json, to_json};
 use super::{Failure, Failures};
 use crate::guatiao::library::{Object, ProviderError};
 use crate::usage::Refill;
 use crate::{
     AccountGrant, AccountKindInfo, AccountLoss, AccountModelsQuery, AccountOffer, AccountProvider,
     AccountRenewal, AccountUsageQuery, AccountWatch, Credentials, Environment, HARNESS_LOGIN,
-    LoginMethodInfo, LoginOutcome, LoginRequest, RenewRequest, WatchRequest,
+    LoginMethodInfo, LoginOutcome, LoginRequest, PROVIDES_BY_VALUE, RenewRequest, WatchRequest,
 };
 
 macro_rules! ensure {
@@ -121,6 +122,10 @@ fn all(contract: &AccountContract, provider: &dyn AccountProvider) -> Vec<(&'sta
         (
             "lists the models of an account",
             models(contract, provider, &place),
+        ),
+        (
+            "says what its accounts provide",
+            provides(contract, provider, &place),
         ),
     ];
     place.remove();
@@ -1035,5 +1040,125 @@ fn models(contract: &AccountContract, provider: &dyn AccountProvider, place: &Pl
             );
         }
     }
+    Ok(())
+}
+
+/// What an account provides: each kind the provider lists, asked for a sample account, must answer what the kind declares
+/// (its `provides`, or what the setting marked [`PROVIDES_BY_VALUE`] picks for the value the account holds), once for each
+/// value such a setting lists. Every id is a standard, none twice; the automatic `local` account answers some, and an
+/// account of a kind it does not list, or with a bad id, is refused as a bad value.
+fn provides(contract: &AccountContract, provider: &dyn AccountProvider, place: &Place) -> Outcome {
+    let offer = offer_of(provider)?;
+    for info in kinds_of(contract, &offer)? {
+        let account = make(provider, &offer, &info, place)?;
+        let kind = &info.id;
+        let reference = |grant: &AccountGrant| {
+            let mut reference = grant.reference();
+            // What the host remembers of an earlier answer is no input to the next.
+            reference.provides.clear();
+            reference
+        };
+        let mut samples = vec![(String::from("its sample account"), account.grant.clone())];
+        for (name, property) in properties_of(&info) {
+            let Some(listed) = property
+                .get(PROVIDES_BY_VALUE)
+                .and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            for value in listed.keys() {
+                let mut settings = to_json(&account.grant.settings);
+                if !settings.is_object() {
+                    settings = serde_json::json!({});
+                }
+                settings[&name] = serde_json::Value::String(value.clone());
+                let mut grant = account.grant.clone();
+                grant.settings = from_json(&settings)?;
+                samples.push((format!("{name} set to {value}"), grant));
+            }
+        }
+        for (what, grant) in samples {
+            let mut answered = provider
+                .provides(reference(&grant))
+                .map_err(|e| format!("{kind}: provides, for {what}: {}", why(&e)))?;
+            ensure!(
+                answered.iter().all(|id| crate::standard::is_standard(id)),
+                "{kind}: for {what} it provides {answered:?}, which holds a name that is not a standard id"
+            );
+            ensure!(
+                answered
+                    .iter()
+                    .enumerate()
+                    .all(|(at, id)| !answered[..at].contains(id)),
+                "{kind}: for {what} it provides a standard twice: {answered:?}"
+            );
+            let mut expected = provided_by(&info, &to_json(&grant.settings));
+            expected.retain(|id| crate::standard::is_standard(id));
+            answered.sort();
+            expected.sort();
+            expected.dedup();
+            ensure!(
+                answered == expected,
+                "{kind}: for {what} it provides {answered:?}, and its kind says {expected:?}"
+            );
+        }
+        for (what, other) in bad_grants(&account.grant) {
+            let label = format!("{kind}: provides, for {what}");
+            refused_plainly(&label, provider.provides(reference(&other)).map(|_| ()))?;
+        }
+    }
+    if contract.kind.is_none() {
+        let local = local_account().reference();
+        if offer.local {
+            let answered = provider
+                .provides(local)
+                .map_err(|e| format!("provides, for the local account: {}", why(&e)))?;
+            ensure!(
+                !answered.is_empty() && answered.iter().all(|id| crate::standard::is_standard(id)),
+                "provides, for the local account, answered {answered:?}, not the standard of the program itself"
+            );
+            ensure!(
+                answered
+                    .iter()
+                    .enumerate()
+                    .all(|(at, id)| !answered[..at].contains(id)),
+                "provides, for the local account, names a standard twice"
+            );
+        } else {
+            refused_plainly(
+                "provides, for the local account, which it does not offer",
+                provider.provides(local).map(|_| ()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The properties of a kind's settings schema, by name.
+fn properties_of(info: &AccountKindInfo) -> Vec<(String, serde_json::Value)> {
+    to_json(&info.settings)
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|properties| {
+            properties
+                .iter()
+                .map(|(name, property)| (name.clone(), property.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A refusal of a question that hands the provider no object: `GUATIAO_ERR_BAD_VALUE` and a reason without a secret.
+fn refused_plainly(label: &str, answer: Result<(), ProviderError>) -> Outcome {
+    let error = answer
+        .err()
+        .ok_or_else(|| format!("{label}: it answered"))?;
+    ensure!(
+        status(&error) == BAD_VALUE
+            && !error.message().is_empty()
+            && !error.message().contains(CANARY),
+        "{label}: it refused with {}, not {BAD_VALUE} and a reason without a secret",
+        why(&error)
+    );
     Ok(())
 }

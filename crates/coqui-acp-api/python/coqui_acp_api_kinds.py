@@ -440,7 +440,7 @@ class AccountWatch(KindProtocol, Protocol, kind="account_watch", floor_hash=5891
         ...
 
 
-class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_hash=4172086390):
+class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_hash=1682791892):
     """Owns accounts: the kinds it makes, the sign-in that makes one, the renewal and watching of its
     credentials, the usage of its plan and the models it may use.
 
@@ -469,6 +469,26 @@ class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_has
     def offers(self) -> ValueAnswer:
         """The kinds of account it makes, the ways to sign in, and which kinds report usage. Cheap,
         the same on every call, and answered as configured.
+        """
+        ...
+
+    @required
+    @fallible
+    def provides(self, account: Ref) -> ValueAnswer:
+        """The standards the account `account` provides: every one it can be used as, the ids a harness
+        matches against what it accepts. An account names only its kind and settings; this is where
+        they are read. A kind that lists `provides` answers that list, and a kind whose settings pick
+        the standards ([`PROVIDES_BY_VALUE`](crate::PROVIDES_BY_VALUE) is the usual way)
+        answers what the account's settings pick. The answer is the account's, not the credentials':
+        it reads `account.settings` and no secret, and `account.provides` is no input. Each id is a
+        [`standard`](crate::standard) id, none twice. May be empty for an account that cannot be
+        used yet.
+
+        Takes every kind the provider lists in `offers().kinds`, and, when `offers().local`, the
+        automatic `local` account ([`HARNESS_LOGIN`](crate::HARNESS_LOGIN)), which provides the
+        standard of the program itself. Any other kind is `GUATIAO_ERR_BAD_VALUE`, as is an id that
+        is not 1 to 128 bytes without a control character. Cheap, the same on every call for the
+        same account, and it starts nothing.
         """
         ...
 

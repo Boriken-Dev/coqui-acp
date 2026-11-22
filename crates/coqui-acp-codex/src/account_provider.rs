@@ -14,14 +14,16 @@ use std::sync::{Mutex, PoisonError};
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
+use coqui_acp_api::standard::CODEX;
 use coqui_acp_api::{
     AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
-    AccountUsage, AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginOutcome, LoginPrompter,
-    LoginRequest, ModelInfo, ModelListing, ProcessSpawner, RenewReport, RenewRequest, Source,
-    UnknownKind, WatchRequest,
+    AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginOutcome,
+    LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner, RenewReport,
+    RenewRequest, Source, UnknownKind, WatchRequest,
 };
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
+use coqui_acp_harness::provider::provides_of;
 
 use crate::account_usage::{ReadOptions, read_limits};
 use crate::{
@@ -166,6 +168,10 @@ impl AccountProvider for CodexAccounts {
 
     fn offers(&self) -> Result<AccountOffer, ProviderError> {
         Ok(accounts::offer())
+    }
+
+    fn provides(&self, account: AccountRef) -> Result<Vec<String>, ProviderError> {
+        provides_of(&accounts::offer(), &account, &[CODEX])
     }
 
     fn login(

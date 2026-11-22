@@ -15,14 +15,16 @@ use std::sync::{Mutex, PoisonError};
 
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
+use coqui_acp_api::standard::CLAUDE_CODE;
 use coqui_acp_api::{
     AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
-    AccountProviderInfo, AccountUsage, AccountUsageQuery, AccountWatch, Credentials, HARNESS_LOGIN,
-    LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner,
-    RenewReport, RenewRequest, UnknownKind, WatchRequest,
+    AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, Credentials,
+    HARNESS_LOGIN, LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing,
+    ProcessSpawner, RenewReport, RenewRequest, UnknownKind, WatchRequest,
 };
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
+use coqui_acp_harness::provider::provides_of;
 
 use crate::account_usage::{ReadOptions, read_limits};
 use crate::{ClaudeLaunch, ClaudeSession, ClaudeSettings, SessionSettings, accounts, signin};
@@ -218,6 +220,10 @@ impl AccountProvider for ClaudeAccounts {
 
     fn offers(&self) -> Result<AccountOffer, ProviderError> {
         Ok(accounts::offer())
+    }
+
+    fn provides(&self, account: AccountRef) -> Result<Vec<String>, ProviderError> {
+        provides_of(&accounts::offer(), &account, &[CLAUDE_CODE])
     }
 
     fn login(

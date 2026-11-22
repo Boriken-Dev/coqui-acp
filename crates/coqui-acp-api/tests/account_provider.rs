@@ -16,9 +16,9 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
 use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
     AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
-    AccountProviderInfo, AccountUsage, AccountUsageQuery, AccountWatch, Credentials, HARNESS_LOGIN,
-    LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner,
-    RenewReport, RenewRequest, WatchRequest,
+    AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, Credentials,
+    HARNESS_LOGIN, LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing,
+    ProcessSpawner, RenewReport, RenewRequest, WatchRequest,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -139,6 +139,19 @@ impl AccountProvider for Breaks {
             offer.usage.push("no-such-kind".into());
         }
         Ok(offer)
+    }
+
+    fn provides(&self, account: AccountRef) -> Result<Vec<String>, ProviderError> {
+        match self.breaking {
+            "provides what its kind does not say" => {
+                let mut standards = self.inner.provides(account)?;
+                standards.push("echo-extra".into());
+                Ok(standards)
+            }
+            "provides nothing for a kind that provides" => Ok(Vec::new()),
+            "provides for any kind" => Ok(vec!["echo-api".into()]),
+            _ => self.inner.provides(account),
+        }
     }
 
     fn login(
@@ -298,6 +311,48 @@ fn models_asked_of_a_kind_the_provider_does_not_list_must_be_refused() {
 #[test]
 fn a_model_listed_twice_is_named() {
     broken_by("models listed twice", "lists the models of an account");
+}
+
+#[test]
+fn a_provider_whose_provides_disagrees_with_its_kind_is_named() {
+    broken_by(
+        "provides what its kind does not say",
+        "says what its accounts provide",
+    );
+    broken_by(
+        "provides nothing for a kind that provides",
+        "says what its accounts provide",
+    );
+}
+
+#[test]
+fn provides_asked_of_a_kind_the_provider_does_not_list_must_be_refused() {
+    broken_by("provides for any kind", "says what its accounts provide");
+}
+
+/// The echo answers the standards of its kinds, and of the login its program has where it runs, and refuses any other.
+#[test]
+fn the_echo_says_what_each_account_provides() {
+    let (_registry, provider) = echo();
+    assert_eq!(
+        provider
+            .provides(AccountRef::new("key", "echo-key"))
+            .expect("a key"),
+        ["echo-api"]
+    );
+    assert_eq!(
+        provider
+            .provides(AccountRef::new("mine", HARNESS_LOGIN))
+            .expect("the login it has"),
+        ["echo-login"]
+    );
+    let unlisted = provider
+        .provides(AccountRef::new("other", "no-such-kind"))
+        .expect_err("not a kind it lists");
+    assert_eq!(
+        unlisted.status,
+        coqui_acp_api::guatiao::Status::GUATIAO_ERR_BAD_VALUE
+    );
 }
 
 /// The echo lists for the kinds it makes and for the login its program has where it runs, and refuses any other.

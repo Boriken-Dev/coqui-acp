@@ -11,9 +11,9 @@ use std::ffi::OsString;
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountUsage, AccountUsageQuery,
-    AccountWatch, HARNESS_LOGIN, LoginMethodInfo, ModelListing, ProcessSpawner, RenewReport,
-    RenewRequest, WatchRequest,
+    AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountRef, AccountUsage,
+    AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginMethodInfo, ModelListing, ProcessSpawner,
+    RenewReport, RenewRequest, WatchRequest,
 };
 
 use super::{Applied, HarnessDef, KindDef, apply, bad, identity_of, login_usable};
@@ -59,6 +59,17 @@ impl Keeping {
             .collect();
         offer.logins = logins;
         offer
+    }
+
+    /// The standards `account` provides, as [`provides_of`](crate::provider::provides_of) answers for what the provider
+    /// offers; the automatic `local` account provides the harness's own standard.
+    ///
+    /// # Errors
+    ///
+    /// `BAD_VALUE` for an id that is not one or a kind the provider does not list.
+    pub fn provides(&self, account: &AccountRef) -> Result<Vec<String>, ProviderError> {
+        let own: Vec<&str> = self.def.own_standard.into_iter().collect();
+        crate::provider::provides_of(&self.offer(Vec::new()), account, &own)
     }
 
     /// The kind `grant` is of, when the provider keeps accounts of it. Nothing of another standard is taken: a harness

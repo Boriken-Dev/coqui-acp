@@ -39,6 +39,7 @@ USAGE_KEYS = {"account", "environment"}
 MODELS_KEYS = {"account", "environment"}
 HARNESS_LOGIN = "harness-login"
 LOCAL_ACCOUNT = "local"
+REF_KEYS = {"id", "kind", "settings", "state_dir", "revision", "provides"}
 GRANT_KEYS = {"id", "kind", "settings", "credentials", "state_dir", "revision", "provides"}
 
 
@@ -416,6 +417,19 @@ class EchoAccounts(provide.Provider, AccountProvider, display_name="Echo account
 
     def offers(self) -> Dict[str, Any]:
         return _offer(self.logins, self.usage_on)
+
+    def provides(self, account: Ref) -> List[str]:
+        asked = account.to_python()
+        if not isinstance(asked, dict) or not set(asked) <= REF_KEYS:
+            raise BadValue("the account has a key the echo does not know")
+        if not _is_account_id(asked.get("id")):
+            raise BadValue("an account id is 1 to 128 bytes with no control character")
+        # The echo's own login is the standard its file kind provides.
+        kind = FILE_KIND if asked.get("kind") == HARNESS_LOGIN else asked.get("kind")
+        for listed in _offer(self.logins, self.usage_on)["kinds"]:
+            if listed["id"] == kind:
+                return list(listed["provides"])
+        raise BadValue("the echo makes no account of that kind")
 
     def login(self, request: Ref, spawner: ProcessSpawner, prompter: LoginPrompter) -> Dict[str, Any]:
         asked = request.to_python()

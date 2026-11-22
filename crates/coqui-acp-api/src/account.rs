@@ -308,6 +308,13 @@ impl AccountRef {
         self
     }
 
+    /// The same reference, with these settings.
+    #[must_use]
+    pub fn settings(mut self, settings: Value) -> Self {
+        self.settings = settings;
+        self
+    }
+
     /// Refuses `GUATIAO_ERR_BAD_VALUE` an id that is not [`is_account_id`].
     ///
     /// # Errors

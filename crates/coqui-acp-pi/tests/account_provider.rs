@@ -517,3 +517,42 @@ fn the_default_model_carries_its_thinking_levels_and_the_others_none() {
     assert_eq!(think.default_effort.as_deref(), Some("medium"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The kind lists no standard of its own: which API a key is for is the value of its `variable`, and the provider reads it.
+#[test]
+fn a_key_provides_the_api_of_the_variable_it_names_and_pis_own_login_provides_pi() {
+    let provider = provider();
+    let key = |variable: &str| {
+        let mut settings = Map::new();
+        settings.set("variable", variable);
+        coqui_acp_api::AccountRef::new("key", "pi-api-key").settings(Value::from(settings))
+    };
+    assert_eq!(
+        provider
+            .provides(key("ANTHROPIC_API_KEY"))
+            .expect("a key of a variable Pi has an API for"),
+        ["anthropic-api"]
+    );
+    assert_eq!(
+        provider
+            .provides(key("OPENAI_API_KEY"))
+            .expect("a key of a variable Pi has an API for"),
+        ["openai-api"]
+    );
+    assert!(
+        provider
+            .provides(key("MISTRAL_API_KEY"))
+            .expect("a key of a variable with no API")
+            .is_empty()
+    );
+    assert_eq!(
+        provider
+            .provides(coqui_acp_api::AccountRef::new("local", HARNESS_LOGIN))
+            .expect("the login Pi has"),
+        ["pi"]
+    );
+    let unlisted = provider
+        .provides(coqui_acp_api::AccountRef::new("a", "no-such-kind"))
+        .expect_err("not a kind it lists");
+    assert_eq!(unlisted.status, Status::GUATIAO_ERR_BAD_VALUE);
+}

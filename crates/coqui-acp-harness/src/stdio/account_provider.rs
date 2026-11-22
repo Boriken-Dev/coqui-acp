@@ -12,8 +12,8 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Schema, Status, ToValue};
 use coqui_acp_api::{
     AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
-    AccountUsage, AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter, LoginRequest,
-    ModelListing, ProcessSpawner, RenewReport, RenewRequest, WatchRequest,
+    AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter,
+    LoginRequest, ModelListing, ProcessSpawner, RenewReport, RenewRequest, WatchRequest,
 };
 
 use super::StdioDef;
@@ -95,6 +95,10 @@ impl AccountProvider for StdioAccounts {
 
     fn offers(&self) -> Result<AccountOffer, ProviderError> {
         Ok(self.keeping.offer((self.def.logins)()))
+    }
+
+    fn provides(&self, account: AccountRef) -> Result<Vec<String>, ProviderError> {
+        self.keeping.provides(&account)
     }
 
     fn login(

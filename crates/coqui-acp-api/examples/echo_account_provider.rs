@@ -25,7 +25,7 @@ use coqui_acp_api::guatiao::{self, FromValue, Provider, Schema, Secret, Status};
 use coqui_acp_api::usage::{Bucket, Coverage, Refill, Source, Status as Level, Unit};
 use coqui_acp_api::{
     ASK, AccountGrant, AccountKeeper, AccountKindInfo, AccountLoss, AccountModelsQuery,
-    AccountOffer, AccountProvider, AccountProviderInfo, AccountRenewal, AccountUsage,
+    AccountOffer, AccountProvider, AccountProviderInfo, AccountRef, AccountRenewal, AccountUsage,
     AccountUsageQuery, AccountWatch, Credentials, EndpointSlot, HARNESS_LOGIN, LoginForm,
     LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest, MODEL_API, ModelInfo, ModelListing,
     OPEN_URL, OpenUrl, ProcessSpawner, RenewReport, RenewRequest, SecretBytes, SpawnSpec,
@@ -621,6 +621,24 @@ impl AccountProvider for EchoAccounts {
 
     fn offers(&self) -> Result<AccountOffer, ProviderError> {
         Ok(offer(&self.settings))
+    }
+
+    fn provides(&self, account: AccountRef) -> Result<Vec<String>, ProviderError> {
+        if !is_account_id(&account.id) {
+            return Err(bad(
+                "an account id is 1 to 128 bytes with no control character",
+            ));
+        }
+        // The echo's own login is the standard its file kind provides.
+        let kind = if account.kind == HARNESS_LOGIN {
+            FILE_KIND
+        } else {
+            &account.kind
+        };
+        offer(&self.settings)
+            .kind(kind)
+            .map(|info| info.provides.clone())
+            .ok_or_else(|| bad("the echo makes no account of that kind"))
     }
 
     fn login(

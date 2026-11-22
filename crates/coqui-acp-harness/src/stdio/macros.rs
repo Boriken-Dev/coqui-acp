@@ -251,6 +251,16 @@ macro_rules! stdio_vendor {
                 $crate::__private::api::AccountProvider::watch(&self.inner, request, spawner, keeper)
             }
 
+            fn provides(
+                &self,
+                account: $crate::__private::api::AccountRef,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<::std::string::String>,
+                $crate::__private::api::guatiao::library::ProviderError,
+            > {
+                $crate::__private::api::AccountProvider::provides(&self.inner, account)
+            }
+
             fn usage(
                 &self,
                 query: $crate::__private::api::AccountUsageQuery,

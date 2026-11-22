@@ -15,8 +15,8 @@ use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::{FromValue, Provider, Schema, Status, ToValue};
 use coqui_acp_api::{
     AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
-    AccountUsage, AccountUsageQuery, AccountWatch, Credentials, HARNESS_LOGIN, LoginForm,
-    LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner,
+    AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, Credentials, HARNESS_LOGIN,
+    LoginForm, LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner,
     RenewReport, RenewRequest, UnknownKind, WatchRequest,
 };
 use coqui_acp_harness::ThroughSpawner;
@@ -131,6 +131,10 @@ impl AccountProvider for PiAccounts {
 
     fn offers(&self) -> Result<AccountOffer, ProviderError> {
         Ok(self.keeping.offer(logins()))
+    }
+
+    fn provides(&self, account: AccountRef) -> Result<Vec<String>, ProviderError> {
+        self.keeping.provides(&account)
     }
 
     fn login(

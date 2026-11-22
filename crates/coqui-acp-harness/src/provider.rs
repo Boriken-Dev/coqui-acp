@@ -584,6 +584,32 @@ pub fn own_kind(
     Ok(())
 }
 
+/// The standards the account `account` provides, as an account provider answers
+/// [`AccountProvider::provides`](coqui_acp_api::AccountProvider::provides): what its kind lists in `offer`, or what the
+/// setting the kind marks [`PROVIDES_BY_VALUE`](coqui_acp_api::PROVIDES_BY_VALUE) picks for the value the account holds.
+/// The automatic `local` account, when `offer` offers it, provides `local`, the standard of the program itself.
+///
+/// # Errors
+///
+/// `GUATIAO_ERR_BAD_VALUE` for an id that is not one or a kind `offer` does not list.
+pub fn provides_of(
+    offer: &coqui_acp_api::AccountOffer,
+    account: &coqui_acp_api::AccountRef,
+    local: &[&str],
+) -> Result<Vec<String>, ProviderError> {
+    account.check_id()?;
+    if account.kind == coqui_acp_api::HARNESS_LOGIN && offer.local {
+        return Ok(local.iter().map(ToString::to_string).collect());
+    }
+    let info = offer.kind(&account.kind).ok_or_else(|| {
+        ProviderError::new(
+            Status::GUATIAO_ERR_BAD_VALUE,
+            "this provider keeps no account of that kind",
+        )
+    })?;
+    Ok(crate::stdio::accounts::provided(info, &account.settings))
+}
+
 /// The grant to apply for `grant`: itself when its kind is one the catalog lists; else, when it provides a standard the
 /// catalog accepts, a grant of the own kind that applies that standard's slot for the credential it carries, with
 /// its `base_url` moved to that kind's setting and the standard's fixed settings added.
