@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-acp-harness` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-acp>.
 
-MSRV Rust 1.89. A default build depends on `coqui-acp-api` (for the usage model), `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Feature `kind` (off by default) adds `spawner`, the `acp_harness` kind's spawner on this machine and `Spawn` through any host's, and `provider`, which serves a harness over the kind's channel (with `guatiao-serde`, for catalogs). Feature `antigravity` (off by default) adds `antigravity`, which reads Antigravity's quota from its loopback port, and with it `serde`, `time` (parsing) and `ureq` (rustls with ring, no default features); its tests also use `rcgen` and `rustls`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
+MSRV Rust 1.89. A default build depends on `coqui-acp-api` (for the usage model), `base64`, `serde_json` and `uuid`, and `win32job` on Windows or `rustix` on Unix. Feature `kind` (off by default) adds `spawner`, the `acp_harness` kind's spawner on this machine and `Spawn` through any host's, and `provider`, which serves a harness over the kind's channel (with `guatiao-serde`, for catalogs). Feature `antigravity` (off by default) adds `antigravity`, which reads Antigravity's account and quota from its stored login and Google's service, or from its loopback port, and with it `serde`, `time` (parsing), `ureq` (rustls with ring and webpki roots, no default features), `memchr`, and `keyring-core` with the platform's store (`windows-native-keyring-store`, `apple-native-keyring-store` with `keychain`, or `zbus-secret-service-keyring-store` with `crypto-rust` on other Unix); its tests also use `rcgen` and `rustls`. Version `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: the root re-exports `acp`'s `AgentInfo`, `ConfigOption`, `Conversation`, `EventSink`, `Harness`, `HarnessError`, `McpServer`, `McpTransport`, `Open`, `OpenRequest`, `OptionValue`, `Settings`, `Takes`, `UsageTracker` and `serve`; `event`'s `Event`, `Outcome`, `PermissionRequest` and `Responder`; `process`'s `ErrorStream`, `Exit`, `Launch`, `LineWriter`, `PlainSpawn`, `Process`, `Spawn`, `Spawned`, `Starter`, `ending_once`, `exit_text`, `line_writer`, `set_starter` and `watch_exit`; and `stream`'s `Answer`, `LineHook`, `Step`, `Stream` and `Waiting`. The root also re-exports `mode`'s `Mode` and `settings`'s `ConnectionSettings` and `SessionLimits`, and with `kind` `spawner`'s `LocalSpawner` and `ThroughSpawner`. The modules `acp`, `event`, `lines`, `mode`, `process`, `settings`, `stream` and `version` are public, `spawner` and `provider` with `kind` and `antigravity` with `antigravity`.
 
@@ -354,6 +354,49 @@ pub fn custom_option(label: &str, offered: &[Mode]) -> ConfigOption     // a sta
 How much a harness asks, named once so a client shows one control over every translator. A translator offers only the modes its tool has, and a mode in use is always listed. Each translator's table of what a mode sets is in its own header: `coqui-acp-claude` (`permissionMode`) and `coqui-acp-codex` (approval policy, sandbox, reviewer, collaboration mode).
 
 ## Antigravity (`coqui_acp_harness::antigravity`, feature `antigravity`)
+
+Two readers. `AgyLogin` reads the account, the plan and the quota from agy's stored login and Google's service, with no `agy` process; `AgyQuota` reads them from an open session's own language server, the fallback when `AgyLogin` fails while a session is open. Both make the same `AgyAccount` and the same buckets.
+
+### From the stored login (`AgyLogin`)
+
+```rust
+pub struct AgyLogin;                     // new(LoginSettings); unmatched() -> u64; Debug (no token, email or secret)
+impl AgyLogin { pub fn read(&mut self, models: &[AcpModel]) -> Result<LoginReading, LoginError>; }   // starts no process
+#[non_exhaustive] pub enum LoginReading { NotSignedIn, SignedIn(SignedIn) }
+#[non_exhaustive] pub struct SignedIn { pub account: AgyAccount, pub usage: Result<Vec<Bucket>, LoginError> }
+#[non_exhaustive] pub struct LoginError { pub step: Step, pub cause: Cause }   // new(step, cause); Display, Error; Copy
+#[non_exhaustive] pub enum Step { Keyring, LoginFile, Program, Refresh, UserInfo, LoadCodeAssist, FetchAvailableModels }   // Display
+#[non_exhaustive] pub enum Cause { NoClient, Refused, Status(u16), Malformed, Io(io::ErrorKind) }   // Display
+#[non_exhaustive] pub struct LoginSettings {   // Default, Debug; new(), then a builder method per field
+    pub home: Option<PathBuf> /* USERPROFILE on Windows, else HOME */, pub gemini_dir: Option<PathBuf> /* <home>/.gemini */,
+    pub keyring: Keyring /* Os */, pub keyring_timeout: Duration /* 5 s */, pub client: ClientSource /* Find */,
+    pub token_url: String /* TOKEN_URL */, pub userinfo_url: String /* USERINFO_URL */, pub service: Option<String> /* none */,
+    pub consumer_service: String /* CONSUMER_SERVICE */, pub gcp_service: String /* GCP_SERVICE */,
+    pub user_agent: String /* "antigravity" */, pub timeout: Duration /* 15 s, each request */, pub body: usize /* 4 MiB */ }
+#[non_exhaustive] pub enum Keyring { Os, Off, Given(Arc<KeyringLookup>) }   // Default Os; Debug names the variant only
+pub type KeyringLookup = dyn Fn(&str, &str) -> io::Result<Option<Vec<u8>>> + Send + Sync;   // (service, user) -> the stored bytes
+#[non_exhaustive] pub enum ClientSource { Find, Program(PathBuf), Given(OAuthClient), Off }   // Default Find
+#[non_exhaustive] pub struct OAuthClient { pub id: String, pub secret: Secret }   // new(id, secret); Debug shows neither
+pub struct Secret;                       // new(value), expose() -> &str; Debug "Secret(..)", Display ".."
+pub const KEYRING_SERVICE: &str = "gemini"; pub const KEYRING_USER: &str = "antigravity";
+pub const SERVICE_VARIABLE: &str = "CLOUD_CODE_URL";
+pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+pub const CONSUMER_SERVICE: &str = "https://daily-cloudcode-pa.googleapis.com";
+pub const GCP_SERVICE: &str = "https://cloudcode-pa.googleapis.com";
+```
+
+The login, as agy 1.5.13 keeps it: the keyring entry of service `gemini` and user `antigravity` (Windows' Credential Manager generic credential `gemini:antigravity`, the macOS Keychain's generic password, the Secret Service item with `service` and `username`), and the files `<gemini>/jetski-standalone-oauth-token` and `<gemini>/antigravity-cli/antigravity-oauth-token`. Each is read; when more than one holds a login, the one whose token expires last (the one agy wrote last) is taken, the keyring's on a tie. A keyring with no entry, or none reachable (no session bus), counts as no login there; one that fails or does not answer within `keyring_timeout` (its thread is left to end on its own) is `Step::Keyring` when no file holds a login either. Stored bytes are read as UTF-8, else UTF-16 little-endian. The JSON is `{"token": {access_token, refresh_token, expiry}, auth_method, id_token_email, project_id, user_tier, tier_display_name}` or the older bare token; a login with no refresh token, or an `auth_method` `gcp` one with no `user_tier` or `project_id`, is `NotSignedIn`, as agy counts them; JSON that is not that shape is `Step::LoginFile` `Malformed`. Nothing is ever written: not the files, not the keyring.
+
+A reading: `account.email` is the stored `id_token_email` and `account.plan` the stored `tier_display_name`, with no call. Then an access token: one this reader refreshed from the same refresh token while it lasts, else the stored one while it lasts (an `expiry` 10 s away counts as passed; none, or Go's zero time, never expires), else a refresh (below). With a token: userinfo when the email or name is unknown (its failure is ignored when the stored email is known, else it is the error), then `POST {service}/v1internal:loadCodeAssist` with `{"metadata": {"ideType": "ANTIGRAVITY", "pluginType": "GEMINI"}, "cloudaicompanionProject"?: project_id}` (the plan becomes `paidTier.name`, else `currentTier.name`; the project, when none is stored, its `cloudaicompanionProject`, a string or an object's `id`), then `POST {service}/v1internal:fetchAvailableModels` with `{"project": …}` (or `{}`), each with `Authorization: Bearer`, `Content-Type: application/json` and `User-Agent`. A call answered 401 with a stored token that has not expired refreshes once and is asked again. `{service}` is `settings.service`, else `CLOUD_CODE_URL`, else `gcp_service` for `auth_method` `gcp` and `consumer_service` for any other. Any failure after the login is read is the reading's `usage`, naming the step, and the account keeps what is known. Errors and every `Debug` hold no token, secret, email or name, and none of an answer. Requests follow no redirect and use the `HTTP(S)_PROXY` variables.
+
+A refresh posts `grant_type=refresh_token`, `refresh_token`, `client_id` and `client_secret` to `token_url` and keeps the answer's `access_token` for `expires_in` in memory. The OAuth client is Antigravity's: `ClientSource::Given`, or read from its program (`Program(path)`, or `Find`: `agy` on this process's `PATH`, then on Windows `%LOCALAPPDATA%\agy\bin\agy.exe`), whose strings hold its client ids (`<number>-<32 lower-case letters and digits>.apps.googleusercontent.com`) and secrets (`GOCSPX-` and 28 characters) but not which is whose: each id is tried with each secret, in the order the program holds them, until the token endpoint answers 200 (a 400 or 401 tries the next; any other status, `Status`; none taken, `Refused`), and the pair that worked is tried first after. The program is read once per file (its path, length and time). With no client (`Off`, no program found, or one with no id and secret) an expired login's usage is `Step::Refresh` `Cause::NoClient`: Antigravity refreshes its own login when it next runs. A refresh never writes anything, so agy's stored token stays as it was and agy refreshes it itself.
+
+Buckets as `AgyQuota`'s below, from `fetchAvailableModels`' `models` (a map: the key is the model's id, `displayName` its label, `quotaInfo {remainingFraction, resetTime}` its figures), in the order of the ids, so a group's bucket id is its first id in that order. `retrieveUserQuotaSummary` is not asked.
+
+Unverified (from the program's code and strings, never seen answered): the request bodies of `loadCodeAssist` and `fetchAvailableModels` beyond `project` (agy's own `ClientMetadata` values and its exact `User-Agent` are unknown), that the map's key is the ACP model id and `displayName` its name, that a Credential Manager blob is UTF-8 (UTF-16 is read too), the Keychain and Secret Service entries (from go-keyring's published source, not this program), where agy is installed outside Windows, and which of `paidTier` and `currentTier` agy shows.
+
+### From a session (`AgyQuota`)
 
 ```rust
 pub struct AgyQuota;                     // new(ReadLimits); unmatched() -> u64; Debug
