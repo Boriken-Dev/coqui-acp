@@ -3,11 +3,36 @@
 //! Its login is kept in `<gemini-dir>/<app-data-dir>/antigravity-oauth-token` and, on Windows, in the Credential Manager
 //! entry `gemini:antigravity`. Which one wins, whether `--gemini-dir` and `--app-data-dir` move the token, whether two
 //! logins can exist at once, and what the sign-in `agy acp --login` prints were not measured, so the provider lists no
-//! kind but `harness-login` and no login method until they are.
+//! kind but `harness-login`. Its one way to sign in starts `agy acp` and opens a session, which says whether the person
+//! is signed in; when they are not, it asks them to start Antigravity and sign in, then tries again.
+
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::time::Duration;
+use std::time::Instant;
+
+use coqui_acp_api::guatiao::Status;
+use coqui_acp_api::guatiao::library::{Object, ProviderError};
+use coqui_acp_api::{
+    ASK, Credentials, HARNESS_LOGIN, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter,
+    LoginRequest, ProcessSpawner,
+};
+use serde_json::{Value, json};
 
 use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
+use crate::cli::Next;
+use crate::process::Launch;
+use crate::provider::schema;
 use crate::stdio::accounts::HarnessDef;
-use crate::stdio::{StdioAccountSettings, StdioDef, StdioSettings, no_logins};
+use crate::stdio::login::{self, Ctx};
+use crate::stdio::{StdioAccountSettings, StdioDef, StdioSettings};
+
+/// The way to sign in: start the program and open a session.
+pub const START: &str = "start";
+
+/// How long the program is given to answer each of the two requests that open a session.
+const ANSWER_WAIT: Duration = Duration::from_secs(30);
 
 /// What Antigravity takes as an account.
 pub static DEF: HarnessDef = HarnessDef {
@@ -23,12 +48,132 @@ pub static DEF: HarnessDef = HarnessDef {
     login_unsupported: "agy signs in with `agy acp --login`, whose prompts were not run: it may write the Windows Credential Manager, which a throwaway profile does not isolate, and where it keeps the login and whether two logins can exist at once are unmeasured",
 };
 
+/// The ways to sign in.
+#[must_use]
+pub fn logins() -> Vec<LoginMethodInfo> {
+    let mut start = LoginMethodInfo::new(START, "Start Antigravity to sign in", HARNESS_LOGIN);
+    start.description = "Starts `agy acp` and opens a session to see whether you are signed in. If you are not, it asks you to start Antigravity, sign in there and continue.".to_string();
+    start.steps = vec![ASK.to_string()];
+    vec![start]
+}
+
+/// Runs the sign-in `request.method` names.
+///
+/// # Errors
+///
+/// As [`AccountProvider::login`](coqui_acp_api::AccountProvider::login).
+pub fn sign_in(
+    program: String,
+    request: LoginRequest,
+    spawner: Object<dyn ProcessSpawner>,
+    prompter: Object<dyn LoginPrompter>,
+) -> Result<LoginOutcome, ProviderError> {
+    if request.method != START {
+        return Err(ProviderError::new(
+            Status::GUATIAO_ERR_BAD_VALUE,
+            "this harness offers no such way to sign in",
+        ));
+    }
+    let dir = request.state_dir.clone();
+    login::run(spawner, prompter, request.timeout_ms, move |ctx| {
+        loop {
+            ctx.check()?;
+            let Err(why) = open_session(ctx, &program, &dir)? else {
+                break;
+            };
+            let form = LoginForm::new(
+                "Start Antigravity to sign in",
+                schema(&json!({
+                    "type": "object",
+                    "description": alloc::format!(
+                        "Antigravity did not open a session ({why}). Start Antigravity, sign in there, then continue."
+                    ),
+                    "properties": {},
+                })),
+            );
+            ctx.ask(form)?;
+        }
+        let mut outcome = LoginOutcome::new(HARNESS_LOGIN, Credentials::new());
+        outcome.checked = true;
+        Ok(outcome)
+    })
+}
+
+/// Starts the program, opens a session in `dir` and ends it. The inner error is why no session opened.
+fn open_session(
+    ctx: &Ctx<'_>,
+    program: &str,
+    dir: &str,
+) -> Result<Result<(), String>, ProviderError> {
+    let child = ctx.spawn(&Launch::new(program).args(DEF.args.iter().copied()).cwd(dir))?;
+    let cli = child.input();
+    let mut heard = Heard::default();
+    let opened = (|| {
+        for (id, method, params) in [
+            (
+                1,
+                "initialize",
+                json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            ),
+            (2, "session/new", json!({"cwd": dir, "mcpServers": []})),
+        ] {
+            let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            cli.write(alloc::format!("{line}\n").as_bytes())
+                .map_err(|error| alloc::format!("it does not read its input ({error})"))?;
+            let answer = heard.answer(ctx, &cli, id)?;
+            if let Some(error) = answer.get("error") {
+                return Err(error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("it refused")
+                    .to_string());
+            }
+        }
+        Ok(())
+    })();
+    cli.kill();
+    Ok(opened)
+}
+
+/// What a program has said that is not yet a whole line.
+#[derive(Default)]
+struct Heard {
+    pending: Vec<u8>,
+}
+
+impl Heard {
+    /// The answer to request `id`, waiting at most [`ANSWER_WAIT`]; the other lines are not for this.
+    fn answer(&mut self, ctx: &Ctx<'_>, cli: &crate::cli::Cli, id: u64) -> Result<Value, String> {
+        let until = Instant::now() + ANSWER_WAIT;
+        loop {
+            ctx.check().map_err(|_| "the sign-in ended".to_string())?;
+            while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=end).collect();
+                if let Ok(value) = serde_json::from_slice::<Value>(&line)
+                    && value.get("id").and_then(Value::as_u64) == Some(id)
+                    && value.get("method").is_none()
+                {
+                    return Ok(value);
+                }
+            }
+            if Instant::now() >= until {
+                return Err("it did not answer".to_string());
+            }
+            match cli.next(Duration::from_millis(40)) {
+                Next::Piece(piece) if !piece.error => self.pending.extend_from_slice(&piece.bytes),
+                Next::Piece(_) | Next::Idle => {}
+                Next::Ended => return Err("it ended before it answered".to_string()),
+            }
+        }
+    }
+}
+
 /// How the stdio provider runs it.
 pub static STDIO: StdioDef = StdioDef {
     accounts: &DEF,
-    accounts_description: "Antigravity's sign-in is unmeasured, so it keeps no account yet.",
-    logins: no_logins,
-    sign_in: None,
+    accounts_description: "Antigravity keeps its own login; this provider starts it to see who is signed in.",
+    logins,
+    sign_in: Some(sign_in),
     session_ids: None,
     import: None,
     export: None,
@@ -86,6 +231,20 @@ mod tests {
     #[test]
     fn the_table_is_well_formed() {
         assert_eq!(TARGET.well_formed(), Ok(()));
+    }
+
+    #[test]
+    fn it_offers_one_way_to_sign_in_that_starts_the_program() {
+        let methods = logins();
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].id, START);
+        assert_eq!(methods[0].produces, HARNESS_LOGIN);
+        assert_eq!(methods[0].title, "Start Antigravity to sign in");
+        assert_eq!(
+            catalog(&DEF).kinds.len(),
+            1,
+            "no kind but the program's own login"
+        );
     }
 
     #[test]
