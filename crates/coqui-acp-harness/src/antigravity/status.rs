@@ -17,8 +17,8 @@ use super::{AcpModel, BUCKET_PREFIX, ReadError};
 /// What the permille limit of a bucket is.
 const WHOLE: u64 = 1000;
 
-/// The answer, holding only the model list. Every other field (the account's address, name and
-/// picture, its tier) is skipped as it is read and never becomes a value.
+/// The answer, holding the model list and who the account is. Every other field (the account's
+/// picture, its terms and limits) is skipped as it is read and never becomes a value.
 #[derive(Deserialize)]
 struct Answer {
     #[serde(rename = "userStatus")]
@@ -29,6 +29,59 @@ struct Answer {
 struct UserStatus {
     #[serde(rename = "cascadeModelConfigData")]
     models: Option<ModelData>,
+    email: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "planStatus")]
+    plan: Option<PlanStatus>,
+    #[serde(rename = "userTier")]
+    tier: Option<Tier>,
+}
+
+#[derive(Deserialize)]
+struct PlanStatus {
+    #[serde(rename = "planInfo")]
+    info: Option<PlanInfo>,
+}
+
+#[derive(Deserialize)]
+struct PlanInfo {
+    #[serde(rename = "planName")]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Tier {
+    name: Option<String>,
+}
+
+/// Who the signed-in account is, as agy's status says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgyAccount {
+    /// The account's email address.
+    pub email: Option<String>,
+    /// The name on the account.
+    pub name: Option<String>,
+    /// The plan: its tier's name (`Google AI Pro`), else the plan's own (`Pro`).
+    pub plan: Option<String>,
+}
+
+/// The account `body` says is signed in; none for a body that is not agy's status.
+pub(super) fn account(body: &[u8]) -> Option<AgyAccount> {
+    let status = serde_json::from_slice::<Answer>(body).ok()?.status?;
+    let text = |value: Option<String>| value.filter(|text| !text.is_empty());
+    Some(AgyAccount {
+        email: text(status.email),
+        name: text(status.name),
+        plan: text(status.tier.and_then(|tier| tier.name)).or_else(|| {
+            text(
+                status
+                    .plan
+                    .and_then(|plan| plan.info)
+                    .and_then(|info| info.name),
+            )
+        }),
+    })
 }
 
 #[derive(Deserialize)]
@@ -296,6 +349,30 @@ mod tests {
         assert_eq!(made.len(), 1);
         assert_eq!(made[0].remaining, Some(400));
         assert_eq!(made[0].id, "agy:a");
+    }
+
+    #[test]
+    fn the_recorded_answer_says_who_is_signed_in_and_their_plan() {
+        let body = include_str!("../../tests/fixtures/agy-1.5.3/getuserstatus.json");
+        let who = account(body.as_bytes()).expect("an account");
+        assert!(
+            who.email.as_deref().is_some_and(|email| !email.is_empty()),
+            "{who:?}"
+        );
+        assert!(
+            who.plan.as_deref().is_some_and(|plan| !plan.is_empty()),
+            "{who:?}"
+        );
+        assert_eq!(account(b"{}"), None);
+        let plan_only = br#"{"userStatus":{"planStatus":{"planInfo":{"planName":"Pro"}}}}"#;
+        assert_eq!(
+            account(plan_only),
+            Some(AgyAccount {
+                email: None,
+                name: None,
+                plan: Some("Pro".to_owned())
+            })
+        );
     }
 
     #[test]

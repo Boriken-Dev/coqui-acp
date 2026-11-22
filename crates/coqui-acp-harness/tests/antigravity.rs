@@ -300,6 +300,15 @@ fn the_recorded_answer_over_chunked_http_is_two_unused_buckets() {
     let buckets = quota.read(&me(), &acp_models()).unwrap();
     assert_eq!(server.accepted(), 1, "plain HTTP answered the first time");
     assert_eq!(buckets.len(), 2);
+    let who = quota.account().expect("the status says whose it is");
+    assert!(
+        who.email.as_deref().is_some_and(|email| !email.is_empty()),
+        "{who:?}"
+    );
+    assert!(
+        who.plan.as_deref().is_some_and(|plan| !plan.is_empty()),
+        "{who:?}"
+    );
 
     let week = find(&buckets, "agy:gemini-4-argon-medium");
     let five = find(&buckets, "agy:gemini-3.8-flash-high");
