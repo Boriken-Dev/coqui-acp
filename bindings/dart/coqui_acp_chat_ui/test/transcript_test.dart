@@ -1,5 +1,6 @@
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -261,6 +262,41 @@ void main() {
       expect(merged.tool['x'], b.tool['x']);
       expect(merged.plan, a.plan);
     });
+  });
+
+  testWidgets('one small wheel step up during a streamed turn stops following and the view stays put as chunks arrive', (tester) async {
+    final entries = [for (var i = 0; i < 40; i++) agent('line $i', i)];
+    final key = GlobalKey<ChatTranscriptState>();
+    await tester.pumpWidget(transcript(entries, key: key, working: true));
+    await tester.pump();
+    final list = find.byType(ListView);
+    ScrollPosition position() => tester.widget<ListView>(list).controller!.position;
+    expect(key.currentState!.following, isTrue);
+    expect(position().extentAfter, 0);
+
+    // A wheel step far smaller than the "near the end" band.
+    final mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(tester.getCenter(list)));
+    await tester.sendEventToBinding(mouse.scroll(const Offset(0, -6)));
+    await tester.pump();
+    expect(key.currentState!.following, isFalse);
+    final offset = position().pixels;
+
+    // Chunks keep arriving: the view does not move.
+    for (var i = 0; i < 3; i++) {
+      entries.add(agent('chunk $i\nmore\nlines', 41 + i));
+      await tester.pumpWidget(transcript([...entries], key: key, working: true));
+      await tester.pump();
+      expect(position().pixels, offset, reason: 'a detached view is never moved by streaming');
+      expect(key.currentState!.following, isFalse);
+    }
+    expect(find.byTooltip('Jump to latest'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Jump to latest'));
+    await tester.pump();
+    await tester.pump();
+    expect(key.currentState!.following, isTrue);
+    expect(position().extentAfter, 0);
   });
 
   testWidgets('a person scrolled away is not dragged to the end, and the button brings them back', (tester) async {
