@@ -85,10 +85,15 @@ pub fn sign_in(
                 "Start Antigravity to sign in",
                 schema(&json!({
                     "type": "object",
-                    "description": alloc::format!(
-                        "Antigravity did not open a session ({why}). Start Antigravity, sign in there, then continue."
-                    ),
-                    "properties": {},
+                    "properties": {
+                        "started": {
+                            "type": "boolean",
+                            "title": "Antigravity is started and signed in",
+                            "description": alloc::format!(
+                                "Antigravity did not open a session ({why}). Start Antigravity, sign in there, then continue."
+                            ),
+                        },
+                    },
                 })),
             );
             ctx.ask(form)?;
