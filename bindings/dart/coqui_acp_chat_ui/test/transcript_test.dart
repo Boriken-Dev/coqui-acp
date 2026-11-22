@@ -366,4 +366,96 @@ void main() {
     expect(copied, contains('line 0'));
     expect(copied, contains('line 59'));
   });
+
+  group('dragging over the conversation copies what it covers', () {
+    String? copied;
+
+    setUp(() {
+      copied = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') copied = (call.arguments as Map)['text'] as String;
+        return null;
+      });
+    });
+    tearDown(() => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+
+    /// Drags from the start of [from] to the end of [to] in a transcript tall enough to build every entry, then presses Ctrl+C.
+    Future<String?> dragCopy(WidgetTester tester, List<ChatEntryData> entries, String from, String to) async {
+      tester.view.physicalSize = const Size(900, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(host(ChatTranscript(entries: entries, density: ChatDensity.verbose)));
+      await tester.pump();
+      final start = tester.getTopLeft(find.text(from)) + const Offset(1, 5);
+      final end = tester.getBottomRight(find.text(to)) - const Offset(1, 5);
+      final gesture = await tester.startGesture(start, kind: PointerDeviceKind.mouse);
+      await tester.pump();
+      await gesture.moveTo(end);
+      await tester.pump();
+      await gesture.up();
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      return copied;
+    }
+
+    testWidgets('a message, a paragraph, a code block and a list, each on lines of their own', (tester) async {
+      final entries = [
+        user('Question', 0),
+        agent('First paragraph.\n\nSecond paragraph.\n\n```\ncode a\ncode b\n```\n\n- item one\n- item two\n\n1. step', 1),
+        agent('The end', 2),
+      ];
+      expect(
+        await dragCopy(tester, entries, 'Question', 'The end'),
+        'Question\n\nFirst paragraph.\nSecond paragraph.\ncode a\ncode b\nitem one\nitem two\nstep\n\nThe end',
+      );
+    });
+
+    testWidgets('a tool call, its output and a change, without the blank lines at the ends', (tester) async {
+      final entries = [
+        user('Run it', 0),
+        toolEntry(tool('t', kind: 'execute', title: 'cargo test', status: 'failed', content: [{'type': 'content', 'content': {'type': 'text', 'text': 'OUT 1\nOUT 2'}}]), 1),
+        toolEntry(tool('u', kind: 'edit', title: 'Edit a.js', status: 'failed', content: [diff('a.js', 'x\n', 'y\n')]), 2),
+        agent('Done', 3),
+      ];
+      final text = await dragCopy(tester, entries, 'Run it', 'Done');
+      expect(text, startsWith('Run it\n\ncargo test\nOUT 1\nOUT 2\n\nEdit a.js\na.js\n'));
+      expect(text, contains('- x\n+ y'));
+      expect(text, endsWith('\n\nDone'));
+      expect(tester.takeException(), isNull, reason: 'a drag across a change does not trip the nested scrollables');
+    });
+
+    testWidgets('part of one code block is copied alone', (tester) async {
+      final entries = [agent('```\nalpha\nbeta\n```', 0)];
+      expect(await dragCopy(tester, entries, 'alpha\nbeta', 'alpha\nbeta'), 'alpha\nbeta');
+    });
+
+    testWidgets('every kind of entry is in a Select all: message, Markdown, thought, tool, output, change, plan', (tester) async {
+      final entries = [
+        user('Q one', 0),
+        thought('pondering', 1),
+        toolEntry(tool('t', kind: 'execute', title: 'cargo test', status: 'failed', content: [{'type': 'content', 'content': {'type': 'text', 'text': 'OUTPUT'}}]), 2),
+        toolEntry(tool('u', kind: 'edit', title: 'Edit a.js', status: 'failed', content: [diff('a.js', 'x\n', 'y\n')]), 3),
+        agent('**bold** answer', 4),
+      ];
+      tester.view.physicalSize = const Size(900, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(host(ChatTranscript(
+        entries: entries,
+        density: ChatDensity.verbose,
+        plan: const [PlanEntry('write the test', PlanStatus.pending)],
+      )));
+      await tester.pump();
+      tester.state<SelectableRegionState>(find.byType(SelectableRegion)).selectAll(SelectionChangedCause.toolbar);
+      await tester.pump();
+      tester.state<SelectableRegionState>(find.byType(SelectableRegion)).copySelection(SelectionChangedCause.toolbar);
+      await tester.pump();
+      for (final part in ['Q one', 'Thinking', 'cargo test', 'OUTPUT', 'Edit a.js', '+ y', 'bold answer', 'write the test']) {
+        expect(copied, contains(part));
+      }
+    });
+  });
 }

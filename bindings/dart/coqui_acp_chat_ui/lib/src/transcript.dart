@@ -12,6 +12,7 @@ import 'fold.dart';
 import 'folded.dart';
 import 'look.dart';
 import 'renderers.dart';
+import 'selection.dart';
 import 'working.dart';
 
 /// A conversation: its entries laid out at the look's [ChatDensity], the agent's plan as a checklist at the end while it has one,
@@ -192,9 +193,13 @@ class ChatTranscriptState extends State<ChatTranscript> {
                 padding: EdgeInsets.symmetric(horizontal: widget.narrow ? 12 : 40, vertical: look.padding + 10),
                 itemCount: count,
                 itemBuilder: (context, index) {
-                  if (index < items.length) return TranscriptItemView(item: items[index]);
-                  if (index != planAt) return _workingRow();
-                  return look.column(Padding(padding: EdgeInsets.only(bottom: look.gap), child: PlanChecklist(entries: widget.plan)));
+                  // Each entry is a paragraph of its own in what a selection copies.
+                  if (index < items.length) return SelectionBlock(lead: '\n\n', child: TranscriptItemView(item: items[index]));
+                  if (index != planAt) return SelectionContainer.disabled(child: _workingRow());
+                  return SelectionBlock(
+                    lead: '\n\n',
+                    child: look.column(Padding(padding: EdgeInsets.only(bottom: look.gap), child: PlanChecklist(entries: widget.plan))),
+                  );
                 },
               ),
             ),
@@ -239,6 +244,9 @@ class SelectableTranscriptState extends State<SelectableTranscript> {
   bool _selectingAll = false;
   String? _allShown;
 
+  /// What the selection holds now, as the blocks under it wrote it.
+  String? _selected;
+
   bool get _mac => defaultTargetPlatform == TargetPlatform.macOS || defaultTargetPlatform == TargetPlatform.iOS;
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -249,15 +257,26 @@ class SelectableTranscriptState extends State<SelectableTranscript> {
     }
     if (event.logicalKey == LogicalKeyboardKey.keyA) {
       _startSelectingAll();
-    } else if (event.logicalKey == LogicalKeyboardKey.keyC && _all) {
-      unawaited(copyAll());
-      return KeyEventResult.handled;
+    } else if (event.logicalKey == LogicalKeyboardKey.keyC) {
+      if (_all) {
+        unawaited(copyAll());
+        return KeyEventResult.handled;
+      }
+      if (_selected != null) {
+        unawaited(copySelected());
+        return KeyEventResult.handled;
+      }
     }
     return KeyEventResult.ignored;
   }
 
   /// Puts the whole conversation's text on the clipboard.
   Future<void> copyAll() => Clipboard.setData(ClipboardData(text: conversationText(widget.entries)));
+
+  /// Puts the selected text on the clipboard without the blank lines the blocks put at its ends.
+  Future<void> copySelected() => Clipboard.setData(ClipboardData(text: _trimmed(_selected ?? '')));
+
+  static String _trimmed(String text) => text.replaceAll(RegExp(r'^\n+|\n+$'), '');
 
   /// Select all is under way until the frame after it: what the selection reports meanwhile is all of it.
   void _startSelectingAll() {
@@ -267,6 +286,7 @@ class SelectableTranscriptState extends State<SelectableTranscript> {
   }
 
   void _changed(SelectedContent? content) {
+    _selected = content?.plainText;
     if (_selectingAll) {
       _all = content != null;
       _allShown = content?.plainText;
@@ -293,6 +313,9 @@ class SelectableTranscriptState extends State<SelectableTranscript> {
             ContextMenuButtonType.copy => item.copyWith(onPressed: () {
               if (_all) {
                 unawaited(copyAll());
+                region.hideToolbar();
+              } else if (_selected != null) {
+                unawaited(copySelected());
                 region.hideToolbar();
               } else {
                 item.onPressed?.call();
