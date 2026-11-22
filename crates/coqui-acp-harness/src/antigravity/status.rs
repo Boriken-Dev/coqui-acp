@@ -4,6 +4,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 use core::time::Duration;
 
 use coqui_acp_api::usage::{Bucket, Coverage, Refill, Status, Unit};
@@ -54,8 +55,9 @@ struct Tier {
     name: Option<String>,
 }
 
-/// Who the signed-in account is, as agy's status says.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Who the signed-in account is, as agy's status or its stored login says. Its `Debug` says which fields are known and
+/// never their values.
+#[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AgyAccount {
     /// The account's email address.
@@ -64,6 +66,17 @@ pub struct AgyAccount {
     pub name: Option<String>,
     /// The plan: its tier's name (`Google AI Pro`), else the plan's own (`Pro`).
     pub plan: Option<String>,
+}
+
+impl fmt::Debug for AgyAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let known = |value: &Option<String>| if value.is_some() { "known" } else { "none" };
+        f.debug_struct("AgyAccount")
+            .field("email", &known(&self.email))
+            .field("name", &known(&self.name))
+            .field("plan", &known(&self.plan))
+            .finish()
+    }
 }
 
 /// The account `body` says is signed in; none for a body that is not agy's status.
@@ -134,6 +147,44 @@ pub(super) fn parse(body: &[u8]) -> Result<Vec<Model>, ReadError> {
         .and_then(|status| status.models)
         .ok_or(ReadError::Malformed)?;
     Ok(data.configs.into_iter().filter_map(model).collect())
+}
+
+/// `fetchAvailableModels`' answer: each model's details under its id. A model's `displayName` is its label.
+#[derive(Deserialize)]
+struct Available {
+    #[serde(default)]
+    models: BTreeMap<String, Details>,
+}
+
+#[derive(Deserialize)]
+struct Details {
+    #[serde(rename = "displayName")]
+    label: Option<String>,
+    #[serde(rename = "quotaInfo")]
+    quota: Option<Quota>,
+}
+
+/// Reads `body` as `fetchAvailableModels`' answer, with each model's id its key, in the order of the ids; `None` for a body that
+/// is not that answer. A model is left out as [`parse`] leaves it out.
+pub(super) fn parse_available(body: &[u8]) -> Option<Vec<Model>> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    if !value.is_object() {
+        return None;
+    }
+    let answer = Available::deserialize(value).ok()?;
+    Some(
+        answer
+            .models
+            .into_iter()
+            .filter_map(|(id, details)| {
+                model(Config {
+                    label: details.label,
+                    model_id: Some(id),
+                    quota: details.quota,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn model(config: Config) -> Option<Model> {
@@ -322,6 +373,37 @@ mod tests {
             remaining: permille,
             resets_at,
         }
+    }
+
+    #[test]
+    fn the_available_models_are_read_by_their_ids() {
+        let body = br#"{"models":{"b":{"displayName":"B","quotaInfo":{"resetTime":"2030-01-01T00:00:00Z"}},
+            "a":{"displayName":"A","quotaInfo":{"remainingFraction":0.25,"resetTime":"2030-01-01T00:00:00Z"}},
+            "c":{"displayName":"C"}}}"#;
+        let models = parse_available(body).unwrap();
+        let shown: Vec<_> = models
+            .iter()
+            .map(|m| (m.id.as_deref(), m.label.as_deref(), m.remaining))
+            .collect();
+        assert_eq!(
+            shown,
+            [(Some("a"), Some("A"), 250), (Some("b"), Some("B"), 0)]
+        );
+        assert_eq!(parse_available(b"{}").unwrap(), []);
+        assert_eq!(parse_available(b"[]"), None);
+    }
+
+    #[test]
+    fn an_accounts_debug_shows_no_value() {
+        let who = AgyAccount {
+            email: Some("someone@example.test".into()),
+            name: None,
+            plan: Some("Pro".into()),
+        };
+        assert_eq!(
+            alloc::format!("{who:?}"),
+            r#"AgyAccount { email: "known", name: "none", plan: "known" }"#
+        );
     }
 
     #[test]

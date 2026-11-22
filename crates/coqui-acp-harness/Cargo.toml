@@ -19,8 +19,19 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-# `antigravity`: the quota Antigravity (`agy`) reports on its own loopback port, as usage buckets.
-antigravity = ["dep:serde", "dep:time", "dep:ureq", "dep:windows-sys"]
+# `antigravity`: Antigravity's (`agy`) account and quota, from its stored login and Google's service or from its own loopback
+# port, as usage buckets.
+antigravity = [
+    "dep:serde",
+    "dep:time",
+    "dep:ureq",
+    "dep:windows-sys",
+    "dep:memchr",
+    "dep:keyring-core",
+    "dep:windows-native-keyring-store",
+    "dep:apple-native-keyring-store",
+    "dep:zbus-secret-service-keyring-store",
+]
 # The acp_harness kind's spawner on this machine, and Spawn through any host's spawner.
 kind = ["dep:guatiao-serde", "dep:coqui-acp-history"]
 
@@ -35,14 +46,28 @@ coqui-acp-history = { path = "../coqui-acp-history", optional = true }
 serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+# Antigravity's OAuth client among its program's strings.
+memchr = { version = "2", optional = true }
+# Antigravity's login in the operating system's keyring, through keyring-core and the platform's store below.
+keyring-core = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
+
+# The Secret Service.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", optional = true, features = ["crypto-rust"] }
+
+# The Keychain.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", optional = true, features = ["keychain"] }
 
 [target.'cfg(windows)'.dependencies]
 win32job.workspace = true
 # The TCP table, for the Antigravity quota reader; its one `unsafe` module.
 windows-sys = { version = "0.61.2", optional = true, default-features = false, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+# Windows' Credential Manager, for Antigravity's login.
+windows-native-keyring-store = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 coqui-acp = { path = "../coqui-acp" }
@@ -92,6 +117,10 @@ required-features = ["kind"]
 
 [[test]]
 name = "antigravity"
+required-features = ["antigravity"]
+
+[[test]]
+name = "agy_login"
 required-features = ["antigravity"]
 
 [lints]

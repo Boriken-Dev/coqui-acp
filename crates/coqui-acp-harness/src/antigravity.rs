@@ -1,4 +1,7 @@
-//! Antigravity's quota as usage buckets.
+//! Antigravity's quota as usage buckets, and its account.
+//!
+//! [`AgyLogin`] reads the account, the plan and the quota from agy's stored login and Google's service, with no `agy` process.
+//! [`AgyQuota`] reads them from a running session's own language server, for when that reading fails while a session is open.
 //!
 //! `agy acp` serves its own language server on two random loopback ports once a session is open, one
 //! plain HTTP and one HTTPS with a self-signed certificate, and answers `GetUserStatus` on both with
@@ -22,9 +25,15 @@ use std::time::Instant;
 
 use coqui_acp_api::usage::Bucket;
 
+mod login;
 mod ports;
 mod status;
 
+pub use login::{
+    AgyLogin, CONSUMER_SERVICE, Cause, ClientSource, GCP_SERVICE, KEYRING_SERVICE, KEYRING_USER,
+    Keyring, KeyringLookup, LoginError, LoginReading, LoginSettings, OAuthClient, SERVICE_VARIABLE,
+    Secret, SignedIn, Step, TOKEN_URL, USERINFO_URL,
+};
 pub use ports::loopback_listeners;
 pub use status::AgyAccount;
 

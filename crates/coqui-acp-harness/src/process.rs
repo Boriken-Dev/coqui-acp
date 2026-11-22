@@ -388,7 +388,12 @@ fn found_on_own_path(program: &OsStr, env: &BTreeMap<OsString, OsString>) -> OsS
 
 /// The first runnable file called `name` in an absolute folder of `path`, then of `extra`. On Windows a name takes each of
 /// `pathext`'s extensions (the usual four when it is empty) unless it has one.
-fn find_in(path: &OsStr, extra: &[PathBuf], pathext: &str, name: &str) -> Option<PathBuf> {
+pub(crate) fn find_in(
+    path: &OsStr,
+    extra: &[PathBuf],
+    pathext: &str,
+    name: &str,
+) -> Option<PathBuf> {
     let suffixes: Vec<String> = if cfg!(windows) {
         let listed: Vec<String> = pathext
             .split(';')
