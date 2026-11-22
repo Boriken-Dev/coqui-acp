@@ -535,10 +535,18 @@ fn the_harness_lists_no_login_and_no_renewal() {
 }
 
 #[test]
-fn antigravity_has_no_account_to_keep_and_says_why_it_signs_no_one_in() {
+fn antigravity_keeps_no_account_file_and_signs_in_only_by_starting_the_program() {
     let accounts = accounts_of(&antigravity::STDIO);
     let offer = accounts.offers().expect("offers");
-    assert!(offer.kinds.is_empty() && offer.logins.is_empty());
+    assert!(
+        offer.kinds.is_empty(),
+        "no account file to keep: {:?}",
+        offer.kinds
+    );
+    assert_eq!(offer.logins.len(), 1, "{:?}", offer.logins);
+    assert_eq!(offer.logins[0].id, "start");
+    assert_eq!(offer.logins[0].title, "Start Antigravity to sign in");
+    assert_eq!(offer.logins[0].produces, coqui_acp_api::HARNESS_LOGIN);
     let dir = scratch("agy");
     let error = accounts
         .login(
@@ -546,12 +554,16 @@ fn antigravity_has_no_account_to_keep_and_says_why_it_signs_no_one_in() {
             LocalSpawner::new().files(&dir).into_object(),
             NoPrompter.into_object(),
         )
-        .expect_err("no sign-in");
+        .expect_err("a way it does not offer");
     assert_eq!(
         u32::from(error.status),
-        u32::from(coqui_acp_api::guatiao::Status::GUATIAO_ERR_UNSUPPORTED)
+        u32::from(coqui_acp_api::guatiao::Status::GUATIAO_ERR_BAD_VALUE)
     );
-    assert!(error.message().contains("agy acp --login"));
+    assert!(
+        error.message().contains("no such way"),
+        "{}",
+        error.message()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
