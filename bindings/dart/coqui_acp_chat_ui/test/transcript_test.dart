@@ -90,6 +90,8 @@ void main() {
       await show([user('go', 0)]);
       expect(headline(tester), 'Starting Claude…');
       expect(find.text('5s'), findsOneWidget);
+      await show([user('go', 0), agent('done', 1), user('next', 2)]);
+      expect(headline(tester), 'Working\u2026', reason: 'a session that has answered is not starting again');
       await show([user('go', 0), thought('hm', 1)]);
       expect(headline(tester), 'Thinking…');
       await show([user('go', 0), agent('first', 1), user('next', 2)]);
