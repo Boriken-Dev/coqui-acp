@@ -897,3 +897,169 @@ fn log(dir: &Path) -> Vec<serde_json::Value> {
         .map(|line| serde_json::from_str(line).expect("a log line"))
         .collect()
 }
+
+/// A loopback server that answers every request with `body` and keeps each request's head.
+fn recording_stand_in(body: &'static str) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let addr = listener.local_addr().expect("its address");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                }
+            }
+            kept.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&bytes).into_owned());
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (addr, seen)
+}
+
+/// The local account's query, with `CODEX_HOME` the test's own folder.
+fn local_query(home: &Path) -> AccountUsageQuery {
+    let environment: coqui_acp_api::Environment =
+        [("CODEX_HOME", home.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+    AccountUsageQuery::new(AccountGrant::new("local", HARNESS_LOGIN)).environment(environment)
+}
+
+/// A provider whose Codex program does not exist, so that starting it is an error, and whose limits are at `addr`.
+fn without_a_program(addr: SocketAddr) -> CodexAccounts {
+    CodexAccounts::new(AccountSettings {
+        executable: "no-such-codex-program".into(),
+        usage_endpoint: Some(format!("http://{addr}/backend-api")),
+        ..AccountSettings::default()
+    })
+}
+
+#[test]
+fn the_local_accounts_usage_is_read_from_its_stored_login_with_no_codex_process() {
+    let (addr, seen) = recording_stand_in(DOCUMENT);
+    let home = scratch("stored-home");
+    std::fs::write(home.join("auth.json"), JWT_FILE).expect("a login");
+    let usage = without_a_program(addr)
+        .usage(
+            local_query(&home),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(usage.supported, "{usage:?}");
+    assert_eq!(usage.account.as_deref(), Some("local"));
+    let ids: Vec<&str> = usage.buckets.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(ids, ["codex:five_hour", "codex:weekly"]);
+    assert!(usage.revision > 0 && usage.observed_at > 0);
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let head = requests[0].to_ascii_lowercase();
+    assert!(head.starts_with("get /backend-api/wham/usage "), "{head}");
+    assert!(head.contains("chatgpt-account-id: acct-a"), "{head}");
+    assert!(
+        head.contains("authorization: bearer eyjhbgcioijub25lin0."),
+        "{head}"
+    );
+    // The login is the person's: it is read and never written.
+    assert_eq!(
+        std::fs::read_to_string(home.join("auth.json")).expect("still there"),
+        JWT_FILE
+    );
+    assert!(!format!("{usage:?}").contains("stand-in-refresh"));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_stored_login_whose_token_expired_is_left_to_codex_and_nothing_is_sent() {
+    let (addr, seen) = recording_stand_in(DOCUMENT);
+    let home = scratch("stored-expired");
+    let expired = JWT_FILE.replace("eyJleHAiOjQxMDI0NDQ4MDB9", "eyJleHAiOjF9");
+    assert_ne!(expired, JWT_FILE);
+    std::fs::write(home.join("auth.json"), &expired).expect("a login");
+    // With no program to ask, an expired login is read as having no allowances.
+    let usage = without_a_program(addr)
+        .usage(
+            local_query(&home),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(usage.buckets.is_empty(), "{usage:?}");
+    // With the stand-in program, Codex is asked and answers.
+    let provider = CodexAccounts::new(AccountSettings {
+        executable: fake(),
+        usage_endpoint: Some(format!("http://{addr}/backend-api")),
+        ..AccountSettings::default()
+    });
+    let usage = provider
+        .usage(
+            local_query(&home),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(!usage.buckets.is_empty(), "Codex answered: {usage:?}");
+    assert!(seen.lock().unwrap().is_empty(), "no token went out");
+    assert_eq!(
+        std::fs::read_to_string(home.join("auth.json")).expect("still there"),
+        expired
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_stored_api_key_has_no_plan_limits_and_starts_nothing() {
+    let (addr, seen) = recording_stand_in(DOCUMENT);
+    let home = scratch("stored-key");
+    std::fs::write(
+        home.join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-canary-7f3a91c04b"}"#,
+    )
+    .expect("a login");
+    let usage = without_a_program(addr)
+        .usage(
+            local_query(&home),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(usage.buckets.is_empty(), "{usage:?}");
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(!format!("{usage:?}").contains(CANARY));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_login_file_past_the_limit_is_left_to_codex() {
+    let (addr, seen) = recording_stand_in(DOCUMENT);
+    let home = scratch("stored-large");
+    std::fs::write(home.join("auth.json"), JWT_FILE).expect("a login");
+    let provider = CodexAccounts::new(AccountSettings {
+        executable: "no-such-codex-program".into(),
+        usage_endpoint: Some(format!("http://{addr}/backend-api")),
+        login_file_limit: 16,
+        ..AccountSettings::default()
+    });
+    let usage = provider
+        .usage(
+            local_query(&home),
+            LocalSpawner::new().into_object(),
+            Heard::default().into_object(),
+        )
+        .expect("answered");
+    assert!(usage.buckets.is_empty(), "{usage:?}");
+    assert!(seen.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&home);
+}

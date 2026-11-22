@@ -26,6 +26,7 @@ use coqui_acp_harness::account::{Accounts, Files, Watching};
 use coqui_acp_harness::provider::provides_of;
 
 use crate::account_usage::{ReadOptions, read_limits};
+use crate::stored_login::{self, Stored};
 use crate::{
     CodexLaunch, CodexSession, CodexSettings, ModelRead, SessionSettings, accounts, signin,
 };
@@ -56,6 +57,10 @@ pub struct AccountSettings {
     /// The longest, in milliseconds, a plan limits read may take in all.
     #[map(default = 10_000)]
     pub usage_timeout_ms: u64,
+    /// The most, in bytes, of the login file (`auth.json`) that is read to answer the local account's usage with no
+    /// process; a larger file is left to Codex.
+    #[map(default = 1_048_576)]
+    pub login_file_limit: u64,
     /// How the sessions that list an account's models, read its allowances and refresh its login read the app server's
     /// output, wait for it and end it.
     #[map(flatten)]
@@ -70,6 +75,7 @@ impl Default for AccountSettings {
             command_timeout_ms: 60_000,
             usage_endpoint: None,
             usage_timeout_ms: 10_000,
+            login_file_limit: 1 << 20,
             session: SessionSettings::default(),
         }
     }
@@ -250,9 +256,23 @@ impl AccountProvider for CodexAccounts {
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<AccountUsage, ProviderError> {
         if query.account.kind == HARNESS_LOGIN {
-            // The login Codex has where it runs: Codex reads its own allowances with no turn.
+            // The login Codex has where it runs: its `auth.json` says the allowances to ChatGPT's backend, and only a
+            // login that file cannot answer for is read by Codex itself, with no turn.
             drop(keeper);
             query.account.check_id()?;
+            let mut options =
+                ReadOptions::new().timeout(Duration::from_millis(self.settings.usage_timeout_ms));
+            if let Some(endpoint) = &self.settings.usage_endpoint {
+                options = options.endpoint(endpoint.clone());
+            }
+            if let Stored::Read(usage) = stored_login::read(
+                &query.account.id,
+                query.environment.expose(),
+                &options,
+                self.settings.login_file_limit,
+            ) {
+                return Ok(self.revised(usage));
+            }
             let launch = self.launch(query.environment.expose());
             let spawn = ThroughSpawner::shared(Arc::new(spawner));
             let mut usage = AccountUsage::new();

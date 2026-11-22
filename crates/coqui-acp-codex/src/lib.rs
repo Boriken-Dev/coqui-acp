@@ -25,6 +25,7 @@ mod provider_history;
 mod session;
 mod session_settings;
 mod signin;
+mod stored_login;
 
 use alloc::string::String;
 use core::fmt;
