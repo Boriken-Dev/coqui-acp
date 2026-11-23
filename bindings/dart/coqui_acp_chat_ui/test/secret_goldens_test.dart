@@ -2,7 +2,7 @@
 // `flutter test --update-goldens test/secret_goldens_test.dart` and look at them before committing.
 import 'package:coqui_acp/secret.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures.dart';

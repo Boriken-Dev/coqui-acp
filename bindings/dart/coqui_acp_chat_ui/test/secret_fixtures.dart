@@ -1,7 +1,7 @@
 // What the secret-card tests and goldens share: two identities, the host's side of a request and of a show, and the screen.
 import 'package:coqui_acp/secret.dart';
 import 'package:coqui_acp/secret_unprotected.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 

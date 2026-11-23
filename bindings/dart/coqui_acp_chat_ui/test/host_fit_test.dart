@@ -1,6 +1,6 @@
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart' show MarkdownElementBuilder;
 import 'package:flutter_test/flutter_test.dart';

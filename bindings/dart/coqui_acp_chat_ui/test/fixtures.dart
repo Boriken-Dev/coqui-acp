@@ -1,6 +1,6 @@
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 const limits = ChatLimits();
 

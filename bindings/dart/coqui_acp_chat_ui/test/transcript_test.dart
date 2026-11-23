@@ -1,7 +1,7 @@
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -451,7 +451,7 @@ void main() {
       await tester.pump();
       tester.state<SelectableRegionState>(find.byType(SelectableRegion)).selectAll(SelectionChangedCause.toolbar);
       await tester.pump();
-      tester.state<SelectableRegionState>(find.byType(SelectableRegion)).copySelection(SelectionChangedCause.toolbar);
+      Actions.invoke(tester.element(find.descendant(of: find.byType(SelectableRegion), matching: find.byType(Text)).first), CopySelectionTextIntent.copy);
       await tester.pump();
       for (final part in ['Q one', 'Thinking', 'cargo test', 'OUTPUT', 'Edit a.js', '+ y', 'bold answer', 'write the test']) {
         expect(copied, contains(part));

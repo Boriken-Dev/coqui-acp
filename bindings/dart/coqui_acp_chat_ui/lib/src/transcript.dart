@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection, SelectedContent;
 import 'package:flutter/services.dart';
 

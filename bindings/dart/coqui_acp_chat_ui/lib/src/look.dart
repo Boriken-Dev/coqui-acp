@@ -1,6 +1,6 @@
 import 'dart:ui' show lerpDouble;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// How much of an agent's work a transcript shows.
 enum ChatDensity {
@@ -46,13 +46,13 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     required this.success,
     required this.warning,
     required this.danger,
-    Color? user,
-    Color? agent,
-    Color? notice,
-    Color? composer,
-    Color? code,
-    Color? added,
-    Color? removed,
+    this._user,
+    this._agent,
+    this._notice,
+    this._composer,
+    this._code,
+    this._added,
+    this._removed,
     this.messageWidth = 780,
     this.gap = 22,
     this.padding = 12,
@@ -68,13 +68,7 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     this.bubbleBorder,
     this.showThinking = true,
     this.codeSpans,
-  }) : _user = user,
-       _agent = agent,
-       _notice = notice,
-       _composer = composer,
-       _code = code,
-       _added = added,
-       _removed = removed;
+  });
 
   /// The tokens, from the scheme: the page, a card on it, a raised control, the text and its quiet form, the accent, a line, and
   /// the three states.

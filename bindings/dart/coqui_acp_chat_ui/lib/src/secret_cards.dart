@@ -5,7 +5,7 @@ import 'package:coqui_acp/coqui_acp.dart';
 import 'package:coqui_acp/secret.dart';
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
 import 'cards.dart' show plainText, shortLine;

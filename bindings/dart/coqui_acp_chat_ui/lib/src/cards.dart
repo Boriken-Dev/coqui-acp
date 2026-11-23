@@ -1,6 +1,6 @@
 import 'package:coqui_acp/coqui_acp.dart';
 import 'package:coqui_acp_chat/coqui_acp_chat.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
 import 'diff.dart';

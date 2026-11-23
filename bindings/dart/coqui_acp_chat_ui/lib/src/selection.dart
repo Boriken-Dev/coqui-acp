@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/rendering.dart' show SelectedContent;
 
 /// Blocks of a conversation that the selection copies on lines of their own: what a [SelectionArea] copies from the text widgets
