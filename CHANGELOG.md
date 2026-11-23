@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- `coqui_acp::secret::Form::parse` reads the schemas coqui-acp derives for a login: the root may carry `$schema` (draft 2020-12 only) and `additionalProperties` (`false` only), a type written `["string", "null"]` is read as `string`, and an `enum` with `x-enum-labels` is a choice with those labels (an `enum` on another type is refused). A schema that is refused now says where: the new `Error::SchemaAt { at, why }` holds the JSON pointer to the keyword (`/additionalProperties`, `/properties/api_key/default`), and a whole-number bound that is not a whole number within 2^53 - 1 (a `u64` field's `maximum`) is refused instead of dropped. The Dart `AcpSecretForm` still refuses these roots.
+- `coqui_acp::secret::Form::parse` reads the schemas coqui-acp derives for a login: the root may carry `$schema` (draft 2020-12 only) and `additionalProperties` (`false` only), a type written `["string", "null"]` is read as `string`, and an `enum` with `x-enum-labels` is a choice with those labels (an `enum` on another type is refused). A schema that is refused now says where: the new `Error::SchemaAt { at, why }` holds the JSON pointer to the keyword (`/additionalProperties`, `/properties/api_key/default`), a whole-number bound outside 2^53 - 1 (what a `u64` or `i64` derives) is read as no bound, and one that is a fraction or no number is refused at its pointer. `AcpSecretForm` in `coqui_acp` (Dart) follows the same rules, and `vectors/secret.json` holds the new accepted and refused cases.
 
 ### Changed
 
