@@ -165,6 +165,39 @@ fn without_null(property: &Map<String, Value>) -> Cow<'_, Map<String, Value>> {
     Cow::Owned(plain)
 }
 
+/// The whole-number bound `keyword` of a question: none when it is absent or lies outside 2^53 - 1 (the bounds a `u64` or an `i64`
+/// derives limit nothing a form can enter), and a refusal when it is a fraction or no number.
+fn whole_bound(
+    property: &Map<String, Value>,
+    keyword: &str,
+    name: &str,
+) -> Result<Option<i64>, Error> {
+    let Some(held) = property.get(keyword) else {
+        return Ok(None);
+    };
+    let Some(number) = held.as_number() else {
+        return Err(refuse_in(name, keyword, "a bound that is not a number"));
+    };
+    if let Some(whole) = number.as_i64() {
+        return Ok((whole.unsigned_abs() <= MAX_SAFE.unsigned_abs()).then_some(whole));
+    }
+    if number.as_u64().is_some() {
+        return Ok(None);
+    }
+    let real = number
+        .as_f64()
+        .filter(|real| real.is_finite() && real.fract() == 0.0);
+    match real {
+        Some(real) if real.abs() > MAX_SAFE as f64 => Ok(None),
+        Some(real) => Ok(Some(real as i64)),
+        None => Err(refuse_in(
+            name,
+            keyword,
+            "a whole-number bound that is a fraction",
+        )),
+    }
+}
+
 /// Puts the labels of `x-enum-labels` (a map from a choice's value to the text that names it) on the options of a choice.
 fn label(options: &mut [elicit::ChoiceOption], property: &Map<String, Value>) {
     let Some(Value::Object(labels)) = property.get("x-enum-labels") else {
@@ -381,19 +414,12 @@ impl Form {
                     "a password format without writeOnly or x-sensitive",
                 ));
             }
-            if matches!(kind, FieldKind::Integer { .. }) {
-                for bound in ["minimum", "maximum"] {
-                    if property
-                        .get(bound)
-                        .is_some_and(|at| at.as_i64().is_none_or(|at| at.abs() > MAX_SAFE))
-                    {
-                        return Err(refuse_in(
-                            name,
-                            bound,
-                            "a whole-number bound that is not a whole number within 2^53 - 1",
-                        ));
-                    }
-                }
+            if let FieldKind::Integer {
+                minimum, maximum, ..
+            } = &mut kind
+            {
+                *minimum = whole_bound(property, "minimum", name)?;
+                *maximum = whole_bound(property, "maximum", name)?;
             }
             if secret {
                 if !matches!(

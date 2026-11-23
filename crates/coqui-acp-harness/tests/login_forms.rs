@@ -137,9 +137,14 @@ fn a_choice_made_of_an_enumeration_keeps_its_labels() {
 fn what_a_flat_form_cannot_draw_is_refused_naming_the_keyword() {
     let said = |schema: &coqui_acp_api::guatiao::Value| parse(schema).unwrap_err().to_string();
 
-    // A whole number the extension's languages cannot hold exactly.
-    let wide = said(&schema_of::<Wide>());
-    assert!(wide.contains("/properties/big/maximum"), "{wide}");
+    // A fraction or a non-number as a whole-number bound.
+    for bound in [json!(1.5), json!("9")] {
+        let schema = json!({"properties": {"n": {"type": "integer", "maximum": bound}}});
+        let said = Form::parse(&schema, &Limits::new())
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("/properties/n/maximum"), "{said}");
+    }
 
     // Bytes are no control's kind.
     let bytes = SchemaBuilder::new()
@@ -198,4 +203,13 @@ fn a_root_that_would_let_a_frontend_draw_more_than_the_form_declares_is_refused(
     assert!(said.contains("/$defs"), "{said}");
     let said = with("unevaluatedProperties", json!(true));
     assert!(said.contains("/unevaluatedProperties"), "{said}");
+}
+
+#[test]
+fn the_bounds_of_a_wide_integer_limit_nothing() {
+    let form = parse(&schema_of::<Wide>()).unwrap_or_else(|error| panic!("{error}"));
+    assert!(matches!(
+        form.fields[0].field.kind,
+        FieldKind::Integer { maximum: None, .. }
+    ));
 }
