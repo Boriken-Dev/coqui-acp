@@ -27,7 +27,7 @@ fn hex(text: &str) -> Vec<u8> {
 
 pub(crate) fn kind(error: &Error) -> &'static str {
     match error {
-        Error::Schema(_) => "schema",
+        Error::Schema(_) | Error::SchemaAt { .. } => "schema",
         Error::Malformed(_) => "malformed",
         Error::Unsupported(_) => "unsupported",
         Error::Key(_) => "key",

@@ -70,7 +70,7 @@ windows-sys = { version = "0.61.2", optional = true, default-features = false, f
 windows-native-keyring-store = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
-coqui-acp = { path = "../coqui-acp" }
+coqui-acp = { path = "../coqui-acp", features = ["secret"] }
 # The suite that holds a spawner's file methods to their rules.
 coqui-acp-api = { path = "../coqui-acp-api", features = ["contract"] }
 guatiao = { workspace = true, features = ["provider", "load"] }
@@ -125,3 +125,7 @@ required-features = ["antigravity"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "login_forms"
+required-features = ["kind"]
