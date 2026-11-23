@@ -156,6 +156,22 @@ fn window_coverage(name: &str) -> Coverage {
     }
 }
 
+/// The names a person reads for the models `coverage` lists: each as Claude names it, first letter up (`opus` is `Opus`).
+pub(crate) fn model_names(coverage: &Coverage) -> Vec<String> {
+    let Coverage::Only { models } = coverage else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .map(|model| {
+            let mut letters = model.chars();
+            letters.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(letters).collect()
+            })
+        })
+        .collect()
+}
+
 /// The buckets a `rate_limit_event` reports, whatever its status: each of `unifiedWindows`, or else the one it
 /// names, or `unknown` when it names none. `utilization` is thousandths only when it is a fraction between 0 and 1,
 /// since its scale is not documented. The status is Claude's own: `allowed_warning` is the only warning.
@@ -179,6 +195,7 @@ pub(crate) fn buckets(value: &Value) -> Vec<Bucket> {
             bucket.limit = Some(1000);
         }
         bucket.models = window_coverage(name);
+        bucket.model_names = model_names(&bucket.models);
         bucket.refill = Refill::FixedWindow {
             length: window_length(name),
             resets_at: fields

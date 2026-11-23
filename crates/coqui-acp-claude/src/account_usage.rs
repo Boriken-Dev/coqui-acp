@@ -313,6 +313,7 @@ fn window(
 ) -> Bucket {
     let mut bucket = Bucket::new(id);
     bucket.label = Some(label.to_string());
+    bucket.model_names = crate::limits::model_names(&models);
     bucket.models = models;
     bucket.unit = Unit::Permille;
     let percent = fields.get("utilization").and_then(Value::as_f64);
@@ -458,6 +459,11 @@ mod tests {
             }
         );
         assert_eq!(report.observed_at, now);
+        // The two plain windows say they cover every model; a model's own window names it.
+        assert_eq!(report.buckets[0].models, Coverage::All);
+        assert!(report.buckets[0].model_names.is_empty());
+        assert_eq!(report.buckets[2].model_names, ["Sonnet"]);
+        assert_eq!(report.buckets[3].model_names, ["Fable 2"]);
     }
 
     #[test]

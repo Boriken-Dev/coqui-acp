@@ -163,20 +163,38 @@ fn exhausted_in(id: &str, snapshot: &Value) -> Option<LimitHit> {
 /// The buckets of one snapshot: each window as `<limit id>:<five_hour|weekly|primary|secondary>`, and the spend
 /// control as `<limit id>:spend_control`. `usedPercent` is thousandths and a window is fixed, with its length when
 /// Codex says it. A window at 100 percent is exhausted, and so is every bucket while the backend does not allow
-/// ordinary usage. A snapshot that names a model covers only it. `credits.balance` is left out: its unit is not known.
+/// ordinary usage. `credits.balance` is left out: its unit is not known.
+///
+/// What a snapshot covers: the model it names (`normalModelSlug`), else the model its `limitName` names, since an additional
+/// limit is one model's own allowance; the default limit, `codex`, names none and is what every model without a limit of its own
+/// draws on, so it covers all of them. A snapshot that says none of this covers what it does not say.
 fn snapshot_buckets(snapshot: &Value, allowed: Option<bool>) -> Vec<Bucket> {
     let id = limit_id(snapshot);
-    let models = snapshot
-        .get("normalModelSlug")
-        .and_then(Value::as_str)
-        .filter(|slug| !slug.is_empty())
-        .map_or(Coverage::Unknown, |slug| Coverage::Only {
-            models: alloc::vec![slug.to_string()],
-        });
     let label = snapshot
         .get("limitName")
         .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
         .map(str::to_string);
+    let slug = snapshot
+        .get("normalModelSlug")
+        .and_then(Value::as_str)
+        .filter(|slug| !slug.is_empty());
+    let (models, model_names) = match (slug, &label) {
+        (Some(slug), name) => (
+            Coverage::Only {
+                models: alloc::vec![slug.to_string()],
+            },
+            alloc::vec![name.clone().unwrap_or_else(|| slug.to_string())],
+        ),
+        (None, Some(name)) if id != DEFAULT_LIMIT => (
+            Coverage::Only {
+                models: alloc::vec![name.clone()],
+            },
+            alloc::vec![name.clone()],
+        ),
+        (None, _) if id == DEFAULT_LIMIT => (Coverage::All, Vec::new()),
+        (None, _) => (Coverage::Unknown, Vec::new()),
+    };
     let blocked = allowed == Some(false);
     let mut buckets: Vec<Bucket> = ["primary", "secondary"]
         .iter()
@@ -185,6 +203,7 @@ fn snapshot_buckets(snapshot: &Value, allowed: Option<bool>) -> Vec<Bucket> {
             let mut bucket = Bucket::new(format!("{id}:{}", window_name(window, position)));
             bucket.label.clone_from(&label);
             bucket.models = models.clone();
+            bucket.model_names.clone_from(&model_names);
             bucket.unit = Unit::Permille;
             let used = window.get("usedPercent").and_then(Value::as_f64);
             if let Some(thousandths) = used.map(permille) {
@@ -215,6 +234,7 @@ fn snapshot_buckets(snapshot: &Value, allowed: Option<bool>) -> Vec<Bucket> {
         let mut bucket = Bucket::new(format!("{id}:spend_control"));
         bucket.label.clone_from(&label);
         bucket.models = models;
+        bucket.model_names = model_names;
         bucket.unit = Unit::Permille;
         let remaining = cap.get("remainingPercent").and_then(Value::as_f64);
         if let Some(remaining) = remaining {

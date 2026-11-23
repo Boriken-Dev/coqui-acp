@@ -716,7 +716,11 @@ fn a_recorded_account_read_becomes_its_two_windows() {
         (five.used, five.limit, &five.unit, &five.status),
         (Some(0), Some(1000), &Unit::Permille, &Status::Ok)
     );
-    assert_eq!(five.models, Coverage::Unknown);
+    assert_eq!(
+        five.models,
+        Coverage::All,
+        "the default limit names no model"
+    );
     assert_eq!(
         five.refill,
         Refill::FixedWindow {
@@ -776,6 +780,7 @@ fn a_delta_updating_one_limit_keeps_the_others() {
         }
     );
     assert_eq!(spark.label.as_deref(), Some("Spark"));
+    assert_eq!(spark.model_names, ["Spark"]);
 
     // A sparse delta: the one window of the one limit, with no length, and nothing else.
     let events = parser.line(&json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {

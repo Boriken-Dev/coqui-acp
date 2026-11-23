@@ -185,7 +185,18 @@ fn a_chatgpt_login_reads_its_windows_from_the_accounts_own_endpoint() {
         report.buckets[2].label.as_deref(),
         Some("GPT-5.3-Codex-Spark")
     );
-    assert_eq!(report.buckets[2].models, Coverage::Unknown);
+    // The default limit names no model, so every model draws on it; a named limit is the one model's own.
+    for general in &report.buckets[..2] {
+        assert_eq!(general.models, Coverage::All);
+        assert!(general.model_names.is_empty());
+    }
+    assert_eq!(
+        report.buckets[2].models,
+        Coverage::Only {
+            models: vec!["GPT-5.3-Codex-Spark".into()]
+        }
+    );
+    assert_eq!(report.buckets[2].model_names, ["GPT-5.3-Codex-Spark"]);
     assert!(report.buckets.iter().all(|b| b.observed_at == NOW));
     assert!(!format!("{report:?}").contains("canary"));
 }
