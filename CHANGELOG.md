@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `bindings/dart/coqui_acp_chat_ui` builds on `package:material_ui` (^1.11.1) instead of `package:flutter/material.dart`, so `ChatLook` extends `material_ui`'s `ThemeExtension` and an app puts it in `material_ui`'s `ThemeData`. It needs Flutter `main` (Dart `^3.13.0`, Flutter `>=3.47.0`; checked at `c0205700e04`). The package's goldens are redrawn: its Markdown style sheet is built here from that `ThemeData` (flutter_markdown_plus reads the SDK's own theme), and the same eleven images already differed by a few pixels on Flutter `main` before the move.
+
 ### Added
 
 - `bindings/dart/coqui_acp_chat_ui`: `ChatLook.codeSpans` (`CodeSpans`, `TextSpan Function(String line, String? path, TextStyle style)`) lets an app draw the code of a diff, for instance coloured: `DiffView`, `ChangesPane` and a `PermissionCard`'s diff call it for each line with the file's path (`DiffView.path`, new), and `codeLine` is the helper an app's own diff view can use. Left null, nothing changes: a line is plain text.

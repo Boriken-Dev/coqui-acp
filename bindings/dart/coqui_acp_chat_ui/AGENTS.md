@@ -1,8 +1,10 @@
 # coqui_acp_chat_ui: API header
 
 Flutter, `import 'package:coqui_acp_chat_ui/coqui_acp_chat_ui.dart';`. Depends on `coqui_acp` and `coqui_acp_chat` (paths `../coqui_acp`,
-`../coqui_acp_chat`: their types are what the widgets draw), `markdown` and `flutter_markdown_plus`. Builds for the web (JavaScript and
+`../coqui_acp_chat`: their types are what the widgets draw), `markdown`, `flutter_markdown_plus` and `material_ui` (^1.11.1). Builds for the web (JavaScript and
 WebAssembly) and desktop; nothing here reads a file, opens a socket or touches `dart:io`. Not published; alpha.
+
+Draws with `package:material_ui/material_ui.dart`, never `package:flutter/material.dart`: an app uses that library's `MaterialApp`, `ThemeData`, `ColorScheme` and `ThemeExtension`, or `ChatLook` is not found in its theme. Needs Flutter `main` (Dart `^3.13.0`, Flutter `>=3.47.0`), built against `c0205700e04`.
 
 The widgets take **data and callbacks**, never a session class: an app that keeps its own session state, and one that uses
 `ChatSession` from `coqui_acp_chat`, draw the same widgets. Everything the app owns (sources, worktrees, profiles, remembered rules,

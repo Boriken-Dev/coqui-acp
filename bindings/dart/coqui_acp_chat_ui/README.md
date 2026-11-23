@@ -13,7 +13,7 @@ draw with. It builds for the web (JavaScript and WebAssembly) and for desktop. N
   actions, `@` mentions, paste (an image, files, a long text as an attachment). The app's choices (a source, mode or model chooser) go in a quiet line under the box,
   and a header and items in the `+` menu have slots too.
 - **ChatLook**: semantic tokens (`bg`, `surface`, `raised`, `text`, `muted`, `accent`, `border`, `success`, `warning`, `danger`, sizes,
-  `density`, `codeFont`) that default from the Material `ColorScheme`; an app's look is a preset.
+  `density`, `codeFont`) that default from the `material_ui` `ColorScheme`; an app's look is a preset.
 - **Renderers**: `ChatRenderers(entry:, tool:, block:, burst:, work:, plan:)`.
 
 ```dart
