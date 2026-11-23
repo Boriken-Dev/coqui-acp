@@ -19,6 +19,7 @@ modes, a browser panel) enters through a slot, never a fork.
 - Switches: `agentInBubble` (false), `userToTheRight` (true), `monospace`, `userPrefix` (such as `'> '`).
 - `density: ChatDensity` (`normal`, `thinking`, `verbose`; `.label`, `ChatDensity.named`): what a transcript folds, below.
 - `centred` (false: the column of `messageWidth` sits at the left; true: in the middle of a wider space) and `bubbleBorder` (a line round a bubble; none by default).
+- `codeSpans: CodeSpans?` (null), `typedef CodeSpans = TextSpan Function(String line, String? path, TextStyle style)`: how one code line of a diff is drawn, so an app can colour code (the package has no highlighter). Called for each line of `DiffView`, `ChangesPane` and a `PermissionCard`'s `diff`, with `style` the plain code style and `path` the file of the lines (null where there is none, or a patch of several files); the line's number and `+`/`-` stay plain in front. Null draws the line as plain text, as before. An app's own view of a diff (a git changes view) gets the same through `DiffView(path:)` and `codeLine(look, prefix, line, style, {path})`.
 - `ChatLook.fromScheme(scheme, {density, messageWidth, ...})`, `copyWith`, `lerp`. An app's look is a preset: build one, put it in
   `ThemeData(extensions: [...])`.
 
@@ -145,7 +146,7 @@ itself, whatever `focusNode` it is given; `paste()` is public.
 
 `changesOf(entries) -> List<FileChange>` (path, before, after, patches, `added`, `removed`, `lines`, `version`),
 `ChangesPane({files, isViewed, onViewed, onComment, onClose, color, dialog})`: files as the agent sent them, a mark of viewed per file
-version, and a comment on a line written into the message. `diffLines`, `withContext`, `patchLines`, `DiffView`.
+version, and a comment on a line written into the message. `diffLines`, `withContext`, `patchLines`, `DiffView({lines, path})` (`path` is what `ChatLook.codeSpans` is given).
 
 ## Also exported
 
