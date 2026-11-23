@@ -32,7 +32,7 @@ mod status;
 pub use login::{
     AgyLogin, CONSUMER_SERVICE, Cause, ClientSource, GCP_SERVICE, KEYRING_SERVICE, KEYRING_USER,
     Keyring, KeyringLookup, LoginError, LoginReading, LoginSettings, OAuthClient, SERVICE_VARIABLE,
-    Secret, SignedIn, Step, TOKEN_URL, USERINFO_URL,
+    Secret, SignedIn, Step, TOKEN_URL, USER_AGENT, USERINFO_URL,
 };
 pub use ports::loopback_listeners;
 pub use status::AgyAccount;

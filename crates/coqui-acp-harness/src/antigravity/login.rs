@@ -2,9 +2,10 @@
 //!
 //! agy keeps its Google sign-in in the operating system's keyring (service `gemini`, user `antigravity`) or, where the keyring
 //! cannot be used, in a file under `~/.gemini`. [`AgyLogin`] reads it, refreshes an expired access token in memory (never
-//! writing it back), and asks Google's Cloud Code service what agy's language server asks: `loadCodeAssist` for the plan and
-//! `fetchAvailableModels` for each model's remaining fraction and reset time. The buckets are the ones [`super::AgyQuota`]
-//! makes from a session's own status.
+//! writing it back), and asks Google's Cloud Code service what agy asks: `loadCodeAssist` for the plan and
+//! `retrieveUserQuotaSummary` for the groups of models and each group's weekly and five-hour windows, as `agy`'s `/usage`
+//! lists them. Where the service gives no summary, `fetchAvailableModels` gives each model's remaining fraction and reset
+//! time, as buckets of the kind [`super::AgyQuota`] makes from a session's own status.
 //!
 //! The OAuth client a refresh needs is Antigravity's, read from its installed program at run time or given by the caller.
 
@@ -45,6 +46,10 @@ pub const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 pub const CONSUMER_SERVICE: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// The Cloud Code service for a Google Cloud sign-in (`auth_method` `gcp`).
 pub const GCP_SERVICE: &str = "https://cloudcode-pa.googleapis.com";
+
+/// The `User-Agent` of agy's command line. The service lists the groups of models by the client that asks: a client that does not
+/// name itself `antigravity/cli/<version>` is given only the groups agy's older clients know.
+pub const USER_AGENT: &str = "antigravity/cli/1.5.15";
 
 /// An access token this close to its expiry counts as expired, as Go's `oauth2` package counts it.
 const EXPIRY_MARGIN: i64 = 10;
@@ -145,7 +150,7 @@ pub struct LoginSettings {
     pub consumer_service: String,
     /// The Cloud Code service of a Google Cloud sign-in. Default [`GCP_SERVICE`].
     pub gcp_service: String,
-    /// The `User-Agent` of each request. Default `antigravity`.
+    /// The `User-Agent` of each request. Default [`USER_AGENT`].
     pub user_agent: String,
     /// How long each request may take, connection included. Default 15 s.
     pub timeout: Duration,
@@ -166,7 +171,7 @@ impl Default for LoginSettings {
             service: None,
             consumer_service: CONSUMER_SERVICE.into(),
             gcp_service: GCP_SERVICE.into(),
-            user_agent: "antigravity".into(),
+            user_agent: USER_AGENT.into(),
             timeout: Duration::from_secs(15),
             body: 4 * 1024 * 1024,
         }
@@ -302,6 +307,8 @@ pub enum Step {
     UserInfo,
     /// Asking `loadCodeAssist` for the plan.
     LoadCodeAssist,
+    /// Asking `retrieveUserQuotaSummary` for the groups of models and their windows.
+    QuotaSummary,
     /// Asking `fetchAvailableModels` for each model's quota.
     FetchAvailableModels,
 }
@@ -315,6 +322,7 @@ impl fmt::Display for Step {
             Self::Refresh => "refreshing the login",
             Self::UserInfo => "userinfo",
             Self::LoadCodeAssist => "loadCodeAssist",
+            Self::QuotaSummary => "retrieveUserQuotaSummary",
             Self::FetchAvailableModels => "fetchAvailableModels",
         })
     }
@@ -590,6 +598,17 @@ impl AgyLogin {
         });
 
         let request = project.map_or_else(|| json!({}), |project| json!({"project": project}));
+        // The service's own summary of the quota says the groups of models and each group's windows; accounts and services that
+        // do not answer it are read through each model's quota instead.
+        let url = endpoint(&base, "retrieveUserQuotaSummary");
+        let summary = authorized(self, &|agent, token| {
+            post(agent, &url, token, &request, limit, Step::QuotaSummary)
+        });
+        if let Ok(body) = summary
+            && let Some(made) = status::summary_buckets(&body, models, now)
+        {
+            return Ok(made);
+        }
         let url = endpoint(&base, "fetchAvailableModels");
         let body = authorized(self, &|agent, token| {
             post(

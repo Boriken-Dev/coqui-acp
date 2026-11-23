@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use coqui_acp_api::usage::{Refill, Source, Status, Unit};
+use coqui_acp_api::usage::{Coverage, Refill, Source, Status, Unit};
 use coqui_acp_harness::antigravity::{
     AcpModel, AgyLogin, Cause, ClientSource, KEYRING_SERVICE, KEYRING_USER, Keyring, LoginError,
-    LoginReading, LoginSettings, OAuthClient, SignedIn, Step,
+    LoginReading, LoginSettings, OAuthClient, SignedIn, Step, USER_AGENT,
 };
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -143,6 +143,7 @@ struct Request {
     method: String,
     path: String,
     authorization: Option<String>,
+    user_agent: String,
     body: Vec<u8>,
 }
 
@@ -205,6 +206,27 @@ impl Google {
     /// which takes only `access` as the bearer.
     fn usual(access: &'static str, models: Value) -> Self {
         Self::start(move |request| answer(request, access, &models))
+    }
+
+    /// The usual answers, and the service's summary of the quota: the groups of models for a client that names itself agy's
+    /// command line, and only the group every client knows for any other.
+    fn with_summary(access: &'static str, models: Value) -> Self {
+        let summary: Value =
+            serde_json::from_str(include_str!("fixtures/agy-1.5.15/retrieveusersummary.json"))
+                .unwrap();
+        Self::start(move |request| {
+            if request.path != "/v1internal:retrieveUserQuotaSummary" {
+                return answer(request, access, &models);
+            }
+            let mut summary = summary.clone();
+            if !request.user_agent.starts_with("antigravity/cli/") {
+                summary["groups"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|group| group["displayName"] == "Claude and GPT models");
+            }
+            (200, summary)
+        })
     }
 
     fn base(&self) -> String {
@@ -316,6 +338,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let (method, path) = (first.next()?.to_owned(), first.next()?.to_owned());
     let mut length = 0;
     let mut authorization = None;
+    let mut user_agent = String::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -324,6 +347,8 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
             length = value.trim().parse().ok()?;
         } else if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("user-agent") {
+            value.trim().clone_into(&mut user_agent);
         }
     }
     let mut body = vec![0_u8; length];
@@ -332,6 +357,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         method,
         path,
         authorization,
+        user_agent,
         body,
     })
 }
@@ -432,6 +458,7 @@ fn a_valid_token_reads_the_account_plan_and_buckets() {
         [
             "/userinfo",
             "/v1internal:loadCodeAssist",
+            "/v1internal:retrieveUserQuotaSummary",
             "/v1internal:fetchAvailableModels"
         ],
         "no refresh for a token that has not expired"
@@ -444,6 +471,91 @@ fn a_valid_token_reads_the_account_plan_and_buckets() {
     assert_eq!(seen[1].json()["metadata"]["ideType"], "ANTIGRAVITY");
     assert_eq!(seen[1].json()["cloudaicompanionProject"], "fixture-project");
     assert_eq!(seen[2].json(), json!({"project": "fixture-project"}));
+    assert_eq!(seen[3].json(), json!({"project": "fixture-project"}));
+}
+
+#[test]
+fn the_quota_is_the_groups_of_models_with_their_windows() {
+    let home = Home::new("groups");
+    home.login(STORED_ACCESS, now() + 3_600);
+    let google = Google::with_summary(STORED_ACCESS, models());
+    let mut reader = AgyLogin::new(google.settings(&home));
+
+    let read = signed_in(reader.read(&acp_models()).unwrap());
+    let buckets = read.usage.unwrap();
+
+    let shown: Vec<_> = buckets
+        .iter()
+        .map(|bucket| {
+            (
+                bucket.group.as_deref().unwrap(),
+                bucket.id.as_str(),
+                bucket.status.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("Gemini Models", "agy:gemini-weekly", Status::Ok),
+            ("Gemini Models", "agy:gemini-5h", Status::Ok),
+            ("Claude and GPT models", "agy:3p-weekly", Status::Exhausted),
+            ("Claude and GPT models", "agy:3p-5h", Status::Disabled),
+            ("Gemini 4 Argon", "agy:gemini-argon-wtu-weekly", Status::Ok),
+        ]
+    );
+    // The argon group names a model the agent lists, so only it is covered.
+    assert_eq!(
+        buckets[4].models,
+        Coverage::Only {
+            models: vec!["gemini-4-argon-medium".into()]
+        }
+    );
+    assert_eq!(
+        google.paths(),
+        [
+            "/userinfo",
+            "/v1internal:loadCodeAssist",
+            "/v1internal:retrieveUserQuotaSummary"
+        ],
+        "the models' own quota is not asked when the summary answers"
+    );
+}
+
+#[test]
+fn the_request_names_agys_command_line_or_the_service_leaves_groups_out() {
+    let home = Home::new("agent");
+    home.login(STORED_ACCESS, now() + 3_600);
+    let google = Google::with_summary(STORED_ACCESS, models());
+
+    let mut reader = AgyLogin::new(google.settings(&home).user_agent("antigravity"));
+    let read = signed_in(reader.read(&[]).unwrap());
+    let groups: Vec<_> = read
+        .usage
+        .unwrap()
+        .into_iter()
+        .filter_map(|bucket| bucket.group)
+        .collect();
+    assert!(
+        groups.iter().all(|group| group == "Claude and GPT models"),
+        "{groups:?}"
+    );
+
+    let mut reader = AgyLogin::new(google.settings(&home));
+    let read = signed_in(reader.read(&[]).unwrap());
+    let groups: std::collections::BTreeSet<_> = read
+        .usage
+        .unwrap()
+        .into_iter()
+        .filter_map(|bucket| bucket.group)
+        .collect();
+    assert_eq!(groups.len(), 3, "{groups:?}");
+    assert!(
+        google
+            .seen()
+            .iter()
+            .any(|request| request.user_agent == USER_AGENT)
+    );
 }
 
 #[test]

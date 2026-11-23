@@ -362,6 +362,182 @@ fn name_of(length: Duration) -> String {
     }
 }
 
+/// `retrieveUserQuotaSummary`' answer: the groups of models, each with its own windows.
+#[derive(Deserialize)]
+struct Summary {
+    #[serde(default)]
+    groups: Vec<SummaryGroup>,
+}
+
+#[derive(Deserialize)]
+struct SummaryGroup {
+    #[serde(rename = "displayName")]
+    name: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    buckets: Vec<SummaryBucket>,
+}
+
+/// The fraction stays a loose value so that one window with a figure of the wrong type is skipped, not the answer.
+#[derive(Deserialize)]
+struct SummaryBucket {
+    #[serde(rename = "bucketId")]
+    id: Option<String>,
+    #[serde(rename = "displayName")]
+    name: Option<String>,
+    window: Option<String>,
+    #[serde(rename = "remainingFraction")]
+    fraction: Option<Value>,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(rename = "resetTime")]
+    reset: Option<String>,
+}
+
+/// What a group's description says before the models it lists.
+const MODELS_LISTED: &str = "Models within this group:";
+
+/// The models a group names. Its description lists them (`Models within this group: A, B`) when it has a list; a group whose
+/// description says anything else is one model, the one it is named for.
+fn group_models(group: &SummaryGroup) -> Vec<String> {
+    let listed = group
+        .description
+        .as_deref()
+        .and_then(|text| text.trim().strip_prefix(MODELS_LISTED));
+    match listed {
+        Some(list) => list
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(String::from)
+            .collect(),
+        None => group
+            .name
+            .iter()
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .collect(),
+    }
+}
+
+/// A window's length from its name: `weekly`, `5h`, `2d`.
+fn summary_window(name: &str) -> Option<Duration> {
+    if name.eq_ignore_ascii_case("weekly") {
+        return Some(Duration::from_secs(7 * 24 * 3600));
+    }
+    let (count, unit) = name.split_at(name.len().checked_sub(1)?);
+    let count: u64 = count.parse().ok().filter(|count| *count > 0)?;
+    let each = match unit {
+        "h" => 3600,
+        "d" => 24 * 3600,
+        "m" => 60,
+        _ => return None,
+    };
+    count.checked_mul(each).map(Duration::from_secs)
+}
+
+/// The ACP ids of the models named `names`: those whose name is the listed one or the listed one with an effort after it
+/// (`Claude Opus 5.5` and `Claude Opus 5.5 (High)`). `None` unless every name has one, since a bucket that covers a model
+/// it cannot name must not stop the others.
+fn covered_ids(names: &[String], acp: &[AcpModel]) -> Option<Vec<String>> {
+    if names.is_empty() {
+        return None;
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for name in names {
+        let before = ids.len();
+        for held in acp {
+            let effort = held
+                .name
+                .strip_prefix(name.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(" ("));
+            if effort && !ids.contains(&held.id) {
+                ids.push(held.id.clone());
+            }
+        }
+        if ids.len() == before {
+            return None;
+        }
+    }
+    Some(ids)
+}
+
+/// The buckets of `retrieveUserQuotaSummary`' answer `body`, as of `now` (Unix seconds): each window of each group, in the
+/// order the answer gives them, with the group's name and models on each. A window that does not apply is `disabled`, and
+/// keeps no figure; the reset time of every other is the service's. `None` for a body that is not that answer or holds no
+/// window, so the caller reads the models' own quota instead.
+pub(super) fn summary_buckets(body: &[u8], acp: &[AcpModel], now: i64) -> Option<Vec<Bucket>> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    if !value.is_object() {
+        return None;
+    }
+    let summary = Summary::deserialize(value).ok()?;
+    let mut made = Vec::new();
+    for group in &summary.groups {
+        let names = group_models(group);
+        let covered = covered_ids(&names, acp);
+        for window in &group.buckets {
+            made.extend(summary_bucket(
+                group,
+                &names,
+                covered.as_deref(),
+                window,
+                now,
+            ));
+        }
+    }
+    (!made.is_empty()).then_some(made)
+}
+
+fn summary_bucket(
+    group: &SummaryGroup,
+    names: &[String],
+    covered: Option<&[String]>,
+    window: &SummaryBucket,
+    now: i64,
+) -> Option<Bucket> {
+    let id = window.id.as_deref().filter(|id| !id.is_empty())?;
+    let mut bucket = Bucket::new(alloc::format!("{BUCKET_PREFIX}{id}"));
+    bucket.label.clone_from(&window.name);
+    bucket.group = group.name.clone().filter(|name| !name.is_empty());
+    bucket.model_names = names.to_vec();
+    if let Some(ids) = covered {
+        bucket.models = Coverage::Only {
+            models: ids.to_vec(),
+        };
+    }
+    bucket.unit = Unit::Permille;
+    bucket.observed_at = now;
+    bucket.refill = Refill::FixedWindow {
+        length: window.window.as_deref().and_then(summary_window),
+        resets_at: window
+            .reset
+            .as_deref()
+            .and_then(|text| OffsetDateTime::parse(text, &Rfc3339).ok())
+            .map(OffsetDateTime::unix_timestamp),
+    };
+    if window.disabled {
+        bucket.status = Status::Disabled;
+        return Some(bucket);
+    }
+    // A fraction left out is zero: the answer is protobuf JSON, which omits zero values.
+    let fraction = match &window.fraction {
+        None => 0.0,
+        Some(value) => value
+            .as_f64()
+            .filter(|fraction| (0.0..=1.0).contains(fraction))?,
+    };
+    let remaining = permille(fraction);
+    bucket.limit = Some(WHOLE);
+    bucket.remaining = Some(remaining);
+    bucket.status = if remaining == 0 {
+        Status::Exhausted
+    } else {
+        Status::Ok
+    };
+    Some(bucket)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +607,168 @@ mod tests {
         assert_eq!(made.len(), 1);
         assert_eq!(made[0].remaining, Some(400));
         assert_eq!(made[0].id, "agy:a");
+    }
+
+    const SUMMARY: &str = include_str!("../../tests/fixtures/agy-1.5.15/retrieveusersummary.json");
+
+    #[test]
+    fn a_summary_makes_a_bucket_of_each_window_of_each_group() {
+        let now = 1_893_000_000;
+        let made = summary_buckets(SUMMARY.as_bytes(), &[], now).expect("buckets");
+        let shown: Vec<_> = made
+            .iter()
+            .map(|bucket| {
+                (
+                    bucket.group.as_deref().unwrap_or(""),
+                    bucket.label.as_deref().unwrap_or(""),
+                    bucket.remaining,
+                    bucket.status.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "Gemini Models",
+                    "Weekly Limit Remaining",
+                    Some(420),
+                    Status::Ok
+                ),
+                (
+                    "Gemini Models",
+                    "Five Hour Limit Remaining",
+                    Some(1000),
+                    Status::Ok
+                ),
+                (
+                    "Claude and GPT models",
+                    "Weekly Limit Remaining",
+                    Some(0),
+                    Status::Exhausted
+                ),
+                (
+                    "Claude and GPT models",
+                    "Five Hour Limit Remaining",
+                    None,
+                    Status::Disabled
+                ),
+                (
+                    "Gemini 4 Argon",
+                    "Gemini 4 Argon Weekly Limit",
+                    Some(70),
+                    Status::Ok
+                ),
+            ]
+        );
+        let ids: Vec<_> = made.iter().map(|bucket| bucket.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "agy:gemini-weekly",
+                "agy:gemini-5h",
+                "agy:3p-weekly",
+                "agy:3p-5h",
+                "agy:gemini-argon-wtu-weekly"
+            ]
+        );
+        assert!(made.iter().all(|bucket| bucket.observed_at == now));
+    }
+
+    #[test]
+    fn a_windows_length_and_reset_are_the_services() {
+        let made = summary_buckets(SUMMARY.as_bytes(), &[], 0).expect("buckets");
+        assert_eq!(
+            made[0].refill,
+            Refill::FixedWindow {
+                length: Some(Duration::from_secs(604_800)),
+                resets_at: Some(1_894_104_000),
+            }
+        );
+        assert_eq!(
+            made[1].refill,
+            Refill::FixedWindow {
+                length: Some(Duration::from_secs(18_000)),
+                resets_at: Some(1_893_517_200),
+            }
+        );
+        // A window that does not apply says nothing is left or used.
+        assert_eq!((made[3].remaining, made[3].limit), (None, None));
+        assert_eq!(made[3].status, Status::Disabled);
+    }
+
+    #[test]
+    fn a_group_lists_its_models_or_is_the_one_it_is_named_for() {
+        let made = summary_buckets(SUMMARY.as_bytes(), &[], 0).expect("buckets");
+        assert_eq!(
+            made[0].model_names,
+            ["Gemini 4 Neon", "Gemini 4 Hydrogen", "Gemini 3.8 Flash"]
+        );
+        assert_eq!(made[0].model_names, made[1].model_names);
+        assert_eq!(
+            made[2].model_names,
+            ["Claude Opus 5.5", "Claude Sonnet 5.5", "GPT-OSS 120B"]
+        );
+        assert_eq!(made[4].model_names, ["Gemini 4 Argon"]);
+        // With no models of the agent's to match, a host may not stop any of them for these.
+        assert!(made.iter().all(|bucket| bucket.models == Coverage::Unknown));
+    }
+
+    #[test]
+    fn a_group_covers_the_agents_models_it_names_with_any_effort() {
+        let acp = [
+            AcpModel::new("claude-opus-5-5-high", "Claude Opus 5.5 (High)"),
+            AcpModel::new("claude-opus-5-5-low", "Claude Opus 5.5 (Low)"),
+            AcpModel::new("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            AcpModel::new("gpt-oss-120b", "GPT-OSS 120B"),
+            AcpModel::new("other", "Another"),
+        ];
+        let made = summary_buckets(SUMMARY.as_bytes(), &acp, 0).expect("buckets");
+        assert_eq!(
+            made[2].models,
+            Coverage::Only {
+                models: alloc::vec![
+                    "claude-opus-5-5-high".into(),
+                    "claude-opus-5-5-low".into(),
+                    "claude-sonnet-5-5".into(),
+                    "gpt-oss-120b".into()
+                ]
+            }
+        );
+        // A group with a model the agent does not list is of unknown coverage: it stops none of the others.
+        assert_eq!(made[0].models, Coverage::Unknown);
+    }
+
+    #[test]
+    fn a_summary_with_no_window_or_that_is_not_one_is_not_read() {
+        assert!(summary_buckets(br#"{"groups": []}"#, &[], 0).is_none());
+        assert!(
+            summary_buckets(
+                br#"{"groups": [{"displayName": "G", "buckets": []}]}"#,
+                &[],
+                0
+            )
+            .is_none()
+        );
+        assert!(summary_buckets(b"[]", &[], 0).is_none());
+        assert!(summary_buckets(b"not json", &[], 0).is_none());
+        // A figure that is not a fraction leaves that window out, not the answer.
+        let one_bad = br#"{"groups": [{"displayName": "G", "buckets": [
+            {"bucketId": "a", "remainingFraction": "x"}, {"bucketId": "b", "remainingFraction": 0.5}]}]}"#;
+        let made = summary_buckets(one_bad, &[], 0).expect("one window");
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].id, "agy:b");
+    }
+
+    #[test]
+    fn a_windows_name_is_its_length() {
+        assert_eq!(summary_window("weekly"), Some(Duration::from_secs(604_800)));
+        assert_eq!(summary_window("5h"), Some(Duration::from_secs(18_000)));
+        assert_eq!(summary_window("2d"), Some(Duration::from_secs(172_800)));
+        assert_eq!(summary_window("30m"), Some(Duration::from_secs(1_800)));
+        assert_eq!(summary_window("0h"), None);
+        assert_eq!(summary_window("soon"), None);
+        assert_eq!(summary_window(""), None);
     }
 
     #[test]

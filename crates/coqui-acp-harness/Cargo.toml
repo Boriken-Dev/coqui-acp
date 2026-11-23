@@ -95,6 +95,11 @@ name = "stdio_provider"
 crate-type = ["cdylib"]
 required-features = ["kind"]
 
+# Prints the quota of the Antigravity account stored on this machine, as agy's `/usage` lists it.
+[[example]]
+name = "agy_quota"
+required-features = ["antigravity"]
+
 [[test]]
 name = "spawner"
 required-features = ["kind"]
