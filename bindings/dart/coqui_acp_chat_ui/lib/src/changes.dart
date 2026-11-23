@@ -307,10 +307,12 @@ class _FileViewState extends State<_FileView> {
                           DiffKind.same => null,
                         },
                         padding: const EdgeInsets.only(right: 8),
-                        child: Text(
-                          '${'${line.now ?? ''}'.padLeft(4)} ${switch (line.kind) { DiffKind.added => '+', DiffKind.removed => '-', DiffKind.same => ' ' }} ${line.text}',
-                          style: mono,
-                          softWrap: false,
+                        child: codeLine(
+                          look,
+                          '${'${line.now ?? ''}'.padLeft(4)} ${switch (line.kind) { DiffKind.added => '+', DiffKind.removed => '-', DiffKind.same => ' ' }} ',
+                          line.text,
+                          mono,
+                          path: file.path,
                         ),
                       ),
                     ),

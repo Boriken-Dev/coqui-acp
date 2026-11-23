@@ -114,10 +114,10 @@ class ToolBlockView extends StatelessWidget {
         children: [
           Text(path, style: TextStyle(fontFamily: context.chatLook.codeFont, fontSize: 12, color: context.chatLook.muted)),
           const SizedBox(height: 4),
-          DiffView(lines: withContext(diffLines(oldText, newText))),
+          DiffView(lines: withContext(diffLines(oldText, newText)), path: path),
         ],
       ),
-      ToolPatch(:final text) => DiffView(lines: patchLines(text)),
+      ToolPatch(:final text, :final paths) => DiffView(lines: patchLines(text), path: paths.length == 1 ? paths.single : null),
       ToolTerminal(:final terminalId) => TerminalBlock(view: scope?.terminals[terminalId]),
     };
   }
@@ -125,10 +125,13 @@ class ToolBlockView extends StatelessWidget {
 
 /// Lines of a change, an added one on the look's `added` and a removed one on its `removed`.
 class DiffView extends StatelessWidget {
-  const DiffView({super.key, required this.lines});
+  const DiffView({super.key, required this.lines, this.path});
 
   /// Null marks lines left out.
   final List<DiffLine?> lines;
+
+  /// The file the lines are of, handed to [ChatLook.codeSpans]; null where there is none or several.
+  final String? path;
 
   @override
   Widget build(BuildContext context) {
@@ -156,10 +159,12 @@ class DiffView extends StatelessWidget {
                     DiffKind.same => null,
                   },
                   padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Text(
-                    '${switch (line.kind) { DiffKind.added => '+', DiffKind.removed => '-', DiffKind.same => ' ' }} ${line.text}',
-                    style: style,
-                    softWrap: false,
+                  child: codeLine(
+                    look,
+                    '${switch (line.kind) { DiffKind.added => '+', DiffKind.removed => '-', DiffKind.same => ' ' }} ',
+                    line.text,
+                    style,
+                    path: path,
                   ),
                 ),
           ],

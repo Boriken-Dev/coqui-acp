@@ -321,7 +321,7 @@ class _ToApprove extends StatelessWidget {
         body = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           if (change.path.isNotEmpty)
             Padding(padding: const EdgeInsets.only(bottom: 4), child: SelectableText(change.path, style: mono.copyWith(color: look.muted))),
-          SizedBox(width: double.infinity, child: DiffView(lines: withContext(diffLines(change.oldText, change.newText)))),
+          SizedBox(width: double.infinity, child: DiffView(lines: withContext(diffLines(change.oldText, change.newText)), path: change.path.isEmpty ? null : change.path)),
         ]);
       } else {
         body = SelectableText(detail!, style: mono);

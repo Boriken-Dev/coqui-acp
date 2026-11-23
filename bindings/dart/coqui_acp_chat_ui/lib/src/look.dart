@@ -27,6 +27,10 @@ enum ChatDensity {
   }
 }
 
+/// How a line of code is drawn: the [TextSpan] for [line], set in [style], of the file at [path] (null where the package has none, or
+/// where one block holds several files). An app gives one to colour code; the package ships no highlighter.
+typedef CodeSpans = TextSpan Function(String line, String? path, TextStyle style);
+
 /// What a chat draws with: semantic tokens and sizes in one [ThemeExtension], so an app's look is a preset over it and no widget
 /// has a colour of its own. [ChatLook.fromScheme] derives every token from a [ColorScheme]; a preset gives any of them.
 @immutable
@@ -63,6 +67,7 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     this.centred = false,
     this.bubbleBorder,
     this.showThinking = true,
+    this.codeSpans,
   }) : _user = user,
        _agent = agent,
        _notice = notice,
@@ -150,6 +155,9 @@ final class ChatLook extends ThemeExtension<ChatLook> {
   /// Whether streamed agent thinking is shown live while a turn runs.
   final bool showThinking;
 
+  /// Draws each code line of a diff, [ChangesPane] and a permission card's edit; null draws it as plain text in [codeFont].
+  final CodeSpans? codeSpans;
+
   @override
   ChatLook copyWith({
     Color? bg,
@@ -183,6 +191,7 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     bool? centred,
     Color? bubbleBorder,
     bool? showThinking,
+    CodeSpans? codeSpans,
   }) => ChatLook(
     bg: bg ?? this.bg,
     surface: surface ?? this.surface,
@@ -215,6 +224,7 @@ final class ChatLook extends ThemeExtension<ChatLook> {
     centred: centred ?? this.centred,
     bubbleBorder: bubbleBorder ?? this.bubbleBorder,
     showThinking: showThinking ?? this.showThinking,
+    codeSpans: codeSpans ?? this.codeSpans,
   );
 
   @override
@@ -257,6 +267,7 @@ final class ChatLook extends ThemeExtension<ChatLook> {
       centred: near.centred,
       bubbleBorder: mixed(bubbleBorder, other.bubbleBorder),
       showThinking: near.showThinking,
+      codeSpans: near.codeSpans,
     );
   }
 }
@@ -285,4 +296,12 @@ extension ChatLookColumn on ChatLook {
       child: ConstrainedBox(constraints: BoxConstraints(maxWidth: messageWidth), child: child),
     );
   }
+}
+
+/// A line of code in [style]: through the look's [ChatLook.codeSpans] when it has one, with [prefix] (a number, a `+`) before it in the
+/// plain style.
+Text codeLine(ChatLook look, String prefix, String line, TextStyle style, {String? path}) {
+  final spans = look.codeSpans;
+  if (spans == null) return Text('$prefix$line', style: style, softWrap: false);
+  return Text.rich(TextSpan(style: style, children: [TextSpan(text: prefix), spans(line, path, style)]), softWrap: false);
 }
