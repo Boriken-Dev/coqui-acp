@@ -269,7 +269,8 @@ UsageReport::new();  UsageReport::unsupported(reason);  UsageReport::fraction_pe
 UsageReport::inferred(LimitHit) -> UsageReport     // a host's report for an agent that reports nothing: sources [inferred], one exhausted `inferred` bucket of unknown coverage, no figures
 pub const DEFAULT_LIMIT_PHRASES: &[&str];                     // RESOURCE_EXHAUSTED, "Resource has been exhausted", "exhausted your capacity", "Error 429", "rate limit", "usage limit", "quota", throttling_error
 pub fn infer_limit(text: &str, phrases: &[&str]) -> Option<LimitHit>   // a failed turn's text read as a limit; see "Inferred limits"
-#[non_exhaustive] pub struct Bucket { pub id: String, pub label: Option<String>, pub models: Coverage, pub unit: Unit,
+#[non_exhaustive] pub struct Bucket { pub id: String, pub label: Option<String>, pub group: Option<String>, pub models: Coverage,
+    pub model_names: Vec<String>, pub unit: Unit,
     pub used: Option<u64>, pub limit: Option<u64>, pub remaining: Option<u64>, pub refill: Refill, pub status: Status,
     pub observed_at: i64, pub source: Source, pub evidence: Option<String> }
 Bucket::new(id);  bucket.resets_in(now: i64) -> Option<Duration>
@@ -277,7 +278,7 @@ Bucket::new(id);  bucket.resets_in(now: i64) -> Option<Duration>
 #[non_exhaustive] pub enum Unit { Tokens, Requests, MicroUsd, Permille, Other(String) }          // "tokens" "requests" "micro_usd" "permille"
 #[non_exhaustive] pub enum Refill { FixedWindow { length: Option<Duration>, resets_at: Option<i64> },
     TokenBucket { amount: u64, per: Duration, max: u64 }, Never, Unknown, Other }                // kinds fixed_window, token_bucket, none, unknown
-#[non_exhaustive] pub enum Status { Ok, Warning, Exhausted, Unknown, Other(String) }
+#[non_exhaustive] pub enum Status { Ok, Warning, Exhausted, Disabled, Unknown, Other(String) }
 #[non_exhaustive] pub enum Source { Reported, Inferred, Other(String) }
 #[non_exhaustive] pub struct LimitHit { pub bucket: Option<String>, pub resets_at: Option<i64>, pub retry_after: Option<Duration>,
     pub source: Source, pub text: Option<String>, pub observed_at: i64 }                         // LimitHit::new(observed_at)
@@ -292,6 +293,7 @@ pub const USAGE_VERSION: u32 = 1;
 ```
 
 - **`supported: false` is a real answer** (this harness reports no usage, and `unsupported_because` says why); `supported` with no buckets is another, nothing reported yet. `sources` says which kinds of figure the harness can give at all: `reported` (its own structured figure) or `inferred` (read from an error's words, a 429 or a refusal, by the provider or the host; the bucket's `evidence` holds the words, for logs, and nothing parses it). A host knows from `sources` that an agent never reports figures.
+- **Groups, model names and a window that does not apply.** `group` names the set of allowances a bucket belongs to (`Gemini Models`, whose weekly and five-hour windows are two buckets with that `group`); buckets of one group follow each other in a report, and a bucket with no group stands alone. `model_names` is what a person reads for the models the bucket covers, when the harness names them (always written, empty when it names none or the bucket covers every model); `models` stays what a host matches. `Status::Disabled` is a window that does not apply now because another stands in its place (a five-hour window while the weekly one is used up): its figures limit nothing, it carries none, and a host never counts it as exhausted.
 - **A bucket** names the models it covers (`unknown` counts as covering every model, so an exhausted bucket of unknown coverage stops the account for each of them), what it counts (`unit`), `used`, `limit` and `remaining` as the harness gave them, and how it refills. A provider fills only what it was told and never derives one figure from another. The fraction a reader uses is `UsageReport::fraction_permille`: `used / limit`, else `(limit - remaining) / limit`, in thousandths, at most 1000, `None` without a limit. `Unit::Permille` is a percentage-only bucket: `limit` is 1000 and `used` thousandths, so the arithmetic is the same for every unit. `id` is stable per harness and account (`five_hour`, `seven_day`, `seven_day_opus`, `codex:primary`, `inferred`).
 - **Refill.** `FixedWindow` resets all at once when the window ends, at `resets_at` (a subscription's five hours or week); `TokenBucket` adds `amount` units each `per`, up to `max`, continuously; `Never` is a balance. `resets_in(now)` is how long until a fixed window ends, zero once it has (the bucket is then due a new report), `None` for any other. A unit, status, source, refill or coverage a newer writer names reads as `Other` and the report is still read; `Unit`, `Status` and `Source` keep the name they were sent under.
 - **Warning thresholds are the host's.** A provider reports `Status::Warning` only when the harness said so (Claude's `allowed_warning`), and never invents a level; a host applies its own to the fraction.

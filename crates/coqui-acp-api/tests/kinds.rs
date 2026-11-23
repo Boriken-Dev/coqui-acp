@@ -326,9 +326,11 @@ fn every_models_keys_are_pinned() {
             "Bucket",
             &[
                 "evidence",
+                "group",
                 "id",
                 "label",
                 "limit",
+                "model_names",
                 "models",
                 "observed_at",
                 "refill",

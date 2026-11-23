@@ -160,6 +160,9 @@ pub enum Status {
     Warning,
     /// Nothing is left until the bucket refills.
     Exhausted,
+    /// The bucket does not apply now: another allowance stands in its place (a five-hour window while the weekly one is used
+    /// up). Its figures are not a limit on anything.
+    Disabled,
     /// The harness did not say.
     Unknown,
     /// A status a newer writer named.
@@ -167,7 +170,7 @@ pub enum Status {
     Other(String),
 }
 
-open_names!(Status { Ok => "ok", Warning => "warning", Exhausted => "exhausted", Unknown => "unknown" });
+open_names!(Status { Ok => "ok", Warning => "warning", Exhausted => "exhausted", Disabled => "disabled", Unknown => "unknown" });
 
 /// The models a bucket covers.
 #[derive(ToValue, FromValue, Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -297,9 +300,18 @@ pub struct Bucket {
     /// What a person sees, when the harness has a name apart from the id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The group of allowances it belongs to, when the harness sorts them: `Gemini Models`, with a weekly and a five-hour window
+    /// in it. Buckets of one group share it and follow each other in a report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// The models it covers.
     #[map(with = coverage_codec)]
     pub models: Coverage,
+    /// The names a person reads for the models it covers, when the harness gives them; empty when it names none, or the bucket
+    /// is not model-specific. `models` is what a host matches, this is what an app shows.
+    #[map(default)]
+    #[serde(default)]
+    pub model_names: Vec<String>,
     /// What it counts.
     pub unit: Unit,
     /// How much is used, when the harness said.
@@ -333,7 +345,9 @@ impl Bucket {
         Self {
             id: id.into(),
             label: None,
+            group: None,
             models: Coverage::Unknown,
+            model_names: Vec::new(),
             unit: Unit::Permille,
             used: None,
             limit: None,

@@ -1318,6 +1318,13 @@
               ],
               "description": "What a person sees, when the harness has a name apart from the id."
             },
+            "group": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The group of allowances it belongs to, when the harness sorts them: `Gemini Models`, with a weekly and a five-hour window in it. Buckets of one group share it and follow each other in a report."
+            },
             "models": {
               "type": "object",
               "x-variant-tag": "kind",
@@ -1380,6 +1387,14 @@
                 }
               ],
               "description": "The models it covers."
+            },
+            "model_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names a person reads for the models it covers, when the harness gives them; empty when it names none, or the bucket is not model-specific. `models` is what a host matches, this is what an app shows.",
+              "default": []
             },
             "unit": {
               "type": "string",
@@ -1562,12 +1577,14 @@
                 "ok",
                 "warning",
                 "exhausted",
+                "disabled",
                 "unknown"
               ],
               "x-enum-labels": {
                 "ok": "Room is left.",
                 "warning": "The harness said it is nearly used. Only when the harness said so: a host applies its own thresholds to the bucket's fraction.",
                 "exhausted": "Nothing is left until the bucket refills.",
+                "disabled": "The bucket does not apply now: another allowance stands in its place (a five-hour window while the weekly one is used up). Its figures are not a limit on anything.",
                 "unknown": "The harness did not say."
               },
               "description": "What the harness says of it."
@@ -1830,6 +1847,13 @@
         ],
         "description": "What a person sees, when the harness has a name apart from the id."
       },
+      "group": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The group of allowances it belongs to, when the harness sorts them: `Gemini Models`, with a weekly and a five-hour window in it. Buckets of one group share it and follow each other in a report."
+      },
       "models": {
         "type": "object",
         "x-variant-tag": "kind",
@@ -1892,6 +1916,14 @@
           }
         ],
         "description": "The models it covers."
+      },
+      "model_names": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The names a person reads for the models it covers, when the harness gives them; empty when it names none, or the bucket is not model-specific. `models` is what a host matches, this is what an app shows.",
+        "default": []
       },
       "unit": {
         "type": "string",
@@ -2074,12 +2106,14 @@
           "ok",
           "warning",
           "exhausted",
+          "disabled",
           "unknown"
         ],
         "x-enum-labels": {
           "ok": "Room is left.",
           "warning": "The harness said it is nearly used. Only when the harness said so: a host applies its own thresholds to the bucket's fraction.",
           "exhausted": "Nothing is left until the bucket refills.",
+          "disabled": "The bucket does not apply now: another allowance stands in its place (a five-hour window while the weekly one is used up). Its figures are not a limit on anything.",
           "unknown": "The harness did not say."
         },
         "description": "What the harness says of it."
@@ -3915,6 +3949,13 @@
               ],
               "description": "What a person sees, when the harness has a name apart from the id."
             },
+            "group": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The group of allowances it belongs to, when the harness sorts them: `Gemini Models`, with a weekly and a five-hour window in it. Buckets of one group share it and follow each other in a report."
+            },
             "models": {
               "type": "object",
               "x-variant-tag": "kind",
@@ -3977,6 +4018,14 @@
                 }
               ],
               "description": "The models it covers."
+            },
+            "model_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names a person reads for the models it covers, when the harness gives them; empty when it names none, or the bucket is not model-specific. `models` is what a host matches, this is what an app shows.",
+              "default": []
             },
             "unit": {
               "type": "string",
@@ -4159,12 +4208,14 @@
                 "ok",
                 "warning",
                 "exhausted",
+                "disabled",
                 "unknown"
               ],
               "x-enum-labels": {
                 "ok": "Room is left.",
                 "warning": "The harness said it is nearly used. Only when the harness said so: a host applies its own thresholds to the bucket's fraction.",
                 "exhausted": "Nothing is left until the bucket refills.",
+                "disabled": "The bucket does not apply now: another allowance stands in its place (a five-hour window while the weekly one is used up). Its figures are not a limit on anything.",
                 "unknown": "The harness did not say."
               },
               "description": "What the harness says of it."

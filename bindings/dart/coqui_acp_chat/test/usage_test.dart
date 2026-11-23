@@ -187,6 +187,32 @@ void main() {
       expect(report.spend!.byModel, hasLength(3));
     });
 
+    test('a bucket says its group, the names of its models and that it does not apply', () {
+      final report = UsageReport.parse({
+        'supported': true,
+        'buckets': [
+          {
+            'id': '3p-5h',
+            'group': 'Claude and GPT models',
+            'models': {'kind': 'unknown'},
+            'model_names': ['Claude Opus 5.5', 'GPT-OSS 120B', 7],
+            'status': 'disabled',
+          },
+          {'id': 'plain'},
+        ],
+      })!;
+      final grouped = report.buckets.first;
+      expect(grouped.group, 'Claude and GPT models');
+      expect(grouped.modelNames, ['Claude Opus 5.5', 'GPT-OSS 120B']);
+      expect(grouped.isDisabled, isTrue);
+      expect(grouped.isExhausted, isFalse);
+      expect(grouped.toJson()['group'], 'Claude and GPT models');
+      expect(report.buckets.last.group, isNull);
+      expect(report.buckets.last.modelNames, isEmpty);
+      expect(report.buckets.last.toJson(), isNot(contains('group')));
+      expect(report.buckets.last.toJson()['model_names'], <String>[]);
+    });
+
     test('a bucket without a usable id is not read', () {
       final report = UsageReport.parse({
         'supported': true,

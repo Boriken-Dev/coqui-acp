@@ -91,9 +91,14 @@ String coverageOf(UsageCoverage models) => switch (models.kind) {
   _ => 'models not known',
 };
 
+/// The models [bucket] covers, as a person reads them: the names the harness gave, else the ids it covers, else that it covers every
+/// model.
+String modelsOf(UsageBucket bucket) => bucket.modelNames.isNotEmpty ? bucket.modelNames.join(', ') : coverageOf(bucket.models);
+
 /// A bucket's place in the order the control uses: an exhausted one first, then the highest fraction used, and last a bucket whose
-/// window has ended (its figures are of the window before) or that gives no fraction. Larger comes first.
+/// window has ended (its figures are of the window before), that does not apply or that gives no fraction. Larger comes first.
 int _rank(UsageBucket bucket, int now) {
+  if (bucket.isDisabled) return -3;
   if (bucket.pastReset(now)) return -2;
   if (bucket.isExhausted) return 2000;
   return bucket.fractionPermille ?? -1;
@@ -135,14 +140,14 @@ String pillText(UsageReport report, int now) {
 
 /// One line of the control's menu for [bucket]: name and figure, then how it refills.
 String bucketLine(UsageBucket bucket, int now) {
-  final figure = bucket.pastReset(now) ? null : figureOf(bucket) ?? (bucket.isExhausted ? 'limit reached' : null);
+  final figure = bucket.isDisabled ? 'disabled' : bucket.pastReset(now) ? null : figureOf(bucket) ?? (bucket.isExhausted ? 'limit reached' : null);
   return [bucket.name, ?figure, ?refillOf(bucket, now)].join(' · ');
 }
 
 /// What else the menu says of [bucket], a line each: that it is inferred, which models it covers, and as of when.
 List<String> bucketDetails(UsageBucket bucket, int now) => [
   if (bucket.inferred) 'inferred from ${bucket.evidence == null ? 'an error' : '"${bucket.evidence}"'}, not reported by the agent',
-  'covers ${coverageOf(bucket.models)}',
+  'covers ${modelsOf(bucket)}',
   if (bucket.observedAt > 0) 'as of ${agoText(now - bucket.observedAt)}',
 ];
 

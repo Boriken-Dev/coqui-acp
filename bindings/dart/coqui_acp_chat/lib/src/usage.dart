@@ -102,7 +102,9 @@ final class UsageBucket {
   const UsageBucket({
     required this.id,
     this.label,
+    this.group,
     this.models = UsageCoverage.unknown,
+    this.modelNames = const [],
     this.unit = UsageUnit.permille,
     this.used,
     this.limit,
@@ -116,12 +118,22 @@ final class UsageBucket {
 
   final String id;
   final String? label;
+
+  /// The group of allowances it belongs to (`Gemini Models`, with a weekly and a five-hour window in it), when the harness sorts
+  /// them; buckets of one group follow each other.
+  final String? group;
+
+  /// The models it covers, by the ids a host matches.
   final UsageCoverage models;
+
+  /// The names a person reads for those models, when the harness gives them; empty when it names none or the bucket is not
+  /// model-specific.
+  final List<String> modelNames;
   final UsageUnit unit;
   final int? used, limit, remaining;
   final UsageRefill refill;
 
-  /// `ok`, `warning`, `exhausted`, `unknown`, or a name a newer writer sent.
+  /// `ok`, `warning`, `exhausted`, `disabled`, `unknown`, or a name a newer writer sent.
   final String status;
 
   /// Unix seconds.
@@ -133,6 +145,9 @@ final class UsageBucket {
 
   bool get inferred => source == 'inferred';
   bool get isExhausted => status == 'exhausted';
+
+  /// Whether the bucket does not apply now: another allowance stands in its place, so its figures limit nothing.
+  bool get isDisabled => status == 'disabled';
 
   /// What the bucket is called: its own label, else its id in words.
   String get name => label ?? id.replaceAll('_', ' ');
@@ -167,7 +182,9 @@ final class UsageBucket {
   Map<String, Object?> toJson() => {
     'id': id,
     if (label != null) 'label': label,
+    if (group != null) 'group': group,
     'models': models.toJson(),
+    'model_names': modelNames,
     'unit': unit.name,
     if (used != null) 'used': used,
     if (limit != null) 'limit': limit,
@@ -427,6 +444,8 @@ UsageBucket? _bucket(Object? json, ChatLimits limits) {
   return UsageBucket(
     id: id,
     label: _text(json['label'], limits),
+    group: _text(json['group'], limits),
+    modelNames: _texts(json['model_names'], limits),
     models: models is Map
         ? switch (models['kind']) {
             'all' => UsageCoverage.all,

@@ -157,7 +157,9 @@ def _bucket(id: str, **fields: Any) -> Dict[str, Any]:
     bucket: Dict[str, Any] = {
         "id": id,
         "label": None,
+        "group": None,
         "models": {"kind": "unknown"},
+        "model_names": [],
         "unit": "permille",
         "used": None,
         "limit": None,

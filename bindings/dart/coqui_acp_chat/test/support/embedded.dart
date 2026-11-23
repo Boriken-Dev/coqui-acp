@@ -132,7 +132,8 @@ const String usageVectors = r'''{
             },
             "status": "ok",
             "observed_at": 1788900000,
-            "source": "reported"
+            "source": "reported",
+            "model_names": []
           },
           {
             "id": "seven_day_opus",
@@ -155,7 +156,8 @@ const String usageVectors = r'''{
             },
             "status": "warning",
             "observed_at": 1788899000,
-            "source": "reported"
+            "source": "reported",
+            "model_names": []
           }
         ]
       }
@@ -190,7 +192,8 @@ const String usageVectors = r'''{
             },
             "status": "ok",
             "observed_at": 1788900100,
-            "source": "reported"
+            "source": "reported",
+            "model_names": []
           },
           {
             "id": "credit",
@@ -207,7 +210,8 @@ const String usageVectors = r'''{
             },
             "status": "ok",
             "observed_at": 1788900050,
-            "source": "reported"
+            "source": "reported",
+            "model_names": []
           },
           {
             "id": "tpm",
@@ -228,7 +232,8 @@ const String usageVectors = r'''{
             },
             "status": "unknown",
             "observed_at": 1788900100,
-            "source": "reported"
+            "source": "reported",
+            "model_names": []
           }
         ]
       }
@@ -256,7 +261,8 @@ const String usageVectors = r'''{
             "status": "exhausted",
             "observed_at": 1788900200,
             "source": "inferred",
-            "evidence": "RESOURCE_EXHAUSTED"
+            "evidence": "RESOURCE_EXHAUSTED",
+            "model_names": []
           }
         ],
         "limit": {
@@ -300,7 +306,8 @@ const String usageVectors = r'''{
             },
             "status": "exhausted",
             "observed_at": 1788900300,
-            "source": "reported"
+            "source": "reported",
+            "model_names": []
           }
         ],
         "limit": {
@@ -360,6 +367,133 @@ const String usageVectors = r'''{
           "cache_write": 10,
           "by_model": []
         }
+      }
+    },
+    {
+      "name": "buckets in groups, each with its models and one window that does not apply",
+      "report": {
+        "supported": true,
+        "sources": [
+          "reported"
+        ],
+        "account": "pool/alice",
+        "revision": 2,
+        "observed_at": 1788900000,
+        "buckets": [
+          {
+            "id": "gemini-weekly",
+            "label": "Weekly Limit",
+            "group": "Gemini Models",
+            "models": {
+              "kind": "only",
+              "models": [
+                "gemini-pro-high",
+                "gemini-flash"
+              ]
+            },
+            "model_names": [
+              "Gemini Pro (High)",
+              "Gemini Flash"
+            ],
+            "unit": "permille",
+            "limit": 1000,
+            "remaining": 8,
+            "refill": {
+              "kind": "fixed_window",
+              "length": [
+                604800,
+                0
+              ],
+              "resets_at": 1789300000
+            },
+            "status": "ok",
+            "observed_at": 1788900000,
+            "source": "reported"
+          },
+          {
+            "id": "gemini-5h",
+            "label": "Five Hour Limit",
+            "group": "Gemini Models",
+            "models": {
+              "kind": "only",
+              "models": [
+                "gemini-pro-high",
+                "gemini-flash"
+              ]
+            },
+            "model_names": [
+              "Gemini Pro (High)",
+              "Gemini Flash"
+            ],
+            "unit": "permille",
+            "limit": 1000,
+            "remaining": 1000,
+            "refill": {
+              "kind": "fixed_window",
+              "length": [
+                18000,
+                0
+              ],
+              "resets_at": 1788918000
+            },
+            "status": "ok",
+            "observed_at": 1788900000,
+            "source": "reported"
+          },
+          {
+            "id": "3p-weekly",
+            "label": "Weekly Limit",
+            "group": "Claude and GPT models",
+            "models": {
+              "kind": "unknown"
+            },
+            "model_names": [
+              "Claude Opus",
+              "Claude Sonnet",
+              "GPT-OSS"
+            ],
+            "unit": "permille",
+            "limit": 1000,
+            "remaining": 0,
+            "refill": {
+              "kind": "fixed_window",
+              "length": [
+                604800,
+                0
+              ],
+              "resets_at": 1789310000
+            },
+            "status": "exhausted",
+            "observed_at": 1788900000,
+            "source": "reported"
+          },
+          {
+            "id": "3p-5h",
+            "label": "Five Hour Limit",
+            "group": "Claude and GPT models",
+            "models": {
+              "kind": "unknown"
+            },
+            "model_names": [
+              "Claude Opus",
+              "Claude Sonnet",
+              "GPT-OSS"
+            ],
+            "unit": "permille",
+            "limit": 1000,
+            "refill": {
+              "kind": "fixed_window",
+              "length": [
+                18000,
+                0
+              ],
+              "resets_at": 1788918000
+            },
+            "status": "disabled",
+            "observed_at": 1788900000,
+            "source": "reported"
+          }
+        ]
       }
     }
   ],
@@ -421,7 +555,8 @@ const String usageVectors = r'''{
             },
             "status": "throttled",
             "observed_at": 5,
-            "source": "estimated"
+            "source": "estimated",
+            "model_names": []
           }
         ]
       },
@@ -488,7 +623,8 @@ const String usageVectors = r'''{
             },
             "status": "ok",
             "observed_at": 5,
-            "source": "reported"
+            "source": "reported",
+            "model_names": []
           }
         ]
       },
