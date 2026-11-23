@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:coqui_acp/coqui_acp.dart' show AcpChoiceField, AcpNumberField;
 import 'package:coqui_acp/secret.dart';
 import 'package:coqui_acp/secret_unprotected.dart';
 import 'package:coqui_acp/src/hpke.dart' as hpke;
@@ -508,6 +509,68 @@ void main() {
           reason: item['name'] as String,
         );
       }
+    });
+
+    test('a derived form is read: labels, nullable types, wide bounds', () {
+      final form = AcpSecretForm.parseText(
+        jsonEncode({
+          r'$schema': 'https://json-schema.org/draft/2020-12/schema',
+          'type': 'object',
+          'properties': {
+            'plan': {
+              'type': ['string', 'null'],
+              'enum': ['a', 'b'],
+              'x-enum-labels': {'a': 'Plan A'},
+            },
+            'big': {'type': 'integer', 'minimum': 0, 'maximum': 1e19},
+            'port': {'type': 'integer', 'minimum': 1, 'maximum': 65535},
+          },
+          'additionalProperties': false,
+        }),
+      );
+      final plan = form.fields[0].field as AcpChoiceField;
+      expect([for (final o in plan.options) o.title], ['Plan A', 'b']);
+      final big = form.fields[1].field as AcpNumberField;
+      expect(big.minimum, 0);
+      expect(big.maximum, isNull);
+      final port = form.fields[2].field as AcpNumberField;
+      expect([port.minimum, port.maximum], [1, 65535]);
+    });
+
+    test('a refusal names the keyword it is at', () {
+      void refused(Map<String, Object?> schema, String pointer) {
+        expect(
+          () => AcpSecretForm.parse({
+            'properties': {
+              'f': {'type': 'string'},
+            },
+            ...schema,
+          }),
+          throwsA(
+            isA<AcpSecretException>().having(
+              (error) => error.reason,
+              'reason',
+              contains('(at $pointer)'),
+            ),
+          ),
+        );
+      }
+
+      refused({'additionalProperties': true}, '/additionalProperties');
+      refused({
+        r'$schema': 'http://json-schema.org/draft-04/schema#',
+      }, r'/$schema');
+      refused({'unevaluatedProperties': false}, '/unevaluatedProperties');
+      refused({
+        'properties': {
+          'k': {'type': 'string', 'writeOnly': true, 'default': 'x'},
+        },
+      }, '/properties/k/default');
+      refused({
+        'properties': {
+          'n': {'type': 'integer', 'maximum': 1.5},
+        },
+      }, '/properties/n/maximum');
     });
 
     test('limits refuse a form past them', () {

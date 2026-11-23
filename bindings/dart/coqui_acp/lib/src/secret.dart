@@ -343,6 +343,63 @@ bool _base64Canonical(String text, {required bool url}) {
 /// The only keywords the schema's root may have: a flat object of questions.
 const _rootAllowed = {'type', 'properties', 'required', 'title', 'description'};
 
+/// The one `$schema` a form may name: the dialect its keywords are read in.
+const _dialect = 'https://json-schema.org/draft/2020-12/schema';
+
+/// A JSON pointer's reference token: `~` as `~0`, `/` as `~1`.
+String _token(String name) => name.replaceAll('~', '~0').replaceAll('/', '~1');
+
+/// A question as the form reads it: a type written `[T, "null"]` is `T`, since an answer never holds null; a whole-number bound
+/// outside 2^53 - 1 limits nothing a form can enter, so it is left out; a bound that is a fraction or no number is refused by
+/// throwing [AcpSecretException] at its pointer.
+Map _plainProperty(String name, Map property) {
+  Map copy = property;
+  void change(String key, Object? value, {bool remove = false}) {
+    if (identical(copy, property)) copy = Map.of(property);
+    if (remove) {
+      copy.remove(key);
+    } else {
+      copy[key] = value;
+    }
+  }
+
+  final type = property['type'];
+  if (type is List &&
+      type.length == 2 &&
+      type.every((kind) => kind is String) &&
+      type.contains('null') &&
+      !(type[0] == 'null' && type[1] == 'null')) {
+    change('type', type.firstWhere((kind) => kind != 'null'));
+  }
+  if (copy['type'] == 'integer') {
+    for (final key in const ['minimum', 'maximum']) {
+      if (!copy.containsKey(key)) continue;
+      final bound = copy[key];
+      if (bound is! num) {
+        throw _at(name, key, 'a bound that is not a number');
+      }
+      if (bound is double &&
+          (!bound.isFinite || bound != bound.truncateToDouble())) {
+        throw _at(name, key, 'a whole-number bound that is a fraction');
+      }
+      if (bound > _maxSafe || bound < -_maxSafe) {
+        change(key, null, remove: true);
+      } else if (bound is double) {
+        change(key, bound.toInt());
+      }
+    }
+  }
+  return copy;
+}
+
+/// The refusal of [keyword] of the question [name].
+AcpSecretException _at(String name, String keyword, String why) =>
+    _atPath('/properties/${_token(name)}/${_token(keyword)}', why);
+
+/// The refusal of the keyword at the JSON pointer [pointer].
+AcpSecretException _atPath(String pointer, String why) =>
+    _fail(AcpSecretFailure.schema, '$why (at $pointer)');
+
 /// The only keywords a secret field may have. Anything else could carry a value, a condition or a hint that makes a frontend draw or
 /// treat the field as something other than a secret.
 const _secretAllowed = {
@@ -428,11 +485,30 @@ final class AcpSecretForm {
     if (_utf8(jsonEncode(schema)).length > limits.schemaBytes) {
       throw bad('the schema is larger than the limit');
     }
-    if (schema.keys.any((key) => !_rootAllowed.contains(key))) {
-      throw bad('the schema has a keyword a flat form does not');
+    for (final MapEntry(:key, :value) in schema.entries) {
+      if (key == r'$schema') {
+        if (value != _dialect) {
+          throw _atPath(
+            '/\$schema',
+            'the schema names a dialect other than draft 2020-12',
+          );
+        }
+      } else if (key == 'additionalProperties') {
+        if (value != false) {
+          throw _atPath(
+            '/additionalProperties',
+            'the schema allows questions it does not declare',
+          );
+        }
+      } else if (!_rootAllowed.contains(key)) {
+        throw _atPath(
+          '/${_token('$key')}',
+          'the schema has a keyword a flat form does not',
+        );
+      }
     }
     if (schema.containsKey('type') && schema['type'] != 'object') {
-      throw bad("the schema's type is not object");
+      throw _atPath('/type', "the schema's type is not object");
     }
     final properties = schema['properties'];
     if (properties is! Map) throw bad('the schema has no properties');
@@ -455,7 +531,7 @@ final class AcpSecretForm {
       }
     }
     final fields = <AcpSecretField>[];
-    for (final MapEntry(:key, :value) in properties.entries) {
+    for (final MapEntry(:key, value: raw) in properties.entries) {
       final name = '$key';
       if (name.isEmpty ||
           _utf8(name).length > limits.nameBytes ||
@@ -466,12 +542,41 @@ final class AcpSecretForm {
           "a property's name is empty, too long or holds a control character",
         );
       }
-      if (value is! Map) throw bad('a property is not an object');
-      final field = acpFieldFromSchema(
+      if (raw is! Map) throw bad('a property is not an object');
+      final value = _plainProperty(name, raw);
+      var field = acpFieldFromSchema(
         name,
         value,
         required: required.contains(name),
       );
+      if (field is AcpChoiceField) {
+        final labels = value['x-enum-labels'];
+        if (labels is Map) {
+          field = AcpChoiceField(
+            field.name,
+            [
+              for (final option in field.options)
+                AcpChoice(
+                  option.value,
+                  labels[option.value] is String
+                      ? labels[option.value] as String
+                      : option.title,
+                  description: option.description,
+                ),
+            ],
+            title: field.title,
+            description: field.description,
+            required: field.required,
+            defaultValue: field.defaultValue,
+          );
+        }
+      } else if (value.containsKey('enum')) {
+        throw _at(
+          name,
+          'enum',
+          'a list of values on a question that is not a text choice',
+        );
+      }
       final options = switch (field) {
         AcpChoiceField(:final options) ||
         AcpChoicesField(:final options) => options.length,
@@ -481,29 +586,31 @@ final class AcpSecretForm {
         throw bad('a question has more choices than the limit');
       }
       if (field is AcpUnsupportedField) {
-        throw bad("a property's type is one no control can show");
+        throw _at(name, 'type', "a property's type is one no control can show");
       }
       final secret = _flag(value, 'writeOnly') | _flag(value, 'x-sensitive');
       if (!secret && value['format'] == 'password') {
-        throw bad('a password format without writeOnly or x-sensitive');
-      }
-      if (field is AcpNumberField &&
-          field.integer &&
-          [
-            field.minimum,
-            field.maximum,
-          ].any((bound) => bound != null && bound.abs() > _maxSafe)) {
-        throw bad('a whole-number bound beyond 2^53 - 1');
+        throw _at(
+          name,
+          'format',
+          'a password format without writeOnly or x-sensitive',
+        );
       }
       if (secret) {
         if (field is! AcpTextField && field is! AcpNumberField) {
-          throw bad('a secret field is not text or a number');
+          throw _at(name, 'type', 'a secret field is not text or a number');
         }
-        if (value.keys.any((key) => !_secretAllowed.contains(key))) {
-          throw bad('a secret field has a keyword a secret field may not');
+        for (final key in value.keys) {
+          if (!_secretAllowed.contains(key)) {
+            throw _at(
+              name,
+              '$key',
+              'a secret field has a keyword a secret field may not',
+            );
+          }
         }
         if (value.containsKey('format') && value['format'] != 'password') {
-          throw bad("a secret field's format is not password");
+          throw _at(name, 'format', "a secret field's format is not password");
         }
       }
       fields.add(
