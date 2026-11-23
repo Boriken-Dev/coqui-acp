@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `coqui_acp::secret::Form::parse` reads the schemas coqui-acp derives for a login: the root may carry `$schema` (draft 2020-12 only) and `additionalProperties` (`false` only), a type written `["string", "null"]` is read as `string`, and an `enum` with `x-enum-labels` is a choice with those labels (an `enum` on another type is refused). A schema that is refused now says where: the new `Error::SchemaAt { at, why }` holds the JSON pointer to the keyword (`/additionalProperties`, `/properties/api_key/default`), and a whole-number bound that is not a whole number within 2^53 - 1 (a `u64` field's `maximum`) is refused instead of dropped. The Dart `AcpSecretForm` still refuses these roots.
+
 ### Changed
 
 - `bindings/dart/coqui_acp_chat_ui` builds on `package:material_ui` (^1.11.1) instead of `package:flutter/material.dart`, so `ChatLook` extends `material_ui`'s `ThemeExtension` and an app puts it in `material_ui`'s `ThemeData`. It needs Flutter `main` (Dart `^3.13.0`, Flutter `>=3.47.0`; checked at `c0205700e04`). The package's goldens are redrawn: its Markdown style sheet is built here from that `ThemeData` (flutter_markdown_plus reads the SDK's own theme), and the same eleven images already differed by a few pixels on Flutter `main` before the move.
