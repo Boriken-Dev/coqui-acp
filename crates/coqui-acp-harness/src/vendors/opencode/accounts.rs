@@ -17,6 +17,7 @@ use std::ffi::OsString;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
+use coqui_acp_api::guatiao::schema::{FieldBuilder, KindBuilder, SchemaBuilder};
 use coqui_acp_api::{
     ASK, Credentials, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
     OPEN_URL, OpenUrl, ProcessSpawner, USER_CODE,
@@ -271,19 +272,22 @@ pub static STDIO: StdioDef = StdioDef {
 #[must_use]
 pub fn logins() -> Vec<LoginMethodInfo> {
     let inputs = |providers: &[&str], methods: &[&str]| {
-        schema(&json!({
-            "type": "object",
-            "properties": {
-                "provider": {"type": "string", "title": "Provider",
-                    "description": "The provider's id or name, as `opencode auth login` takes it.",
-                    "examples": providers},
-                "method": {"type": "string", "title": "Login method",
-                    "description": "The method's label, for a provider that has several.",
-                    "examples": methods},
-            },
-            "required": ["provider"],
-            "additionalProperties": false,
-        }))
+        SchemaBuilder::new()
+            .field(
+                FieldBuilder::new("provider", KindBuilder::string())
+                    .title("Provider")
+                    .description("The provider's id or name, as `opencode auth login` takes it.")
+                    .examples(providers.iter().copied())
+                    .required(),
+            )
+            .field(
+                FieldBuilder::new("method", KindBuilder::string())
+                    .title("Login method")
+                    .description("The method's label, for a provider that has several.")
+                    .examples(methods.iter().copied()),
+            )
+            .finish()
+            .expect("the inputs schema builds")
     };
     let mut own_key =
         LoginMethodInfo::new("provider-key", "A provider's key, kept by OpenCode", LOGIN);
@@ -304,12 +308,14 @@ pub fn logins() -> Vec<LoginMethodInfo> {
     code.remote = true;
     let mut key = LoginMethodInfo::new("api-key", "Provider API key", PROVIDER_KEY);
     key.description = "Asks which environment variable the key goes in (a provider's own is suggested, any other name works) and then the key. It sends nothing to the provider.".to_string();
-    key.inputs = schema(&json!({
-        "type": "object",
-        "properties": {"variable": {"type": "string", "examples": KEY_VARIABLES}},
-        "required": ["variable"],
-        "additionalProperties": false,
-    }));
+    key.inputs = SchemaBuilder::new()
+        .field(
+            FieldBuilder::new("variable", KindBuilder::string())
+                .examples(KEY_VARIABLES.iter().copied())
+                .required(),
+        )
+        .finish()
+        .expect("the inputs schema builds");
     key.steps = vec![ASK.to_string()];
     key.remote = true;
     vec![own_key, code, key]
@@ -328,14 +334,7 @@ fn launch(program: &str, args: &[&str], dir: &str) -> Launch {
 }
 
 fn key_form() -> LoginForm {
-    LoginForm::new(
-        "OpenCode provider key",
-        schema(&json!({
-            "type": "object",
-            "properties": {"api_key": crate::provider::credential()},
-            "required": ["api_key"],
-        })),
-    )
+    LoginForm::secret("OpenCode provider key", "api_key")
 }
 
 /// The key the person typed into `form`, when it is one the program can be given on a line.

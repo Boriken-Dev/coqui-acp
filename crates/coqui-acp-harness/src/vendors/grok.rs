@@ -16,7 +16,6 @@ use coqui_acp_api::{
     ASK, AUTH, Credentials, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
     MODEL_API, OPEN_URL, OpenUrl, PROXY, ProcessSpawner, USER_CODE,
 };
-use serde_json::json;
 
 use coqui_acp_api::standard;
 
@@ -24,7 +23,6 @@ use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
 use crate::cli::address_in;
 use crate::login::reason;
 use crate::process::{Exit, Launch};
-use crate::provider::schema;
 use crate::stdio::accounts::{
     AcceptDef, Credential, Endpoint, HarnessDef, KindDef, Setting, SlotDef,
 };
@@ -452,14 +450,7 @@ fn browser_or_device(
 }
 
 fn api_key(ctx: &Ctx<'_>, program: &str, dir: &str) -> Result<LoginOutcome, ProviderError> {
-    let form = LoginForm::new(
-        "xAI API key",
-        schema(&json!({
-            "type": "object",
-            "properties": {"api_key": crate::provider::credential()},
-            "required": ["api_key"],
-        })),
-    );
+    let form = LoginForm::secret("xAI API key", "api_key");
     let answer = ctx.ask(form)?;
     let key = answer
         .secrets
@@ -534,6 +525,7 @@ mod tests {
     use crate::stdio::accounts::{apply, catalog};
     use coqui_acp_api::standard;
     use coqui_acp_api::{AccountGrant, Credentials, HARNESS_LOGIN};
+    use serde_json::json;
 
     const CANARY: &str = "sk-canary-3b7c";
 

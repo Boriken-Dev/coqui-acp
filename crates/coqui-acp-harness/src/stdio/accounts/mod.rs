@@ -14,7 +14,9 @@ use coqui_acp_api::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::provider::{credential, schema};
+use coqui_acp_api::guatiao::schema::{FieldBuilder, KindBuilder, SchemaBuilder};
+
+use crate::provider::schema;
 
 mod keeping;
 
@@ -182,16 +184,24 @@ impl HarnessDef {
     }
 }
 
-fn property(setting: &Setting) -> Value {
-    let mut property = json!({"type": "string"});
-    if setting.url {
-        property["format"] = json!("uri");
-    }
-    if !setting.choices.is_empty() {
-        property["enum"] = json!(setting.choices);
+fn field(setting: &Setting) -> FieldBuilder {
+    let kind = if setting.choices.is_empty() {
+        let text = KindBuilder::string();
+        if setting.url {
+            text.format("uri")
+        } else {
+            text
+        }
+    } else {
+        let choices: Vec<(&str, &str)> = setting.choices.iter().map(|c| (*c, *c)).collect();
+        KindBuilder::enumeration(&choices)
+    };
+    let mut field = FieldBuilder::new(setting.name, kind);
+    if setting.required {
+        field = field.required();
     }
     if !setting.suggestions.is_empty() {
-        property["examples"] = json!(setting.suggestions);
+        field = field.examples(setting.suggestions.iter().copied());
     }
     if !setting.provides.is_empty() {
         let mut by_value = Map::new();
@@ -203,33 +213,26 @@ fn property(setting: &Setting) -> Value {
                 .expect("a list")
                 .push(json!(standard));
         }
-        property[PROVIDES_BY_VALUE] = Value::Object(by_value);
+        field = field.option(PROVIDES_BY_VALUE, schema(&Value::Object(by_value)));
     }
-    property
+    field
 }
 
 impl KindDef {
-    fn schema(&self) -> Value {
-        let mut properties = Map::new();
-        let mut required = Vec::new();
+    fn schema(&self) -> coqui_acp_api::guatiao::Value {
+        let mut builder = SchemaBuilder::new();
         for credential_def in self.credentials {
-            properties.insert(credential_def.key.to_string(), credential());
+            let mut field =
+                FieldBuilder::new(credential_def.key, KindBuilder::string()).sensitive();
             if credential_def.required {
-                required.push(credential_def.key);
+                field = field.required();
             }
+            builder = builder.field(field);
         }
         for setting in self.settings {
-            properties.insert(setting.name.to_string(), property(setting));
-            if setting.required {
-                required.push(setting.name);
-            }
+            builder = builder.field(field(setting));
         }
-        json!({
-            "type": "object",
-            "properties": properties,
-            "required": required,
-            "additionalProperties": false,
-        })
+        builder.finish().expect("a kind's settings schema builds")
     }
 
     /// Whether an account of the kind provides a standard: the kind lists some, or one of its settings picks them by the
@@ -246,7 +249,7 @@ impl KindDef {
     pub(crate) fn info(&self) -> AccountKindInfo {
         let mut info = AccountKindInfo::new(self.id, self.title);
         info.description = self.description.to_string();
-        info.settings = schema(&self.schema());
+        info.settings = self.schema();
         info.endpoints = self
             .endpoints
             .iter()

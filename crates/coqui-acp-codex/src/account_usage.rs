@@ -21,8 +21,7 @@ use coqui_acp_api::key_usage::{KeySources, read_key as read_key_sources};
 use coqui_acp_api::reader::{ReadError, get_json, now_seconds};
 use coqui_acp_api::usage::Source;
 use coqui_acp_api::{AccountGrant, HARNESS_LOGIN, UsageReport};
-use coqui_acp_harness::account::jwt_claims;
-use coqui_acp_harness::provider::endpoint_setting;
+use coqui_acp_harness::account::{jwt_claims, sole_credential};
 use serde_json::{Value, json};
 
 use crate::accounts::{self, ACCESS_TOKEN, API_KEY, CHATGPT, FILE_KEY};
@@ -97,16 +96,13 @@ fn read_key(
     now: i64,
 ) -> Result<UsageReport, ProviderError> {
     let credentials = grant.credentials.expose();
-    let secret = credentials
-        .get("api_key")
-        .filter(|secret| !secret.is_empty() && credentials.keys().all(|each| each == "api_key"))
-        .ok_or_else(|| {
-            error(
-                Status::GUATIAO_ERR_BAD_VALUE,
-                "the credential is missing or not the kind's",
-            )
-        })?;
-    let custom = endpoint_setting(&grant.settings, "openai_base_url")?;
+    let secret = sole_credential(credentials, "api_key").ok_or_else(|| {
+        error(
+            Status::GUATIAO_ERR_BAD_VALUE,
+            "the credential is missing or not the kind's",
+        )
+    })?;
+    let custom = crate::accounts::openai_endpoint(&grant.settings)?;
     let base = custom
         .as_deref()
         .or(options.endpoint.as_deref())
@@ -222,7 +218,7 @@ pub fn read_limits(
     }
     let base = match &options.endpoint {
         Some(endpoint) => Some(endpoint.clone()),
-        None => endpoint_setting(&grant.settings, "chatgpt_base_url")?,
+        None => crate::accounts::chatgpt_endpoint(&grant.settings)?,
     };
     let url = usage_url(base.as_deref().unwrap_or(DEFAULT_ENDPOINT));
     let bearer = format!("Bearer {token}");

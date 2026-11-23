@@ -498,12 +498,6 @@ pub fn schema(json: &Value) -> coqui_acp_api::guatiao::Value {
     guatiao_serde::from_serde(json.clone()).expect("a schema is a value")
 }
 
-/// The schema of a setting that is a credential: text, marked `writeOnly` and `x-sensitive`, with no default.
-#[must_use]
-pub fn credential() -> Value {
-    serde_json::json!({"type": "string", "writeOnly": true, "x-sensitive": true})
-}
-
 /// Whether a provider that applies nothing to the harness's environment can take `account`: why not, when it cannot.
 ///
 /// Only [`HARNESS_LOGIN`](coqui_acp_api::HARNESS_LOGIN) hands nothing over and clears nothing, so only it is taken; any
@@ -538,29 +532,73 @@ pub fn to_json(value: &coqui_acp_api::guatiao::Value) -> Value {
     serde_json::to_value(guatiao_serde::Serializable::from(value)).unwrap_or(Value::Null)
 }
 
-/// The address setting `key` of an account's `settings`, the only setting its kind reads: absent, or a plain `http(s)`
-/// address ([`coqui_acp_api::is_http_url`]).
+/// The schema `T` derives, as a catalog's `settings` or `inputs` hold it.
+///
+/// # Panics
+///
+/// `T`'s schema cannot be built, which a derived one over plain fields does not.
+#[must_use]
+pub fn schema_of<T: coqui_acp_api::guatiao::Schema>() -> coqui_acp_api::guatiao::Value {
+    T::schema().expect("a derived schema builds")
+}
+
+/// An account's `settings` read as `T`, a type that derives `FromValue`; `deny_unknown_fields` on `T` makes a key the kind
+/// lacks a refusal.
 ///
 /// # Errors
 ///
-/// `GUATIAO_ERR_BAD_VALUE` when the settings are not an object, name anything but `key`, or hold `key` as something
-/// other than an address. No message shows a value.
-pub fn endpoint_setting(
+/// `GUATIAO_ERR_BAD_VALUE` when the settings are not a map `T` reads. No message shows a value.
+pub fn settings_as<T: coqui_acp_api::guatiao::FromValue>(
     settings: &coqui_acp_api::guatiao::Value,
-    key: &str,
-) -> Result<Option<String>, ProviderError> {
-    let bad = |why: &str| ProviderError::new(Status::GUATIAO_ERR_BAD_VALUE, why);
-    let settings = to_json(settings);
-    let Some(object) = settings.as_object() else {
-        return Err(bad("the account's settings are not an object"));
-    };
-    if object.keys().any(|name| name != key) {
-        return Err(bad("the account's settings name something the kind lacks"));
+) -> Result<T, ProviderError> {
+    T::from_value(settings).map_err(|error| {
+        ProviderError::new(
+            Status::GUATIAO_ERR_BAD_VALUE,
+            &alloc::format!("the account's settings are refused: {error}"),
+        )
+    })
+}
+
+/// A plain `http` or `https` address ([`coqui_acp_api::is_http_url`]) of any length, for a setting that is an endpoint.
+///
+/// A field of this type is written `#[map(as_text)]` and reads as text; one that is not an address is refused without its
+/// value being shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Address(String);
+
+impl Address {
+    /// The address as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
-    match object.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(url)) if coqui_acp_api::is_http_url(url) => Ok(Some(url.clone())),
-        Some(_) => Err(bad(&alloc::format!("{key} is not an address"))),
+}
+
+impl core::str::FromStr for Address {
+    type Err = NotAnAddress;
+
+    fn from_str(text: &str) -> Result<Self, NotAnAddress> {
+        if coqui_acp_api::is_http_url(text) {
+            Ok(Self(text.to_string()))
+        } else {
+            Err(NotAnAddress)
+        }
+    }
+}
+
+impl core::fmt::Display for Address {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Why a text is no [`Address`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotAnAddress;
+
+impl core::fmt::Display for NotAnAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("an address starting http:// or https://")
     }
 }
 
@@ -673,14 +711,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    use coqui_acp_api::guatiao::{FromValue, Schema, ToValue};
+
+    #[derive(ToValue, FromValue, Schema, Debug)]
+    #[map(crate = ::coqui_acp_api::guatiao, deny_unknown_fields)]
+    struct Endpoint {
+        #[map(as_text)]
+        #[schema(format = "uri")]
+        base_url: Option<Address>,
+    }
+
+    fn base_url(value: &serde_json::Value) -> Result<Option<String>, ProviderError> {
+        settings_as::<Endpoint>(&schema(value)).map(|e| e.base_url.map(|a| a.as_str().to_string()))
+    }
+
     #[test]
     fn an_endpoint_setting_is_absent_or_an_address_of_any_length_and_nothing_else() {
-        let setting = |value: serde_json::Value| endpoint_setting(&schema(&value), "base_url");
-        assert_eq!(setting(json!({})).unwrap(), None);
-        assert_eq!(setting(json!({"base_url": null})).unwrap(), None);
+        assert_eq!(base_url(&json!({})).unwrap(), None);
+        assert_eq!(base_url(&json!({"base_url": null})).unwrap(), None);
         let long = format!("https://gateway.example/{}", "a".repeat(5000));
         assert_eq!(
-            setting(json!({"base_url": long})).unwrap().as_deref(),
+            base_url(&json!({"base_url": long})).unwrap().as_deref(),
             Some(long.as_str())
         );
         for bad in [
@@ -691,7 +742,36 @@ mod tests {
             json!({"other": "https://x"}),
             json!(["https://x"]),
         ] {
-            assert!(setting(bad.clone()).is_err(), "{bad}");
+            assert!(base_url(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_refused_setting_does_not_show_what_it_held() {
+        let said = base_url(&json!({"base_url": "canary-not-an-address"}))
+            .unwrap_err()
+            .message()
+            .to_string();
+        assert!(!said.contains("canary"), "{said}");
+    }
+
+    #[test]
+    fn a_derived_settings_schema_marks_the_address_and_seals_the_object() {
+        let schema = to_json(&schema_of::<Endpoint>());
+        assert_eq!(schema["properties"]["base_url"]["format"], "uri");
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn a_secret_form_asks_for_one_required_text_marked_sensitive() {
+        let form = coqui_acp_api::LoginForm::secret("Enter the key", "api_key");
+        assert_eq!(form.title, "Enter the key");
+        let schema = to_json(&form.schema);
+        let property = &schema["properties"]["api_key"];
+        assert_eq!(property["type"], "string");
+        assert_eq!(property["x-sensitive"], true);
+        assert_eq!(property["writeOnly"], true);
+        assert_eq!(schema["required"], json!(["api_key"]));
+        assert_eq!(schema["additionalProperties"], false);
     }
 }

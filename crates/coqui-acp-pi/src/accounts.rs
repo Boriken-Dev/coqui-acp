@@ -7,6 +7,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use coqui_acp_api::guatiao::schema::{FieldBuilder, KindBuilder, SchemaBuilder};
 use coqui_acp_api::standard;
 use coqui_acp_api::{ASK, AccountCatalog, LoginMethodInfo};
 use coqui_acp_harness::stdio::accounts::{
@@ -258,17 +259,16 @@ pub fn catalog() -> AccountCatalog {
 pub fn logins() -> Vec<LoginMethodInfo> {
     let mut key = LoginMethodInfo::new(KEY_METHOD, "Provider API key", API_KEY);
     key.description = "Asks which environment variable the key goes in and then the key. It sends nothing to the provider; the account provides the API the variable is a key of.".to_string();
-    key.inputs = coqui_acp_harness::provider::schema(&serde_json::json!({
-        "type": "object",
-        "properties": {"variable": {
-            "type": "string",
-            "title": "Variable",
-            "description": "The environment variable Pi reads the key from.",
-            "examples": KEY_VARIABLES,
-        }},
-        "required": ["variable"],
-        "additionalProperties": false,
-    }));
+    key.inputs = SchemaBuilder::new()
+        .field(
+            FieldBuilder::new("variable", KindBuilder::string())
+                .title("Variable")
+                .description("The environment variable Pi reads the key from.")
+                .examples(KEY_VARIABLES.iter().copied())
+                .required(),
+        )
+        .finish()
+        .expect("the inputs schema builds");
     key.steps = vec![ASK.to_string()];
     key.remote = true;
     vec![key]

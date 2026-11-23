@@ -25,7 +25,6 @@ use coqui_acp_api::{AccountGrant, Credentials, HARNESS_LOGIN, UsageReport};
 use serde_json::Value;
 
 use crate::accounts::{self, API_KEY, AUTH_TOKEN, CONSOLE, FILE_KEY, LOGIN, OAUTH_TOKEN};
-use coqui_acp_harness::provider::endpoint_setting;
 
 use crate::limits::{WEEK, WINDOWS};
 
@@ -247,7 +246,7 @@ fn read_key(
                 "the credential is missing or not the kind's",
             )
         })?;
-    let custom = endpoint_setting(&grant.settings, "base_url")?;
+    let custom = crate::accounts::endpoint(&grant.settings)?;
     let base = custom
         .as_deref()
         .or(options.endpoint.as_deref())

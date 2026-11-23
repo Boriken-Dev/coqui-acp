@@ -22,7 +22,7 @@ use coqui_acp_api::{
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, DEFAULT_POLL_MS};
 use coqui_acp_harness::login::{asked, supervise};
-use coqui_acp_harness::provider::{credential, schema, to_json};
+use coqui_acp_harness::provider::{schema, to_json};
 use coqui_acp_harness::stdio::accounts::{Keeping, check_variable_name};
 
 use crate::account_usage::read_limits;
@@ -158,14 +158,7 @@ impl AccountProvider for PiAccounts {
             prompter,
             request.timeout_ms,
             Box::new(move |_spawner, prompter, _job| {
-                let form = LoginForm::new(
-                    "Pi provider key",
-                    schema(&serde_json::json!({
-                        "type": "object",
-                        "properties": {"api_key": credential()},
-                        "required": ["api_key"],
-                    })),
-                );
+                let form = LoginForm::secret("Pi provider key", "api_key");
                 let answer = asked(prompter.ask(form))?;
                 let key = answer
                     .secrets

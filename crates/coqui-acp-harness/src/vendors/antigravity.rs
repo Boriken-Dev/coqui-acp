@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
+use coqui_acp_api::guatiao::schema::{FieldBuilder, KindBuilder, SchemaBuilder};
 use coqui_acp_api::{
     ASK, Credentials, HARNESS_LOGIN, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter,
     LoginRequest, ProcessSpawner,
@@ -23,7 +24,6 @@ use serde_json::{Value, json};
 use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
 use crate::cli::Next;
 use crate::process::Launch;
-use crate::provider::schema;
 use crate::stdio::accounts::HarnessDef;
 use crate::stdio::login::{self, Ctx};
 use crate::stdio::{StdioAccountSettings, StdioDef, StdioSettings};
@@ -83,18 +83,16 @@ pub fn sign_in(
             };
             let form = LoginForm::new(
                 "Start Antigravity to sign in",
-                schema(&json!({
-                    "type": "object",
-                    "properties": {
-                        "started": {
-                            "type": "boolean",
-                            "title": "Antigravity is started and signed in",
-                            "description": alloc::format!(
+                SchemaBuilder::new()
+                    .field(
+                        FieldBuilder::new("started", KindBuilder::bool())
+                            .title("Antigravity is started and signed in")
+                            .description(&alloc::format!(
                                 "Antigravity did not open a session ({why}). Start Antigravity, sign in there, then continue."
-                            ),
-                        },
-                    },
-                })),
+                            )),
+                    )
+                    .finish()
+                    .expect("the form schema builds"),
             );
             ctx.ask(form)?;
         }
