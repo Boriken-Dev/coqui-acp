@@ -120,6 +120,17 @@ fn write_only(property: &Value) -> bool {
     property.get("writeOnly") == Some(&json!(true))
 }
 
+/// Whether a schema's `type` is text: `string`, or `string` and `null` for a setting that may be absent.
+fn is_text_type(kind: &Value) -> bool {
+    match kind {
+        Value::String(name) => name == "string",
+        Value::Array(names) => {
+            !names.is_empty() && names.iter().all(|name| name == "string" || name == "null")
+        }
+        _ => false,
+    }
+}
+
 fn x_sensitive(property: &Value) -> bool {
     property.get("x-sensitive") == Some(&json!(true))
 }
@@ -262,7 +273,7 @@ pub(super) fn kind_rules(kinds: &[AccountKindInfo]) -> Outcome {
                 let property = properties(&schema).get(key).cloned();
                 ensure!(
                     property.as_ref().is_some_and(|p| {
-                        !write_only(p) && p.get("type").is_none_or(|t| t == "string")
+                        !write_only(p) && p.get("type").is_none_or(is_text_type)
                     }),
                     "{}'s endpoint names {key}, which is not a plain text setting",
                     info.id

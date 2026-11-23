@@ -995,6 +995,20 @@ impl LoginForm {
             schema,
         }
     }
+
+    /// A form titled `title` that asks for one secret text, which the host answers in
+    /// [`LoginAnswer::secrets`] under `key`.
+    #[must_use]
+    pub fn secret(title: impl Into<String>, key: &str) -> Self {
+        let field = guatiao::schema::FieldBuilder::new(key, guatiao::schema::KindBuilder::string())
+            .sensitive()
+            .required();
+        let schema = guatiao::schema::SchemaBuilder::new()
+            .field(field)
+            .finish()
+            .expect("a schema of one field builds");
+        Self::new(title, schema)
+    }
 }
 
 /// What the person answered, from [`LoginPrompter::ask`].
