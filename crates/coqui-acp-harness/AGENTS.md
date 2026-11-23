@@ -72,8 +72,10 @@ pub fn shared(harness: impl Harness) -> Arc<dyn Harness>
 pub fn track(thread: JoinHandle<()>);  pub fn to_json(&guatiao::Value) -> Value        // track: threads_done waits for it
 pub fn threads_done() -> Status                                                    // a library's `unload` hook
 pub fn takes_of(takes: &Takes) -> coqui_acp_api::Takes                              // resume true
-pub fn schema(json: &Value) -> guatiao::Value;  pub fn credential() -> Value        // for a catalog
-pub fn endpoint_setting(settings: &guatiao::Value, key: &str) -> Result<Option<String>, ProviderError>   // an account's one address setting: absent, or an http(s) address of any length (`coqui_acp_api::is_http_url`); BAD_VALUE for anything else, naming no value
+pub fn schema(json: &Value) -> guatiao::Value                                      // any JSON as a Guatiao value
+pub fn schema_of<T: guatiao::Schema>() -> guatiao::Value                           // what a catalog's `settings` and `inputs` hold: a type that derives `Schema`, a credential field `#[schema(sensitive)]`
+pub fn settings_as<T: guatiao::FromValue>(settings: &guatiao::Value) -> Result<T, ProviderError>   // an account's settings read as T (`deny_unknown_fields` refuses a key the kind lacks); BAD_VALUE naming no value
+pub struct Address;   // FromStr + Display, for a field `#[map(as_text)] #[schema(format = "uri")] base_url: Option<Address>`: an http(s) address of any length (`coqui_acp_api::is_http_url`), anything else refused with no value shown; .as_str()
 pub fn own_kind(grant: &AccountGrant, offer: &AccountOffer) -> Result<(), ProviderError>   // the id is one and the offer lists the grant's kind; what an account provider asks before it keeps an account
 pub fn account_refusal(catalog: &AccountCatalog, account: &AccountRef) -> Result<Option<String>, ProviderError>
 ```
@@ -87,6 +89,13 @@ What a provider of `acp_harness` needs to front a harness that `serve` serves. `
 What a provider that applies an account to a harness started through a host's spawner needs.
 
 ```rust
+pub fn kind_info(id, title, description, settings: guatiao::Value) -> AccountKindInfo;  pub fn method_info(id, title, description, produces) -> LoginMethodInfo;  pub fn typed_method(..) -> LoginMethodInfo /* one `ask` step, remote */
+pub fn provide_standards(catalog: &mut AccountCatalog, standard_of: impl Fn(&str) -> &str)   // what each kind provides, by its id
+pub fn harness_catalog(full: AccountCatalog) -> AccountCatalog   // what the harness takes: no login method, no kind renews
+pub fn provider_offer(full: AccountCatalog, usage: &[&str]) -> AccountOffer   // every kind but `harness-login`, the sign-in methods, `local`, and the kinds whose usage it reads
+pub fn takes_no_settings(settings: &guatiao::Value) -> Result<(), ProviderError>;  pub struct NoSettings {}   // the harness's own login takes none
+pub fn sole_credential<'a>(credentials: &'a Credentials, key: &str) -> Option<&'a str>   // the text of `key` when it is the only credential and not empty
+pub fn bad(why: &str) -> ProviderError   // BAD_VALUE
 pub struct SecretText;   // a credential as text: wiped when dropped, Debug shows its length; Deref<Target = str>
 pub enum FileState { Missing, Text(SecretText), Planted /* longer than MAX_FILE_BYTES, a link, not a file */ }
 pub struct Files;   // Clone; the held spawner's file methods

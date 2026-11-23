@@ -363,7 +363,7 @@ pub trait AccountKeeper: Send + Sync {
 pub trait LoginPrompter: Send + Sync {
     fn say(&self, text: &str) -> Result<(), ProviderError>;
     fn open_url(&self, open: OpenUrl) -> Result<(), ProviderError>;            // OpenUrl { url, user_code: Option<String>, expires_ms: Option<u64> }
-    fn ask(&self, form: LoginForm) -> Result<LoginAnswer, ProviderError>;      // LoginForm { title, schema }; LoginAnswer { values: Value, secrets: Secret<Credentials> }
+    fn ask(&self, form: LoginForm) -> Result<LoginAnswer, ProviderError>;      // LoginForm { title, schema } (LoginForm::secret(title, key): one required sensitive text); LoginAnswer { values: Value, secrets: Secret<Credentials> }
     fn cancelled(&self) -> Result<bool, ProviderError>;
 }
 ```
