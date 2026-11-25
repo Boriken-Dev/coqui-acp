@@ -187,6 +187,16 @@ pub(super) fn parse_available(body: &[u8]) -> Option<Vec<Model>> {
     )
 }
 
+/// The models `read` lists as an ACP agent's, each with its id and its label for a name (the id when it has none).
+pub(super) fn acp_models(read: &[Model]) -> Vec<AcpModel> {
+    read.iter()
+        .filter_map(|model| {
+            let id = model.id.as_deref()?;
+            Some(AcpModel::new(id, model.label.as_deref().unwrap_or(id)))
+        })
+        .collect()
+}
+
 fn model(config: Config) -> Option<Model> {
     let quota = config.quota?;
     let fraction = match quota.fraction {

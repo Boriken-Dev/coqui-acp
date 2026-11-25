@@ -211,9 +211,16 @@ impl Google {
     /// The usual answers, and the service's summary of the quota: the groups of models for a client that names itself agy's
     /// command line, and only the group every client knows for any other.
     fn with_summary(access: &'static str, models: Value) -> Self {
-        let summary: Value =
-            serde_json::from_str(include_str!("fixtures/agy-1.5.15/retrieveusersummary.json"))
-                .unwrap();
+        Self::with_summary_of(
+            access,
+            models,
+            include_str!("fixtures/agy-1.5.15/retrieveusersummary.json"),
+        )
+    }
+
+    /// As `with_summary`, with the summary `text` says.
+    fn with_summary_of(access: &'static str, models: Value, text: &str) -> Self {
+        let summary: Value = serde_json::from_str(text).unwrap();
         Self::start(move |request| {
             if request.path != "/v1internal:retrieveUserQuotaSummary" {
                 return answer(request, access, &models);
@@ -766,5 +773,112 @@ fn a_stored_token_the_service_refuses_is_refreshed_once() {
             .filter(|path| *path == "/token")
             .count(),
         1
+    );
+}
+
+/// The listing the service gives, shaped as `fetchAvailableModels` answers it: each model's id under `models`, with its
+/// `displayName`.
+fn listed_models() -> Value {
+    let now = now();
+    let reset = rfc3339(now + 3_600);
+    json!({
+        "models": {
+            "gemini-4-neon-high": {"displayName": "Gemini 4 Neon (High)", "quotaInfo": {"remainingFraction": 0.5, "resetTime": reset}},
+            "gemini-4-carbon-low": {"displayName": "Gemini 4 Carbon (Low)", "quotaInfo": {"remainingFraction": 0.5, "resetTime": reset}},
+            "gemini-4-argon-medium": {"displayName": "Gemini 4 Argon (Medium)", "quotaInfo": {"remainingFraction": 0.5, "resetTime": reset}},
+            "gemini-4-hydrogen-high": {"displayName": "Gemini 4 Hydrogen (High)", "quotaInfo": {"remainingFraction": 0.5, "resetTime": reset}},
+            "gemini-3.8-flash-low": {"displayName": "Gemini 3.8 Flash (Low)", "quotaInfo": {"remainingFraction": 0.5, "resetTime": reset}},
+            "claude-opus-5-5-high": {"displayName": "Claude Opus 5.5 (High)", "quotaInfo": {"resetTime": reset}},
+            "claude-sonnet-5-5-low": {"displayName": "Claude Sonnet 5.5 (Low)", "quotaInfo": {"resetTime": reset}},
+            "gpt-oss-120b-medium": {"displayName": "GPT-OSS 120B (Medium)", "quotaInfo": {"resetTime": reset}}
+        }
+    })
+}
+
+#[test]
+fn with_no_session_the_models_the_service_lists_say_which_models_a_bucket_covers() {
+    let home = Home::new("nothing_started");
+    home.login(STORED_ACCESS, now() + 3_600);
+    let google = Google::with_summary_of(
+        STORED_ACCESS,
+        listed_models(),
+        include_str!("fixtures/agy-1.5.15/retrieveusersummary_one_gemini_pool.json"),
+    );
+    let mut reader = AgyLogin::new(google.settings(&home));
+
+    let buckets = signed_in(reader.read(&[]).unwrap()).usage.unwrap();
+
+    // One pool for every Gemini model, Argon included: its two windows name Argon among their models and cover its ids.
+    let weekly = &buckets[0];
+    assert_eq!(weekly.id, "agy:gemini-weekly");
+    assert!(weekly.model_names.contains(&"Gemini 4 Argon".to_string()));
+    let gemini = Coverage::Only {
+        models: vec![
+            "gemini-4-neon-high".into(),
+            "gemini-4-carbon-low".into(),
+            "gemini-4-argon-medium".into(),
+            "gemini-4-hydrogen-high".into(),
+            "gemini-3.8-flash-low".into(),
+        ],
+    };
+    assert_eq!(weekly.models, gemini);
+    assert_eq!(buckets[1].models, gemini);
+    assert_eq!(
+        buckets[2].models,
+        Coverage::Only {
+            models: vec![
+                "claude-opus-5-5-high".into(),
+                "claude-sonnet-5-5-low".into(),
+                "gpt-oss-120b-medium".into(),
+            ]
+        }
+    );
+
+    // The list is kept for a while, so the next reading does not ask for it again.
+    let _ = reader.read(&[]).unwrap();
+    let asked = google
+        .paths()
+        .iter()
+        .filter(|path| path.as_str() == "/v1internal:fetchAvailableModels")
+        .count();
+    assert_eq!(asked, 1);
+}
+
+#[test]
+fn a_session_that_lists_models_is_not_overruled_by_the_list_of_the_service() {
+    let home = Home::new("session_wins");
+    home.login(STORED_ACCESS, now() + 3_600);
+    let google = Google::with_summary_of(
+        STORED_ACCESS,
+        listed_models(),
+        include_str!("fixtures/agy-1.5.15/retrieveusersummary_one_gemini_pool.json"),
+    );
+    let mut reader = AgyLogin::new(google.settings(&home));
+    let session = vec![
+        AcpModel::new("a-neon", "Gemini 4 Neon (High)"),
+        AcpModel::new("a-carbon", "Gemini 4 Carbon (Low)"),
+        AcpModel::new("a-argon", "Gemini 4 Argon (Medium)"),
+        AcpModel::new("a-hydrogen", "Gemini 4 Hydrogen (High)"),
+        AcpModel::new("a-flash", "Gemini 3.8 Flash (Low)"),
+    ];
+
+    let buckets = signed_in(reader.read(&session).unwrap()).usage.unwrap();
+
+    assert_eq!(
+        buckets[0].models,
+        Coverage::Only {
+            models: vec![
+                "a-neon".into(),
+                "a-carbon".into(),
+                "a-argon".into(),
+                "a-hydrogen".into(),
+                "a-flash".into()
+            ]
+        }
+    );
+    assert!(
+        !google
+            .paths()
+            .contains(&"/v1internal:fetchAvailableModels".to_string())
     );
 }

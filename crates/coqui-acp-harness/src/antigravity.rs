@@ -26,6 +26,7 @@ use std::time::Instant;
 use coqui_acp_api::usage::Bucket;
 
 mod login;
+mod models;
 mod ports;
 mod status;
 
@@ -34,6 +35,7 @@ pub use login::{
     Keyring, KeyringLookup, LoginError, LoginReading, LoginSettings, OAuthClient, SERVICE_VARIABLE,
     Secret, SignedIn, Step, TOKEN_URL, USER_AGENT, USERINFO_URL,
 };
+pub use models::{MODELS_ARGS, list_models, parse_models};
 pub use ports::loopback_listeners;
 pub use status::AgyAccount;
 

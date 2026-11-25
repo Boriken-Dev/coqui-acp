@@ -31,6 +31,9 @@ mod stored;
 
 pub use stored::Secret;
 
+/// How long the models the service listed are kept, in seconds.
+const LISTED_FOR: i64 = 600;
+
 /// The keyring service agy keeps its login under.
 pub const KEYRING_SERVICE: &str = "gemini";
 /// The keyring user agy keeps its login under.
@@ -431,6 +434,8 @@ pub struct AgyLogin {
     working: BTreeMap<String, OAuthClient>,
     windows: status::Windows,
     unmatched: u64,
+    /// The models the service listed when no session gave any, and when (Unix seconds).
+    listed: Option<(i64, Vec<AcpModel>)>,
 }
 
 impl fmt::Debug for AgyLogin {
@@ -484,6 +489,7 @@ impl AgyLogin {
             working: BTreeMap::new(),
             windows: status::Windows::default(),
             unmatched: 0,
+            listed: None,
         }
     }
 
@@ -598,6 +604,37 @@ impl AgyLogin {
         });
 
         let request = project.map_or_else(|| json!({}), |project| json!({"project": project}));
+        // With no session to say which models the agent lists, the service's own list says which models a group names.
+        let listed: Vec<AcpModel>;
+        let models = if models.is_empty() {
+            listed = match &self.listed {
+                Some((at, held)) if now.saturating_sub(*at) < LISTED_FOR => held.clone(),
+                _ => {
+                    let url = endpoint(&base, "fetchAvailableModels");
+                    let read = authorized(self, &|agent, token| {
+                        post(
+                            agent,
+                            &url,
+                            token,
+                            &request,
+                            limit,
+                            Step::FetchAvailableModels,
+                        )
+                    })
+                    .ok()
+                    .and_then(|body| status::parse_available(&body))
+                    .map(|read| status::acp_models(&read))
+                    .unwrap_or_default();
+                    if !read.is_empty() {
+                        self.listed = Some((now, read.clone()));
+                    }
+                    read
+                }
+            };
+            &listed[..]
+        } else {
+            models
+        };
         // The service's own summary of the quota says the groups of models and each group's windows; accounts and services that
         // do not answer it are read through each model's quota instead.
         let url = endpoint(&base, "retrieveUserQuotaSummary");
