@@ -2,7 +2,7 @@
 //!
 //! Pi keeps what `/login` signed in with in `auth.json` of its agent directory (`PI_CODING_AGENT_DIR`, else `.pi/agent` below
 //! the user's home), and reads a provider's key from that provider's own variable. A login is there when `auth.json` holds an
-//! entry or when one of [`KEY_VARIABLES`](crate::accounts::KEY_VARIABLES) is set and not empty. Pi keeps no login anywhere
+//! entry or when one of [`KEY_VARIABLES`] is set and not empty. Pi keeps no login anywhere
 //! else, so a file that is not there is signed out.
 
 use std::path::PathBuf;

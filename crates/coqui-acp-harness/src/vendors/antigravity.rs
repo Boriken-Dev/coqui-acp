@@ -179,7 +179,7 @@ fn signed_in(environment: &Environment, wait: Duration) -> SignedInCheck {
     signed_in_with(environment, wait, crate::antigravity::Keyring::Os)
 }
 
-/// [`signed_in`] with the keyring `keyring` names, so that a test need not read the operating system's.
+/// The signed-in check with the keyring `keyring` names, so that a test need not read the operating system's.
 #[cfg(feature = "antigravity")]
 #[must_use]
 pub fn signed_in_with(
