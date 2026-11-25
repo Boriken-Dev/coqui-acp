@@ -8,7 +8,9 @@
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::time::Duration;
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
@@ -16,6 +18,7 @@ use coqui_acp_api::{
     ASK, AUTH, Credentials, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
     MODEL_API, OPEN_URL, OpenUrl, PROXY, ProcessSpawner, USER_CODE,
 };
+use coqui_acp_api::{Environment, SignedInCheck, SignedInState};
 
 use coqui_acp_api::standard;
 
@@ -23,6 +26,7 @@ use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
 use crate::cli::address_in;
 use crate::login::reason;
 use crate::process::{Exit, Launch};
+use crate::signed_in;
 use crate::stdio::accounts::{
     AcceptDef, Credential, Endpoint, HarnessDef, KindDef, Setting, SlotDef,
 };
@@ -267,9 +271,35 @@ pub static DEF: HarnessDef = HarnessDef {
     login_unsupported: "",
 };
 
+/// The variables Grok signs in by itself with: a key of xAI's API.
+const SIGN_IN_VARIABLES: &[&str] = &["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"];
+
+/// Whether Grok has a login: `auth.json` in its home (`GROK_HOME`) that holds something, or a key in one of
+/// [`SIGN_IN_VARIABLES`]. Without `GROK_HOME` the home is assumed to be `.grok` below the user's home, which was not measured,
+/// so a file missing there is unknown, not signed out.
+fn signed_in(environment: &Environment, _wait: Duration) -> SignedInCheck {
+    let named = signed_in::value(environment, "GROK_HOME").map(PathBuf::from);
+    let assumed = named.is_none();
+    let home = named.or_else(|| signed_in::home(environment).map(|home| home.join(".grok")));
+    let path = home.map(|home| home.join(AUTH_FILE));
+    let answer = signed_in::answer_for_file(
+        environment,
+        SIGN_IN_VARIABLES,
+        path.as_deref(),
+        "Grok's auth.json",
+    );
+    if assumed && answer.state == SignedInState::SignedOut {
+        return SignedInCheck::unknown(
+            "Grok's auth.json is not in the folder Grok is assumed to keep it in (.grok below the home), which was not measured, and GROK_HOME is not set",
+        );
+    }
+    answer
+}
+
 /// How the stdio provider runs it.
 pub static STDIO: StdioDef = StdioDef {
     accounts: &DEF,
+    signed_in,
     accounts_description: "Signs in to Grok, renews and watches its logins, and says its accounts report no plan usage.",
     logins,
     sign_in: Some(sign_in),

@@ -19,9 +19,9 @@ use coqui_acp_api::{
     ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo, LoginOutcome,
     LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, NAMES, NonDefault,
     NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement,
-    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, SpawnSpec,
-    SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize, UnknownKind,
-    UsageReport, UsageSupport, WatchRequest,
+    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, SignedInCheck,
+    SignedInQuery, SignedInState, SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend,
+    StartRequest, Takes, TerminalSize, UnknownKind, UsageReport, UsageSupport, WatchRequest,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -135,6 +135,9 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("AccountUsageQuery", schema_of::<AccountUsageQuery>()),
         ("AccountModelsQuery", schema_of::<AccountModelsQuery>()),
         ("AccountUsage", schema_of::<AccountUsage>()),
+        ("SignedInQuery", schema_of::<SignedInQuery>()),
+        ("SignedInState", schema_of::<SignedInState>()),
+        ("SignedInCheck", schema_of::<SignedInCheck>()),
     ]
 }
 
@@ -156,7 +159,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 52] = [
+    let pinned: [(&str, &[&str], &[&str]); 54] = [
         (
             "StartRequest",
             &[
@@ -538,9 +541,15 @@ fn every_models_keys_are_pinned() {
             ],
             &["observed_at", "revision", "supported"],
         ),
+        ("SignedInQuery", &["environment"], &[]),
+        (
+            "SignedInCheck",
+            &["reason", "state", "variable"],
+            &["state"],
+        ),
     ];
     let schemas = schemas();
-    assert_eq!(pinned.len(), 52);
+    assert_eq!(pinned.len(), 54);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()
@@ -772,7 +781,7 @@ const SPAWNER_HASH: u32 = 4038904472;
 const PROCESS_HASH: u32 = 3306532587;
 const KEEPER_HASH: u32 = 708146915;
 const PROMPTER_HASH: u32 = 2606822037;
-const ACCOUNT_PROVIDER_HASH: u32 = 1682791892;
+const ACCOUNT_PROVIDER_HASH: u32 = 2677651813;
 const ACCOUNT_WATCH_HASH: u32 = 589148782;
 
 const HASHES: [(&str, u32); 9] = [

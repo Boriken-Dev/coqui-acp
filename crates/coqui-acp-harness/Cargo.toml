@@ -27,10 +27,18 @@ antigravity = [
     "dep:ureq",
     "dep:windows-sys",
     "dep:memchr",
+    "keyring",
+]
+# Whether a program's login is in the operating system's keyring or keychain, looked at with no secret read into an answer: the
+# `keyring` module.
+keyring = [
     "dep:keyring-core",
     "dep:windows-native-keyring-store",
     "dep:apple-native-keyring-store",
     "dep:zbus-secret-service-keyring-store",
+    "dep:security-framework",
+    "dep:sha2",
+    "dep:data-encoding",
 ]
 # The acp_harness kind's spawner on this machine, and Spawn through any host's spawner.
 kind = ["dep:guatiao-serde", "dep:coqui-acp-history"]
@@ -51,6 +59,10 @@ memchr = { version = "2", optional = true }
 # Antigravity's login in the operating system's keyring, through keyring-core and the platform's store below.
 keyring-core = { version = "1", optional = true }
 
+# The name a login is kept under in the keyring: a digest of a folder.
+sha2 = { workspace = true, optional = true }
+data-encoding = { workspace = true, optional = true }
+
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
@@ -61,6 +73,8 @@ zbus-secret-service-keyring-store = { version = "1", optional = true, features =
 # The Keychain.
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", optional = true, features = ["keychain"] }
+# Whether a Keychain item is there, from its attributes alone.
+security-framework = { version = "3.7", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 win32job.workspace = true
@@ -133,4 +147,8 @@ workspace = true
 
 [[test]]
 name = "login_forms"
+required-features = ["kind"]
+
+[[test]]
+name = "signed_in"
 required-features = ["kind"]

@@ -119,6 +119,10 @@ pub struct OpenCodeAccountSettings {
     /// The longest, in milliseconds, a command of the harness's own may run; 0 ends it at once.
     #[map(default = 60_000)]
     pub command_timeout_ms: u64,
+    /// The longest, in milliseconds, the look at where OpenCode keeps its sign-in may take before the answer is unknown; 0
+    /// does not wait for it.
+    #[map(default = 5_000)]
+    pub signed_in_timeout_ms: u64,
 }
 
 impl Default for OpenCodeAccountSettings {
@@ -128,6 +132,7 @@ impl Default for OpenCodeAccountSettings {
             executable: None,
             renew_poll_ms: own.renew_poll_ms,
             command_timeout_ms: own.command_timeout_ms,
+            signed_in_timeout_ms: own.signed_in_timeout_ms,
         }
     }
 }
@@ -138,6 +143,7 @@ impl From<OpenCodeAccountSettings> for StdioAccountSettings {
         own.executable = settings.executable;
         own.renew_poll_ms = settings.renew_poll_ms;
         own.command_timeout_ms = settings.command_timeout_ms;
+        own.signed_in_timeout_ms = settings.signed_in_timeout_ms;
         own
     }
 }

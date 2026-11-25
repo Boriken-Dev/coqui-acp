@@ -478,6 +478,17 @@ struct TokenAnswer {
     expires_in: Option<i64>,
 }
 
+/// Whether a whole sign-in is stored, in the keyring or in a file, with no reading of its account or its usage and no
+/// request: the check a host makes before it lists the account. A keyring that does not answer within
+/// [`LoginSettings::keyring_timeout`] and no file to fall back on is the error; an expired login still counts.
+///
+/// # Errors
+///
+/// The step that could not be read, when nothing else was found.
+pub fn has_stored_login(settings: &LoginSettings) -> Result<bool, LoginError> {
+    Ok(stored::load(settings)?.is_some())
+}
+
 impl AgyLogin {
     /// A reader with `settings`.
     #[must_use]

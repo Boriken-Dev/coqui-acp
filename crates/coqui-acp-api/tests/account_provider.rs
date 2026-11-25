@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use coqui_acp_api::contract::AccountContract;
 use coqui_acp_api::guatiao::library::{Object, ProviderError, Registry};
@@ -17,8 +18,9 @@ use coqui_acp_api::guatiao::{Map, Value};
 use coqui_acp_api::{
     AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
     AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, Credentials,
-    HARNESS_LOGIN, LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing,
-    ProcessSpawner, RenewReport, RenewRequest, WatchRequest,
+    Environment, HARNESS_LOGIN, LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing,
+    ProcessSpawner, RenewReport, RenewRequest, SignedInCheck, SignedInQuery, SignedInState,
+    WatchRequest,
 };
 
 /// The echo's library file, which `cargo test` builds beside the tests.
@@ -236,6 +238,34 @@ impl AccountProvider for Breaks {
         }
         self.inner.models(query, spawner, keeper)
     }
+
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError> {
+        match self.breaking {
+            "signed_in that shows the environment" => {
+                let shown: String = query
+                    .environment
+                    .expose()
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect();
+                Ok(SignedInCheck::signed_out(shown))
+            }
+            "signed out with no reason" => {
+                let mut answer = SignedInCheck::signed_out("");
+                answer.reason = None;
+                Ok(answer)
+            }
+            "signed_in that changes its mind" => {
+                static ASKED: AtomicBool = AtomicBool::new(false);
+                if ASKED.swap(true, Ordering::SeqCst) {
+                    Ok(SignedInCheck::signed_in())
+                } else {
+                    Ok(SignedInCheck::unknown("not yet"))
+                }
+            }
+            _ => self.inner.signed_in(query),
+        }
+    }
 }
 
 /// A watch that tells nothing, ever.
@@ -328,6 +358,57 @@ fn a_provider_whose_provides_disagrees_with_its_kind_is_named() {
 #[test]
 fn provides_asked_of_a_kind_the_provider_does_not_list_must_be_refused() {
     broken_by("provides for any kind", "says what its accounts provide");
+}
+
+#[test]
+fn a_signed_in_answer_that_shows_the_environment_is_named() {
+    broken_by(
+        "signed_in that shows the environment",
+        "says whether the program's own login exists",
+    );
+}
+
+#[test]
+fn a_signed_out_answer_with_no_reason_is_named() {
+    broken_by(
+        "signed out with no reason",
+        "says whether the program's own login exists",
+    );
+}
+
+#[test]
+fn an_answer_that_changes_between_calls_is_named() {
+    broken_by(
+        "signed_in that changes its mind",
+        "says whether the program's own login exists",
+    );
+}
+
+/// The echo is signed in by its variable, named and never shown, and signed out without it.
+#[test]
+fn the_echo_says_whether_its_own_login_exists() {
+    let (_registry, provider) = echo();
+    let out = provider
+        .signed_in(SignedInQuery::new())
+        .expect("asked with nothing set");
+    assert_eq!(out.state, SignedInState::SignedOut);
+    assert!(out.reason.is_some_and(|reason| !reason.is_empty()));
+    let key = "echo-secret-value-3f1a";
+    let found = provider
+        .signed_in(
+            SignedInQuery::new().environment(Environment::from_iter([("ECHO_API_KEY", key)])),
+        )
+        .expect("asked with its variable set");
+    assert_eq!(found, SignedInCheck::by_variable("ECHO_API_KEY"));
+    assert!(!format!("{found:?}").contains(key));
+    let empty = provider
+        .signed_in(SignedInQuery::new().environment(Environment::from_iter([("ECHO_API_KEY", "")])))
+        .expect("asked with it empty");
+    assert_eq!(
+        empty.state,
+        SignedInState::SignedOut,
+        "an empty variable is no login"
+    );
 }
 
 /// The echo answers the standards of its kinds, and of the login its program has where it runs, and refuses any other.

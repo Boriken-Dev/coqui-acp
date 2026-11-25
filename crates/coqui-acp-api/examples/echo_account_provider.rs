@@ -28,8 +28,8 @@ use coqui_acp_api::{
     AccountOffer, AccountProvider, AccountProviderInfo, AccountRef, AccountRenewal, AccountUsage,
     AccountUsageQuery, AccountWatch, Credentials, EndpointSlot, HARNESS_LOGIN, LoginForm,
     LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest, MODEL_API, ModelInfo, ModelListing,
-    OPEN_URL, OpenUrl, ProcessSpawner, RenewReport, RenewRequest, SecretBytes, SpawnSpec,
-    SpawnedProcess, USER_CODE, WatchRequest, is_account_id,
+    OPEN_URL, OpenUrl, ProcessSpawner, RenewReport, RenewRequest, SecretBytes, SignedInCheck,
+    SignedInQuery, SpawnSpec, SpawnedProcess, USER_CODE, WatchRequest, is_account_id,
 };
 use serde_json::{Value, json};
 
@@ -132,6 +132,8 @@ guatiao::providers!(
 const FILE_KIND: &str = "echo-login";
 /// The kind with a credential in a variable.
 const KEY_KIND: &str = "echo-key";
+/// The variable the echo's own program signs in by itself with.
+const SIGN_IN_VARIABLE: &str = "ECHO_API_KEY";
 /// The one file of the file kind, relative to the account's directory.
 const FILE: &str = "auth.json";
 /// The credential key a file is held under.
@@ -842,6 +844,16 @@ impl AccountProvider for EchoAccounts {
             models.push(ModelInfo::new("echo-large"));
         }
         Ok(ModelListing::of(models))
+    }
+
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError> {
+        // The echo's own login is the variable its program signs in by.
+        Ok(match query.environment.expose().get(SIGN_IN_VARIABLE) {
+            Some(value) if !value.is_empty() => SignedInCheck::by_variable(SIGN_IN_VARIABLE),
+            _ => SignedInCheck::signed_out(format!(
+                "the echo is signed in by {SIGN_IN_VARIABLE}, which is not set"
+            )),
+        })
     }
 
     fn usage(

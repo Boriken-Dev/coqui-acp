@@ -17,7 +17,7 @@ use coqui_acp_api::{
     AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
     AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, Credentials, HARNESS_LOGIN,
     LoginForm, LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner,
-    RenewReport, RenewRequest, UnknownKind, WatchRequest,
+    RenewReport, RenewRequest, SignedInCheck, SignedInQuery, UnknownKind, WatchRequest,
 };
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, DEFAULT_POLL_MS};
@@ -202,6 +202,10 @@ impl AccountProvider for PiAccounts {
             keeper,
             Duration::from_millis(self.settings.renew_poll_ms),
         )
+    }
+
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError> {
+        Ok(crate::signed_in::check(query.environment.expose()))
     }
 
     fn usage(

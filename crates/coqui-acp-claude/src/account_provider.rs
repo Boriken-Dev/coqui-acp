@@ -20,7 +20,8 @@ use coqui_acp_api::{
     AccountGrant, AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider,
     AccountProviderInfo, AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, Credentials,
     HARNESS_LOGIN, LoginOutcome, LoginPrompter, LoginRequest, ModelInfo, ModelListing,
-    ProcessSpawner, RenewReport, RenewRequest, UnknownKind, WatchRequest,
+    ProcessSpawner, RenewReport, RenewRequest, SignedInCheck, SignedInQuery, UnknownKind,
+    WatchRequest,
 };
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
@@ -55,6 +56,10 @@ pub struct AccountSettings {
     /// The longest, in milliseconds, a plan limits read may take in all.
     #[map(default = 10_000)]
     pub usage_timeout_ms: u64,
+    /// The longest, in milliseconds, the macOS Keychain may take to say whether Claude Code's login item is there before the
+    /// answer is unknown; 0 does not wait for it. No other system asks a keyring.
+    #[map(default = 5_000)]
+    pub signed_in_timeout_ms: u64,
     /// How the session that lists an account's models reads Claude Code's output, waits for it and ends it.
     #[map(flatten)]
     pub session: SessionSettings,
@@ -68,6 +73,7 @@ impl Default for AccountSettings {
             command_timeout_ms: 60_000,
             usage_endpoint: None,
             usage_timeout_ms: 10_000,
+            signed_in_timeout_ms: 5_000,
             session: SessionSettings::default(),
         }
     }
@@ -291,6 +297,14 @@ impl AccountProvider for ClaudeAccounts {
         Ok(Watching::begin(
             hold,
             Duration::from_millis(self.settings.renew_poll_ms),
+        ))
+    }
+
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError> {
+        Ok(crate::signed_in::check(
+            query.environment.expose(),
+            Duration::from_millis(self.settings.signed_in_timeout_ms),
+            crate::signed_in::real_keychain(),
         ))
     }
 

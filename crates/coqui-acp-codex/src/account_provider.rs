@@ -19,7 +19,7 @@ use coqui_acp_api::{
     AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
     AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, HARNESS_LOGIN, LoginOutcome,
     LoginPrompter, LoginRequest, ModelInfo, ModelListing, ProcessSpawner, RenewReport,
-    RenewRequest, Source, UnknownKind, WatchRequest,
+    RenewRequest, SignedInCheck, SignedInQuery, Source, UnknownKind, WatchRequest,
 };
 use coqui_acp_harness::ThroughSpawner;
 use coqui_acp_harness::account::{Accounts, Files, Watching};
@@ -61,6 +61,10 @@ pub struct AccountSettings {
     /// process; a larger file is left to Codex.
     #[map(default = 1_048_576)]
     pub login_file_limit: u64,
+    /// The longest, in milliseconds, the operating system's keyring may take to say whether Codex's login is there before the
+    /// answer is unknown; 0 does not wait for it.
+    #[map(default = 5_000)]
+    pub signed_in_timeout_ms: u64,
     /// How the sessions that list an account's models, read its allowances and refresh its login read the app server's
     /// output, wait for it and end it.
     #[map(flatten)]
@@ -76,6 +80,7 @@ impl Default for AccountSettings {
             usage_endpoint: None,
             usage_timeout_ms: 10_000,
             login_file_limit: 1 << 20,
+            signed_in_timeout_ms: 5_000,
             session: SessionSettings::default(),
         }
     }
@@ -246,6 +251,14 @@ impl AccountProvider for CodexAccounts {
         Ok(Watching::begin(
             hold,
             Duration::from_millis(self.settings.renew_poll_ms),
+        ))
+    }
+
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError> {
+        Ok(crate::signed_in::check(
+            query.environment.expose(),
+            Duration::from_millis(self.settings.signed_in_timeout_ms),
+            crate::signed_in::real_keyring(),
         ))
     }
 

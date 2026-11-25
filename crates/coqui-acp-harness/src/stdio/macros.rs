@@ -261,6 +261,16 @@ macro_rules! stdio_vendor {
                 $crate::__private::api::AccountProvider::provides(&self.inner, account)
             }
 
+            fn signed_in(
+                &self,
+                query: $crate::__private::api::SignedInQuery,
+            ) -> ::core::result::Result<
+                $crate::__private::api::SignedInCheck,
+                $crate::__private::api::guatiao::library::ProviderError,
+            > {
+                $crate::__private::api::AccountProvider::signed_in(&self.inner, query)
+            }
+
             fn usage(
                 &self,
                 query: $crate::__private::api::AccountUsageQuery,

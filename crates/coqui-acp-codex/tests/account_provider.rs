@@ -1063,3 +1063,133 @@ fn a_login_file_past_the_limit_is_left_to_codex() {
     assert!(seen.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `CodexAccounts::signed_in` for the Codex home `home`, with the variables Codex signs in by emptied (an empty value is no
+/// login) and `extra` set over that.
+fn signed_in_with(home: &Path, extra: &[(&str, &str)]) -> coqui_acp_api::SignedInCheck {
+    provider()
+        .signed_in(
+            coqui_acp_api::SignedInQuery::new().environment(signed_in_environment(home, extra)),
+        )
+        .expect("it answers")
+}
+
+fn signed_in_environment(home: &Path, extra: &[(&str, &str)]) -> coqui_acp_api::Environment {
+    let mut environment = coqui_acp_api::Environment::new();
+    for name in coqui_acp_codex::signed_in::SIGN_IN_VARIABLES {
+        environment.insert(*name, "");
+    }
+    environment.insert("CODEX_HOME", home.to_string_lossy().into_owned());
+    for (name, value) in extra {
+        environment.insert(*name, *value);
+    }
+    environment
+}
+
+#[test]
+fn an_auth_file_with_a_login_is_signed_in_and_shows_nothing_of_it() {
+    let home = scratch("signed-in-file");
+    std::fs::write(home.join("auth.json"), JWT_FILE).expect("a login");
+    let answer = signed_in_with(&home, &[]);
+    assert_eq!(answer, coqui_acp_api::SignedInCheck::signed_in());
+    assert!(!format!("{answer:?}").contains("access_token"));
+    assert_eq!(
+        std::fs::read_to_string(home.join("auth.json")).unwrap(),
+        JWT_FILE,
+        "the login is read, never written"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn no_auth_file_or_an_empty_one_is_signed_out_and_the_reason_holds_no_path() {
+    let home = scratch("signed-in-none");
+    let missing = signed_in_with(&home, &[]);
+    assert_eq!(missing.state, coqui_acp_api::SignedInState::SignedOut);
+    let reason = missing.reason.expect("a reason");
+    assert!(reason.contains("auth.json"), "{reason}");
+    assert!(reason.contains("CODEX_API_KEY"), "{reason}");
+    assert!(!reason.contains(&*home.to_string_lossy()), "{reason}");
+    for text in ["", "{}", "\n"] {
+        std::fs::write(home.join("auth.json"), text).unwrap();
+        assert_eq!(
+            signed_in_with(&home, &[]).state,
+            coqui_acp_api::SignedInState::SignedOut,
+            "{text:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_key_variable_counts_by_its_name_and_never_by_its_value() {
+    let home = scratch("signed-in-variable");
+    for name in coqui_acp_codex::signed_in::SIGN_IN_VARIABLES {
+        let answer = signed_in_with(&home, &[(name, CANARY)]);
+        assert_eq!(answer, coqui_acp_api::SignedInCheck::by_variable(*name));
+        assert!(!format!("{answer:?}").contains(CANARY));
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_login_kept_in_the_keyring_is_asked_for_by_presence_under_the_name_codex_keeps_it() {
+    use coqui_acp_codex::signed_in::{check, keyring_user};
+    use coqui_acp_harness::keyring::Presence;
+    use std::cell::RefCell;
+    let home = scratch("signed-in-keyring");
+    let environment = signed_in_environment(&home, &[]);
+    let asked: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
+    let ask = |answer: Presence| {
+        asked.borrow_mut().clear();
+        let lookup = |service: &str, user: &str, _wait: Duration| {
+            asked.borrow_mut().push((service.into(), user.into()));
+            answer.clone()
+        };
+        check(&environment, Duration::from_secs(1), &lookup)
+    };
+    // The default store is the file: the keyring is not asked.
+    assert_eq!(
+        ask(Presence::Present).state,
+        coqui_acp_api::SignedInState::SignedOut
+    );
+    assert!(asked.borrow().is_empty());
+    for store in ["keyring", "auto"] {
+        std::fs::write(
+            home.join("config.toml"),
+            format!("cli_auth_credentials_store = \"{store}\"\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            ask(Presence::Present),
+            coqui_acp_api::SignedInCheck::signed_in(),
+            "{store}"
+        );
+        let user = keyring_user(&home);
+        assert!(user.starts_with("cli|") && user.len() == 4 + 16, "{user}");
+        assert_eq!(*asked.borrow(), [("Codex Auth".to_owned(), user)]);
+        // Not found, or a keyring that did not answer, is not signed out: the name was not measured.
+        for answer in [Presence::Absent, Presence::Unknown("slow".into())] {
+            let said = ask(answer);
+            assert_eq!(said.state, coqui_acp_api::SignedInState::Unknown, "{store}");
+            assert!(!said.reason.unwrap().contains(&*home.to_string_lossy()));
+        }
+    }
+    // In `auto` a file with a login answers first; in `keyring` it is not where Codex looks.
+    std::fs::write(home.join("auth.json"), JWT_FILE).unwrap();
+    assert_eq!(
+        ask(Presence::Absent),
+        coqui_acp_api::SignedInCheck::signed_in(),
+        "auto, with the file"
+    );
+    std::fs::write(
+        home.join("config.toml"),
+        "cli_auth_credentials_store = \"keyring\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        ask(Presence::Absent).state,
+        coqui_acp_api::SignedInState::Unknown
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

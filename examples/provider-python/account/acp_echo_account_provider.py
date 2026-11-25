@@ -37,6 +37,9 @@ RENEW_KEYS = {"account"}
 WATCH_KEYS = {"account"}
 USAGE_KEYS = {"account", "environment"}
 MODELS_KEYS = {"account", "environment"}
+SIGNED_IN_KEYS = {"environment"}
+# The variable that signs the echo's own program in by itself.
+ECHO_SIGN_IN_VARIABLE = "ECHO_API_KEY"
 HARNESS_LOGIN = "harness-login"
 LOCAL_ACCOUNT = "local"
 REF_KEYS = {"id", "kind", "settings", "state_dir", "revision", "provides"}
@@ -430,6 +433,22 @@ class EchoAccounts(provide.Provider, AccountProvider, display_name="Echo account
             if listed["id"] == kind:
                 return list(listed["provides"])
         raise BadValue("the echo makes no account of that kind")
+
+    def signed_in(self, query: Ref) -> Dict[str, Any]:
+        asked = query.to_python()
+        if not isinstance(asked, dict) or not set(asked) <= SIGNED_IN_KEYS:
+            raise BadValue("the query has a key the echo does not know")
+        environment = asked.get("environment") or {}
+        if not isinstance(environment, dict):
+            raise BadValue("the environment is a map of names to values")
+        # The echo's own login is the variable the echo's program signs in by.
+        if environment.get(ECHO_SIGN_IN_VARIABLE):
+            return {"state": "signed_in", "reason": None, "variable": ECHO_SIGN_IN_VARIABLE}
+        return {
+            "state": "signed_out",
+            "reason": "the echo is signed in by " + ECHO_SIGN_IN_VARIABLE + ", which is not set",
+            "variable": None,
+        }
 
     def login(self, request: Ref, spawner: ProcessSpawner, prompter: LoginPrompter) -> Dict[str, Any]:
         asked = request.to_python()

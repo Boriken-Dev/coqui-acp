@@ -26,7 +26,7 @@ history = ["dep:coqui-acp-history"]
 [dependencies]
 clap.workspace = true
 coqui-acp-api = { path = "../coqui-acp-api", features = ["reader"] }
-coqui-acp-harness = { path = "../coqui-acp-harness", features = ["kind"] }
+coqui-acp-harness = { path = "../coqui-acp-harness", features = ["kind", "keyring"] }
 serde_json.workspace = true
 coqui-acp-history = { path = "../coqui-acp-history", optional = true }
 

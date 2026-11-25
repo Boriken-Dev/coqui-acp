@@ -3,10 +3,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use core::time::Duration;
+
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::{
-    ExportPage, ImportReport, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
-    ProcessSpawner, SessionExport, SessionImport,
+    Environment, ExportPage, ImportReport, LoginMethodInfo, LoginOutcome, LoginPrompter,
+    LoginRequest, ProcessSpawner, SessionExport, SessionImport, SignedInCheck,
 };
 
 use super::StdioProvider;
@@ -19,6 +21,10 @@ pub type SignIn = fn(
     Object<dyn ProcessSpawner>,
     Object<dyn LoginPrompter>,
 ) -> Result<LoginOutcome, ProviderError>;
+
+/// Whether the harness's own login exists, from the variables it reads (the call's over this process's) and the places it
+/// keeps one, looking no longer than the time given at a place that may be slow. Starts nothing and reaches no network.
+pub type LoginCheck = fn(&Environment, Duration) -> SignedInCheck;
 
 /// Reads a session the host holds into the harness's own store, for a harness that keeps one the provider can write.
 /// `UNSUPPORTED` or `INTERNAL` falls back to a replay when the settings allow one.
@@ -62,6 +68,8 @@ pub struct StdioDef {
     pub logins: fn() -> Vec<LoginMethodInfo>,
     /// Its sign-in, when it has one; else the account's `login_unsupported` says why not.
     pub sign_in: Option<SignIn>,
+    /// Whether its own login exists.
+    pub signed_in: LoginCheck,
     /// How it spells the id of a session imported into its store, when it keeps one.
     pub session_ids: Option<SessionIds>,
     /// Writes a session into its store, when it takes one.

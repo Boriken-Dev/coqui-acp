@@ -556,3 +556,67 @@ fn a_key_provides_the_api_of_the_variable_it_names_and_pis_own_login_provides_pi
         .expect_err("not a kind it lists");
     assert_eq!(unlisted.status, Status::GUATIAO_ERR_BAD_VALUE);
 }
+
+/// `PiAccounts::signed_in` for the agent directory `dir`, with every key variable emptied (an empty value is no login) and
+/// `extra` set over that.
+fn signed_in(dir: &Path, extra: &[(&str, &str)]) -> coqui_acp_api::SignedInCheck {
+    let mut environment = coqui_acp_api::Environment::new();
+    for name in coqui_acp_pi::accounts::KEY_VARIABLES {
+        environment.insert(*name, "");
+    }
+    environment.insert("PI_CODING_AGENT_DIR", dir.to_string_lossy().into_owned());
+    for (name, value) in extra {
+        environment.insert(*name, *value);
+    }
+    provider()
+        .signed_in(coqui_acp_api::SignedInQuery::new().environment(environment))
+        .expect("it answers")
+}
+
+#[test]
+fn an_auth_file_with_an_entry_is_signed_in_and_shows_nothing_of_it() {
+    let dir = scratch("signed-in-file");
+    let text = r#"{"anthropic":{"type":"oauth","access":"pi-access-5","refresh":"pi-refresh-5"}}"#;
+    std::fs::write(dir.join("auth.json"), text).unwrap();
+    let answer = signed_in(&dir, &[]);
+    assert_eq!(answer, coqui_acp_api::SignedInCheck::signed_in());
+    assert!(!format!("{answer:?}").contains("pi-access-5"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("auth.json")).unwrap(),
+        text
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn no_auth_file_or_an_empty_one_is_signed_out_and_the_reason_holds_no_path() {
+    let dir = scratch("signed-in-none");
+    let missing = signed_in(&dir, &[]);
+    assert_eq!(missing.state, coqui_acp_api::SignedInState::SignedOut);
+    let reason = missing.reason.expect("a reason");
+    assert!(
+        reason.contains("auth.json") && reason.contains("ANTHROPIC_API_KEY"),
+        "{reason}"
+    );
+    assert!(!reason.contains(&*dir.to_string_lossy()), "{reason}");
+    for text in ["", "{}"] {
+        std::fs::write(dir.join("auth.json"), text).unwrap();
+        assert_eq!(
+            signed_in(&dir, &[]).state,
+            coqui_acp_api::SignedInState::SignedOut,
+            "{text:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_providers_key_variable_counts_by_its_name_and_never_by_its_value() {
+    let dir = scratch("signed-in-variable");
+    for name in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"] {
+        let answer = signed_in(&dir, &[(name, "pi-canary-key-1")]);
+        assert_eq!(answer, coqui_acp_api::SignedInCheck::by_variable(name));
+        assert!(!format!("{answer:?}").contains("pi-canary-key-1"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

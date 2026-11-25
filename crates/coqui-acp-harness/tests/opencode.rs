@@ -505,6 +505,7 @@ fn accounts() -> OpenCodeAccounts {
         executable: Some(fake()),
         renew_poll_ms: 50,
         command_timeout_ms: 60_000,
+        ..OpenCodeAccountSettings::default()
     })
 }
 

@@ -23,7 +23,7 @@ pub const KEY_METHOD: &str = "api-key";
 
 /// The variables Pi reads a provider's key from: what a form suggests for a key account's `variable`, which may name any
 /// other variable (a provider a later Pi adds).
-const KEY_VARIABLES: &[&str] = &[
+pub const KEY_VARIABLES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_OAUTH_TOKEN",
     "ANTHROPIC_AUTH_TOKEN",

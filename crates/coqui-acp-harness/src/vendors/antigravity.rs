@@ -19,6 +19,7 @@ use coqui_acp_api::{
     ASK, Credentials, HARNESS_LOGIN, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter,
     LoginRequest, ProcessSpawner,
 };
+use coqui_acp_api::{Environment, SignedInCheck};
 use serde_json::{Value, json};
 
 use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
@@ -171,9 +172,59 @@ impl Heard {
     }
 }
 
+/// Whether Antigravity has a login: an entry in the keyring (`gemini`, `antigravity`) or a file under `.gemini` below the home that
+/// holds a whole sign-in, as [`AgyLogin`](crate::antigravity::AgyLogin) reads it, and nothing is refreshed or requested.
+#[cfg(feature = "antigravity")]
+fn signed_in(environment: &Environment, wait: Duration) -> SignedInCheck {
+    signed_in_with(environment, wait, crate::antigravity::Keyring::Os)
+}
+
+/// [`signed_in`] with the keyring `keyring` names, so that a test need not read the operating system's.
+#[cfg(feature = "antigravity")]
+#[must_use]
+pub fn signed_in_with(
+    environment: &Environment,
+    wait: Duration,
+    keyring: crate::antigravity::Keyring,
+) -> SignedInCheck {
+    use crate::antigravity::{Cause, LoginSettings, Step, has_stored_login};
+    let Some(home) = crate::signed_in::home(environment) else {
+        return SignedInCheck::unknown(
+            "the home folder Antigravity keeps its login under could not be worked out",
+        );
+    };
+    match has_stored_login(
+        &LoginSettings::new()
+            .home(home)
+            .keyring(keyring)
+            .keyring_timeout(wait),
+    ) {
+        Ok(true) => SignedInCheck::signed_in(),
+        Ok(false) => SignedInCheck::signed_out(
+            "Antigravity's keyring entry and its login files under .gemini hold no whole sign-in",
+        ),
+        Err(error) => SignedInCheck::unknown(match (error.step, error.cause) {
+            (Step::Keyring, Cause::Io(std::io::ErrorKind::TimedOut)) => {
+                String::from("the keyring did not answer in time")
+            }
+            (Step::Keyring, _) => String::from("the keyring could not be read"),
+            _ => String::from("a login file could not be read"),
+        }),
+    }
+}
+
+/// Without the `antigravity` feature nothing here can read Antigravity's keyring.
+#[cfg(not(feature = "antigravity"))]
+fn signed_in(_environment: &Environment, _wait: Duration) -> SignedInCheck {
+    SignedInCheck::unknown(
+        "this build cannot read Antigravity's login (the `antigravity` feature is off)",
+    )
+}
+
 /// How the stdio provider runs it.
 pub static STDIO: StdioDef = StdioDef {
     accounts: &DEF,
+    signed_in,
     accounts_description: "Antigravity keeps its own login; this provider starts it to see who is signed in.",
     logins,
     sign_in: Some(sign_in),

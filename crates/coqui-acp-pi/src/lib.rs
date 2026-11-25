@@ -24,6 +24,7 @@ mod provider;
 mod provider_history;
 mod session;
 mod session_settings;
+pub mod signed_in;
 
 use alloc::string::String;
 use core::fmt;

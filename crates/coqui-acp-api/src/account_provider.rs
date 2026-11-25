@@ -187,6 +187,105 @@ impl AccountModelsQuery {
     }
 }
 
+/// What a host asks [`AccountProvider::signed_in`]: refuses a key it does not declare.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq)]
+#[map(crate = ::guatiao, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SignedInQuery {
+    /// The variables the program's own login is read with, over this process's: the ones that place
+    /// its home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HOME`) and the ones that sign it in by
+    /// themselves (an API key). A provider shows none of them in an answer, a refusal, an error or
+    /// a log.
+    #[map(default)]
+    pub environment: Secret<Environment>,
+}
+
+impl SignedInQuery {
+    /// A query that adds nothing to this process's environment.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The variables the login is read with.
+    #[must_use]
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environment = Secret::new(environment);
+        self
+    }
+}
+
+/// What [`AccountProvider::signed_in`] found.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq)]
+#[map(crate = ::guatiao, rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SignedInState {
+    /// A login is there: a file with something in it, a keyring entry, or a variable that signs the
+    /// program in. It may be expired or revoked; only the service knows.
+    SignedIn,
+    /// Every place the program keeps a login was looked at, and none holds one.
+    SignedOut,
+    /// The provider could not tell: a place it cannot look at here, or one that did not answer in
+    /// time. The reason says which.
+    Unknown,
+}
+
+/// The answer of [`AccountProvider::signed_in`]: whether the program's own login exists, and never the login.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct SignedInCheck {
+    /// What was found.
+    pub state: SignedInState,
+    /// Why, for people: what was looked at when `state` is not `signed_in`. Holds no value of the
+    /// environment and nothing read from a login.
+    pub reason: Option<String>,
+    /// The name, never the value, of the environment variable that signs the program in, when that
+    /// is what was found.
+    pub variable: Option<String>,
+}
+
+impl SignedInCheck {
+    /// A login is there.
+    #[must_use]
+    pub const fn signed_in() -> Self {
+        Self {
+            state: SignedInState::SignedIn,
+            reason: None,
+            variable: None,
+        }
+    }
+
+    /// A login is there because the variable `name` is set and not empty.
+    #[must_use]
+    pub fn by_variable(name: impl Into<String>) -> Self {
+        Self {
+            variable: Some(name.into()),
+            ..Self::signed_in()
+        }
+    }
+
+    /// No login is anywhere the program keeps one, with what was looked at.
+    #[must_use]
+    pub fn signed_out(reason: impl Into<String>) -> Self {
+        Self {
+            state: SignedInState::SignedOut,
+            reason: Some(reason.into()),
+            variable: None,
+        }
+    }
+
+    /// The provider could not tell, and why.
+    #[must_use]
+    pub fn unknown(reason: impl Into<String>) -> Self {
+        Self {
+            state: SignedInState::Unknown,
+            reason: Some(reason.into()),
+            variable: None,
+        }
+    }
+}
+
 /// How much of an account's plan is used: its allowances, each with its window, as the account's
 /// own provider reads them. **Never a session's or a run's tokens**: those come from ACP, as the
 /// session's usage updates, and never cross this kind.
@@ -421,6 +520,27 @@ pub trait AccountProvider: Send + Sync {
         spawner: Object<dyn ProcessSpawner>,
         keeper: Object<dyn AccountKeeper>,
     ) -> Result<ModelListing, ProviderError>;
+
+    /// Whether the program's own login (the automatic `local` account) exists, asked cheaply enough
+    /// for a host to list the account only when it does, with no list of file names of its own.
+    ///
+    /// The answer is [`SignedInState::SignedIn`] when a login is there, [`SignedInState::SignedOut`]
+    /// when every place the program keeps one was looked at and none holds one, and
+    /// [`SignedInState::Unknown`] when the provider could not tell (a place it cannot look at here,
+    /// a keyring that did not answer in time), each of the last two with a reason. A login counts
+    /// where the program finds one: a credentials file that is not empty, an entry of the
+    /// operating system's keyring or keychain, or one of the variables the program signs in by
+    /// itself with, set and not empty (`variable` names it).
+    ///
+    /// It starts no program, makes no network call, puts no secret in the answer and is bounded in
+    /// time: a keyring that is slow answers unknown instead of waiting. A login that is there is
+    /// not checked with the service, so an expired one still answers signed in. It reads this
+    /// machine's own files and keyring, which are the program's when the host runs it here. Never
+    /// carries a value of the environment or of the login, not in the answer, not in an error.
+    ///
+    /// A provider that does not offer the automatic `local` account answers
+    /// `GUATIAO_ERR_UNSUPPORTED` with the reason.
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError>;
 }
 
 /// A watch of one account, from [`AccountProvider::watch`]. Destroying it stops it, as

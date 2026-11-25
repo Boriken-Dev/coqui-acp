@@ -42,7 +42,8 @@ pub use account::{
 };
 pub use account_provider::{
     AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo, AccountProviderVtable,
-    AccountUsage, AccountUsageQuery, AccountWatch, AccountWatchVtable, WatchRequest,
+    AccountUsage, AccountUsageQuery, AccountWatch, AccountWatchVtable, SignedInCheck,
+    SignedInQuery, SignedInState, WatchRequest,
 };
 pub use address::is_http_url;
 pub use environment::Environment;

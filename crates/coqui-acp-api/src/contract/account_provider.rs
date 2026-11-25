@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::accounts::{
-    BAD_VALUE, GONE, ROTATED, SECOND, SignIn, UNSUPPORTED, can_provide, distinct, grant_of,
-    inputs_for, kind_rules, login_rules, provided_by, sign_in, why,
+    BAD_VALUE, GONE, PROMPTLY, ROTATED, SECOND, SignIn, UNSUPPORTED, can_provide, distinct,
+    grant_of, inputs_for, kind_rules, login_rules, provided_by, sign_in, why,
 };
 use super::checks::{CANARY, Outcome, Place, text};
 use super::host::{self, GRACE, PATIENCE, Script, status};
@@ -28,7 +28,8 @@ use crate::usage::Refill;
 use crate::{
     AccountGrant, AccountKindInfo, AccountLoss, AccountModelsQuery, AccountOffer, AccountProvider,
     AccountRenewal, AccountUsageQuery, AccountWatch, Credentials, Environment, HARNESS_LOGIN,
-    LoginMethodInfo, LoginOutcome, LoginRequest, PROVIDES_BY_VALUE, RenewRequest, WatchRequest,
+    LoginMethodInfo, LoginOutcome, LoginRequest, PROVIDES_BY_VALUE, RenewRequest, SignedInCheck,
+    SignedInQuery, SignedInState, WatchRequest,
 };
 
 macro_rules! ensure {
@@ -126,6 +127,10 @@ fn all(contract: &AccountContract, provider: &dyn AccountProvider) -> Vec<(&'sta
         (
             "says what its accounts provide",
             provides(contract, provider, &place),
+        ),
+        (
+            "says whether the program's own login exists",
+            signed_in(provider),
         ),
     ];
     place.remove();
@@ -1146,6 +1151,85 @@ fn properties_of(info: &AccountKindInfo) -> Vec<(String, serde_json::Value)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether the program's own login exists: asked of a provider that offers the automatic `local` account, which answers one
+/// of the three states within the time a host can wait, with a reason when it is not signed in, and never a value of the
+/// environment; asked of one that does not, which refuses it as unsupported.
+fn signed_in(provider: &dyn AccountProvider) -> Outcome {
+    let offer = offer_of(provider)?;
+    let mut environment = Environment::new();
+    environment.insert("COQUI_ACP_CONTRACT_VARIABLE", CANARY);
+    let query = || SignedInQuery::new().environment(environment.clone());
+    if !offer.local {
+        let error = provider
+            .signed_in(query())
+            .err()
+            .ok_or("signed_in, which it does not offer the local account for: it answered")?;
+        ensure!(
+            status(&error) == UNSUPPORTED
+                && !error.message().is_empty()
+                && !error.message().contains(CANARY),
+            "signed_in without a local account was refused with {}, not {UNSUPPORTED} and a reason without a secret",
+            why(&error)
+        );
+        return Ok(());
+    }
+    let begun = Instant::now();
+    let answer = provider
+        .signed_in(query())
+        .map_err(|e| format!("signed_in: {}", why(&e)))?;
+    ensure!(
+        begun.elapsed() < PROMPTLY,
+        "signed_in took {:?}: it is asked to be cheap and bounded in time",
+        begun.elapsed()
+    );
+    ensure!(
+        !format!("{answer:?}").contains(CANARY),
+        "the answer of signed_in carries a value of the environment"
+    );
+    check_signed_in(&answer)?;
+    let bare = provider
+        .signed_in(SignedInQuery::new())
+        .map_err(|e| format!("signed_in with no environment: {}", why(&e)))?;
+    check_signed_in(&bare)?;
+    let again = provider
+        .signed_in(query())
+        .map_err(|e| format!("signed_in, asked twice: {}", why(&e)))?;
+    ensure!(
+        again == answer,
+        "signed_in answered {answer:?}, then {again:?}, for the same query"
+    );
+    Ok(())
+}
+
+/// The rules of one answer of `signed_in`.
+fn check_signed_in(answer: &SignedInCheck) -> Outcome {
+    let said = |text: &Option<String>| text.as_deref().is_some_and(|text| !text.is_empty());
+    match answer.state {
+        SignedInState::SignedIn => ensure!(
+            answer.reason.is_none(),
+            "signed_in answers signed in with a reason, which is for the other two"
+        ),
+        SignedInState::SignedOut | SignedInState::Unknown => {
+            ensure!(
+                said(&answer.reason),
+                "signed_in answers {:?} with no reason",
+                answer.state
+            );
+            ensure!(
+                answer.variable.is_none(),
+                "signed_in names a variable it did not find a login in"
+            );
+        }
+    }
+    if let Some(name) = &answer.variable {
+        ensure!(
+            !name.is_empty() && !name.contains(['=', '\0']) && !name.contains(CANARY),
+            "signed_in names a variable that is no variable name"
+        );
+    }
+    Ok(())
 }
 
 /// A refusal of a question that hands the provider no object: `GUATIAO_ERR_BAD_VALUE` and a reason without a secret.

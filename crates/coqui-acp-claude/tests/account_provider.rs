@@ -956,3 +956,133 @@ fn the_local_account_of_a_claude_code_that_lists_no_model_says_why_and_never_wai
     assert_eq!(other.unknown_kind, Some(coqui_acp_api::UnknownKind::Failed));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `ClaudeAccounts::signed_in` for Claude Code's configuration in `config`, with every variable Claude Code signs in by
+/// emptied (an empty value is no login) and `extra` set over that.
+fn signed_in(config: &Path, extra: &[(&str, &str)]) -> coqui_acp_api::SignedInCheck {
+    let mut environment = coqui_acp_api::Environment::new();
+    for name in coqui_acp_claude::signed_in::SIGN_IN_VARIABLES {
+        environment.insert(*name, "");
+    }
+    environment.insert("CLAUDE_CONFIG_DIR", config.to_string_lossy().into_owned());
+    for (name, value) in extra {
+        environment.insert(*name, *value);
+    }
+    provider()
+        .signed_in(coqui_acp_api::SignedInQuery::new().environment(environment))
+        .expect("it answers")
+}
+
+#[test]
+fn a_credentials_file_with_a_login_in_it_is_signed_in_and_shows_nothing_of_it() {
+    let config = scratch("signed-in-file");
+    let text = login_text("si-access-4", "si-refresh-4", 4_102_444_800_000);
+    std::fs::write(config.join(".credentials.json"), &text).unwrap();
+    let answer = signed_in(&config, &[]);
+    assert_eq!(answer, coqui_acp_api::SignedInCheck::signed_in());
+    let shown = format!("{answer:?}");
+    assert!(!shown.contains("si-access-4") && !shown.contains("si-refresh-4"));
+    assert_eq!(
+        std::fs::read_to_string(config.join(".credentials.json")).unwrap(),
+        text,
+        "the login is read, never written"
+    );
+    assert!(log(&config).is_empty(), "no program was started");
+    let _ = std::fs::remove_dir_all(&config);
+}
+
+#[test]
+fn no_credentials_file_or_an_empty_one_is_signed_out_with_what_was_looked_at() {
+    let config = scratch("signed-in-none");
+    let missing = signed_in(&config, &[]);
+    assert_eq!(missing.state, coqui_acp_api::SignedInState::SignedOut);
+    let reason = missing.reason.expect("a reason");
+    assert!(reason.contains("credentials file"), "{reason}");
+    assert!(reason.contains("ANTHROPIC_API_KEY"), "{reason}");
+    assert!(
+        !reason.contains(&*config.to_string_lossy()),
+        "a path is a value of the environment: {reason}"
+    );
+    for text in ["", "  \n", "{}"] {
+        std::fs::write(config.join(".credentials.json"), text).unwrap();
+        let empty = signed_in(&config, &[]);
+        assert_eq!(
+            empty.state,
+            coqui_acp_api::SignedInState::SignedOut,
+            "{text:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&config);
+}
+
+#[test]
+fn a_sign_in_variable_that_is_set_counts_by_its_name_and_an_empty_one_does_not() {
+    let config = scratch("signed-in-variable");
+    for name in coqui_acp_claude::signed_in::SIGN_IN_VARIABLES {
+        let answer = signed_in(&config, &[(name, CANARY)]);
+        assert_eq!(
+            answer,
+            coqui_acp_api::SignedInCheck::by_variable(*name),
+            "{name}"
+        );
+        assert!(!format!("{answer:?}").contains(CANARY), "{name}");
+    }
+    let empty = signed_in(&config, &[("ANTHROPIC_API_KEY", "")]);
+    assert_eq!(empty.state, coqui_acp_api::SignedInState::SignedOut);
+    let _ = std::fs::remove_dir_all(&config);
+}
+
+#[test]
+fn a_credentials_file_that_cannot_be_read_is_unknown_not_signed_out() {
+    let config = scratch("signed-in-unreadable");
+    // A folder where the file should be.
+    std::fs::create_dir_all(config.join(".credentials.json")).unwrap();
+    let answer = signed_in(&config, &[]);
+    assert_eq!(answer.state, coqui_acp_api::SignedInState::Unknown);
+    assert!(answer.reason.is_some_and(|reason| !reason.is_empty()));
+    let _ = std::fs::remove_dir_all(&config);
+}
+
+#[test]
+fn the_keychain_is_asked_by_the_name_claude_code_keeps_its_item_under_and_never_read() {
+    use coqui_acp_claude::signed_in::{check, keychain_service};
+    use coqui_acp_harness::keyring::Presence;
+    use std::cell::RefCell;
+    let config = scratch("signed-in-keychain");
+    let mut environment = coqui_acp_api::Environment::new();
+    for name in coqui_acp_claude::signed_in::SIGN_IN_VARIABLES {
+        environment.insert(*name, "");
+    }
+    environment.insert("CLAUDE_CONFIG_DIR", config.to_string_lossy().into_owned());
+    environment.insert("USER", "kc-user");
+    let asked: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
+    let ask = |answer: Presence| {
+        asked.borrow_mut().clear();
+        let lookup = |service: &str, user: &str, _wait: Duration| {
+            asked.borrow_mut().push((service.into(), user.into()));
+            answer.clone()
+        };
+        check(&environment, Duration::from_secs(1), Some(&lookup))
+    };
+    let found = ask(Presence::Present);
+    assert_eq!(found, coqui_acp_api::SignedInCheck::signed_in());
+    let service = keychain_service(Some(&config.to_string_lossy()));
+    assert_eq!(*asked.borrow(), [(service.clone(), "kc-user".to_owned())]);
+    assert!(service.starts_with("Claude Code-credentials-") && service.len() == 23 + 1 + 8);
+    assert_eq!(keychain_service(None), "Claude Code-credentials");
+    // Not found there is unknown: the item's name was not measured on a Mac. A Keychain that failed is unknown too.
+    for answer in [Presence::Absent, Presence::Unknown("slow".into())] {
+        let said = ask(answer);
+        assert_eq!(said.state, coqui_acp_api::SignedInState::Unknown);
+        assert!(
+            !said.reason.unwrap().contains(&*config.to_string_lossy()),
+            "no value of the environment in the reason"
+        );
+    }
+    // A credentials file that holds a login is enough: the Keychain is not asked.
+    std::fs::write(config.join(".credentials.json"), "{\"a\":1}").unwrap();
+    let from_file = ask(Presence::Absent);
+    assert_eq!(from_file, coqui_acp_api::SignedInCheck::signed_in());
+    assert!(asked.borrow().is_empty());
+    let _ = std::fs::remove_dir_all(&config);
+}

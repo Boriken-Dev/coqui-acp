@@ -14,6 +14,9 @@ pub mod acp;
 pub mod antigravity;
 pub mod cli;
 pub mod event;
+#[cfg(feature = "keyring")]
+#[cfg_attr(docsrs, doc(cfg(feature = "keyring")))]
+pub mod keyring;
 pub mod lines;
 #[cfg(feature = "kind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
@@ -24,6 +27,7 @@ pub mod process;
 #[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
 pub mod provider;
 pub mod settings;
+pub mod signed_in;
 #[cfg(feature = "kind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "kind")))]
 pub mod spawner;

@@ -33,7 +33,7 @@ mod status;
 pub use login::{
     AgyLogin, CONSUMER_SERVICE, Cause, ClientSource, GCP_SERVICE, KEYRING_SERVICE, KEYRING_USER,
     Keyring, KeyringLookup, LoginError, LoginReading, LoginSettings, OAuthClient, SERVICE_VARIABLE,
-    Secret, SignedIn, Step, TOKEN_URL, USER_AGENT, USERINFO_URL,
+    Secret, SignedIn, Step, TOKEN_URL, USER_AGENT, USERINFO_URL, has_stored_login,
 };
 pub use models::{MODELS_ARGS, list_models, parse_models};
 pub use ports::loopback_listeners;

@@ -42,7 +42,7 @@ mod relay;
 mod replay;
 
 pub use account_provider::{StdioAccountSettings, StdioAccounts};
-pub use def::{ExportSession, ImportSession, SessionIds, SignIn, StdioDef, no_logins};
+pub use def::{ExportSession, ImportSession, LoginCheck, SessionIds, SignIn, StdioDef, no_logins};
 
 use accounts::{Applied, HarnessDef};
 

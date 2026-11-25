@@ -440,7 +440,7 @@ class AccountWatch(KindProtocol, Protocol, kind="account_watch", floor_hash=5891
         ...
 
 
-class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_hash=1682791892):
+class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_hash=2677651813):
     """Owns accounts: the kinds it makes, the sign-in that makes one, the renewal and watching of its
     credentials, the usage of its plan and the models it may use.
 
@@ -596,6 +596,31 @@ class AccountProvider(KindProtocol, Protocol, kind="account_provider", floor_has
         A provider that runs a program to ask runs it through `spawner`, on the account's directory,
         and destroys it; `keeper` is handed over as `watch`'s is, for a login the call sees renewed
         or lost, and is destroyed before the call answers.
+        """
+        ...
+
+    @required
+    @fallible
+    def signed_in(self, query: Ref) -> ValueAnswer:
+        """Whether the program's own login (the automatic `local` account) exists, asked cheaply enough
+        for a host to list the account only when it does, with no list of file names of its own.
+
+        The answer is [`SignedInState::SignedIn`] when a login is there, [`SignedInState::SignedOut`]
+        when every place the program keeps one was looked at and none holds one, and
+        [`SignedInState::Unknown`] when the provider could not tell (a place it cannot look at here,
+        a keyring that did not answer in time), each of the last two with a reason. A login counts
+        where the program finds one: a credentials file that is not empty, an entry of the
+        operating system's keyring or keychain, or one of the variables the program signs in by
+        itself with, set and not empty (`variable` names it).
+
+        It starts no program, makes no network call, puts no secret in the answer and is bounded in
+        time: a keyring that is slow answers unknown instead of waiting. A login that is there is
+        not checked with the service, so an expired one still answers signed in. It reads this
+        machine's own files and keyring, which are the program's when the host runs it here. Never
+        carries a value of the environment or of the login, not in the answer, not in an error.
+
+        A provider that does not offer the automatic `local` account answers
+        `GUATIAO_ERR_UNSUPPORTED` with the reason.
         """
         ...
 

@@ -13,14 +13,16 @@
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::time::Duration;
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use coqui_acp_api::guatiao::Status;
 use coqui_acp_api::guatiao::library::{Object, ProviderError};
 use coqui_acp_api::guatiao::schema::{FieldBuilder, KindBuilder, SchemaBuilder};
 use coqui_acp_api::{
-    ASK, Credentials, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter, LoginRequest,
-    OPEN_URL, OpenUrl, ProcessSpawner, USER_CODE,
+    ASK, Credentials, Environment, LoginForm, LoginMethodInfo, LoginOutcome, LoginPrompter,
+    LoginRequest, OPEN_URL, OpenUrl, ProcessSpawner, SignedInCheck, USER_CODE,
 };
 use serde_json::json;
 
@@ -31,6 +33,7 @@ use crate::access::{Access, Approvals, Part, Sandbox, Target, Translation};
 use crate::login::reason;
 use crate::process::Launch;
 use crate::provider::schema;
+use crate::signed_in;
 use crate::stdio::accounts::{
     AcceptDef, Credential, HarnessDef, KindDef, Setting, SlotDef, check_variable_name,
 };
@@ -250,9 +253,26 @@ pub static DEF: HarnessDef = HarnessDef {
     login_unsupported: "OpenCode is signed in with the `provider-key`, `provider-code` and `api-key` methods; its own sign-in that returns the browser to a port on the machine it runs on is not offered",
 };
 
+/// Whether OpenCode has a sign-in: `auth.json` in its data folder (`XDG_DATA_HOME`, else `.local/share` below the home) that
+/// holds something, or one of the variables a provider's key is read from, or `OPENCODE_AUTH_CONTENT`, which replaces the file.
+fn signed_in(environment: &Environment, _wait: Duration) -> SignedInCheck {
+    let mut variables: Vec<&str> = KEY_VARIABLES.to_vec();
+    variables.push("OPENCODE_AUTH_CONTENT");
+    let data = signed_in::value(environment, "XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| signed_in::home(environment).map(|home| home.join(".local").join("share")));
+    signed_in::answer_for_file(
+        environment,
+        &variables,
+        data.map(|data| data.join(AUTH_FILE)).as_deref(),
+        "OpenCode's auth.json",
+    )
+}
+
 /// How the stdio provider runs it.
 pub static STDIO: StdioDef = StdioDef {
     accounts: &DEF,
+    signed_in,
     accounts_description: "Makes an OpenCode account from a provider's key, watches the sign-in OpenCode keeps in `auth.json`, and says its accounts report no plan usage.",
     logins,
     sign_in: Some(sign_in),

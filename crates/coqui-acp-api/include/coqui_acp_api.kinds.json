@@ -555,7 +555,7 @@
     },
     {
       "name": "account_provider",
-      "floor_hash": 1682791892,
+      "floor_hash": 2677651813,
       "object": false,
       "doc": "Owns accounts: the kinds it makes, the sign-in that makes one, the renewal and watching of its\ncredentials, the usage of its plan and the models it may use.\n\nAn account provider does not run an agent. A harness (`acp_harness`) applies an account the\nhost hands it when the account's `provides` meets what the harness accepts, and never asks how\nthe account was made. The host owns which accounts exist, their secrets at rest and who holds\none; the provider owns every fact about how its kinds sign in, renew, rotate and report.\n\nEvery method answers for the provider as configured: a host builds an instance from the\nprovider's settings and asks it. Every method is synchronous; a host calls them from a thread\nof its own. Every object a method is handed (`spawner`, `prompter`, `keeper`) is the provider's\nfrom then on, and it destroys each, even when it refuses.\n\nA credential crosses only as a secret, and nothing a provider answers carries one: not an\nanswer, a refusal, an error, a log line or an argument vector.",
       "slots": [
@@ -729,6 +729,22 @@
             "type": "value"
           },
           "doc": "The models the account behind `query.account` may use, with no model turn and no session:\nwhat a host shows a person choosing one before a session starts. The listing is the\naccount's, so an account of another kind (another login, another key) may list others. A\nprovider that cannot list for a kind (the program lists its models only in a session, or\nhas no way to) answers [`ModelListing::unknown`] with the reason, which is a true answer,\nand one that tried and could not answers [`ModelListing::unavailable`]; it never guesses.\n\nTakes every kind the provider lists in `offers().kinds`, and [`HARNESS_LOGIN`](crate::HARNESS_LOGIN)\n(the automatic `local` account) when `offers().local`: the program asked as its\nconfiguration stands, with nothing applied. Any other kind is `GUATIAO_ERR_BAD_VALUE`, as\nis an id that is not 1 to 128 bytes without a control character. Never carries a value of\nthe environment or the credentials.\n\nA provider that runs a program to ask runs it through `spawner`, on the account's directory,\nand destroys it; `keeper` is handed over as `watch`'s is, for a login the call sees renewed\nor lost, and is destroyed before the call answers."
+        },
+        {
+          "name": "signed_in",
+          "required": true,
+          "fallible": true,
+          "args": [
+            {
+              "name": "query",
+              "type": "value",
+              "pass": "borrowed"
+            }
+          ],
+          "answer": {
+            "type": "value"
+          },
+          "doc": "Whether the program's own login (the automatic `local` account) exists, asked cheaply enough\nfor a host to list the account only when it does, with no list of file names of its own.\n\nThe answer is [`SignedInState::SignedIn`] when a login is there, [`SignedInState::SignedOut`]\nwhen every place the program keeps one was looked at and none holds one, and\n[`SignedInState::Unknown`] when the provider could not tell (a place it cannot look at here,\na keyring that did not answer in time), each of the last two with a reason. A login counts\nwhere the program finds one: a credentials file that is not empty, an entry of the\noperating system's keyring or keychain, or one of the variables the program signs in by\nitself with, set and not empty (`variable` names it).\n\nIt starts no program, makes no network call, puts no secret in the answer and is bounded in\ntime: a keyring that is slow answers unknown instead of waiting. A login that is there is\nnot checked with the service, so an expired one still answers signed in. It reads this\nmachine's own files and keyring, which are the program's when the host runs it here. Never\ncarries a value of the environment or of the login, not in the answer, not in an error.\n\nA provider that does not offer the automatic `local` account answers\n`GUATIAO_ERR_UNSUPPORTED` with the reason."
         }
       ]
     },

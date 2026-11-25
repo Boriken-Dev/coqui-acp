@@ -13,7 +13,8 @@ use coqui_acp_api::guatiao::{FromValue, Schema, Status, ToValue};
 use coqui_acp_api::{
     AccountKeeper, AccountModelsQuery, AccountOffer, AccountProvider, AccountProviderInfo,
     AccountRef, AccountUsage, AccountUsageQuery, AccountWatch, LoginOutcome, LoginPrompter,
-    LoginRequest, ModelListing, ProcessSpawner, RenewReport, RenewRequest, WatchRequest,
+    LoginRequest, ModelListing, ProcessSpawner, RenewReport, RenewRequest, SignedInCheck,
+    SignedInQuery, WatchRequest,
 };
 
 use super::StdioDef;
@@ -34,6 +35,10 @@ pub struct StdioAccountSettings {
     /// The longest, in milliseconds, a command of the harness's own (a renewal) may run; 0 ends it at once.
     #[map(default = 60_000)]
     pub command_timeout_ms: u64,
+    /// The longest, in milliseconds, a look at where the harness keeps its login (its keyring, for one that uses it) may take
+    /// before the answer is unknown; 0 does not wait for it.
+    #[map(default = 5_000)]
+    pub signed_in_timeout_ms: u64,
 }
 
 impl StdioAccountSettings {
@@ -44,6 +49,7 @@ impl StdioAccountSettings {
             executable: None,
             renew_poll_ms: DEFAULT_POLL_MS,
             command_timeout_ms: 60_000,
+            signed_in_timeout_ms: 5_000,
         }
     }
 }
@@ -165,5 +171,12 @@ impl AccountProvider for StdioAccounts {
             &query,
             "the agent lists its models in its session, not before it",
         )
+    }
+
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError> {
+        Ok((self.def.signed_in)(
+            query.environment.expose(),
+            Duration::from_millis(self.settings.signed_in_timeout_ms),
+        ))
     }
 }

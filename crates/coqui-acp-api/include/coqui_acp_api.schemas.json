@@ -4267,5 +4267,75 @@
       "revision",
       "observed_at"
     ]
+  },
+  "SignedInQuery": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "environment": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "writeOnly": true,
+        "x-sensitive": true,
+        "description": "The variables the program's own login is read with, over this process's: the ones that place its home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HOME`) and the ones that sign it in by themselves (an API key). A provider shows none of them in an answer, a refusal, an error or a log.",
+        "default": {}
+      }
+    },
+    "additionalProperties": false
+  },
+  "SignedInState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "string",
+    "enum": [
+      "signed_in",
+      "signed_out",
+      "unknown"
+    ],
+    "x-enum-labels": {
+      "signed_in": "A login is there: a file with something in it, a keyring entry, or a variable that signs the program in. It may be expired or revoked; only the service knows.",
+      "signed_out": "Every place the program keeps a login was looked at, and none holds one.",
+      "unknown": "The provider could not tell: a place it cannot look at here, or one that did not answer in time. The reason says which."
+    },
+    "properties": {}
+  },
+  "SignedInCheck": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "state": {
+        "type": "string",
+        "enum": [
+          "signed_in",
+          "signed_out",
+          "unknown"
+        ],
+        "x-enum-labels": {
+          "signed_in": "A login is there: a file with something in it, a keyring entry, or a variable that signs the program in. It may be expired or revoked; only the service knows.",
+          "signed_out": "Every place the program keeps a login was looked at, and none holds one.",
+          "unknown": "The provider could not tell: a place it cannot look at here, or one that did not answer in time. The reason says which."
+        },
+        "description": "What was found."
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Why, for people: what was looked at when `state` is not `signed_in`. Holds no value of the environment and nothing read from a login."
+      },
+      "variable": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The name, never the value, of the environment variable that signs the program in, when that is what was found."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "state"
+    ]
   }
 }
