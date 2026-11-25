@@ -53,8 +53,8 @@ pub fn present(service: &str, user: &str, target: Option<&str>, timeout: Duratio
     }
 }
 
-/// The first 16 hexadecimal digits of the SHA-256 of `text`: how Codex and Claude Code tell the folders their logins are kept
-/// for apart in a keyring entry's name.
+/// The first `digits` hexadecimal digits of the SHA-256 of `text`: how Codex and Claude Code tell the folders their
+/// logins are kept for apart in a keyring entry's name.
 #[must_use]
 pub fn digest_prefix(text: &str, digits: usize) -> String {
     use sha2::{Digest, Sha256};
