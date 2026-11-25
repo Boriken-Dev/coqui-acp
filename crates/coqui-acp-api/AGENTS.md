@@ -21,7 +21,7 @@ A kind is a C ABI. Its table carries a hash of every slot as spelled, so adding,
 | `spawned_process` | `SpawnedProcessVtable` | `3306532587` | the host |
 | `account_keeper` | `AccountKeeperVtable` | `708146915` | the host |
 | `login_prompter` | `LoginPrompterVtable` | `2606822037` | the host |
-| `account_provider` | `AccountProviderVtable` | `1682791892` | the provider |
+| `account_provider` | `AccountProviderVtable` | `2677651813` | the provider |
 | `account_watch` | `AccountWatchVtable` | `589148782` | the provider |
 
 The package holds all nine as data in `include/coqui_acp_api.kinds.json`, every model's JSON Schema in `include/coqui_acp_api.schemas.json`, and the kinds for Python in `python/coqui_acp_api_kinds.py` (written by `python/write_kinds.py`).
@@ -393,7 +393,7 @@ pub trait LoginPrompter: Send + Sync {
 
 ## The account provider (`coqui_acp_api::AccountProvider`)
 
-An account provider owns accounts. It is not an ACP harness and runs no agent: it signs a person in, renews and watches the credentials it made, reports how much of the account's plan is used, and lists the models the account may use. A harness **accepts** standards (`AccountCatalog::accepts`); an account provider **provides** them (`AccountKindInfo::provides`), and a host lists an account for a harness exactly when the two lists meet. The host owns which accounts exist, their secrets at rest and who holds one. Every method is required (a provider with nothing to say answers so: `usage` "not offered", `models` unknown with its reason); the harness kind has none of them.
+An account provider owns accounts. It is not an ACP harness and runs no agent: it signs a person in, renews and watches the credentials it made, reports how much of the account's plan is used, and lists the models the account may use. A harness **accepts** standards (`AccountCatalog::accepts`); an account provider **provides** them (`AccountKindInfo::provides`), and a host lists an account for a harness exactly when the two lists meet. The host owns which accounts exist, their secrets at rest and who holds one. Every method is required (a provider with nothing to say answers so: `usage` "not offered", `models` unknown with its reason, `signed_in` unknown with its reason); the harness kind has none of them.
 
 **The automatic `local` account.** A provider whose program has a login of its own (the `harness-login` kind, `HARNESS_LOGIN`) says so with `offers().local`, and a host lists an account named `LOCAL_ACCOUNT` (`local`) of that kind for the harness without anyone adding it. It is not one of `offers().kinds` (the provider cannot sign in to it); `usage` and `models` accept a grant of that kind, and answer for the program run on the configuration as it stands with nothing applied. A provider that offers none refuses such a grant as a kind it does not list.
 
@@ -412,6 +412,7 @@ pub trait AccountProvider: Send + Sync {
         -> Result<AccountUsage, ProviderError>;
     fn models(&self, query: AccountModelsQuery, spawner: Object<dyn ProcessSpawner>, keeper: Object<dyn AccountKeeper>)
         -> Result<ModelListing, ProviderError>;
+    fn signed_in(&self, query: SignedInQuery) -> Result<SignedInCheck, ProviderError>;
 }
 #[guatiao::kind(object, name = "account_watch")]
 pub trait AccountWatch: Send + Sync { fn stop(&self) -> Result<(), ProviderError>; }   // idempotent; dropping it stops it
@@ -427,6 +428,10 @@ pub const LOCAL_ACCOUNT: &str = "local";
 #[non_exhaustive] pub struct AccountModelsQuery { pub account: AccountGrant, pub environment: Secret<Environment> }   ::new(account) .environment(env)
 #[non_exhaustive] pub struct AccountUsage { pub supported: bool, pub unsupported_because: Option<String>, pub sources: Vec<Source>,
     pub account: Option<String>, pub revision: u64, pub observed_at: i64, pub buckets: Vec<Bucket> }
+#[non_exhaustive] pub struct SignedInQuery { pub environment: Secret<Environment> }   ::new() .environment(env)
+#[non_exhaustive] pub enum SignedInState { SignedIn, SignedOut, Unknown }   // JSON: signed_in, signed_out, unknown
+#[non_exhaustive] pub struct SignedInCheck { pub state: SignedInState, pub reason: Option<String>, pub variable: Option<String> }
+SignedInCheck::signed_in(); ::by_variable(name); ::signed_out(reason); ::unknown(reason)
 AccountUsage::new(); ::unsupported(reason); ::from_report(UsageReport) /* the windows; a report's spend and limit are no account's */; ::fraction_permille(&Bucket) -> Option<u16>
 ```
 
@@ -434,6 +439,7 @@ AccountUsage::new(); ::unsupported(reason); ::from_report(UsageReport) /* the wi
 
 - `describe`, `offers`: who it is, and what it makes: kinds (each names the standards an account of it provides; an offer lists at least one kind and each kind provides at least one standard), the ways to sign in (each `produces` a listed kind), and the kinds that report usage. Cheap, the same on every call, answered as configured.
 - `provides`: the standards the account `account` (an `AccountRef`: its kind, id and settings, no secret) provides, as ids of `coqui_acp_api::standard`, none twice. A kind that lists `provides` answers it; a kind whose setting is marked `x-provides-by-value` (`PROVIDES_BY_VALUE`) answers what the value the account holds picks, and none when it lists no such value. `account.provides` is never an input. The automatic `local` account (`offers().local`) answers the standard of the program itself; any other kind, or an id that is not 1 to 128 bytes without a control character, is `BAD_VALUE`. Cheap, starts nothing, the same for the same account. The contract suite asks every listed kind (and each value a by-value setting lists) and fails a provider whose answer differs from what its kind declares. The provider runs its sign-in in `request.state_dir` through `spawner`, relays each step through `prompter` (`say`, `open_url`, `ask`; `cancelled` is how the person ends it), and answers the outcome. Cancelled (`prompter.cancelled()` true or a call answering `GONE`) or past `timeout_ms`: it kills the program's tree and answers `GUATIAO_ERR_GONE`, `login cancelled` or `login timed out`, within two seconds, even with a prompter call still out. A key refused: `BAD_VALUE`, `login refused: <reason>`. No method listed: `UNSUPPORTED`; a method not listed: `BAD_VALUE`. Both objects are destroyed before it answers, a timeout excepted.
+- `signed_in`: whether the program's own login (the `local` account) exists, so a host lists the account only when it does and keeps no list of file names. `signed_in` when a login is there (a credentials file that is not empty, an entry of the operating system's keyring or keychain, or a sign-in variable of the program set and not empty, named in `variable`, never its value); `signed_out` when every place was looked at and none holds one; `unknown` when the provider could not tell (a place it cannot look at here, a keyring that did not answer in time). Both of the last carry a `reason`. It starts no program, makes no network call, is bounded in time and puts no secret in the answer; a login that is there is not checked with the service. `query.environment` places the home and holds the variables a login may come from. A provider with no `local` account answers `UNSUPPORTED` with a reason. Read on this machine: a host whose program runs elsewhere does not ask.
 - `renew`: the credentials renewed with no model turn, or why not (`not_renewed_because`). `UNSUPPORTED` for a kind that says `renews` false; `GONE` for a login that is blank or gone, never a renewal made of nothing.
 - `watch`: starts watching an account of a kind that both `rotates` and keeps a `state_dir` (any other: `UNSUPPORTED`). A changed credential file is told as `renewed`, a blank or deleted one as `lost`, once, with a `sequence` that counts every event of the account and is the same for every live watch of it in the instance; a watch tells what it finds when it begins, so a login already gone is told at once, and tells a change no later than 30 seconds after it. The returned object owns the `spawner` and the `keeper`: `stop` (or dropping it) ends it, leaves no keeper call running, and destroys both.
 - `usage`: the account's **plan** usage: its windows (`Bucket`s: used, limit or remaining, `refill` with `resets_at`, the models it covers, status), no session and no model turn. Cheap. A kind listed in `offers().usage` answers `supported`, with `account` echoing the grant's id and `observed_at` the newest bucket's; any other kind the provider lists answers "not offered" (`AccountUsage::unsupported(reason)`, no bucket); the `local` account, when offered, answers for the program as it stands (listed in `offers().usage` when the program reads its plan with no turn, else "not offered"); a kind it neither lists nor offers as `local` is `BAD_VALUE`.
