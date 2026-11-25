@@ -471,6 +471,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cabuya"
+version = "0.0.0-alpha.0"
+source = "git+https://github.com/Boriken-Dev/cabuya?rev=40123baab01440c0522a27baa7321a31892b3735#40123baab01440c0522a27baa7321a31892b3735"
+dependencies = [
+ "coqui-builder",
+ "coqui-peer",
+ "coqui-peer-noise",
+ "coqui-peer-webcrypto",
+ "coqui-transport",
+ "serde_json",
+ "socket2",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -651,9 +665,9 @@ dependencies = [
 name = "coqui-acp-bridge"
 version = "0.0.0-alpha.0"
 dependencies = [
+ "cabuya",
  "clap",
  "coqui-agentic-peer",
- "coqui-link",
  "coqui-net-acl",
  "coqui-peer",
  "coqui-peer-tls",
@@ -813,7 +827,7 @@ name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
 source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=161307f9ebc216a56e21d7407688baa80f442823#161307f9ebc216a56e21d7407688baa80f442823"
 dependencies = [
- "coqui-link",
+ "cabuya",
  "coqui-peer-webcrypto",
  "coqui-transport",
  "mdns-sd",
@@ -837,20 +851,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "coqui-link"
-version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-link?rev=40123baab01440c0522a27baa7321a31892b3735#40123baab01440c0522a27baa7321a31892b3735"
-dependencies = [
- "coqui-builder",
- "coqui-peer",
- "coqui-peer-noise",
- "coqui-peer-webcrypto",
- "coqui-transport",
- "serde_json",
- "socket2",
 ]
 
 [[package]]

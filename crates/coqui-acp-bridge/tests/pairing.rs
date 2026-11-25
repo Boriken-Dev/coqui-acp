@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_link::auth::Identity;
-use coqui_link::pairing;
+use cabuya::auth::Identity;
+use cabuya::pairing;
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pairing, Pin, PinRole};
 use coqui_peer_webcrypto::{TrustStore, random};
 use coqui_transport::Channel;
@@ -453,7 +453,7 @@ fn a_relay_that_swaps_in_its_own_key_without_the_pin_fails_both_sides() {
     assert_eq!(accepted(&sides.dir.path("client-store")), 0);
 }
 
-fn run_joiner(sides: &Sides, asked: Pairing, limit: Duration) -> Result<(), coqui_link::Error> {
+fn run_joiner(sides: &Sides, asked: Pairing, limit: Duration) -> Result<(), cabuya::Error> {
     let (near, far) = binary_pair();
     let desk = pairing::desk().unwrap();
     let _ = desk.show_pin().unwrap();

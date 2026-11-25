@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use coqui_link::auth::{Identity, Method};
+use cabuya::auth::{Identity, Method};
 
 pub fn method() -> Method {
     std::env::var("COQUI_ACP_TEST_METHOD")

@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use coqui_link::auth::{Identity, Proof, Trust};
-use coqui_link::auth::{Sealed, prove_out};
-use coqui_link::link::capabilities;
-use coqui_link::mux::{Limits, Mux, Side};
+use cabuya::auth::{Identity, Proof, Trust};
+use cabuya::auth::{Sealed, prove_out};
+use cabuya::link::capabilities;
+use cabuya::mux::{Limits, Mux, Side};
 use coqui_transport::Channel as _;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -317,7 +317,7 @@ fn one_pairing_and_a_new_capability_is_a_grant_counted_at_once() {
         );
         assert!(matches!(
             mcp.end(),
-            Some(coqui_link::mux::StreamEnd::Revoked(_))
+            Some(cabuya::mux::StreamEnd::Revoked(_))
         ));
         initialized(&mux.open("acp/1").unwrap());
     });
@@ -567,8 +567,8 @@ fn forwarding_is_refused_by_default_and_a_target_takes_a_grant_of_its_own() {
     over_link(port, client, &server, |mux| {
         // Allowed in with no --grant gets every protocol that runs a program, and never this.
         assert_eq!(capabilities(mux, WAIT).unwrap().offers, ["acp/1", "mcp"]);
-        let target: coqui_link::forward::Target = web.parse().unwrap();
-        let stream = coqui_link::forward::connect(mux, &target).unwrap();
+        let target: cabuya::forward::Target = web.parse().unwrap();
+        let stream = cabuya::forward::connect(mux, &target).unwrap();
         assert_eq!(
             stream.receive(Some(WAIT)),
             Err(coqui_transport::Failure::Permission)
@@ -672,7 +672,7 @@ fn one_peer_gets_only_so_many_links_and_others_are_not_affected() {
         .responders(Trust::pinned([server.parse().unwrap()]))
         .build()
         .unwrap();
-    let opening = coqui_link::mux::Frame::Open {
+    let opening = cabuya::mux::Frame::Open {
         stream: 1,
         protocol: "link/1".to_owned(),
         metadata: Vec::new(),
@@ -864,10 +864,10 @@ fn many_streams_on_a_full_link_lose_and_repeat_nothing() {
         inner: &sealed,
         began: Instant::now(),
     };
-    let target: coqui_link::forward::Target = source.parse().unwrap();
+    let target: cabuya::forward::Target = source.parse().unwrap();
     Mux::run(&stalling, Side::Dialed, Limits::default(), None, |mux| {
         let streams: Vec<_> = (0..8)
-            .map(|_| coqui_link::forward::connect(mux, &target).unwrap())
+            .map(|_| cabuya::forward::connect(mux, &target).unwrap())
             .collect();
         std::thread::scope(|scope| {
             for (reader, stream) in streams.iter().enumerate() {

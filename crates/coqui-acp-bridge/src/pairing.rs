@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_link::pairing;
+use cabuya::pairing;
 use coqui_peer::pair::{CodeAlphabet, Pin};
 use coqui_transport::{Channel as _, Failure};
 use coqui_transport_web::websocket::Frames;

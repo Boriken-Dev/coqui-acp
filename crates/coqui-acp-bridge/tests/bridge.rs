@@ -92,7 +92,7 @@ fn node() -> Option<PathBuf> {
 /// The JavaScript module of this run's method, named by `COQUI_ACP_TEST_WEBCRYPTO` or `COQUI_ACP_TEST_NOISE`.
 fn module_variable() -> &'static str {
     match method::method() {
-        coqui_link::auth::Method::Noise => "COQUI_ACP_TEST_NOISE",
+        cabuya::auth::Method::Noise => "COQUI_ACP_TEST_NOISE",
         _ => "COQUI_ACP_TEST_WEBCRYPTO",
     }
 }
@@ -659,8 +659,8 @@ fn binary_dial(url: &url::Url) -> coqui_transport_web::websocket::Channel {
 
 #[test]
 fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
-    use coqui_link::auth::{Proof, Trust};
-    use coqui_link::auth::{Sealed, prove_out};
+    use cabuya::auth::{Proof, Trust};
+    use cabuya::auth::{Sealed, prove_out};
     use coqui_peer_webcrypto::TrustStore;
     let mut fixture = Fixture::new("removed");
     let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
@@ -695,7 +695,7 @@ fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
     // WebCrypto's initiator hears the refusal in the proof. Noise's finishes on its last message and hears it as the
     // connection ending before anything is answered.
     let proved = prove_out(&method, &again, wait, 1 << 20);
-    if method::method() == coqui_link::auth::Method::WebCrypto {
+    if method::method() == cabuya::auth::Method::WebCrypto {
         assert!(proved.is_err());
     }
     if let Ok(established) = proved {
@@ -714,8 +714,8 @@ fn a_peer_removed_from_the_store_loses_its_live_link_and_cannot_return() {
 
 #[test]
 fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
-    use coqui_link::auth::{Proof, Trust};
-    use coqui_link::auth::{Sealed, prove_out};
+    use cabuya::auth::{Proof, Trust};
+    use cabuya::auth::{Sealed, prove_out};
     use coqui_peer_webcrypto::TrustStore;
     let mut fixture = Fixture::new("plainafter");
     let store = TrustStore::open(&fixture.dir.join("peers")).unwrap();
@@ -753,8 +753,8 @@ fn a_stranger_with_a_good_proof_and_a_plain_message_after_it_reach_nothing() {
 
 #[test]
 fn a_link_cut_before_the_close_record_is_a_failure_and_a_close_record_is_an_orderly_end() {
-    use coqui_link::auth::{Proof, Trust};
-    use coqui_link::auth::{Sealed, prove, prove_out};
+    use cabuya::auth::{Proof, Trust};
+    use cabuya::auth::{Sealed, prove, prove_out};
     let fixture = Fixture::new("closerecord");
     let near = method::identity(&fixture.dir.join("near.pem"));
     let far = method::identity(&fixture.dir.join("far.pem"));
@@ -904,8 +904,8 @@ fn start_in_band_dial(
 
 #[test]
 fn dial_proves_itself_through_a_proxy_that_ends_tls_and_the_proxy_cannot_inject() {
-    use coqui_link::auth::{Proof, Trust};
-    use coqui_link::auth::{Sealed, prove};
+    use cabuya::auth::{Proof, Trust};
+    use cabuya::auth::{Sealed, prove};
     let fixture = Fixture::new("dialproxy");
     // Built first: another test's build can hold the lock for longer than the listeners would wait.
     let agent = echo_agent();
@@ -1386,7 +1386,7 @@ fn heard_line(heard: &std::sync::mpsc::Receiver<String>, start: &str) -> String 
 
 #[test]
 fn a_method_is_the_identitys_and_naming_another_is_refused() {
-    use coqui_link::auth::{Identity, Method};
+    use cabuya::auth::{Identity, Method};
     const ANYONE: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
     let fixture = Fixture::new("methods");
     for (method, other) in [
@@ -1467,8 +1467,8 @@ fn a_method_is_the_identitys_and_naming_another_is_refused() {
 
 #[test]
 fn a_fresh_home_proves_by_the_default_and_a_webcrypto_home_keeps_serving_its_peers() {
+    use cabuya::auth::{Identity, Method, Proof, Sealed, Trust, prove_out};
     use coqui_agentic_peer::home;
-    use coqui_link::auth::{Identity, Method, Proof, Sealed, Trust, prove_out};
     use coqui_peer_webcrypto::TrustStore;
     let fixture = Fixture::new("homes");
 
@@ -1538,8 +1538,8 @@ fn a_fresh_home_proves_by_the_default_and_a_webcrypto_home_keeps_serving_its_pee
 
 #[test]
 fn after_moving_to_noise_a_paired_serve_naming_no_method_keeps_working() {
+    use cabuya::auth::{Identity, Method};
     use coqui_agentic_peer::home;
-    use coqui_link::auth::{Identity, Method};
     let fixture = Fixture::new("moved");
     let moved = fixture.dir.join("home");
     // A home paired before Noise.

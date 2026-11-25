@@ -46,7 +46,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      # The JavaScript peers of the bridge's test, at the revisions crates/coqui-acp-bridge/Cargo.toml and coqui-link pin.
+      # The JavaScript peers of the bridge's test, at the revisions crates/coqui-acp-bridge/Cargo.toml and cabuya pin.
       - uses: actions/checkout@v4
         with:
           repository: Boriken-Dev/coqui-peer-webcrypto

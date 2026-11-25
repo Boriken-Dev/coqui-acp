@@ -11,11 +11,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use cabuya::auth::Method;
 use clap::{Parser, Subcommand};
 use coqui_acp_bridge::helper::Helper;
 use coqui_acp_bridge::standing::DEFAULT_NAME;
 use coqui_acp_bridge::{agent, dial, discover, forward, grant, keygen, mcp_shim, pairing, serve};
-use coqui_link::auth::Method;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]

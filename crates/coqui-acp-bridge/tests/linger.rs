@@ -12,10 +12,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use cabuya::auth::{Identity, Proof, Trust};
+use cabuya::auth::{Sealed, prove_out};
+use cabuya::mux::{Limits, Mux, Side};
 use coqui_acp_bridge::linger::OUTPUT_LOST;
-use coqui_link::auth::{Identity, Proof, Trust};
-use coqui_link::auth::{Sealed, prove_out};
-use coqui_link::mux::{Limits, Mux, Side};
 use coqui_peer_webcrypto::TrustStore;
 use coqui_transport::{Channel, Failure};
 use coqui_transport_web::{Dialer, Kind, websocket};
