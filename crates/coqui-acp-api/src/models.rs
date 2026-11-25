@@ -278,6 +278,59 @@ pub struct ModelInfo {
     /// Whether the program uses this model when none is named.
     #[map(default)]
     pub is_default: bool,
+    /// What the model can do, as ids: operations (`chat`, `embed`, `rerank`, `speech_to_text`,
+    /// `text_to_speech`) and traits (`audio_input`, `audio_output`, `image_input`, `tool_use`,
+    /// `reasoning`, `structured_output`). The set is open: a consumer filters by the ids it asks
+    /// for and passes any other through. Empty means NOT REPORTED, never "none".
+    #[map(default)]
+    pub capabilities: Vec<String>,
+    /// Where `capabilities` come from, when the provider says.
+    pub capabilities_from: Option<CapabilitiesSource>,
+    /// The model's limits, when the provider knows any.
+    pub limits: Option<ModelLimits>,
+}
+
+/// Where a model's [`ModelInfo::capabilities`] were read from.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Copy, PartialEq, Eq)]
+#[map(crate = ::guatiao, rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CapabilitiesSource {
+    /// The service's own listing says them.
+    Listed,
+    /// The provider's library declares them, for a service whose listing carries none.
+    Declared,
+}
+
+/// What a model takes and gives, each only where the provider knows it.
+#[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq, Eq)]
+#[map(crate = ::guatiao)]
+#[non_exhaustive]
+pub struct ModelLimits {
+    /// The tokens a request and its answer may hold together.
+    pub context_tokens: Option<u64>,
+    /// The tokens of one answer at most.
+    pub max_output_tokens: Option<u64>,
+    /// The tokens of one text at most, for a model that embeds.
+    pub max_input_tokens: Option<u64>,
+    /// The length of the vectors of a model that embeds.
+    pub dimensions: Option<u64>,
+    /// Whether the vector length can be asked for a smaller one.
+    #[map(default)]
+    pub dimensions_adjustable: bool,
+    /// The audio formats the model takes in, as file extensions.
+    #[map(default)]
+    pub audio_in_formats: Vec<String>,
+    /// The audio formats the model gives, as file extensions.
+    #[map(default)]
+    pub audio_out_formats: Vec<String>,
+    /// The bytes of one recording at most.
+    pub max_audio_bytes: Option<u64>,
+    /// The voices of a model that speaks.
+    #[map(default)]
+    pub voices: Vec<String>,
+    /// The styles of a model that speaks and takes a style.
+    #[map(default)]
+    pub styles: Vec<String>,
 }
 
 impl ModelInfo {
@@ -293,7 +346,41 @@ impl ModelInfo {
             efforts: Vec::new(),
             default_effort: None,
             is_default: false,
+            capabilities: Vec::new(),
+            capabilities_from: None,
+            limits: None,
         }
+    }
+
+    /// The model able to do `capabilities`, from `source`.
+    #[must_use]
+    pub fn with_capabilities<I, S>(mut self, capabilities: I, source: CapabilitiesSource) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.capabilities = capabilities.into_iter().map(Into::into).collect();
+        self.capabilities_from = Some(source);
+        self
+    }
+
+    /// The model with `limits`.
+    #[must_use]
+    pub fn with_limits(mut self, limits: ModelLimits) -> Self {
+        self.limits = Some(limits);
+        self
+    }
+
+    /// Whether the model reports its capabilities, and so can be filtered by them.
+    #[must_use]
+    pub fn reports_capabilities(&self) -> bool {
+        !self.capabilities.is_empty()
+    }
+
+    /// Whether the model reports `capability`.
+    #[must_use]
+    pub fn can(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
     }
 }
 
@@ -708,5 +795,48 @@ impl NonDefault {
             value: value.into(),
             default: default.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use guatiao::{FromValue, ToValue};
+
+    use super::*;
+
+    #[test]
+    fn a_model_with_no_capabilities_reports_none_and_is_not_filtered_by_them() {
+        let model = ModelInfo::new("m");
+        assert!(!model.reports_capabilities());
+        assert!(!model.can("chat"));
+    }
+
+    #[test]
+    fn capabilities_and_limits_survive_the_trip_through_a_value() {
+        let limits = ModelLimits {
+            dimensions: Some(1536),
+            dimensions_adjustable: true,
+            voices: vec!["alloy".to_owned()],
+            ..ModelLimits::default()
+        };
+        let model = ModelInfo::new("text-embedding-3-small")
+            .with_capabilities(["embed"], CapabilitiesSource::Declared)
+            .with_limits(limits);
+        assert!(model.can("embed") && !model.can("chat"));
+        let value = model.to_value().expect("a value");
+        assert_eq!(ModelInfo::from_value(&value).expect("read back"), model);
+    }
+
+    #[test]
+    fn an_answer_written_before_the_fields_existed_still_reads() {
+        let old = ModelInfo::new("m");
+        let mut value = old.to_value().expect("a value");
+        let map = <&guatiao::Map>::try_from(&value).expect("a map").clone();
+        let mut kept = guatiao::Map::new();
+        for key in ["id", "efforts", "is_default"] {
+            kept.set(key, map.get(key).expect("a key").clone());
+        }
+        value = guatiao::Value::from(kept);
+        assert_eq!(ModelInfo::from_value(&value).expect("read"), old);
     }
 }

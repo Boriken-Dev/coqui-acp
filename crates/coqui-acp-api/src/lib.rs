@@ -51,10 +51,10 @@ pub mod standard;
 pub use files::PrivateDir;
 pub use kind::{AcpHarness, AcpHarnessVtable};
 pub use models::{
-    AccountsLink, CacheLifetime, DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo, HistoryLoss,
-    ImportReport, LINE_TOO_LARGE, ModelInfo, ModelListing, NonDefault, REPLAYED_AS_PROMPT,
-    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, StartRequest,
-    StartRequestBuilder, Takes, UnknownKind, line_too_large,
+    AccountsLink, CacheLifetime, CapabilitiesSource, DEFAULT_PAGE_BYTES, ExportPage, HarnessInfo,
+    HistoryLoss, ImportReport, LINE_TOO_LARGE, ModelInfo, ModelLimits, ModelListing, NonDefault,
+    REPLAYED_AS_PROMPT, SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile,
+    StartRequest, StartRequestBuilder, Takes, UnknownKind, line_too_large,
 };
 pub use requirement::{
     ANSWER_ONLY, DENIED_PATHS, FILES_UNDER, NAMES, NETWORK, NO_COMMANDS, NO_PROJECT_MCP,

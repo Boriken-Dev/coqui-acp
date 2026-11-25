@@ -14,14 +14,15 @@ use coqui_acp_api::{
     Accepted, AcceptedSlot, AccountCatalog, AccountGrant, AccountKeeperVtable, AccountKindInfo,
     AccountLoss, AccountModelsQuery, AccountOffer, AccountProviderInfo, AccountProviderVtable,
     AccountRef, AccountRenewal, AccountUsage, AccountUsageQuery, AccountWatchVtable, AccountsLink,
-    AcpHarnessVtable, Bucket, CacheLifetime, ChannelSinkVtable, ChannelVtable, Credentials,
-    EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice, HistoryLoss,
-    ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo, LoginOutcome,
-    LoginPrompterVtable, LoginRequest, ModelInfo, ModelListing, ModelSpend, NAMES, NonDefault,
-    NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable, RenewReport, RenewRequest, Requirement,
-    SeedPoint, SessionExport, SessionImport, SessionQuery, SessionRecordFile, SignedInCheck,
-    SignedInQuery, SignedInState, SpawnSpec, SpawnedProcessVtable, SpawnerInfo, Spend,
-    StartRequest, Takes, TerminalSize, UnknownKind, UsageReport, UsageSupport, WatchRequest,
+    AcpHarnessVtable, Bucket, CacheLifetime, CapabilitiesSource, ChannelSinkVtable, ChannelVtable,
+    Credentials, EndpointSlot, ErrorOutput, ExportPage, FileInfo, HarnessInfo, HarnessNotice,
+    HistoryLoss, ImportReport, LimitHit, LinkState, LoginAnswer, LoginForm, LoginMethodInfo,
+    LoginOutcome, LoginPrompterVtable, LoginRequest, ModelInfo, ModelLimits, ModelListing,
+    ModelSpend, NAMES, NonDefault, NoticeKind, OpenUrl, ProcessExit, ProcessSpawnerVtable,
+    RenewReport, RenewRequest, Requirement, SeedPoint, SessionExport, SessionImport, SessionQuery,
+    SessionRecordFile, SignedInCheck, SignedInQuery, SignedInState, SpawnSpec,
+    SpawnedProcessVtable, SpawnerInfo, Spend, StartRequest, Takes, TerminalSize, UnknownKind,
+    UsageReport, UsageSupport, WatchRequest,
 };
 use guatiao_serde::Serializable;
 use serde_json::Value as Json;
@@ -90,6 +91,7 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("Takes", schema_of::<Takes>()),
         ("ModelListing", schema_of::<ModelListing>()),
         ("UnknownKind", schema_of::<UnknownKind>()),
+        ("CapabilitiesSource", schema_of::<CapabilitiesSource>()),
         ("ModelInfo", schema_of::<ModelInfo>()),
         ("SessionRecordFile", schema_of::<SessionRecordFile>()),
         ("NonDefault", schema_of::<NonDefault>()),
@@ -138,6 +140,7 @@ fn schemas() -> Vec<(&'static str, Json)> {
         ("SignedInQuery", schema_of::<SignedInQuery>()),
         ("SignedInState", schema_of::<SignedInState>()),
         ("SignedInCheck", schema_of::<SignedInCheck>()),
+        ("ModelLimits", schema_of::<ModelLimits>()),
     ]
 }
 
@@ -159,7 +162,7 @@ fn the_committed_schemas_are_what_this_build_describes() {
 /// changing one is a decision.
 #[test]
 fn every_models_keys_are_pinned() {
-    let pinned: [(&str, &[&str], &[&str]); 54] = [
+    let pinned: [(&str, &[&str], &[&str]); 55] = [
         (
             "StartRequest",
             &[
@@ -271,16 +274,35 @@ fn every_models_keys_are_pinned() {
         (
             "ModelInfo",
             &[
+                "capabilities",
+                "capabilities_from",
                 "default_effort",
                 "description",
                 "efforts",
                 "id",
                 "is_default",
+                "limits",
                 "name",
                 "resolved",
                 "version",
             ],
             &["id"],
+        ),
+        (
+            "ModelLimits",
+            &[
+                "audio_in_formats",
+                "audio_out_formats",
+                "context_tokens",
+                "dimensions",
+                "dimensions_adjustable",
+                "max_audio_bytes",
+                "max_input_tokens",
+                "max_output_tokens",
+                "styles",
+                "voices",
+            ],
+            &[],
         ),
         (
             "SessionRecordFile",
@@ -549,7 +571,7 @@ fn every_models_keys_are_pinned() {
         ),
     ];
     let schemas = schemas();
-    assert_eq!(pinned.len(), 54);
+    assert_eq!(pinned.len(), 55);
     for (name, keys, required) in pinned {
         let schema = &schemas
             .iter()

@@ -831,6 +831,125 @@
               "type": "boolean",
               "description": "Whether the program uses this model when none is named.",
               "default": false
+            },
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What the model can do, as ids: operations (`chat`, `embed`, `rerank`, `speech_to_text`, `text_to_speech`) and traits (`audio_input`, `audio_output`, `image_input`, `tool_use`, `reasoning`, `structured_output`). The set is open: a consumer filters by the ids it asks for and passes any other through. Empty means NOT REPORTED, never \"none\".",
+              "default": []
+            },
+            "capabilities_from": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "listed",
+                    "declared"
+                  ],
+                  "x-enum-labels": {
+                    "listed": "The service's own listing says them.",
+                    "declared": "The provider's library declares them, for a service whose listing carries none."
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where `capabilities` come from, when the provider says."
+            },
+            "limits": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "context_tokens": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 18446744073709551615,
+                  "description": "The tokens a request and its answer may hold together."
+                },
+                "max_output_tokens": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 18446744073709551615,
+                  "description": "The tokens of one answer at most."
+                },
+                "max_input_tokens": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 18446744073709551615,
+                  "description": "The tokens of one text at most, for a model that embeds."
+                },
+                "dimensions": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 18446744073709551615,
+                  "description": "The length of the vectors of a model that embeds."
+                },
+                "dimensions_adjustable": {
+                  "type": "boolean",
+                  "description": "Whether the vector length can be asked for a smaller one.",
+                  "default": false
+                },
+                "audio_in_formats": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The audio formats the model takes in, as file extensions.",
+                  "default": []
+                },
+                "audio_out_formats": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The audio formats the model gives, as file extensions.",
+                  "default": []
+                },
+                "max_audio_bytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 18446744073709551615,
+                  "description": "The bytes of one recording at most."
+                },
+                "voices": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The voices of a model that speaks.",
+                  "default": []
+                },
+                "styles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The styles of a model that speaks and takes a style.",
+                  "default": []
+                }
+              },
+              "additionalProperties": false,
+              "description": "The model's limits, when the provider knows any."
             }
           },
           "additionalProperties": false,
@@ -857,6 +976,19 @@
     "x-enum-labels": {
       "not_installed": "The program the account's models are asked of is not on the machine.",
       "failed": "The program is there and could not be asked; the text says what."
+    },
+    "properties": {}
+  },
+  "CapabilitiesSource": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "string",
+    "enum": [
+      "listed",
+      "declared"
+    ],
+    "x-enum-labels": {
+      "listed": "The service's own listing says them.",
+      "declared": "The provider's library declares them, for a service whose listing carries none."
     },
     "properties": {}
   },
@@ -915,6 +1047,125 @@
         "type": "boolean",
         "description": "Whether the program uses this model when none is named.",
         "default": false
+      },
+      "capabilities": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "What the model can do, as ids: operations (`chat`, `embed`, `rerank`, `speech_to_text`, `text_to_speech`) and traits (`audio_input`, `audio_output`, `image_input`, `tool_use`, `reasoning`, `structured_output`). The set is open: a consumer filters by the ids it asks for and passes any other through. Empty means NOT REPORTED, never \"none\".",
+        "default": []
+      },
+      "capabilities_from": {
+        "anyOf": [
+          {
+            "type": "string",
+            "enum": [
+              "listed",
+              "declared"
+            ],
+            "x-enum-labels": {
+              "listed": "The service's own listing says them.",
+              "declared": "The provider's library declares them, for a service whose listing carries none."
+            }
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Where `capabilities` come from, when the provider says."
+      },
+      "limits": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "context_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 18446744073709551615,
+            "description": "The tokens a request and its answer may hold together."
+          },
+          "max_output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 18446744073709551615,
+            "description": "The tokens of one answer at most."
+          },
+          "max_input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 18446744073709551615,
+            "description": "The tokens of one text at most, for a model that embeds."
+          },
+          "dimensions": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 18446744073709551615,
+            "description": "The length of the vectors of a model that embeds."
+          },
+          "dimensions_adjustable": {
+            "type": "boolean",
+            "description": "Whether the vector length can be asked for a smaller one.",
+            "default": false
+          },
+          "audio_in_formats": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The audio formats the model takes in, as file extensions.",
+            "default": []
+          },
+          "audio_out_formats": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The audio formats the model gives, as file extensions.",
+            "default": []
+          },
+          "max_audio_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 18446744073709551615,
+            "description": "The bytes of one recording at most."
+          },
+          "voices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The voices of a model that speaks.",
+            "default": []
+          },
+          "styles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The styles of a model that speaks and takes a style.",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "description": "The model's limits, when the provider knows any."
       }
     },
     "additionalProperties": false,
@@ -4337,5 +4588,94 @@
     "required": [
       "state"
     ]
+  },
+  "ModelLimits": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "context_tokens": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "The tokens a request and its answer may hold together."
+      },
+      "max_output_tokens": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "The tokens of one answer at most."
+      },
+      "max_input_tokens": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "The tokens of one text at most, for a model that embeds."
+      },
+      "dimensions": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "The length of the vectors of a model that embeds."
+      },
+      "dimensions_adjustable": {
+        "type": "boolean",
+        "description": "Whether the vector length can be asked for a smaller one.",
+        "default": false
+      },
+      "audio_in_formats": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The audio formats the model takes in, as file extensions.",
+        "default": []
+      },
+      "audio_out_formats": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The audio formats the model gives, as file extensions.",
+        "default": []
+      },
+      "max_audio_bytes": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0,
+        "maximum": 18446744073709551615,
+        "description": "The bytes of one recording at most."
+      },
+      "voices": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The voices of a model that speaks.",
+        "default": []
+      },
+      "styles": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The styles of a model that speaks and takes a style.",
+        "default": []
+      }
+    },
+    "additionalProperties": false
   }
 }
