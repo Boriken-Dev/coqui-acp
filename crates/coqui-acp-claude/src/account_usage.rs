@@ -349,7 +349,7 @@ fn slug(name: &str) -> String {
 }
 
 /// The report the usage document makes: each window it names and is not null, then each per-model weekly window of
-/// `model_scoped`. No window at all is an account with no plan limits.
+/// the model-scoped weekly entries of `limits`. No window at all is an account with no plan limits.
 fn report_of(document: &Value, now: i64) -> UsageReport {
     let mut buckets: Vec<Bucket> = Vec::new();
     for known in WINDOWS {
@@ -372,10 +372,16 @@ fn report_of(document: &Value, now: i64) -> UsageReport {
             now,
         ));
     }
-    if let Some(scoped) = document.get("model_scoped").and_then(Value::as_array) {
-        for fields in scoped.iter().filter(|fields| fields.is_object()) {
+    // The plan's per-model weekly limits: `limits` holds one entry per limit, and a `weekly_scoped` one names the model it
+    // is for under `scope.model.display_name` (`Fable`). It is a bucket of its own whether or not the plan counts it yet
+    // (`is_active`).
+    if let Some(limits) = document.get("limits").and_then(Value::as_array) {
+        for fields in limits.iter().filter(|fields| fields.is_object()) {
+            if fields.get("kind").and_then(Value::as_str) != Some("weekly_scoped") {
+                continue;
+            }
             let Some(name) = fields
-                .get("display_name")
+                .pointer("/scope/model/display_name")
                 .and_then(Value::as_str)
                 .filter(|name| !name.is_empty())
             else {
@@ -385,16 +391,30 @@ fn report_of(document: &Value, now: i64) -> UsageReport {
             if buckets.iter().any(|bucket| bucket.id == id) {
                 continue;
             }
-            buckets.push(window(
+            let mut bucket = window(
                 &id,
                 &format!("Weekly, {name}"),
                 Some(WEEK),
                 Coverage::Only {
-                    models: alloc::vec![name.to_string()],
+                    models: alloc::vec![name.to_lowercase()],
                 },
-                fields,
+                &Value::Null,
                 now,
-            ));
+            );
+            if let Some(percent) = fields.get("percent").and_then(Value::as_f64) {
+                bucket.used = Some(permille(percent));
+                bucket.limit = Some(1000);
+                bucket.status = if percent >= 100.0 {
+                    Room::Exhausted
+                } else {
+                    Room::Ok
+                };
+            }
+            bucket.refill = Refill::FixedWindow {
+                length: Some(Duration::from_secs(WEEK)),
+                resets_at: resets_at(fields.get("resets_at")),
+            };
+            buckets.push(bucket);
         }
     }
     if buckets.is_empty() {
@@ -421,7 +441,10 @@ mod tests {
                 "seven_day": {"utilization": 100.0, "resets_at": "2026-11-20T10:00:00Z"},
                 "seven_day_opus": null,
                 "seven_day_sonnet": {"utilization": 5.0, "resets_at": 1_795_000_000},
-                "model_scoped": [{"display_name": "Fable 2", "utilization": 33.0, "resets_at": "2026-11-20T10:00:00Z"}],
+                "limits": [
+                    {"kind": "weekly_all", "percent": 100, "resets_at": "2026-11-20T10:00:00Z", "scope": null},
+                    {"kind": "weekly_scoped", "percent": 33, "resets_at": "2026-11-20T10:00:00Z", "scope": {"model": {"id": null, "display_name": "Fable 2"}}},
+                ],
             }),
             now,
         );
@@ -455,7 +478,7 @@ mod tests {
         assert_eq!(
             report.buckets[3].models,
             Coverage::Only {
-                models: alloc::vec!["Fable 2".to_string()]
+                models: alloc::vec!["fable 2".to_string()]
             }
         );
         assert_eq!(report.observed_at, now);

@@ -89,7 +89,7 @@ fn document() -> String {
         "seven_day": {"utilization": 34.0, "resets_at": "2026-11-20T10:00:00+00:00"},
         "seven_day_opus": null,
         "seven_day_sonnet": {"utilization": 5.0, "resets_at": "2026-11-20T10:00:00+00:00"},
-        "model_scoped": [{"display_name": "Fable", "utilization": 61.0, "resets_at": "2026-11-21T00:00:00Z"}],
+        "limits": [{"kind": "weekly_scoped", "group": "weekly", "percent": 61, "severity": "normal", "resets_at": "2026-11-21T00:00:00Z", "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}, "is_active": false}],
     })
     .to_string()
 }
@@ -153,10 +153,40 @@ fn a_subscription_login_reads_its_windows_with_the_oauth_token() {
     assert_eq!(
         report.buckets[3].models,
         Coverage::Only {
-            models: vec!["Fable".to_string()]
+            models: vec!["fable".to_string()]
         }
     );
+    assert_eq!(report.buckets[3].model_names, ["Fable"]);
+    assert_eq!(report.buckets[3].used, Some(610));
     assert!(!format!("{report:?}").contains("canary"));
+}
+
+/// Claude's own document, as the account answers it today: no five-hour window, and the Fable limit only in `limits`.
+#[test]
+fn the_fable_limit_of_the_recorded_document_is_a_bucket_of_its_own() {
+    let recorded = include_str!("fixtures/oauth_usage/with_fable.json");
+    let (addr, _seen) = stand_in(vec![(200, None, recorded.to_string())]);
+    let report = read_limits(&login(&login_file(PROFILE, LATER)), &options(addr)).expect("read");
+    let ids: Vec<&str> = report.buckets.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(ids, ["seven_day", "seven_day_model_fable"]);
+    let fable = &report.buckets[1];
+    assert_eq!(fable.label.as_deref(), Some("Weekly, Fable"));
+    assert_eq!(fable.model_names, ["Fable"]);
+    assert_eq!(
+        fable.models,
+        Coverage::Only {
+            models: vec!["fable".to_string()]
+        }
+    );
+    assert_eq!((fable.used, fable.limit), (Some(610), Some(1000)));
+    assert_eq!(fable.status, Room::Ok);
+    assert_eq!(
+        fable.refill,
+        Refill::FixedWindow {
+            length: Some(core::time::Duration::from_secs(7 * 86_400)),
+            resets_at: Some(1_795_219_200)
+        }
+    );
 }
 
 #[test]
