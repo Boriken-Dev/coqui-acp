@@ -333,6 +333,51 @@ pub struct ModelLimits {
     pub styles: Vec<String>,
 }
 
+impl ModelLimits {
+    /// No limit known.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The tokens a request and its answer may hold together.
+    #[must_use]
+    pub fn context(mut self, tokens: u64) -> Self {
+        self.context_tokens = Some(tokens);
+        self
+    }
+
+    /// The tokens of one answer at most.
+    #[must_use]
+    pub fn output(mut self, tokens: u64) -> Self {
+        self.max_output_tokens = Some(tokens);
+        self
+    }
+
+    /// A model that embeds: its vector length, whether a shorter one can be asked for, and the tokens of one text at most.
+    #[must_use]
+    pub fn embedding(mut self, dimensions: u64, adjustable: bool, max_input: Option<u64>) -> Self {
+        self.dimensions = Some(dimensions);
+        self.dimensions_adjustable = adjustable;
+        self.max_input_tokens = max_input;
+        self
+    }
+
+    /// A model that speaks: its voices and styles.
+    #[must_use]
+    pub fn speaking<V, S>(mut self, voices: V, styles: S) -> Self
+    where
+        V: IntoIterator,
+        V::Item: Into<String>,
+        S: IntoIterator,
+        S::Item: Into<String>,
+    {
+        self.voices = voices.into_iter().map(Into::into).collect();
+        self.styles = styles.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
 impl ModelInfo {
     /// The model `id`, with no name, description, version or efforts.
     #[must_use]
