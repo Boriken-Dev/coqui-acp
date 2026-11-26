@@ -31,6 +31,8 @@ pub(crate) struct Shapes {
     terminals: BTreeMap<String, String>,
     /// The last usage of the running turn, which version 2 gives with its `idle`.
     pub(crate) usage: Option<Usage>,
+    /// What the harness said of the running turn for its answer's `_meta`.
+    pub(crate) meta: Map<String, Value>,
     /// What the running turn said, to tell which of it is a limit's own words.
     said: Said,
 }
@@ -198,6 +200,12 @@ impl Shapes {
             Event::Usage(usage) => {
                 self.usage = Some(usage.clone());
                 usage_update(usage).into_iter().collect()
+            }
+            Event::TurnMeta(meta) => {
+                for (key, value) in meta {
+                    self.meta.insert(key.clone(), value.clone());
+                }
+                Vec::new()
             }
             Event::Commands(commands) => vec![available_commands(commands, v2)],
             Event::Options(options) => vec![json!({"sessionUpdate": "config_option_update",
@@ -503,13 +511,33 @@ fn available_commands(commands: &[Command], v2: bool) -> Value {
 
 /// A turn's token counts as version 2 gives them with `idle`.
 pub(crate) fn turn_usage(usage: &Usage) -> Value {
-    json!({
-        "inputTokens": usage.input,
-        "outputTokens": usage.output,
-        "cachedReadTokens": usage.cache_read,
-        "cachedWriteTokens": usage.cache_write,
-        "totalTokens": usage.input.saturating_add(usage.output).saturating_add(usage.cache_read).saturating_add(usage.cache_write),
-    })
+    let (input, output, cache_read, cache_write, reasoning) = match &usage.turn {
+        Some(turn) => (
+            turn.input,
+            turn.output,
+            turn.cache_read,
+            turn.cache_write,
+            turn.reasoning,
+        ),
+        None => (
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+            None,
+        ),
+    };
+    let mut counts = json!({
+        "inputTokens": input,
+        "outputTokens": output,
+        "cachedReadTokens": cache_read,
+        "cachedWriteTokens": cache_write,
+        "totalTokens": input.saturating_add(output).saturating_add(cache_read).saturating_add(cache_write),
+    });
+    if let Some(reasoning) = reasoning {
+        counts["thoughtTokens"] = json!(reasoning);
+    }
+    counts
 }
 
 /// The update that reports a child agent: a change to the parent's tool call that carries only the child's `_meta`.
@@ -555,6 +583,17 @@ fn child_update(child: &Child) -> Value {
 /// The `_meta` that says a quota refused a turn.
 pub(crate) fn limit_meta(limit: &LimitHit) -> Value {
     json!({ LIMIT_META_KEY: serde_json::to_value(limit).unwrap_or(Value::Null) })
+}
+
+/// A turn answer's `_meta`: what the harness said of the turn, with the limit that refused it when one did.
+pub(crate) fn answer_meta(limit: Option<&LimitHit>, said: &Map<String, Value>) -> Option<Value> {
+    let mut meta = said.clone();
+    if let Some(limit) = limit
+        && let Value::Object(own) = limit_meta(limit)
+    {
+        meta.extend(own);
+    }
+    (!meta.is_empty()).then_some(Value::Object(meta))
 }
 
 /// Options as ACP selects: `id` in version 1, `configId` in version 2.

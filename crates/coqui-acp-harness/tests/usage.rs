@@ -6,6 +6,7 @@
     clippy::alloc_instead_of_core
 )]
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use coqui_acp_api::usage::{Bucket, LimitHit, Refill, Spend, Status};
 use coqui_acp_api::{Source, UsageReport, UsageSupport};
-use coqui_acp_harness::event::{Event, Stop, TurnEnd, Usage};
+use coqui_acp_harness::event::{Event, Stop, TurnEnd, TurnTokens, Usage};
 use coqui_acp_harness::{
     AgentInfo, ConfigOption, Conversation, EventSink, Harness, HarnessError, OpenRequest, Settings,
     Takes, serve,
@@ -27,6 +28,10 @@ struct Script {
     buckets: Vec<Bucket>,
     spend: bool,
     limit: Option<LimitHit>,
+    /// A turn's own counts, reported in place of the last request's.
+    turn: Option<TurnTokens>,
+    /// What the harness says of the turn for its answer's `_meta`.
+    said: BTreeMap<String, Value>,
 }
 
 /// What a read with no turn answers, and how often it was asked.
@@ -123,7 +128,11 @@ impl Conversation for Open {
                 spend.input = 7;
                 spend.output = 3;
                 usage.spend = Some(spend);
+                usage.turn = script.turn.clone();
                 events.send(Event::Usage(usage));
+            }
+            if !script.said.is_empty() {
+                events.send(Event::TurnMeta(script.said));
             }
             events.send(Event::TurnEnd(match script.limit {
                 Some(hit) => TurnEnd::Limited(hit),
@@ -189,6 +198,13 @@ impl Wire {
             if message.get("id") == Some(&json!(id)) && message.get("method").is_none() {
                 return message;
             }
+            self.seen.push(message);
+        }
+    }
+
+    /// Reads everything the agent has sent, keeping it in `seen`.
+    fn settle(&mut self) {
+        while let Ok(message) = self.from_agent.recv_timeout(Duration::from_millis(300)) {
             self.seen.push(message);
         }
     }
@@ -312,6 +328,7 @@ fn a_change_is_told_to_the_client_that_asked_and_a_repeat_changes_nothing() {
         buckets: vec![five_hour(620)],
         spend: true,
         limit: None,
+        ..Script::default()
     });
     assert_eq!(prompt(&mut wire, &s)["result"]["stopReason"], "end_turn");
     prompt(&mut quiet, &q);
@@ -348,6 +365,7 @@ fn a_change_is_told_to_the_client_that_asked_and_a_repeat_changes_nothing() {
         buckets: vec![five_hour(620)],
         spend: false,
         limit: None,
+        ..Script::default()
     });
     prompt(&mut wire, &s);
     assert!(wire.told().is_empty(), "a repeat was told");
@@ -356,6 +374,7 @@ fn a_change_is_told_to_the_client_that_asked_and_a_repeat_changes_nothing() {
         buckets: vec![five_hour(700)],
         spend: false,
         limit: None,
+        ..Script::default()
     });
     prompt(&mut wire, &s);
     assert_eq!(wire.told().len(), 1);
@@ -377,6 +396,7 @@ fn a_limited_turn_is_a_refusal_with_its_hit_and_the_report_keeps_it() {
         buckets: vec![five_hour(990)],
         spend: false,
         limit: Some(hit.clone()),
+        ..Script::default()
     });
     let ended = prompt(&mut wire, &s);
     assert_eq!(ended["result"]["stopReason"], "refusal", "{ended}");
@@ -394,6 +414,7 @@ fn a_limited_turn_is_a_refusal_with_its_hit_and_the_report_keeps_it() {
         buckets: vec![five_hour(10)],
         spend: false,
         limit: None,
+        ..Script::default()
     });
     prompt(&mut wire, &s);
     assert!(wire.report(None).limit.is_none());
@@ -498,6 +519,7 @@ fn a_hit_with_a_reset_and_no_wait_is_left_with_no_wait() {
         buckets: Vec::new(),
         spend: false,
         limit: Some(hit),
+        ..Script::default()
     });
     let ended = prompt(&mut wire, &s);
     let told: LimitHit =
@@ -565,4 +587,82 @@ fn a_harness_that_needs_a_session_says_so_and_is_read_only_with_one_open() {
     let s = session(&mut wire);
     assert_eq!(wire.report(Some(&s)).buckets[0].used, Some(450));
     assert_eq!(harness.readings.harness_reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_turn_answer_carries_its_own_counts_and_what_the_harness_said_of_it() {
+    for version in [1, 2] {
+        let harness = Reports::new(reporting());
+        let mut wire = Wire::serve(harness.clone(), Settings::new());
+        opted_in(&mut wire, version, false);
+        let s = session(&mut wire);
+        let mut turn = TurnTokens::default();
+        turn.input = 40;
+        turn.output = 9;
+        turn.cache_read = 100;
+        turn.reasoning = Some(4);
+        let mut hit = LimitHit::new(0);
+        hit.text = Some("usage limit".into());
+        for limit in [None, Some(hit)] {
+            harness.says(Script {
+                spend: true,
+                turn: Some(turn.clone()),
+                said: BTreeMap::from([
+                    ("model".to_owned(), json!("gpt-6.1-sol")),
+                    ("codex:error_info".to_owned(), json!("serverOverloaded")),
+                ]),
+                limit: limit.clone(),
+                ..Script::default()
+            });
+            wire.seen.clear();
+            let ended = prompt(&mut wire, &s);
+            wire.settle();
+            let (usage, meta) = if version >= 2 {
+                let idle = wire
+                    .seen
+                    .iter()
+                    .rev()
+                    .find(|message| message["params"]["update"]["state"] == "idle")
+                    .unwrap_or_else(|| panic!("an idle update in {:?}", wire.seen))
+                    .clone();
+                (
+                    idle["params"]["update"]["usage"].clone(),
+                    idle["params"]["update"]["_meta"].clone(),
+                )
+            } else {
+                (
+                    ended["result"]["usage"].clone(),
+                    ended["result"]["_meta"].clone(),
+                )
+            };
+            if limit.is_none() || version >= 2 {
+                assert_eq!(usage["inputTokens"], 40, "{usage}");
+                assert_eq!(usage["cachedReadTokens"], 100);
+                assert_eq!(usage["thoughtTokens"], 4);
+            }
+            assert_eq!(meta["model"], "gpt-6.1-sol", "{meta}");
+            assert_eq!(meta["codex:error_info"], "serverOverloaded");
+            assert_eq!(
+                meta.get("dev.boriken.coqui.acp/limit").is_some(),
+                limit.is_some(),
+                "{meta}"
+            );
+        }
+        // The next turn starts with nothing of the last one's.
+        harness.says(Script::default());
+        wire.seen.clear();
+        let ended = prompt(&mut wire, &s);
+        wire.settle();
+        let idle = wire
+            .seen
+            .iter()
+            .find(|message| message["params"]["update"]["state"] == "idle")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            ended["result"].get("_meta").is_none()
+                && idle["params"]["update"].get("_meta").is_none(),
+            "{ended} {idle}"
+        );
+    }
 }

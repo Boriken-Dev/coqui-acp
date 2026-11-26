@@ -266,6 +266,7 @@ impl Session {
             sent: false,
         });
         state.shapes.usage = None;
+        state.shapes.meta.clear();
         Ok(number)
     }
 
@@ -426,6 +427,7 @@ impl Session {
                             turn,
                             &TurnEnd::stopped(Stop::Cancelled),
                             None,
+                            &Map::new(),
                         );
                     }
                 }
@@ -449,6 +451,7 @@ impl Session {
                 turn,
                 &TurnEnd::stopped(Stop::Cancelled),
                 None,
+                &Map::new(),
             );
         }
         let conversation = self
@@ -523,6 +526,7 @@ impl Session {
         }
         let version = state.shapes.version;
         let usage = state.shapes.usage.take();
+        let said = core::mem::take(&mut state.shapes.meta);
         let Some(turn) = state.turn.take() else {
             drop(state);
             shared.withdraw(&asking);
@@ -541,7 +545,7 @@ impl Session {
             _ if turn.cancelling => TurnEnd::stopped(Stop::Cancelled),
             other => other,
         };
-        self.answer(shared, version, turn, &end, usage.as_ref());
+        self.answer(shared, version, turn, &end, usage.as_ref(), &said);
     }
 
     fn answer(
@@ -551,6 +555,7 @@ impl Session {
         turn: Turn,
         end: &TurnEnd,
         usage: Option<&Usage>,
+        said: &Map<String, Value>,
     ) {
         if version >= 2 {
             let mut idle = Map::new();
@@ -570,7 +575,6 @@ impl Session {
                         json!({"sessionUpdate": "notice", "severity": "warning", "title": title}),
                     );
                     idle.insert("stopReason".into(), json!("refusal"));
-                    idle.insert("_meta".into(), shape::limit_meta(limit));
                 }
                 TurnEnd::Failed(why) => {
                     idle.insert("stopReason".into(), json!("error"));
@@ -582,6 +586,14 @@ impl Session {
             }
             if let Some(usage) = usage {
                 idle.insert("usage".into(), shape::turn_usage(usage));
+            }
+            let limit = if let TurnEnd::Limited(limit) = end {
+                Some(limit)
+            } else {
+                None
+            };
+            if let Some(meta) = shape::answer_meta(limit, said) {
+                idle.insert("_meta".into(), meta);
             }
             self.update(shared, Value::Object(idle));
             return;
@@ -595,13 +607,17 @@ impl Session {
                 if let Some(usage) = usage {
                     result["usage"] = shape::turn_usage(usage);
                 }
+                if let Some(meta) = shape::answer_meta(None, said) {
+                    result["_meta"] = meta;
+                }
                 shared.respond(&id, result);
             }
             TurnEnd::Limited(limit) => {
-                shared.respond(
-                    &id,
-                    json!({"stopReason": "refusal", "_meta": shape::limit_meta(limit)}),
-                );
+                let mut result = json!({"stopReason": "refusal"});
+                if let Some(meta) = shape::answer_meta(Some(limit), said) {
+                    result["_meta"] = meta;
+                }
+                shared.respond(&id, result);
             }
             TurnEnd::Failed(why) => {
                 shared.respond_error_data(
