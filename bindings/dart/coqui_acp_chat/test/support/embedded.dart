@@ -269,7 +269,9 @@ const String usageVectors = r'''{
           "bucket": "inferred",
           "source": "inferred",
           "text": "Error 429: RESOURCE_EXHAUSTED",
-          "observed_at": 1788900200
+          "observed_at": 1788900200,
+          "text_ids": [],
+          "text_indexes": []
         }
       }
     },
@@ -319,7 +321,15 @@ const String usageVectors = r'''{
           ],
           "source": "reported",
           "text": "You have hit your usage limit.",
-          "observed_at": 1788900300
+          "observed_at": 1788900300,
+          "kind": "usage_quota",
+          "continuable": true,
+          "text_ids": [
+            "m1"
+          ],
+          "text_indexes": [
+            2
+          ]
         },
         "spend": {
           "session_id": "0f8fad5b-d9cb-469f-a165-70867728950e",

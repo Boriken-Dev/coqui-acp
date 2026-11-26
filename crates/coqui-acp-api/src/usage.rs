@@ -377,7 +377,32 @@ impl Bucket {
     }
 }
 
-/// A refused request: the harness said a limit stopped it.
+/// What kind of limit stopped a turn.
+#[derive(ToValue, FromValue, Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[map(crate = ::guatiao, rename_all = "snake_case")]
+#[serde(from = "String", into = "String")]
+#[non_exhaustive]
+pub enum LimitKind {
+    /// An allowance of the plan or key used up: a five-hour or weekly window, a monthly quota.
+    UsageQuota,
+    /// Too many requests or tokens in a short time; it lifts in seconds or minutes.
+    RateLimit,
+    /// The conversation does not fit the model's context window. Another account does not help; a model with a larger window might.
+    ContextWindow,
+    /// A prepaid balance or a spending cap used up.
+    Credit,
+    /// A limit that fits none of these.
+    Unclassified,
+    /// A kind a newer writer named.
+    #[map(other)]
+    Other(String),
+}
+
+open_names!(LimitKind { UsageQuota => "usage_quota", RateLimit => "rate_limit", ContextWindow => "context_window", Credit => "credit", Unclassified => "other" });
+
+/// A refused request: the harness said a limit stopped it. This is the standard form a harness reports a limit in, so a host reads
+/// what it says and does not match the words of an error: the answer of a refused turn carries it in `_meta` under
+/// [`LIMIT_META_KEY`].
 #[derive(ToValue, FromValue, Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[map(crate = ::guatiao)]
 #[non_exhaustive]
@@ -399,6 +424,24 @@ pub struct LimitHit {
     pub text: Option<String>,
     /// When it was seen, in Unix seconds.
     pub observed_at: i64,
+    /// What kind of limit it is, when the harness can tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<LimitKind>,
+    /// Whether the work can go on with another account, model or agent: `false` for a limit that follows the work (a context
+    /// window), `true` for one that follows the member. Absent: not said, and a host takes it as `true` unless the kind is
+    /// `context_window`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuable: Option<bool>,
+    /// The `messageId`s of the turn's agent message and thought updates that are the limit's own words, so a host drops them from
+    /// the history it carries on.
+    #[map(default)]
+    #[serde(default)]
+    pub text_ids: Vec<String>,
+    /// For a harness whose updates carry no ids (ACP version 1): the zero-based positions of those updates among the turn's agent
+    /// message and thought chunks, in the order they were sent.
+    #[map(default)]
+    #[serde(default)]
+    pub text_indexes: Vec<u32>,
 }
 
 impl LimitHit {
@@ -412,7 +455,46 @@ impl LimitHit {
             source: Source::Reported,
             text: None,
             observed_at,
+            kind: None,
+            continuable: None,
+            text_ids: Vec::new(),
+            text_indexes: Vec::new(),
         }
+    }
+
+    /// Says what kind of limit it is.
+    #[must_use]
+    pub fn kind(mut self, kind: LimitKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+
+    /// Says whether the work can go on with another member.
+    #[must_use]
+    pub const fn continuable(mut self, continuable: bool) -> Self {
+        self.continuable = Some(continuable);
+        self
+    }
+
+    /// Names the messages that are the limit's words, by id.
+    #[must_use]
+    pub fn text_ids(mut self, ids: Vec<String>) -> Self {
+        self.text_ids = ids;
+        self
+    }
+
+    /// Names the messages that are the limit's words, by position among the turn's messages and thoughts.
+    #[must_use]
+    pub fn text_indexes(mut self, indexes: Vec<u32>) -> Self {
+        self.text_indexes = indexes;
+        self
+    }
+
+    /// Whether the work can go on elsewhere: what the harness said, else `true` unless the limit is a context window.
+    #[must_use]
+    pub fn can_continue(&self) -> bool {
+        self.continuable
+            .unwrap_or(self.kind != Some(LimitKind::ContextWindow))
     }
 }
 
@@ -715,7 +797,46 @@ pub fn infer_limit(text: &str, phrases: &[&str]) -> Option<LimitHit> {
     hit.text = Some(String::from(truncated(phrase, MAX_EVIDENCE_BYTES)));
     hit.resets_at = stated_time(hay);
     hit.retry_after = stated_length(hay);
+    hit.kind = Some(limit_kind_of(text).unwrap_or(LimitKind::Unclassified));
     Some(hit)
+}
+
+/// The most of a text [`limit_kind_of`] reads, in bytes.
+const MAX_KIND_BYTES: usize = 4096;
+
+/// What kind of limit a refusal's words say, for a harness that gives no structured kind: a context window (`context window`,
+/// `prompt is too long`, `context length`), a balance or spending cap (`credit`, `balance`, `billing`, `spend`), a rate limit
+/// (`rate limit`, `too many requests`, `throttl...`), a usage quota (`usage limit`, `quota`, `exhausted`, `limit reached`,
+/// `hit your limit`) or, with none of those words, a bare `429` (a rate limit), checked in that order. `None` when the words say none of them. A harness that knows its own
+/// limits states the kind itself, and this is the fallback for one that does not.
+#[must_use]
+pub fn limit_kind_of(text: &str) -> Option<LimitKind> {
+    let lower = String::from(truncated(text, MAX_KIND_BYTES)).to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|word| lower.contains(word));
+    if has(&[
+        "context window",
+        "context length",
+        "prompt is too long",
+        "too many tokens",
+    ]) {
+        Some(LimitKind::ContextWindow)
+    } else if has(&["credit", "balance", "billing", "spend"]) {
+        Some(LimitKind::Credit)
+    } else if has(&["rate limit", "rate_limit", "too many requests", "throttl"]) {
+        Some(LimitKind::RateLimit)
+    } else if has(&[
+        "usage limit",
+        "quota",
+        "exhausted",
+        "limit reached",
+        "hit your limit",
+    ]) {
+        Some(LimitKind::UsageQuota)
+    } else if has(&["429"]) {
+        Some(LimitKind::RateLimit)
+    } else {
+        None
+    }
 }
 
 /// The prefix of `text` that is read, as bytes.

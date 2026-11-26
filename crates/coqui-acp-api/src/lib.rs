@@ -68,7 +68,7 @@ pub use spawner::{
     SpawnedProcessVtable, SpawnerInfo, TerminalSize,
 };
 pub use usage::{
-    Bucket, Coverage, DEFAULT_LIMIT_PHRASES, LIMIT_META_KEY, LimitHit, ModelSpend, Refill, Source,
-    Spend, Status, USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION, USAGE_VERSION, Unit,
-    UsageReport, UsageSupport, infer_limit,
+    Bucket, Coverage, DEFAULT_LIMIT_PHRASES, LIMIT_META_KEY, LimitHit, LimitKind, ModelSpend,
+    Refill, Source, Spend, Status, USAGE_CAPABILITY, USAGE_METHOD, USAGE_NOTIFICATION,
+    USAGE_VERSION, Unit, UsageReport, UsageSupport, infer_limit, limit_kind_of,
 };

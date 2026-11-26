@@ -206,7 +206,21 @@ final class UsageLimitHit {
     this.source = 'reported',
     this.text,
     this.observedAt = 0,
+    this.kind,
+    this.continuable,
+    this.textIds = const [],
+    this.textIndexes = const [],
   });
+
+  /// What kind of limit it is (`usage_quota`, `rate_limit`, `context_window`, `credit`, `other`), when the harness said.
+  final String? kind;
+
+  /// Whether the work can go on with another account, model or agent, when the harness said.
+  final bool? continuable;
+
+  /// The `messageId`s of the turn's messages that are the limit's own words, and the positions of those that have no id.
+  final List<String> textIds;
+  final List<int> textIndexes;
 
   final String? bucket;
   final int? resetsAt;
@@ -222,6 +236,10 @@ final class UsageLimitHit {
     'source': source,
     if (text != null) 'text': text,
     'observed_at': observedAt,
+    if (kind != null) 'kind': kind,
+    if (continuable != null) 'continuable': continuable,
+    'text_ids': textIds,
+    'text_indexes': textIndexes,
   };
 }
 
@@ -492,6 +510,16 @@ UsageLimitHit? _limit(Object? json, ChatLimits limits) {
     source: _text(json['source'], limits) ?? 'other',
     text: _text(json['text'], limits),
     observedAt: _count(json['observed_at']) ?? 0,
+    kind: _text(json['kind'], limits),
+    continuable: json['continuable'] is bool
+        ? json['continuable'] as bool
+        : null,
+    textIds: _texts(json['text_ids'], limits),
+    textIndexes: [
+      if (json['text_indexes'] case final List<Object?> list)
+        for (final each in list)
+          if (_count(each) case final int at) at,
+    ],
   );
 }
 

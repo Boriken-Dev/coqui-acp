@@ -3,7 +3,10 @@
 
 use core::time::Duration;
 
-use coqui_acp_api::{DEFAULT_LIMIT_PHRASES, Refill, Source, Status, UsageReport, infer_limit};
+use coqui_acp_api::{
+    DEFAULT_LIMIT_PHRASES, LimitHit, LimitKind, Refill, Source, Status, UsageReport, infer_limit,
+    limit_kind_of,
+};
 
 const AGY: &str = include_str!("usage_text/agy_429_failed_turn.txt");
 const GATEWAY: &str = include_str!("usage_text/litellm_429_gateway.json");
@@ -240,4 +243,56 @@ fn the_host_report_of_an_agent_that_reports_nothing_is_one_exhausted_inferred_bu
 
     let unknown = UsageReport::inferred(defaults("quota").expect("a limit"));
     assert_eq!(unknown.buckets[0].refill, Refill::Unknown);
+}
+
+#[test]
+fn the_kind_of_a_limit_is_read_from_the_words_that_name_it() {
+    let kind = |text: &str| limit_kind_of(text);
+    // The recorded and paraphrased texts of this directory: a gateway's and a provider's throttle, and Antigravity's two.
+    assert_eq!(kind(GATEWAY), Some(LimitKind::RateLimit));
+    assert_eq!(kind(PROVIDER), Some(LimitKind::RateLimit));
+    let second = AGY.split("\n2. ").nth(1).expect("the second recorded text");
+    assert_eq!(
+        kind(line_starting(second, "RESOURCE_EXHAUSTED")),
+        Some(LimitKind::UsageQuota)
+    );
+    assert_eq!(kind("HTTP 429"), Some(LimitKind::RateLimit));
+    assert_eq!(kind("You have hit your limit"), Some(LimitKind::UsageQuota));
+    assert_eq!(
+        kind("Your credit balance is too low"),
+        Some(LimitKind::Credit)
+    );
+    assert_eq!(
+        kind("prompt is too long: 250000 tokens"),
+        Some(LimitKind::ContextWindow)
+    );
+    assert_eq!(kind("the build failed"), None);
+    // `infer_limit` states it, so a host reads a kind and does not match words itself.
+    let hit = defaults(PROVIDER).expect("a limit");
+    assert_eq!(hit.kind, Some(LimitKind::RateLimit));
+    assert!(hit.can_continue());
+}
+
+#[test]
+fn whether_the_work_can_go_on_elsewhere_is_said_or_follows_the_kind() {
+    let plain = LimitHit::new(0);
+    assert!(plain.can_continue());
+    assert!(!plain.clone().kind(LimitKind::ContextWindow).can_continue());
+    assert!(
+        plain
+            .clone()
+            .kind(LimitKind::ContextWindow)
+            .continuable(true)
+            .can_continue()
+    );
+    assert!(
+        !plain
+            .kind(LimitKind::UsageQuota)
+            .continuable(false)
+            .can_continue()
+    );
+    assert_eq!(
+        LimitKind::from(String::from("a_newer_kind")).as_str(),
+        "a_newer_kind"
+    );
 }

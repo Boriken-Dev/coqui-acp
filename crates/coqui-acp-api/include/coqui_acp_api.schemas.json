@@ -1948,6 +1948,52 @@
             "minimum": -9223372036854775808,
             "maximum": 9223372036854775807,
             "description": "When it was seen, in Unix seconds."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "examples": [
+              "usage_quota",
+              "rate_limit",
+              "context_window",
+              "credit",
+              "unclassified"
+            ],
+            "x-enum-labels": {
+              "usage_quota": "An allowance of the plan or key used up: a five-hour or weekly window, a monthly quota.",
+              "rate_limit": "Too many requests or tokens in a short time; it lifts in seconds or minutes.",
+              "context_window": "The conversation does not fit the model's context window. Another account does not help; a model with a larger window might.",
+              "credit": "A prepaid balance or a spending cap used up.",
+              "unclassified": "A limit that fits none of these."
+            },
+            "description": "What kind of limit it is, when the harness can tell."
+          },
+          "continuable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the work can go on with another account, model or agent: `false` for a limit that follows the work (a context window), `true` for one that follows the member. Absent: not said, and a host takes it as `true` unless the kind is `context_window`."
+          },
+          "text_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `messageId`s of the turn's agent message and thought updates that are the limit's own words, so a host drops them from the history it carries on.",
+            "default": []
+          },
+          "text_indexes": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "description": "For a harness whose updates carry no ids (ACP version 1): the zero-based positions of those updates among the turn's agent message and thought chunks, in the order they were sent.",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -2472,6 +2518,52 @@
         "minimum": -9223372036854775808,
         "maximum": 9223372036854775807,
         "description": "When it was seen, in Unix seconds."
+      },
+      "kind": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "examples": [
+          "usage_quota",
+          "rate_limit",
+          "context_window",
+          "credit",
+          "unclassified"
+        ],
+        "x-enum-labels": {
+          "usage_quota": "An allowance of the plan or key used up: a five-hour or weekly window, a monthly quota.",
+          "rate_limit": "Too many requests or tokens in a short time; it lifts in seconds or minutes.",
+          "context_window": "The conversation does not fit the model's context window. Another account does not help; a model with a larger window might.",
+          "credit": "A prepaid balance or a spending cap used up.",
+          "unclassified": "A limit that fits none of these."
+        },
+        "description": "What kind of limit it is, when the harness can tell."
+      },
+      "continuable": {
+        "type": [
+          "boolean",
+          "null"
+        ],
+        "description": "Whether the work can go on with another account, model or agent: `false` for a limit that follows the work (a context window), `true` for one that follows the member. Absent: not said, and a host takes it as `true` unless the kind is `context_window`."
+      },
+      "text_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "The `messageId`s of the turn's agent message and thought updates that are the limit's own words, so a host drops them from the history it carries on.",
+        "default": []
+      },
+      "text_indexes": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "description": "For a harness whose updates carry no ids (ACP version 1): the zero-based positions of those updates among the turn's agent message and thought chunks, in the order they were sent.",
+        "default": []
       }
     },
     "additionalProperties": false,
