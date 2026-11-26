@@ -60,13 +60,13 @@ Switchboard::new(&pool, &dyn Keeper, &dyn Availability<T>, &dyn Starter<T>);  .u
 fn assign(&self, ask: &Ask<'_>, record: TurnRecord) -> Result<Assigned, Unassigned>;   // decide, Starter::start; a start that fails leaves the member out and decides again, once per member
 fn resolve(&self, ask: &Ask<'_>) -> Result<Chosen, NoneLeft>;                           // what it would pick, nothing started, the cursor not moved
 fn choose_next(&self, ended: &Ended<'_>) -> Result<Option<Chosen>, NoneLeft>;           // where at_turn would move the session (None: it stays); no carry, no memory
-fn at_turn(&self, ended: &Ended<'_>) -> AtTurn;                                         // Stayed | Moved(Box<Moved>) | NoneLeft(NoneLeft) | Unknown(member id)
+fn at_turn(&self, ended: &Ended<'_>) -> AtTurn;                                         // Stayed | Moved(Box<Moved>) | NotContinuable(Box<LimitHit>) | NoneLeft(NoneLeft) | Unknown(member id)
 pub enum HowEnded { Limit { until: Option<i64> }, Finished, Other }
-pub struct Ended<'a> { session, current, model, now, how, resume_text, record }          // Ended::new(session, current, how, now); .model .resume_text .record
+pub struct Ended<'a> { session, current, model, now, how, resume_text, report: Option<LimitHit>, record }   // Ended::new(session, current, how, now); .model .resume_text .report(hit) .record
 pub struct Moved { pub from: String, pub chosen: Chosen, pub replayed: bool, pub loss: LossReport, pub resume: Resume, pub resume_error: Option<String>, pub limit_text_left: bool }
 ```
 
-`at_turn`: `Other` moves nothing. The session's member is held out for what ran out (`Limit`: until the stated time, else for good; the `Finished` case relies on the standing), `stick` and a warm cache are assumed, and members whose `Standing::carries` is false (a harness that can neither export nor import) are left out for a running session. A session moves only when its member cannot serve, never because an earlier member refilled, and never mid-turn (it is called when a turn ends). On a move: `Starter::carry`; `Refused` leaves that member out for this session and decides again; then `resume` (`Resume::Nothing` after a `Finished` turn). `Moved::chosen.same_group` false is a move to another group (harness): a host that asks the person first uses `choose_next` and then `at_turn`.
+`at_turn`: with a `report`, a limit that is not `continuable` (a context window, or one the harness says does not follow the member) returns `AtTurn::NotContinuable(report)` and moves nothing; the member is held until `until`, else the report's `resets_at`, else `retry_after` from now; the report reaches `Starter::carry` (for the cleaner) and the record (`outcome.limit`, tags `pool:limit_kind` and `pool:limit_bucket`). `Other` moves nothing. The session's member is held out for what ran out (`Limit`: until the stated time, else for good; the `Finished` case relies on the standing), `stick` and a warm cache are assumed, and members whose `Standing::carries` is false (a harness that can neither export nor import) are left out for a running session. A session moves only when its member cannot serve, never because an earlier member refilled, and never mid-turn (it is called when a turn ends). On a move: `Starter::carry`; `Refused` leaves that member out for this session and decides again; then `resume` (`Resume::Nothing` after a `Finished` turn). `Moved::chosen.same_group` false is a move to another group (harness): a host that asks the person first uses `choose_next` and then `at_turn`.
 
 ```rust
 pub trait UsageSource<T> { fn report(&self, member: &Member<T>) -> Usage; }                       // never awaited; Pending is a report still to come
@@ -75,7 +75,7 @@ pub trait Holds<T>       { fn holds(&self, member, now: i64) -> Vec<Hold>; }    
 pub trait Availability<T>{ fn availability(&self, member, ask: &Ask<'_>) -> Basics; }               // Basics { unavailable, limited_until, carries }; Basics::new().unavailable(..).limited_until(..).cannot_carry()
 pub trait Starter<T> {
     fn start(&self, member: &Member<T>, ask: &Ask<'_>) -> Result<Started, String>;                  // Started::new(session)
-    fn carry(&self, session: &str, from: &Member<T>, to: &Member<T>) -> Carry;                      // export, clean, import: the host's
+    fn carry(&self, session: &str, from: &Member<T>, to: &Member<T>, report: Option<&LimitHit>) -> Carry;   // export, clean (pass `report` to `Cleaning`), import: the host's
     fn resume(&self, session: &str, to: &Member<T>, resume: &Resume) -> Result<(), String>;
 }
 pub enum Carry { Whole(Carried), Replayed(Carried), Refused(String) }   // Carried::new(loss, had_work).prompt(blocks).limit_text_left()
@@ -88,13 +88,16 @@ pub trait Ledger { fn record(&self, record: &TurnRecord); }
 
 ```rust
 pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned;
-pub struct Cleaning<'a> { pub phrases: &'a [&'a str], pub notice_key: Option<&'a str>, pub ended_by_limit: bool /*true*/, pub max_window: usize /*64*/ }   // Cleaning::new(phrases); .notice_key(..) .ended_by_limit(bool) .max_window(n)
+pub struct Cleaning<'a> { pub phrases: &'a [&'a str], pub notice_key: Option<&'a str>, pub ended_by_limit: bool /*true*/, pub max_window: usize /*64*/,
+                          pub report: Option<&'a LimitHit> }   // Cleaning::new(phrases); .notice_key(..) .ended_by_limit(bool) .max_window(n) .report(&hit)
 pub struct Cleaned { pub document: Document, pub removed: Removed, pub had_work: bool, pub prompt: Option<Vec<Value>>, pub limit_text_left: bool }   // .resume(role_text, ended_by_limit)
 pub struct Removed { pub notices: usize, pub end: bool, pub limit_text: usize, pub open_calls: usize }
 pub enum Resume { Nothing, Continue(String), Repeat(Vec<Value>) }
 pub fn resume(role_text: Option<&str>, (had_work, prompt): (bool, Option<&[Value]>), ended_by_limit: bool) -> Resume;
 pub const DEFAULT_CONTINUATION: &str;   // "The previous agent's usage ran out; continue this session where it stopped."
 ```
+
+**The harness's report.** With `Cleaning::report` (the `LimitHit` of the refused turn's `_meta`), the report is authoritative: the chunks it names are dropped, by `text_ids` (any message update with that `messageId`) or by `text_indexes` (the zero-based position among the last turn's `agent_message_chunk` and `agent_thought_chunk` updates), and no phrase is matched. A report with `source: reported` that names none says there is no limit text, and `limit_text_left` stays false. A report that only read an error's words (`source: inferred`) and names none falls back to the phrases, as does no report at all.
 
 `clean` works on the exported history and only on its last turn (from the last `session/prompt`); earlier turns are not touched. `phrases` are the host's (`coqui_acp_api::DEFAULT_LIMIT_PHRASES`, or the person's), matched without regard to ASCII case by `infer_limit`. With `ended_by_limit` it drops: the closing `error` line or `refusal` stop; the agent's message and thought chunks after the last tool call, plan or permission line, from the first run of up to `max_window` chunks that together name a limit (agents stream, so a phrase may span chunks) to the end ("please wait" included); tool calls with no `completed`/`failed` update, with the permission requests and answers about them. Always, whole history: every line whose `_meta` (the line's, or its update's) holds `notice_key`. Text before the last tool call is never judged, so an agent discussing "quota" in its work is safe. The turn is left open when its end went (an import closes it as cancelled). `limit_text_left`: a limit ended the turn and nothing recognisable was removed; tell the person "limit text not removed". `had_work`: after cleaning the turn holds an agent message, thought, plan or tool call. `resume`: `Nothing` when the turn ended well; the person's own `prompt` again (`Repeat`) when no work was done and the prompt is known; else `Continue` with the role's text (blank counts as unset) or the default line. Nothing else (no summary, account, reset time, instruction) goes into the turn.
 

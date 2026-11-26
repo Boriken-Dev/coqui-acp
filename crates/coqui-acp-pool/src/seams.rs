@@ -4,6 +4,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use coqui_acp_api::LimitHit;
 use coqui_acp_history::{LossReport, TurnRecord};
 use serde_json::Value;
 
@@ -173,8 +174,15 @@ pub trait Starter<T> {
     /// Why it could not start; the pool excludes the member and decides again.
     fn start(&self, member: &Member<T>, ask: &Ask<'_>) -> Result<Started, String>;
 
-    /// Moves the running `session` from one member to another: export, clean ([`clean`](crate::clean)), import.
-    fn carry(&self, session: &str, from: &Member<T>, to: &Member<T>) -> Carry;
+    /// Moves the running `session` from one member to another: export, clean ([`clean`](crate::clean), given `report`, which names
+    /// the messages that are the limit's own words), import.
+    fn carry(
+        &self,
+        session: &str,
+        from: &Member<T>,
+        to: &Member<T>,
+        report: Option<&LimitHit>,
+    ) -> Carry;
 
     /// Sends the new member what continues the work.
     ///

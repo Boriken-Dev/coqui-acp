@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 
-use coqui_acp_api::CacheLifetime;
+use coqui_acp_api::{CacheLifetime, LimitHit};
 use coqui_acp_history::{LossReport, TurnOutcome, TurnRecord};
 
 use crate::clean::Resume;
@@ -95,6 +95,10 @@ pub struct Ended<'a> {
     pub how: HowEnded,
     /// The role's own continuation text, when it set one.
     pub resume_text: Option<&'a str>,
+    /// What the harness reported of the limit: its kind, when it lifts, whether the work can go on elsewhere and which messages
+    /// are the limit's words. It dates the member's hold when `how` names no time, stops a move that cannot help (a context
+    /// window), reaches `carry` for the cleaner and the ledger.
+    pub report: Option<LimitHit>,
     /// What the host knows of the turn: agent, account, effort, role, profile, tokens, cost, duration, tags. The switchboard adds
     /// the pool, member, why and the move.
     pub record: TurnRecord,
@@ -111,6 +115,7 @@ impl<'a> Ended<'a> {
             now,
             how,
             resume_text: None,
+            report: None,
             record: TurnRecord::new(now),
         }
     }
@@ -126,6 +131,13 @@ impl<'a> Ended<'a> {
     #[must_use]
     pub const fn resume_text(mut self, text: &'a str) -> Self {
         self.resume_text = Some(text);
+        self
+    }
+
+    /// What the harness reported of the limit.
+    #[must_use]
+    pub fn report(mut self, report: LimitHit) -> Self {
+        self.report = Some(report);
         self
     }
 
@@ -165,6 +177,8 @@ pub enum AtTurn {
     Stayed,
     /// It moved.
     Moved(Box<Moved>),
+    /// A limit ended the turn that no other member helps with (a context window): the session stays, and the report says why.
+    NotContinuable(Box<LimitHit>),
     /// It cannot move: no member can take it. The session stays, and the person's next prompt is refused with this.
     NoneLeft(NoneLeft),
     /// The member the session ran on is not in the pool.
@@ -319,7 +333,7 @@ impl<'a, T> Switchboard<'a, T> {
                 Ok(started) => {
                     let mut record = record;
                     record.session = Some(started.session.clone());
-                    self.write(record, member, ask, &chosen, None, None);
+                    self.write(record, member, ask, &chosen, None);
                     return Ok(Assigned { chosen, started });
                 }
                 Err(why) => excluded.push((chosen.member, format!("could not start: {why}"))),
@@ -359,7 +373,20 @@ impl<'a, T> Switchboard<'a, T> {
         if let (HowEnded::Limit { until }, Some(at)) =
             (ended.how, self.pool.position(ended.current))
         {
-            let until = until.filter(|until| *until > ended.now).unwrap_or(i64::MAX);
+            // The time the text gave, else the harness's own: its reset, or the wait it asked for.
+            let said = ended.report.as_ref().and_then(|report| {
+                report.resets_at.or_else(|| {
+                    report.retry_after.map(|wait| {
+                        ended
+                            .now
+                            .saturating_add(i64::try_from(wait.as_secs()).unwrap_or(i64::MAX))
+                    })
+                })
+            });
+            let until = until
+                .or(said)
+                .filter(|until| *until > ended.now)
+                .unwrap_or(i64::MAX);
             if standings[at].unavailable.is_none() {
                 standings[at].limited_until = Some(until);
             }
@@ -378,6 +405,14 @@ impl<'a, T> Switchboard<'a, T> {
         if ended.how == HowEnded::Other {
             return AtTurn::Stayed;
         }
+        if let Some(report) = ended
+            .report
+            .as_ref()
+            .filter(|report| !report.can_continue())
+            && matches!(ended.how, HowEnded::Limit { .. })
+        {
+            return AtTurn::NotContinuable(Box::new(report.clone()));
+        }
         let mut excluded = Excluded::new();
         for _ in 0..=self.pool.members.len() {
             let chosen = match self.next(ended, &excluded, false) {
@@ -386,17 +421,21 @@ impl<'a, T> Switchboard<'a, T> {
                 Err(none) => return AtTurn::NoneLeft(none),
             };
             let to = &self.pool.members[chosen.index];
-            let (carried, replayed) = match self.starter.carry(ended.session, from, to) {
-                Carry::Whole(carried) => (carried, false),
-                Carry::Replayed(carried) => (carried, true),
-                Carry::Refused(why) => {
-                    excluded.push((
-                        chosen.member,
-                        format!("its history cannot be carried: {why}"),
-                    ));
-                    continue;
-                }
-            };
+            let (carried, replayed) =
+                match self
+                    .starter
+                    .carry(ended.session, from, to, ended.report.as_ref())
+                {
+                    Carry::Whole(carried) => (carried, false),
+                    Carry::Replayed(carried) => (carried, true),
+                    Carry::Refused(why) => {
+                        excluded.push((
+                            chosen.member,
+                            format!("its history cannot be carried: {why}"),
+                        ));
+                        continue;
+                    }
+                };
             let by_limit = matches!(ended.how, HowEnded::Limit { .. });
             let resume = crate::clean::resume(
                 ended.resume_text,
@@ -410,7 +449,17 @@ impl<'a, T> Switchboard<'a, T> {
             let mut record = ended.record.clone();
             record.session = Some(ended.session.to_string());
             let ask = Ask::new(ended.now);
-            self.write(record, to, &ask, &chosen, Some(&from.id), Some(by_limit));
+            self.write(
+                record,
+                to,
+                &ask,
+                &chosen,
+                Some((
+                    &from.id,
+                    by_limit,
+                    ended.report.as_ref().filter(|_| by_limit),
+                )),
+            );
             return AtTurn::Moved(Box::new(Moved {
                 from: from.id.clone(),
                 chosen,
@@ -434,8 +483,7 @@ impl<'a, T> Switchboard<'a, T> {
         member: &Member<T>,
         ask: &Ask<'_>,
         chosen: &Chosen,
-        moved_from: Option<&str>,
-        limit: Option<bool>,
+        moved: Option<(&str, bool, Option<&LimitHit>)>,
     ) {
         let Some(ledger) = self.ledger else {
             return;
@@ -451,11 +499,20 @@ impl<'a, T> Switchboard<'a, T> {
         }
         record.why = Some(chosen.why.name().to_string());
         record.usage_known = Some(chosen.usage_known);
-        if let Some(from) = moved_from {
+        if let Some((from, by_limit, limit)) = moved {
             record.moved_from = Some(from.to_string());
             let outcome = record.outcome.get_or_insert_with(TurnOutcome::default);
             outcome.moved_on = true;
-            outcome.limit = limit.unwrap_or(false);
+            outcome.limit = by_limit;
+            if let Some(limit) = limit {
+                // Tagged by this crate, so usage can be summed by what kind of limit moved a session.
+                if let Some(kind) = &limit.kind {
+                    let _ = record.tag("pool:limit_kind", kind.as_str());
+                }
+                if let Some(bucket) = &limit.bucket {
+                    let _ = record.tag("pool:limit_bucket", bucket.as_str());
+                }
+            }
         }
         ledger.record(&record);
     }

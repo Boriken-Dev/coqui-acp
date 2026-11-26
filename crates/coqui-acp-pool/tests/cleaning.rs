@@ -6,7 +6,7 @@
     reason = "tests run on std"
 )]
 
-use coqui_acp_api::DEFAULT_LIMIT_PHRASES;
+use coqui_acp_api::{DEFAULT_LIMIT_PHRASES, LimitHit, LimitKind, Source};
 use coqui_acp_history::{Body, Document, Line, Stop, StopReason};
 use coqui_acp_pool::{Cleaning, DEFAULT_CONTINUATION, Resume, clean, resume};
 use serde_json::{Value, json};
@@ -247,4 +247,78 @@ fn the_continuation_is_the_roles_text_else_the_default_line() {
         DEFAULT_CONTINUATION,
         "The previous agent's usage ran out; continue this session where it stopped."
     );
+}
+
+/// A history of one turn whose messages carry ids, as version 2 sends them, and an agent that words its limit in no phrase.
+fn identified() -> Document {
+    let mut document = fixture("limit_first_request.jsonl");
+    document.lines.pop();
+    for (id, text) in [
+        ("m1", "Working on it."),
+        ("m2", "Allowance spent"),
+        ("m3", "back at nine"),
+    ] {
+        document.lines.push(Line::update(json!({
+            "sessionUpdate": "agent_message_chunk", "messageId": id,
+            "content": {"type": "text", "text": text}
+        })));
+    }
+    document.lines.push(Line::turn_end(Stop::Error));
+    document
+}
+
+#[test]
+fn the_messages_the_harness_names_by_id_go_whatever_they_say() {
+    let hit = LimitHit::new(0)
+        .kind(LimitKind::UsageQuota)
+        .text_ids(vec!["m2".into(), "m3".into()]);
+    let cleaned = clean(&identified(), &cleaning().report(&hit));
+    assert_eq!(
+        texts(&cleaned.document).last().map(String::as_str),
+        Some("Working on it.")
+    );
+    assert_eq!((cleaned.removed.limit_text, cleaned.removed.end), (2, true));
+    // The phrases would have found nothing here.
+    let by_words = clean(&identified(), &cleaning());
+    assert_eq!(by_words.removed.limit_text, 0);
+}
+
+#[test]
+fn the_messages_the_harness_names_by_position_go_and_the_others_stay() {
+    let mut document = fixture("limit_error.jsonl");
+    // Positions count the chunks of the last turn: "Let me look..." is 0, the limit's three chunks are 1, 2 and 3.
+    let hit = LimitHit::new(0).text_indexes(vec![1, 2, 3]);
+    let cleaned = clean(&document, &Cleaning::new(&[]).report(&hit));
+    assert_eq!(cleaned.removed.limit_text, 3);
+    assert_eq!(
+        texts(&cleaned.document),
+        [
+            "first answer",
+            "planner moved from Codex to Claude",
+            "Let me look at the build."
+        ]
+    );
+    // A position past the turn names nothing.
+    document.lines.truncate(8);
+    let none = clean(
+        &document,
+        &Cleaning::new(&[]).report(&LimitHit::new(0).text_indexes(vec![40])),
+    );
+    assert_eq!(none.removed.limit_text, 0);
+}
+
+#[test]
+fn a_report_that_names_no_message_says_there_is_none_and_the_words_are_not_matched() {
+    let mut hit = LimitHit::new(0).kind(LimitKind::UsageQuota);
+    hit.source = Source::Reported;
+    let cleaned = clean(&fixture("limit_error.jsonl"), &cleaning().report(&hit));
+    assert_eq!(
+        cleaned.removed.limit_text, 0,
+        "the harness said there is no limit text to find"
+    );
+    assert!(!cleaned.limit_text_left);
+    // A report that only read an error's words falls back to the phrases.
+    hit.source = Source::Inferred;
+    let by_words = clean(&fixture("limit_error.jsonl"), &cleaning().report(&hit));
+    assert_eq!(by_words.removed.limit_text, 3);
 }

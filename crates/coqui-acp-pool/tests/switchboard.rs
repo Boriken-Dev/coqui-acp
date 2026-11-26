@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use coqui_acp_api::{Coverage, Status};
+use coqui_acp_api::{Coverage, LimitHit, LimitKind, Status};
 use coqui_acp_history::{LossReport, TurnRecord};
 use coqui_acp_pool::{
     Ask, AtTurn, Availability, Basics, Carried, Carry, DEFAULT_CONTINUATION, Ended, Hold, Holds,
@@ -34,6 +34,7 @@ struct World {
     refuses_carry: BTreeSet<String>,
     carried: RefCell<Option<Carried>>,
     log: RefCell<Vec<String>>,
+    reports: RefCell<Vec<Option<LimitHit>>>,
     records: RefCell<Vec<TurnRecord>>,
 }
 
@@ -93,7 +94,14 @@ impl Starter<()> for World {
         Ok(Started::new("s1"))
     }
 
-    fn carry(&self, session: &str, from: &Member<()>, to: &Member<()>) -> Carry {
+    fn carry(
+        &self,
+        session: &str,
+        from: &Member<()>,
+        to: &Member<()>,
+        report: Option<&LimitHit>,
+    ) -> Carry {
+        self.reports.borrow_mut().push(report.cloned());
         self.log
             .borrow_mut()
             .push(format!("carry {session} {} -> {}", from.id, to.id));
@@ -483,4 +491,52 @@ fn a_cap_counts_through_the_occupancy_seam() {
         .assign(&Ask::new(NOW), TurnRecord::default())
         .expect("free");
     assert_eq!(assigned.chosen.member, "free");
+}
+
+#[test]
+fn the_harnesss_report_dates_the_hold_reaches_carry_and_tags_the_record() {
+    let pool = pool(Strategy::Priority);
+    let memory = RefCell::new(Memory::new());
+    let world = World::default();
+    let mut hit = LimitHit::new(NOW)
+        .kind(LimitKind::UsageQuota)
+        .text_ids(vec!["m2".to_owned()]);
+    hit.bucket = Some("five_hour".to_owned());
+    hit.resets_at = Some(NOW + 900);
+    let ended =
+        Ended::new("s1", "claude_a", HowEnded::Limit { until: None }, NOW).report(hit.clone());
+    let AtTurn::Moved(moved) = board(&pool, &memory, &world).at_turn(&ended) else {
+        panic!("it moves");
+    };
+    assert_eq!(
+        moved.chosen.left.as_deref(),
+        Some("a turn on it was refused for a limit")
+    );
+    assert_eq!(world.reports.borrow()[0], Some(hit));
+    let records = world.records.borrow();
+    let tags = &records[0].tags;
+    assert_eq!(tags["pool:limit_kind"], "usage_quota");
+    assert_eq!(tags["pool:limit_bucket"], "five_hour");
+}
+
+#[test]
+fn a_limit_no_other_member_helps_with_leaves_the_session_where_it_is() {
+    let pool = pool(Strategy::Priority);
+    let memory = RefCell::new(Memory::new());
+    let world = World::default();
+    let hit = LimitHit::new(NOW).kind(LimitKind::ContextWindow);
+    let ended =
+        Ended::new("s1", "claude_a", HowEnded::Limit { until: None }, NOW).report(hit.clone());
+    let AtTurn::NotContinuable(said) = board(&pool, &memory, &world).at_turn(&ended) else {
+        panic!("it stays");
+    };
+    assert_eq!(*said, hit);
+    assert!(world.log.borrow().is_empty());
+    // The harness can say the work goes on even for a kind that usually does not.
+    let goes_on = hit.continuable(true);
+    let ended = Ended::new("s1", "claude_a", HowEnded::Limit { until: None }, NOW).report(goes_on);
+    assert!(matches!(
+        board(&pool, &memory, &world).at_turn(&ended),
+        AtTurn::Moved(_)
+    ));
 }

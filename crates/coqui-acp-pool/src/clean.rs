@@ -6,7 +6,7 @@ use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use coqui_acp_api::infer_limit;
+use coqui_acp_api::{LimitHit, Source, infer_limit};
 use coqui_acp_history::{Body, Document, Line, Stop, StopReason};
 use serde_json::Value;
 
@@ -28,8 +28,12 @@ pub struct Cleaning<'a> {
     pub notice_key: Option<&'a str>,
     /// Whether a limit ended the last turn. When it did not (the turn ended well and a bucket is now used up), only notices go.
     pub ended_by_limit: bool,
-    /// How many chunks of text a limit's message may span.
+    /// How many chunks a limit's message may span.
     pub max_window: usize,
+    /// What the harness reported of the limit. When it names the messages that are the limit's words, they are the ones dropped
+    /// and no phrase is matched; a report from a harness that states them and names none says there is none. The phrases are the
+    /// fallback for a harness that reports nothing, or whose report only read the words of an error.
+    pub report: Option<&'a LimitHit>,
 }
 
 impl<'a> Cleaning<'a> {
@@ -41,7 +45,15 @@ impl<'a> Cleaning<'a> {
             notice_key: None,
             ended_by_limit: true,
             max_window: DEFAULT_MAX_WINDOW,
+            report: None,
         }
+    }
+
+    /// Gives what the harness reported of the limit.
+    #[must_use]
+    pub const fn report(mut self, report: &'a LimitHit) -> Self {
+        self.report = Some(report);
+        self
     }
 
     /// Sets the key a host's notices carry in `_meta`.
@@ -271,7 +283,13 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
             }
         }
         drop_open_calls(lines, &mut keep, &turn, &mut removed);
-        drop_limit_text(lines, &mut keep, &turn, cleaning, &mut removed);
+        match cleaning.report {
+            Some(report) if !report.text_ids.is_empty() || !report.text_indexes.is_empty() => {
+                drop_reported_text(lines, &mut keep, &turn, report, &mut removed);
+            }
+            Some(report) if report.source == Source::Reported => {}
+            _ => drop_limit_text(lines, &mut keep, &turn, cleaning, &mut removed),
+        }
     }
     let had_work = start.is_some_and(|start| {
         (start + 1..lines.len()).any(|at| {
@@ -292,7 +310,13 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
         .filter(|(_, keep)| **keep)
         .map(|(line, _)| line.clone())
         .collect();
-    let limit_text_left = cleaning.ended_by_limit && !removed.end && removed.limit_text == 0;
+    let said_none = cleaning.report.is_some_and(|report| {
+        report.source == Source::Reported
+            && report.text_ids.is_empty()
+            && report.text_indexes.is_empty()
+    });
+    let limit_text_left =
+        cleaning.ended_by_limit && !removed.end && removed.limit_text == 0 && !said_none;
     Cleaned {
         document: out,
         removed,
@@ -344,6 +368,40 @@ fn drop_open_calls(
         if open || asked_only {
             keep[at] = false;
             removed.open_calls += 1;
+        }
+    }
+}
+
+/// The updates the harness named as the limit's words: message and thought chunks by their position among the turn's, or any
+/// message update by its `messageId`.
+fn drop_reported_text(
+    lines: &[Line],
+    keep: &mut [bool],
+    turn: &core::ops::Range<usize>,
+    report: &LimitHit,
+    removed: &mut Removed,
+) {
+    let mut position = 0u32;
+    for at in turn.clone() {
+        let Some(update) = update_of(&lines[at]) else {
+            continue;
+        };
+        let Some(kind) = kind_of(update) else {
+            continue;
+        };
+        let chunk = matches!(kind, "agent_message_chunk" | "agent_thought_chunk");
+        let by_position = chunk && report.text_indexes.contains(&position);
+        if chunk {
+            position += 1;
+        }
+        let by_id = is_text(kind)
+            && update
+                .get("messageId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| report.text_ids.iter().any(|each| each == id));
+        if keep[at] && (by_position || by_id) {
+            keep[at] = false;
+            removed.limit_text += 1;
         }
     }
 }
