@@ -18,6 +18,8 @@ the prompt as [[name]] or [[name:argument]]:
   [[slow]]          text deltas 0.25 s apart for 30 s (to abort mid-turn)
   [[429]] [[500]]   HTTP error with a JSON body
   [[429once]]       429 the first time this marker is seen, then text
+  [[limit_rate]]    429 as OpenAI sends a rate limit: retry-after, x-ratelimit-* headers, type "requests"
+  [[limit_quota]]   429 as OpenAI sends a spent balance: type and code insufficient_quota
   [[drop]]          closes the connection after the headers (cut stream)
   [[huge]]          reports 60000 prompt tokens in usage (to trigger compaction)
 
@@ -106,6 +108,25 @@ class Handler(BaseHTTPRequestHandler):
 
         if marker in ("429", "500"):
             self.send_json(int(marker), {"error": {"message": "stand-in forced %s" % marker, "type": "stub_error", "code": marker}})
+            return
+        if marker in ("limit_rate", "limit_quota"):
+            if marker == "limit_rate":
+                extra = [("Retry-After", "7"), ("x-ratelimit-limit-requests", "60"), ("x-ratelimit-remaining-requests", "0"),
+                         ("x-ratelimit-reset-requests", "6m0s"), ("x-ratelimit-remaining-tokens", "90000")]
+                error = {"message": "Rate limit reached for stub-fast on requests per min (RPM): Limit 60, Used 60.",
+                         "type": "requests", "param": None, "code": "rate_limit_exceeded"}
+            else:
+                extra = []
+                error = {"message": "You exceeded your current quota, please check your plan and billing details.",
+                         "type": "insufficient_quota", "param": None, "code": "insufficient_quota"}
+            body = json.dumps({"error": error}).encode()
+            self.send_response(429)
+            for name, value in extra:
+                self.send_header(name, value)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if marker == "429once":
             with LOCK:

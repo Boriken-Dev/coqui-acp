@@ -627,3 +627,22 @@ fn a_real_pi_resumes_a_session_imported_from_its_own_history_and_from_claude_cod
     assert!(last.contains("echo checked > checked.txt"), "{last}");
     assert!(last.contains("and the third question"));
 }
+
+/// A provider's 429 as the real Pi tells it: the turn ends as a limit the gate extension's report classified, not one
+/// read from Pi's words. The stand-in answers `[[limit_rate]]` with OpenAI's headers; Pi 1.5.2 gives the kind alone, a
+/// later Pi (1.6.1 and on) also the bucket and when it lifts.
+#[test]
+#[ignore = "needs a real Pi and the stand-in: COQUI_ACP_PI_REAL, COQUI_ACP_PI_REAL_PATH and COQUI_ACP_PI_REAL_PYTHON"]
+fn a_real_pi_ends_a_rate_limited_turn_as_a_limit_the_extension_classified() {
+    let world = world("real-limit").expect("a real Pi, its Node and a Python are named");
+    std::fs::write(
+        world.home.join(".pi").join("agent").join("settings.json"),
+        r#"{"defaultProvider": "stub", "defaultModel": "stub-fast", "retry": {"enabled": false}}"#,
+    )
+    .unwrap();
+    let (session, mut events) = world.session(Mode::Manual);
+    let said = world.turn(&session, &mut events, "[[limit_rate]]");
+    assert!(said.contains("Limited"), "{said}");
+    assert!(said.contains("RateLimit"), "{said}");
+    assert!(said.contains("Reported"), "{said}");
+}

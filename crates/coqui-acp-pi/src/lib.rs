@@ -22,6 +22,7 @@ pub mod protect;
 mod provider;
 #[cfg(feature = "history")]
 mod provider_history;
+mod report;
 mod session;
 mod session_settings;
 pub mod signed_in;

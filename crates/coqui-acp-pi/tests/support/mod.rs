@@ -23,7 +23,15 @@ pub fn fixtures() -> PathBuf {
 
 /// The lines Pi wrote in recording `name`.
 pub fn recorded(name: &str) -> Vec<Value> {
-    let text = std::fs::read_to_string(fixtures().join(format!("{name}.stdout"))).unwrap();
+    recorded_by("pi-1.5.2", name)
+}
+
+/// The lines the Pi of `version` (a directory of the recordings) wrote in recording `name`.
+pub fn recorded_by(version: &str, name: &str) -> Vec<Value> {
+    let path = fixtures()
+        .with_file_name(version)
+        .join(format!("{name}.stdout"));
+    let text = std::fs::read_to_string(path).unwrap();
     text.lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
@@ -52,10 +60,15 @@ pub fn parser() -> (Parser, Arc<Mutex<Vec<Value>>>) {
 /// Every event recording `name` becomes with a run begun at the start and after each `agent_settled`, and what the parser
 /// wrote back.
 pub fn parsed(name: &str) -> (Vec<Event>, Arc<Mutex<Vec<Value>>>) {
+    parsed_lines(recorded(name))
+}
+
+/// Every event `lines` become, as [`parsed`] does.
+pub fn parsed_lines(lines: Vec<Value>) -> (Vec<Event>, Arc<Mutex<Vec<Value>>>) {
     let (mut parser, written) = parser();
     let mut events = Vec::new();
     parser.prompting();
-    for line in recorded(name) {
+    for line in lines {
         events.extend(parser.line(&line));
         if line["type"] == "agent_settled" {
             parser.prompting();

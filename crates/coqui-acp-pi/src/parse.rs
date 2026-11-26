@@ -15,7 +15,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use coqui_acp_api::usage::{DEFAULT_LIMIT_PHRASES, infer_limit};
+use coqui_acp_api::usage::{DEFAULT_LIMIT_PHRASES, LimitHit, infer_limit};
 use coqui_acp_harness::event::{
     Content, Diff, Event, FileChange, Location, OptionKind, Outcome, PermissionOption,
     PermissionRequest, Responder, Severity, Stop, Terminal, ToolCall, ToolContent, ToolKind,
@@ -26,6 +26,7 @@ use serde_json::{Map, Value, json};
 
 use crate::gate;
 use crate::mode::{Decision, Policy, Scope};
+use crate::report;
 
 /// Writes one line to Pi.
 pub type Writer = Arc<dyn Fn(&Value) -> io::Result<()> + Send + Sync>;
@@ -126,6 +127,8 @@ struct Run {
     retrying: bool,
     /// The last assistant message's stop reason and error.
     last: Option<(String, Option<String>)>,
+    /// The limit the gate extension reported for the assistant message under way, when its error was one.
+    reported: Option<LimitHit>,
 }
 
 /// Pi's lines as events, for one session. Not thread-safe by itself; the session holds it behind a lock.
@@ -449,6 +452,7 @@ impl Parser {
     fn message_start(&mut self, message: &Value) -> Vec<Event> {
         if text(message, "/message/role") == Some("assistant") {
             self.messages += 1;
+            self.run.reported = None;
             self.blocks.clear();
             self.seen.clear();
         }
@@ -1026,6 +1030,10 @@ impl Parser {
                     ),
                 }]
             }
+            Some("setStatus") if text(message, "/statusKey") == Some(report::REPORT_KEY) => {
+                self.run.reported = text(message, "/statusText").and_then(report::limit_of);
+                Vec::new()
+            }
             Some("notify") => {
                 let severity = match text(message, "/notifyType") {
                     Some("error") => Severity::Error,
@@ -1239,6 +1247,7 @@ impl Parser {
         }
         let interrupting = self.run.state.load(Ordering::SeqCst) == 1;
         let last = self.run.last.take();
+        let reported = self.run.reported.take();
         self.run.state.store(2, Ordering::SeqCst);
         self.run = Run::default();
         locked(&self.open).clear();
@@ -1250,7 +1259,7 @@ impl Parser {
             match last {
                 Some((stop, error)) if stop == "error" => {
                     let why = error.unwrap_or_else(|| "The model failed".to_string());
-                    self.failure(&why)
+                    self.failure(&why, reported)
                 }
                 Some((stop, _)) if stop == "length" => TurnEnd::stopped(Stop::MaxTokens),
                 Some((stop, _)) if stop == "aborted" => TurnEnd::stopped(Stop::Cancelled),
@@ -1261,8 +1270,15 @@ impl Parser {
         events
     }
 
-    /// A run Pi ended on an error: a usage limit when the words say so, else a failure in Pi's words.
-    fn failure(&self, why: &str) -> TurnEnd {
+    /// A run Pi ended on an error: the limit the gate extension reported for it, else a usage limit when the words
+    /// say so, else a failure in Pi's words.
+    fn failure(&self, why: &str, reported: Option<LimitHit>) -> TurnEnd {
+        if let Some(mut hit) = reported {
+            if hit.text.is_none() {
+                hit.text = Some(cut(why, 2048).to_string());
+            }
+            return TurnEnd::Limited(hit);
+        }
         let read = if why.starts_with("429") {
             format!("Error {why}")
         } else {

@@ -1,0 +1,154 @@
+[
+	{
+		"name": "an Anthropic key's 429 names the exhausted window, when it resets and how long to wait",
+		"response": {
+			"status": 429,
+			"headers": {
+				"retry-after": "17",
+				"anthropic-ratelimit-requests-remaining": "0",
+				"anthropic-ratelimit-requests-reset": "2027-01-15T08:00:30Z",
+				"anthropic-ratelimit-tokens-remaining": "4000"
+			}
+		},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "anthropic", "model": "claude-x",
+			"errorMessage": "429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your organization's rate limit of 50 requests per minute\"},\"request_id\":\"req_1\"}"
+		},
+		"expect": {
+			"model": "anthropic/claude-x",
+			"error": {"status": 429, "type": "rate_limit_error"},
+			"limit": {"kind": "rate_limit", "bucket": "requests", "resets_at": 1800000030, "retry_after_ms": 17000, "continuable": true}
+		}
+	},
+	{
+		"name": "a subscription's rejected window is a quota though the provider calls it a rate limit",
+		"response": {
+			"status": 429,
+			"headers": {
+				"anthropic-ratelimit-unified-status": "rejected",
+				"anthropic-ratelimit-unified-reset": "1800003600",
+				"anthropic-ratelimit-unified-representative-claim": "five_hour"
+			}
+		},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "anthropic", "model": "claude-x",
+			"errorMessage": "429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Number of request tokens has exceeded your per-minute rate limit\"}}"
+		},
+		"expect": {
+			"limit": {"kind": "usage_quota", "bucket": "five_hour", "resets_at": 1800003600, "continuable": true}
+		}
+	},
+	{
+		"name": "an overloaded provider is an error, not a limit",
+		"response": {"status": 529, "headers": {}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "anthropic", "model": "claude-x",
+			"errorMessage": "529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"
+		},
+		"expect": {"error": {"status": 529, "type": "overloaded_error"}, "limit": null}
+	},
+	{
+		"name": "an error inside a started stream is read from the stream event",
+		"response": {"status": 200, "headers": {}},
+		"stream": {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "anthropic", "model": "claude-x",
+			"errorMessage": "slow down"
+		},
+		"expect": {"error": {"type": "rate_limit_error"}, "limit": {"kind": "rate_limit"}}
+	},
+	{
+		"name": "a balance used up is a credit limit",
+		"response": {"status": 400, "headers": {}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "anthropic", "model": "claude-x",
+			"errorMessage": "400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API.\"}}"
+		},
+		"expect": {"error": {"status": 400, "type": "invalid_request_error"}, "limit": {"kind": "credit"}}
+	},
+	{
+		"name": "OpenAI's insufficient_quota is a credit limit, which no reset header lifts",
+		"response": {
+			"status": 429,
+			"headers": {"x-ratelimit-remaining-requests": "0", "x-ratelimit-reset-requests": "6m0s", "retry-after": "360"}
+		},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "openai", "model": "gpt-x",
+			"errorMessage": "429 {\"error\":{\"message\":\"You exceeded your current quota, please check your plan and billing details.\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}"
+		},
+		"expect": {
+			"error": {"status": 429, "type": "insufficient_quota", "code": "insufficient_quota"},
+			"limit": {"kind": "credit", "bucket": null, "resets_at": null, "retry_after_ms": null}
+		}
+	},
+	{
+		"name": "OpenAI's rate limit with only words in the error",
+		"response": {"status": 429, "headers": {"retry-after-ms": "250"}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "openai", "model": "gpt-x",
+			"errorMessage": "429 Rate limit reached for gpt-x in organization org-1 on tokens per min."
+		},
+		"expect": {"error": {"status": 429}, "limit": {"kind": "rate_limit", "retry_after_ms": 250}}
+	},
+	{
+		"name": "OpenAI's reset lengths become a moment, on the window the headers say is empty",
+		"response": {
+			"status": 429,
+			"headers": {"x-ratelimit-remaining-tokens": "0", "x-ratelimit-reset-tokens": "1m30.5s", "x-ratelimit-remaining-requests": "9"}
+		},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "openai", "model": "gpt-x",
+			"errorMessage": "429 Rate limit reached for gpt-x"
+		},
+		"expect": {"limit": {"kind": "rate_limit", "bucket": "tokens", "resets_at": 1800000090}}
+	},
+	{
+		"name": "Codex's usage limit reaches Pi as words, with how long to wait",
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "openai-codex", "model": "gpt-x-codex",
+			"errorMessage": "You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min."
+		},
+		"expect": {"limit": {"kind": "usage_quota", "retry_after_ms": 7200000}}
+	},
+	{
+		"name": "a provider that sends the reset in its body",
+		"response": {"status": 429, "headers": {}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "p", "model": "m",
+			"errorMessage": "429 {\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"resets_at\":1800009999}}"
+		},
+		"expect": {"limit": {"kind": "usage_quota", "resets_at": 1800009999}}
+	},
+	{
+		"name": "a context window that is too small is a limit that follows the work",
+		"response": {"status": 400, "headers": {}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "anthropic", "model": "claude-x",
+			"errorMessage": "400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 250000 tokens > 200000 maximum\"}}"
+		},
+		"expect": {"limit": {"kind": "context_window", "continuable": false}}
+	},
+	{
+		"name": "a plain server error is no limit",
+		"response": {"status": 500, "headers": {}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "openai", "model": "gpt-x",
+			"errorMessage": "500 Internal server error"
+		},
+		"expect": {"error": {"status": 500}, "limit": null}
+	},
+	{
+		"name": "a message that did not fail reports nothing",
+		"message": {"role": "assistant", "stopReason": "stop", "provider": "openai", "model": "gpt-x"},
+		"expect": null
+	},
+	{
+		"name": "a headers value that is no string is left out, not trusted",
+		"response": {"status": 429, "headers": {"retry-after": {"not": "a string"}, "x-other": 5}},
+		"message": {
+			"role": "assistant", "stopReason": "error", "provider": "p", "model": "m",
+			"errorMessage": "429 too many requests"
+		},
+		"expect": {"limit": {"kind": "rate_limit"}}
+	}
+]
