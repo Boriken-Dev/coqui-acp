@@ -1,0 +1,5 @@
+{"format":"coqui-acp-history","version":1,"id":"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77","origin":{"harness":"claude"}}
+{"method":"session/prompt","params":{"prompt":[{"text":"first question","type":"text"}]}}
+{"method":"session/update","params":{"update":{"content":{"text":"partial work","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"session/update","params":{"update":{"content":{"text":"Usage limit reached","type":"text"},"sessionUpdate":"agent_thought_chunk"}}}
+{"method":"history/turn_end","params":{"stopReason":"refusal"}}

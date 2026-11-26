@@ -1,0 +1,15 @@
+{"format":"coqui-acp-history","version":1,"id":"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77","origin":{"harness":"claude"}}
+{"method":"session/prompt","params":{"prompt":[{"text":"first question","type":"text"}]}}
+{"method":"session/update","params":{"update":{"content":{"text":"first answer","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"history/turn_end","params":{"stopReason":"end_turn"}}
+{"method":"session/update","params":{"update":{"content":{"text":"planner moved from Codex to Claude","type":"text"},"sessionUpdate":"agent_message_chunk","_meta":{"example.test/notice":true}}}}
+{"method":"session/prompt","params":{"prompt":[{"text":"fix the build","type":"text"}]}}
+{"method":"session/update","params":{"update":{"content":{"text":"Let me look at the build.","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"session/update","params":{"update":{"kind":"read","sessionUpdate":"tool_call","status":"pending","title":"Read a.txt","toolCallId":"tc1"}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","status":"completed","toolCallId":"tc1"}}}
+{"method":"session/update","params":{"update":{"kind":"execute","sessionUpdate":"tool_call","status":"in_progress","title":"cargo build","toolCallId":"tc2"}}}
+{"method":"session/request_permission","params":{"options":[{"optionId":"allow"}],"toolCall":{"toolCallId":"tc3"}}}
+{"method":"session/update","params":{"update":{"content":{"text":"You have hit your usage ","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"session/update","params":{"update":{"content":{"text":"limit. Please wait","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"session/update","params":{"update":{"content":{"text":" until 15:04 to continue.","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"history/turn_end","params":{"error":"Error 429: usage limit reached","stopReason":"error"}}

@@ -794,6 +794,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-acp-pool"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "coqui-acp-api",
+ "coqui-acp-history",
+ "proptest",
+ "serde_json",
+]
+
+[[package]]
 name = "coqui-acp-provider"
 version = "0.0.0-alpha.0"
 dependencies = [

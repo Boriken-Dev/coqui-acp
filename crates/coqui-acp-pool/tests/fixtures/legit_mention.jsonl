@@ -1,0 +1,7 @@
+{"format":"coqui-acp-history","version":1,"id":"5f0f6d6e-3f3c-4f1a-8a52-1c1e6f0b9a77","origin":{"harness":"claude"}}
+{"method":"session/prompt","params":{"prompt":[{"text":"first question","type":"text"}]}}
+{"method":"session/update","params":{"update":{"content":{"text":"I will explain the quota system you asked about in a moment.","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"session/update","params":{"update":{"kind":"read","sessionUpdate":"tool_call","status":"pending","title":"Read b","toolCallId":"t9"}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","status":"completed","toolCallId":"t9"}}}
+{"method":"session/update","params":{"update":{"content":{"text":"Done reading; the rate limit docs say 3 per second.","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"method":"history/turn_end","params":{"stopReason":"end_turn"}}
