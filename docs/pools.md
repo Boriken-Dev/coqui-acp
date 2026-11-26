@@ -37,6 +37,12 @@ A session is never moved in the middle of a turn. When its member cannot serve, 
 members of the same group (the harness) first, in the strategy's order, then the others. The host's `carry` exports the session,
 cleans it and imports it on the new member. A member whose history cannot be carried is left out for this session.
 
+How a turn's end is read is the harness's to say. A harness provider that knows how its harness reports a limit states it in the standard
+form, the `LimitHit` in the refused turn's `_meta`: the kind (usage quota, rate limit, context window, credit, other), when it lifts,
+whether the work can go on with another member, and which of the turn's messages are the limit's own words. The pool uses it when it is
+given: a limit that cannot be continued elsewhere (a context window) moves nothing, the cleaner drops the named messages, and phrase
+matching is only the fallback for a harness that reports nothing.
+
 The cleaner works on the exported history in the standard format and only on the last turn, the one the limit ended. It drops the
 closing error or refusal, the text that names the limit and what follows it (the phrases are the host's), tool calls left open, and every
 line the host marked as its own notice. Then the continuation goes to the new member: the role's text, else "The previous agent's usage
