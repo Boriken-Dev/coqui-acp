@@ -353,8 +353,9 @@ fn classify(info: &Info) -> Option<(LimitKind, bool)> {
         "ratelimitexceeded" => LimitKind::RateLimit,
         "apikeyspendlimitexceeded"
         | "projectspendlimitexceeded"
-        | "organizationspendlimitexceeded"
-        | "sessionbudgetexceeded" => LimitKind::Credit,
+        | "organizationspendlimitexceeded" => LimitKind::Credit,
+        // A budget the person set on the session is a stop, not an allowance another account makes up.
+        "sessionbudgetexceeded" => return Some((LimitKind::Credit, false)),
         "serveroverloaded" | "flexunavailable" | "policycapacityunavailable" | "unauthorized" => {
             LimitKind::Unclassified
         }

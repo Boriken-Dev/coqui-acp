@@ -135,7 +135,8 @@ A turn that ends in an error is a limit of the standard form (`coqui_acp_api::us
 | --- | --- | --- | --- |
 | `usageLimitExceeded` | `usage_quota`; `credit` when the turn's snapshot says `rateLimitReachedType` `workspace_owner_credits_depleted` or `workspace_member_credits_depleted` | true | the error's `resetsAt`, else the used-up window's (`bucket` `<limitId>:five_hour` or `weekly`) |
 | `rateLimitExceeded`; `httpConnectionFailed`, `responseStreamConnectionFailed`, `responseStreamDisconnected`, `responseTooManyFailedAttempts` with `httpStatusCode` 429 | `rate_limit` | true | the error's `resetsAt` when it has one |
-| `apiKeySpendLimitExceeded`, `projectSpendLimitExceeded`, `organizationSpendLimitExceeded`, `sessionBudgetExceeded` | `credit` | true | the error's `resetsAt`, else the used-up spend control's (`bucket` `<limitId>:spend_control`: `spendControlReached`, or no `remainingPercent`) |
+| `apiKeySpendLimitExceeded`, `projectSpendLimitExceeded`, `organizationSpendLimitExceeded` | `credit` | true | the error's `resetsAt`, else the used-up spend control's (`bucket` `<limitId>:spend_control`: `spendControlReached`, or no `remainingPercent`) |
+| `sessionBudgetExceeded` | `credit` | false (a budget the person set on the session is a stop, not one to route around) | none |
 | `contextWindowExceeded` | `context_window` | false | none |
 | `serverOverloaded`, `flexUnavailable`, `policyCapacityUnavailable`, `unauthorized` | `other` | true | the error's `resetsAt` when it has one |
 | a name a later Codex adds | read by what it says: `spendlimit` or `budget` is `credit`, `usagelimit` `usage_quota`, `ratelimit` `rate_limit`, `contextwindow` `context_window`; anything else is a failure | | |
