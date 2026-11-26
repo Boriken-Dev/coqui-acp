@@ -244,7 +244,8 @@ pub fn read_diagnostics(reader: impl Read, max_line: u64, tail: &Mutex<Tail>)   
 | `Terminal(Terminal)` | a terminal of the agent's own: `id`, `command`, `output` to add, `exit: Option<Option<i32>>` once it ended |
 | `Plan(Vec<PlanEntry>)` | the plan, whole |
 | `Permission(PermissionRequest)` | a call that needs leave |
-| `Usage(Usage)` | tokens (`input`, `output`, `cache_read`, `cache_write`, `cumulative`), `cost_usd`, `context_used`, `context_size`, `elsewhere`, `spend: Option<Spend>` (the session's running totals; the connection fills the session id) |
+| `Usage(Usage)` | tokens (`input`, `output`, `cache_read`, `cache_write`, `cumulative`), `cost_usd`, `context_used`, `context_size`, `elsewhere`, `spend: Option<Spend>` (the session's running totals; the connection fills the session id), `turn: Option<TurnTokens>` (the running turn's own counts in all its requests: `input`, `output`, `cache_read`, `cache_write`, `reasoning`; the turn's answer reports these as its `usage`, with `thoughtTokens` when `reasoning` is set, in place of the last report's) |
+| `TurnMeta(BTreeMap<String, Value>)` | facts about the running turn for the `_meta` of its answer, each under the key a host reads it by (`model`, or a namespaced key such as `codex:error_info`); a later value of a key replaces an earlier one and the turn's end clears them |
 | `Buckets(Vec<Bucket>)` | the account's usage allowances (`coqui_acp_api::usage::Bucket`): one replaces the earlier of its id and keeps what it leaves unknown; `observed_at` 0 is stamped when the connection hears it |
 | `Commands(Vec<Command>)` | commands by name: `name`, `description`, `hint` |
 | `Options(Vec<ConfigOption>)` | the session's choices as they stand now, after a change not a client's own |
