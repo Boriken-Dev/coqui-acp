@@ -394,6 +394,31 @@ fn a_usage_limit_error_becomes_a_limit_with_the_reset_it_names() {
     };
     assert_eq!(limit.text.as_deref(), Some("You've hit your usage limit."));
     assert_eq!(limit.resets_at, Some(1_790_000_000));
+    // Codex's own word, `usageLimitExceeded`, is the plan's quota, and the work can go on with another account.
+    assert_eq!(limit.kind, Some(coqui_acp_api::LimitKind::UsageQuota));
+    assert_eq!(limit.continuable, Some(true));
+}
+
+#[test]
+fn a_bare_429_from_codex_is_a_rate_limit_and_a_usage_limit_a_quota() {
+    let kind_of = |info: Value| {
+        let events = events_of(&[
+            json!({"method": "error", "params": {"error": {"message": "slow down", "codexErrorInfo": info}, "willRetry": false}}),
+            json!({"method": "turn/completed", "params": {"turn": {"id": "t", "status": "failed", "error": null}}}),
+        ]);
+        let TurnEnd::Limited(limit) = end_of(&events) else {
+            panic!("{:?}", end_of(&events))
+        };
+        limit.kind.clone()
+    };
+    assert_eq!(
+        kind_of(json!({"httpConnectionFailed": {"httpStatusCode": 429}})),
+        Some(coqui_acp_api::LimitKind::RateLimit)
+    );
+    assert_eq!(
+        kind_of(json!("usage_limit_exceeded")),
+        Some(coqui_acp_api::LimitKind::UsageQuota)
+    );
 }
 
 #[test]

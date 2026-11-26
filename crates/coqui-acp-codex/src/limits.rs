@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use core::time::Duration;
 
-use coqui_acp_api::usage::{Bucket, Coverage, LimitHit, Refill, Spend, Status, Unit};
+use coqui_acp_api::usage::{Bucket, Coverage, LimitHit, LimitKind, Refill, Spend, Status, Unit};
 use coqui_acp_harness::event::Usage;
 use serde_json::Value;
 
@@ -154,6 +154,9 @@ fn exhausted_in(id: &str, snapshot: &Value) -> Option<LimitHit> {
                 let mut limit = LimitHit::new(0);
                 limit.resets_at = window.get("resetsAt").and_then(Value::as_i64);
                 limit.bucket = Some(format!("{id}:{}", window_name(window, position)));
+                // A window of the plan at 100 percent.
+                limit.kind = Some(LimitKind::UsageQuota);
+                limit.continuable = Some(true);
                 limit
             })
         })
@@ -279,10 +282,13 @@ pub(crate) fn error_of(message: &Value) -> Option<&Value> {
 /// 429. The reset is the error's `resetsAt`, else the exhausted window's `hint`.
 pub(crate) fn limit(error: &Value, hint: Option<&LimitHit>) -> Option<LimitHit> {
     let info = error.get("codexErrorInfo")?;
-    let named = info
+    let name = info
         .as_str()
-        .map(|text| text.to_lowercase().replace('_', ""))
-        .is_some_and(|text| text.contains("usagelimit") || text.contains("ratelimit"));
+        .map(|text| text.to_lowercase().replace('_', ""));
+    let usage_limit = name
+        .as_ref()
+        .is_some_and(|text| text.contains("usagelimit"));
+    let named = usage_limit || name.as_ref().is_some_and(|text| text.contains("ratelimit"));
     let throttled = info
         .as_object()
         .and_then(|object| object.values().next())
@@ -293,6 +299,13 @@ pub(crate) fn limit(error: &Value, hint: Option<&LimitHit>) -> Option<LimitHit> 
         return None;
     }
     let mut limit = LimitHit::new(0);
+    // `codexErrorInfo` is Codex's own word: a usage limit is the plan's quota, any other limit it names or a bare 429 is a rate limit.
+    limit.kind = Some(if usage_limit {
+        LimitKind::UsageQuota
+    } else {
+        LimitKind::RateLimit
+    });
+    limit.continuable = Some(true);
     limit.resets_at = error
         .get("resetsAt")
         .and_then(Value::as_i64)

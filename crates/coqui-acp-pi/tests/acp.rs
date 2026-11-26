@@ -299,6 +299,11 @@ fn a_limit_is_a_refusal_with_its_meta_and_another_error_fails_the_prompt() {
         ended["result"]["_meta"]["dev.boriken.coqui.acp/limit"]["text"],
         "Error 429"
     );
+    // Pi gives no structured kind: the words say a bare 429, a rate limit.
+    assert_eq!(
+        ended["result"]["_meta"]["dev.boriken.coqui.acp/limit"]["kind"],
+        "rate_limit"
+    );
     let failed = peer.request(
         "session/prompt",
         json!({"sessionId": session, "prompt": [{"type": "text", "text": "fail"}]}),

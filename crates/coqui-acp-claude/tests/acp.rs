@@ -912,6 +912,9 @@ fn a_recorded_rejection_ends_the_turn_refused_with_the_hit_and_exhausts_the_wind
     assert_eq!(hit["bucket"], "five_hour");
     assert_eq!(hit["resets_at"], 1_793_875_411);
     assert_eq!(hit["source"], "reported");
+    // Claude Code's own event names a plan window: a quota, which another account may have room in.
+    assert_eq!(hit["kind"], "usage_quota");
+    assert_eq!(hit["continuable"], true);
     assert!(hit["observed_at"].as_i64().unwrap() > 0);
     let polled = peer.request(USAGE_METHOD, json!({}));
     assert_eq!(

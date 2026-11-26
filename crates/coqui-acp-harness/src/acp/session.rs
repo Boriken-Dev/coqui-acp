@@ -493,9 +493,22 @@ impl Session {
         let end = match end {
             TurnEnd::Limited(mut hit) => {
                 super::usage::stamp(&mut hit, super::usage::now());
+                let mut state = self.state();
+                let (ids, indexes) = state.shapes.limit_text(hit.text.as_deref());
+                // What the harness named itself is not replaced by what the words suggest.
+                if hit.text_ids.is_empty() && hit.text_indexes.is_empty() {
+                    if state.shapes.version >= 2 {
+                        hit.text_ids = ids;
+                    } else {
+                        hit.text_indexes = indexes;
+                    }
+                }
                 TurnEnd::Limited(hit)
             }
-            other => other,
+            other => {
+                self.state().shapes.limit_text(None);
+                other
+            }
         };
         if let TurnEnd::Limited(hit) = &end {
             shared.usage_limit(self.id(), hit.clone());

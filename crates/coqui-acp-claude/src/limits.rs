@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use coqui_acp_api::usage::{
-    Bucket, Coverage, LimitHit, ModelSpend, Refill, Source, Spend, Status, Unit, infer_limit,
+    Bucket, Coverage, LimitHit, LimitKind, ModelSpend, Refill, Source, Spend, Status, Unit,
+    infer_limit, limit_kind_of,
 };
 use coqui_acp_harness::event::Usage;
 use serde_json::Value;
@@ -36,6 +37,18 @@ pub(crate) fn limit(value: &Value) -> Option<LimitHit> {
                 return None;
             }
             let mut limit = LimitHit::new(0);
+            let window = info
+                .get("rateLimitType")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // Claude Code's own event names the window: the plan's windows are quotas, `overage` is the extra usage bought
+            // with money.
+            limit.kind = Some(if window.contains("overage") {
+                LimitKind::Credit
+            } else {
+                LimitKind::UsageQuota
+            });
+            limit.continuable = Some(true);
             limit.resets_at = info
                 .get("resetsAt")
                 .and_then(Value::as_i64)
@@ -68,6 +81,13 @@ pub(crate) fn limit(value: &Value) -> Option<LimitHit> {
             let mut limit = LimitHit::new(0);
             limit.resets_at = resets_at;
             limit.bucket = bucket;
+            // A 429 that names no usage limit is the API's rate limit; the words of a usage limit are Claude Code's own.
+            limit.kind = Some(if infer_limit(text, LIMIT_PHRASES).is_some() {
+                LimitKind::UsageQuota
+            } else {
+                limit_kind_of(text).unwrap_or(LimitKind::RateLimit)
+            });
+            limit.continuable = Some(true);
             limit.source = Source::Inferred;
             limit.text = Some(text.to_string());
             Some(limit)
@@ -240,6 +260,7 @@ pub(crate) fn limit_of_text(text: &str) -> Option<LimitHit> {
 pub(crate) fn with_hint(mut limit: LimitHit, hint: Option<LimitHit>) -> LimitHit {
     if let Some(hint) = hint {
         limit.resets_at = hint.resets_at.or(limit.resets_at);
+        limit.kind = hint.kind.or(limit.kind.take());
         limit.bucket = hint.bucket.or(limit.bucket);
         limit.source = hint.source;
     }
