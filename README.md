@@ -19,6 +19,7 @@ command that puts a stdio agent on the network under a proven identity. It build
 | `crates/coqui-acp-history` | one file format for a session's history: write, read, bound, redact, and move it between harnesses |
 | `crates/coqui-acp-hub` | one live session served to any number of attached clients, with no I/O of its own |
 | `crates/coqui-acp-secrets` | the host side of secret prompts: a handle store, the tools that request and use a secret, and the person's approval |
+| `crates/coqui-acp-pool` | the policy that picks which agent, account and model serves a session or task, and moves a running session on when its usage runs out: strategies, caps, the cleaner of a carried history, and the seams a host implements |
 | `crates/coqui-acp-page` | a person's agents from a Rust page compiled to WebAssembly |
 | `crates/coqui-acp-provider` | [agents as Guatiao providers](docs/provider.md), in any language, and a facade serving one over ACP |
 | `examples/provider-python` | an echo agent written in Python, through that facade |
