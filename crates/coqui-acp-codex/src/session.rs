@@ -825,19 +825,19 @@ impl CodexSession {
         if let Some(effort) = &effort {
             params["effort"] = json!(effort);
         }
+        // The model named for the turn, else the thread's, else the one Codex lists as its own.
+        let named = params["model"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| self.thread_model.clone())
+            .or_else(|| {
+                self.models
+                    .as_deref()
+                    .and_then(|models| models.iter().find(|model| model.is_default))
+                    .map(|model| model.id.clone())
+            });
         let (mode, chosen) = locked(&self.mode).clone();
         if let (Some(Shown::Known(mode)), true) = (mode, chosen) {
-            // The model named for the turn, else the thread's, else the one Codex lists as its own.
-            let named = params["model"]
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| self.thread_model.clone())
-                .or_else(|| {
-                    self.models
-                        .as_deref()
-                        .and_then(|models| models.iter().find(|model| model.is_default))
-                        .map(|model| model.id.clone())
-                });
             if mode == Mode::Plan
                 && self.instructions.is_some()
                 && !self.plan_told.swap(true, Ordering::SeqCst)
@@ -864,7 +864,11 @@ impl CodexSession {
                 params[key] = value;
             }
         }
-        locked(&self.parser).prompting();
+        {
+            let mut parser = locked(&self.parser);
+            parser.prompting();
+            parser.set_model(named.as_deref());
+        }
         let number = self.next_request();
         let started = self
             .request_numbered(number, "turn/start", params, self.settings.request_timeout)
