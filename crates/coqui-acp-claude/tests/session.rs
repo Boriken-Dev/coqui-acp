@@ -654,3 +654,192 @@ fn a_close_waits_for_a_process_that_takes_its_time_to_end() {
     session.close();
     assert!(gone.load(Ordering::SeqCst), "the close did not wait");
 }
+
+/// A resumed session on a stand-in that writes `lines` for the person's messages: each of `turns` is the lines that follow one
+/// message, written after it has been read. Claude Code's own ids are kept, so the stand-in does not rewrite them.
+fn resumed_on(
+    scratch: &Scratch,
+    turns: &[Vec<serde_json::Value>],
+) -> (
+    Result<ClaudeSession, coqui_acp_claude::Error>,
+    mpsc::Receiver<Event>,
+) {
+    use serde_json::json;
+    let control = json!({"type": "control_response", "response": {"subtype": "success", "request_id": "init-1",
+        "response": {"commands": [], "models": [], "claude_code_version": "2.1.318"}}});
+    let mut stdout = vec![control];
+    let mut steps = vec![
+        json!({"after": 0, "input": {"type": "control_request", "request_id": "init-1",
+        "request": {"subtype": "initialize"}}}),
+    ];
+    for (n, lines) in turns.iter().enumerate() {
+        steps.push(
+            json!({"after": stdout.len(), "input": {"type": "user", "message": {"role": "user",
+            "content": [{"type": "text", "text": format!("message {n}")}]}}}),
+        );
+        stdout.extend(lines.iter().cloned());
+    }
+    let base = scratch.0.join("clearing");
+    let text: String = stdout.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(base.with_extension("stdout"), text).unwrap();
+    std::fs::write(
+        base.with_extension("steps.json"),
+        serde_json::to_vec(&steps).unwrap(),
+    )
+    .unwrap();
+    let mut launch = replaying(None, &scratch.0);
+    launch.session = SessionStart::Resume("id-old".into());
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_REPLAY".into(), base.into());
+    launch
+        .env
+        .insert("COQUI_ACP_CLAUDE_KEEP_SESSION".into(), "1".into());
+    start(&launch)
+}
+
+fn init_line(session: &str) -> serde_json::Value {
+    serde_json::json!({"type": "system", "subtype": "init", "session_id": session})
+}
+
+fn result_line(session: &str) -> serde_json::Value {
+    serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn",
+        "num_turns": 1, "session_id": session})
+}
+
+fn reset_line(trigger: &str, session: &str) -> serde_json::Value {
+    serde_json::json!({"type": "conversation_reset", "trigger": trigger, "new_conversation_id": "conv-9",
+        "session_id": session})
+}
+
+fn said_line(text: &str, session: &str) -> serde_json::Value {
+    serde_json::json!({"type": "assistant", "session_id": session, "message": {"id": "m1", "type": "message",
+        "role": "assistant", "model": "claude-standin", "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": text}]}})
+}
+
+#[test]
+fn a_resumed_session_follows_the_new_id_a_clear_gives_it_and_goes_on() {
+    let scratch = Scratch::new("clear-resumed");
+    let (session, events) = resumed_on(
+        &scratch,
+        &[
+            vec![
+                reset_line("clear", "id-old"),
+                init_line("id-new"),
+                result_line("id-new"),
+            ],
+            vec![
+                said_line("after the clear", "id-new"),
+                result_line("id-new"),
+            ],
+        ],
+    );
+    let session = session.unwrap();
+    assert_eq!(session.id().as_deref(), Some("id-old"));
+    session
+        .prompt(&[Content::Text("message 0".into())])
+        .unwrap();
+    let told = until_end(&events);
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, Event::SessionId(id) if id == "id-new")),
+        "{told:?}"
+    );
+    assert!(
+        !told.iter().any(|event| matches!(event, Event::Exited(_))),
+        "{told:?}"
+    );
+    assert_eq!(session.id().as_deref(), Some("id-new"));
+    session
+        .prompt(&[Content::Text("message 1".into())])
+        .unwrap();
+    let told = until_end(&events);
+    assert!(
+        told.iter().any(
+            |event| matches!(event, Event::MessageChunk { text, .. } if text.contains("after the clear"))
+        ),
+        "{told:?}"
+    );
+    assert!(
+        matches!(
+            told.last(),
+            Some(Event::TurnEnd(TurnEnd::Stopped {
+                stop: Stop::EndTurn,
+                ..
+            }))
+        ),
+        "{told:?}"
+    );
+    session.close();
+}
+
+/// Events until the session reports why it ended.
+fn until_exit(events: &mpsc::Receiver<Event>) -> String {
+    loop {
+        let event = events
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the session did not end");
+        if let Event::Exited(why) = event {
+            return why;
+        }
+    }
+}
+
+#[test]
+fn another_id_with_no_clear_before_it_still_ends_a_resumed_session() {
+    let scratch = Scratch::new("clear-unrelated");
+    let (session, events) = resumed_on(
+        &scratch,
+        &[vec![init_line("someone-else"), result_line("someone-else")]],
+    );
+    let session = session.unwrap();
+    session
+        .prompt(&[Content::Text("message 0".into())])
+        .unwrap();
+    let why = until_exit(&events);
+    assert!(
+        why.contains("someone-else") && why.contains("not the one requested"),
+        "{why}"
+    );
+    session.close();
+}
+
+#[test]
+fn only_a_clear_excuses_a_new_id_and_only_once() {
+    let scratch = Scratch::new("clear-once");
+    let (session, events) = resumed_on(
+        &scratch,
+        &[vec![
+            // A reset for another reason excuses nothing.
+            reset_line("compact", "id-old"),
+            init_line("id-new"),
+            result_line("id-new"),
+        ]],
+    );
+    let session = session.unwrap();
+    session
+        .prompt(&[Content::Text("message 0".into())])
+        .unwrap();
+    let why = until_exit(&events);
+    assert!(why.contains("id-new"), "{why}");
+    session.close();
+
+    let scratch = Scratch::new("clear-twice");
+    let (session, events) = resumed_on(
+        &scratch,
+        &[vec![
+            reset_line("clear", "id-old"),
+            init_line("id-new"),
+            init_line("id-third"),
+            result_line("id-third"),
+        ]],
+    );
+    let session = session.unwrap();
+    session
+        .prompt(&[Content::Text("message 0".into())])
+        .unwrap();
+    let why = until_exit(&events);
+    assert!(why.contains("id-third"), "{why}");
+    session.close();
+}

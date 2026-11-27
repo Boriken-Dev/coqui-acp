@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `coqui-acp-claude`: a resumed session no longer ends when `/clear` gives Claude Code's process a new session id. The id that follows a `conversation_reset` line of trigger `clear` becomes the session's and `ClaudeSession::id()` answers it; any other change of id still ends the session.
 - **A full context window is not a limit another account can take.** `coqui-acp-claude` marked every limit it reads `continuable`, so a 429 at a full context window let a pool move the turn to another account, which meets the same window; a `ContextWindow` limit is now `continuable: false`, as coqui-acp-api and coqui-acp-codex say.
 
 - `coqui-acp-pool`: `clean` takes out every turn a limit ended, not only the last, so a session that hit a limit earlier and later moved no longer carries that turn's limit words, failed ending or open calls to the next agent. An earlier turn is a limit's when its closing line carries the harness's `LimitHit` (`_meta[LIMIT_META_KEY]`, cleaned by `text_ids` or `text_indexes`) or, with none, when it failed after text that names a limit (judged after the turn's last tool call, so an agent that mentions "quota" in its work is kept); a turn that failed for another reason is kept. Earlier turns are cleaned even when the last ended well. An earlier turn keeps its prompt and work and is closed with a plain `end_turn` in place of the failed ending, so the cleaned history is valid (it was refused as `prompt_inside_turn`).
