@@ -241,13 +241,14 @@ fn matches_limit(text: &str, phrases: &[&str]) -> bool {
 /// failed for another reason or ended well is not touched. The host's notices go from the whole history.
 ///
 /// With a limit as the cause, from each such turn it takes out:
-/// - the closing `error` line or `refusal` stop of the last turn;
+/// - the closing `error` line or `refusal` stop of the last turn (an earlier turn's is written as a plain `end_turn` instead, with
+///   the harness's limit report removed from its `_meta`, so the history stays well formed);
 /// - the agent's message and thought chunks after its last tool call that name the limit (found across up to
 ///   [`Cleaning::max_window`] chunks, since agents stream), and every chunk of text after them ("please wait", "try again in five
 ///   hours");
 /// - tool calls the turn left open with no result, and the permission requests and answers about them.
 ///
-/// It keeps the person's prompt, every finished tool call and result, and every message of the agent's own work.
+/// It keeps every turn's prompt, every finished tool call and result, and every message of the agent's own work.
 #[must_use]
 pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
     let lines = &document.lines;
@@ -268,6 +269,7 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
         Body::Prompt { prompt } => Some(prompt.clone()),
         _ => None,
     });
+    let mut closed: Vec<usize> = Vec::new();
     let prompts: Vec<usize> = lines
         .iter()
         .enumerate()
@@ -276,7 +278,13 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
         .collect();
     for pair in prompts.windows(2) {
         let turn = pair[0] + 1..pair[1];
-        clean_earlier(lines, &mut keep, &turn, cleaning, &mut removed);
+        clean_earlier(
+            lines,
+            &mut keep,
+            &turn,
+            cleaning,
+            (&mut removed, &mut closed),
+        );
     }
     if let (Some(start), true) = (start, cleaning.ended_by_limit) {
         let turn = start + 1..lines.len();
@@ -318,9 +326,15 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
     let mut out = document.clone();
     out.lines = lines
         .iter()
-        .zip(&keep)
-        .filter(|(_, keep)| **keep)
-        .map(|(line, _)| line.clone())
+        .enumerate()
+        .filter(|(at, _)| keep[*at])
+        .map(|(at, line)| {
+            if closed.contains(&at) {
+                closed_plainly(line)
+            } else {
+                line.clone()
+            }
+        })
         .collect();
     let said_none = cleaning.report.is_some_and(|report| {
         report.source == Source::Reported
@@ -338,15 +352,35 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
     }
 }
 
+/// The closing line of an earlier turn a limit ended, as a plain `end_turn`: the failure and the harness's limit report go, the
+/// time and any other `_meta` stay.
+fn closed_plainly(line: &Line) -> Line {
+    let mut line = line.clone();
+    if let Body::TurnEnd { stop, error } = &mut line.body {
+        if matches!(stop, Stop::Error | Stop::Acp(StopReason::Refusal)) {
+            *stop = Stop::Acp(StopReason::EndTurn);
+        }
+        *error = None;
+    }
+    if let Some(Value::Object(meta)) = &mut line.meta {
+        meta.remove(LIMIT_META_KEY);
+        if meta.is_empty() {
+            line.meta = None;
+        }
+    }
+    line
+}
+
 /// An earlier turn goes through the cleaner only when a limit ended it: its closing line carries the harness's report under
 /// `LIMIT_META_KEY`, or, with none, it failed after text that names a limit. A turn that failed for another reason, or ended well,
-/// is left as it was.
+/// is left as it was. Its prompt and work stay, and its ending is listed in `closed` to be written as a plain `end_turn`, so the
+/// next turn's prompt does not land inside an open turn.
 fn clean_earlier(
     lines: &[Line],
     keep: &mut [bool],
     turn: &core::ops::Range<usize>,
     cleaning: &Cleaning<'_>,
-    removed: &mut Removed,
+    (removed, closed): (&mut Removed, &mut Vec<usize>),
 ) {
     let Some(ending) = turn
         .clone()
@@ -379,10 +413,8 @@ fn clean_earlier(
     if report.is_none() && (!failed || taken.limit_text == 0) {
         return;
     }
-    if failed {
-        cut[ending] = false;
-        taken.end = true;
-    }
+    taken.end = failed;
+    closed.push(ending);
     drop_open_calls(lines, &mut cut, turn, &mut taken);
     keep.copy_from_slice(&cut);
     removed.end |= taken.end;
