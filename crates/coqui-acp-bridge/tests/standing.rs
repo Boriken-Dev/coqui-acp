@@ -59,7 +59,7 @@ impl Fixture {
                 .args(["serve", "--listen", &format!("127.0.0.1:{port}")])
                 .args(flags)
                 .args(["--", "no-agent-is-ever-started"])
-                .env(coqui_agentic_peer::home::HOME_ENV, &self.home)
+                .env(agentic_peer::home::HOME_ENV, &self.home)
                 .stdout(Stdio::piped())
                 .stderr(log)
                 .spawn()
@@ -94,7 +94,7 @@ impl Fixture {
     fn config(&self, peer: &str) -> Value {
         let output = Command::new(support::bridge())
             .args(["mcp-config", "--peer", peer])
-            .env(coqui_agentic_peer::home::HOME_ENV, &self.home)
+            .env(agentic_peer::home::HOME_ENV, &self.home)
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -290,13 +290,11 @@ fn the_entry_names_the_peer_and_holds_nothing_secret() {
     assert!(Path::new(entry["command"].as_str().unwrap()).is_absolute());
     assert_eq!(entry["args"], json!(["mcp-shim", "--peer", peer]));
     // A client may start it with little of its own environment, so the entry says where to look.
-    let home = entry["env"][coqui_agentic_peer::home::HOME_ENV]
-        .as_str()
-        .unwrap();
+    let home = entry["env"][agentic_peer::home::HOME_ENV].as_str().unwrap();
     assert_eq!(Path::new(home), fixture.home);
     let bare = Command::new(support::bridge())
         .args(["mcp-config", "--peer", &peer])
-        .env_remove(coqui_agentic_peer::home::HOME_ENV)
+        .env_remove(agentic_peer::home::HOME_ENV)
         .env("LOCALAPPDATA", &fixture.dir)
         .env("XDG_CONFIG_HOME", &fixture.dir)
         .output()
@@ -304,7 +302,7 @@ fn the_entry_names_the_peer_and_holds_nothing_secret() {
     let bare: Value = serde_json::from_slice(&bare.stdout).unwrap();
     assert_eq!(
         Path::new(
-            bare["mcpServers"]["canoa-browser"]["env"][coqui_agentic_peer::home::HOME_ENV]
+            bare["mcpServers"]["canoa-browser"]["env"][agentic_peer::home::HOME_ENV]
                 .as_str()
                 .unwrap()
         ),

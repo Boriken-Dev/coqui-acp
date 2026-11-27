@@ -57,7 +57,7 @@ impl Fixture {
             .arg("--")
             .arg(echo_agent());
         if let Some(home) = home {
-            command.env(coqui_agentic_peer::home::HOME_ENV, home);
+            command.env(agentic_peer::home::HOME_ENV, home);
         }
         let log = std::fs::File::create(self.dir.join(format!("serve-{port}.log"))).unwrap();
         let mut child = command.stdout(Stdio::piped()).stderr(log).spawn().unwrap();
@@ -234,7 +234,7 @@ fn a_grant_names_what_a_peer_may_open_and_keeps_the_rest_refused() {
 /// Pairs two homes once, as a person would.
 fn pair(server_home: &Path, client_home: &Path) {
     let port = free_port();
-    let home = coqui_agentic_peer::home::HOME_ENV;
+    let home = agentic_peer::home::HOME_ENV;
     let mut accept = Command::new(support::bridge())
         .args(["pair-accept", "--listen", &format!("127.0.0.1:{port}")])
         .args(["--method", method::name()])
@@ -272,9 +272,8 @@ fn one_pairing_and_a_new_capability_is_a_grant_counted_at_once() {
     let mut fixture = Fixture::new("paired");
     let (server_home, client_home) = (fixture.dir.join("server"), fixture.dir.join("client"));
     pair(&server_home, &client_home);
-    let client = method::identity(
-        &client_home.join(coqui_agentic_peer::home::identity_file(method::method())),
-    );
+    let client =
+        method::identity(&client_home.join(agentic_peer::home::identity_file(method::method())));
     let peer = client.peer_id().to_string();
     let agent = echo_agent();
     let port = free_port();
@@ -293,7 +292,7 @@ fn one_pairing_and_a_new_capability_is_a_grant_counted_at_once() {
             } else {
                 &[][..]
             })
-            .env(coqui_agentic_peer::home::HOME_ENV, &server_home)
+            .env(agentic_peer::home::HOME_ENV, &server_home)
             .status()
             .unwrap();
         assert!(status.success());
@@ -733,7 +732,7 @@ fn a_target_a_person_allowed_is_only_for_the_peer_they_named() {
             "--allow-target",
             "db:5432",
         ])
-        .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
+        .env(agentic_peer::home::HOME_ENV, &fixture.dir)
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -748,7 +747,7 @@ fn revoking_forwarding_leaves_no_targets_to_come_back() {
         let status = Command::new(support::bridge())
             .arg("grant")
             .args(args)
-            .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
+            .env(agentic_peer::home::HOME_ENV, &fixture.dir)
             .status()
             .unwrap();
         assert!(status.success());
@@ -1040,7 +1039,7 @@ fn what_comes_with_pairing_cannot_be_revoked_by_saying_it_was() {
     for protocol in ["acp/1", "mcp-offer/1"] {
         let output = Command::new(support::bridge())
             .args(["grant", "sha256:peer", protocol, "--revoke"])
-            .env(coqui_agentic_peer::home::HOME_ENV, &fixture.dir)
+            .env(agentic_peer::home::HOME_ENV, &fixture.dir)
             .output()
             .unwrap();
         assert!(!output.status.success(), "{protocol}");

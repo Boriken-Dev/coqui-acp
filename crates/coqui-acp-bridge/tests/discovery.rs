@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-const ENV: &str = coqui_agentic_peer::discovery::DESCRIPTORS_ENV;
+const ENV: &str = agentic_peer::discovery::DESCRIPTORS_ENV;
 
 struct Fixture {
     dir: PathBuf,
@@ -397,7 +397,7 @@ fn one_pairing_serves_every_command() {
     let fixture = Fixture::new("paired");
     let agent = echo_agent();
     let (server_home, client_home) = (fixture.dir.join("server"), fixture.dir.join("client"));
-    let home = coqui_agentic_peer::home::HOME_ENV;
+    let home = agentic_peer::home::HOME_ENV;
     let port = free_tcp_port();
     let mut accept = Running(
         Command::new(support::bridge())
@@ -503,7 +503,7 @@ fn free_tcp_port() -> u16 {
 #[test]
 #[ignore = "needs multicast on this machine's interfaces"]
 fn a_record_on_the_link_is_found_with_what_it_claims() {
-    use coqui_agentic_peer::discovery::{Advertisement, Source, advertise, browse};
+    use agentic_peer::discovery::{Advertisement, Source, advertise, browse};
     let label = format!("coqui-acp-test-{}", std::process::id());
     let peer = "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
     let advertisement = Advertisement::new(&label, true)

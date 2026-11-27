@@ -1352,7 +1352,7 @@ fn serve_saying(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(home) = home {
-        command.env(coqui_agentic_peer::home::HOME_ENV, home);
+        command.env(agentic_peer::home::HOME_ENV, home);
     }
     let mut child = command.spawn().unwrap();
     let said = child.stderr.take().unwrap();
@@ -1467,8 +1467,8 @@ fn a_method_is_the_identitys_and_naming_another_is_refused() {
 
 #[test]
 fn a_fresh_home_proves_by_the_default_and_a_webcrypto_home_keeps_serving_its_peers() {
+    use agentic_peer::home;
     use cabuya::auth::{Identity, Method, Proof, Sealed, Trust, prove_out};
-    use coqui_agentic_peer::home;
     use coqui_peer_webcrypto::TrustStore;
     let fixture = Fixture::new("homes");
 
@@ -1538,8 +1538,8 @@ fn a_fresh_home_proves_by_the_default_and_a_webcrypto_home_keeps_serving_its_pee
 
 #[test]
 fn after_moving_to_noise_a_paired_serve_naming_no_method_keeps_working() {
+    use agentic_peer::home;
     use cabuya::auth::{Identity, Method};
-    use coqui_agentic_peer::home;
     let fixture = Fixture::new("moved");
     let moved = fixture.dir.join("home");
     // A home paired before Noise.
