@@ -6,7 +6,7 @@ use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use coqui_acp_api::{LimitHit, Source, infer_limit};
+use coqui_acp_api::{LIMIT_META_KEY, LimitHit, Source, infer_limit};
 use coqui_acp_history::{Body, Document, Line, Stop, StopReason};
 use serde_json::Value;
 
@@ -235,10 +235,12 @@ fn matches_limit(text: &str, phrases: &[&str]) -> bool {
     !text.is_empty() && infer_limit(text, phrases).is_some()
 }
 
-/// Cleans the last turn of `document` as `cleaning` says; see [`Cleaning`]. Earlier turns ended well and are not touched, except
-/// for the host's notices, which go from the whole history.
+/// Cleans `document` as `cleaning` says; see [`Cleaning`]. Every turn a limit ended loses what the last one does, so no agent
+/// that gets the history reads that it must wait. An earlier turn counts as limit-ended when its closing line carries the
+/// harness's report (`LIMIT_META_KEY` in its `_meta`) or, with none, when it failed after text that names a limit; a turn that
+/// failed for another reason or ended well is not touched. The host's notices go from the whole history.
 ///
-/// With a limit as the cause, it takes out:
+/// With a limit as the cause, from each such turn it takes out:
 /// - the closing `error` line or `refusal` stop of the last turn;
 /// - the agent's message and thought chunks after its last tool call that name the limit (found across up to
 ///   [`Cleaning::max_window`] chunks, since agents stream), and every chunk of text after them ("please wait", "try again in five
@@ -266,6 +268,16 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
         Body::Prompt { prompt } => Some(prompt.clone()),
         _ => None,
     });
+    let prompts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| matches!(line.body, Body::Prompt { .. }))
+        .map(|(at, _)| at)
+        .collect();
+    for pair in prompts.windows(2) {
+        let turn = pair[0] + 1..pair[1];
+        clean_earlier(lines, &mut keep, &turn, cleaning, &mut removed);
+    }
     if let (Some(start), true) = (start, cleaning.ended_by_limit) {
         let turn = start + 1..lines.len();
         for at in turn.clone() {
@@ -324,6 +336,58 @@ pub fn clean(document: &Document, cleaning: &Cleaning<'_>) -> Cleaned {
         prompt,
         limit_text_left,
     }
+}
+
+/// An earlier turn goes through the cleaner only when a limit ended it: its closing line carries the harness's report under
+/// `LIMIT_META_KEY`, or, with none, it failed after text that names a limit. A turn that failed for another reason, or ended well,
+/// is left as it was.
+fn clean_earlier(
+    lines: &[Line],
+    keep: &mut [bool],
+    turn: &core::ops::Range<usize>,
+    cleaning: &Cleaning<'_>,
+    removed: &mut Removed,
+) {
+    let Some(ending) = turn
+        .clone()
+        .rev()
+        .find(|at| keep[*at] && matches!(lines[*at].body, Body::TurnEnd { .. }))
+    else {
+        return;
+    };
+    let failed = matches!(
+        lines[ending].body,
+        Body::TurnEnd {
+            stop: Stop::Error | Stop::Acp(StopReason::Refusal),
+            ..
+        }
+    );
+    let report: Option<LimitHit> = lines[ending]
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(LIMIT_META_KEY))
+        .and_then(|hit| serde_json::from_value(hit.clone()).ok());
+    let mut taken = Removed::default();
+    let mut cut = keep.to_vec();
+    match &report {
+        Some(report) if !report.text_ids.is_empty() || !report.text_indexes.is_empty() => {
+            drop_reported_text(lines, &mut cut, turn, report, &mut taken);
+        }
+        Some(report) if report.source == Source::Reported => {}
+        _ => drop_limit_text(lines, &mut cut, turn, cleaning, &mut taken),
+    }
+    if report.is_none() && (!failed || taken.limit_text == 0) {
+        return;
+    }
+    if failed {
+        cut[ending] = false;
+        taken.end = true;
+    }
+    drop_open_calls(lines, &mut cut, turn, &mut taken);
+    keep.copy_from_slice(&cut);
+    removed.end |= taken.end;
+    removed.limit_text += taken.limit_text;
+    removed.open_calls += taken.open_calls;
 }
 
 fn drop_open_calls(

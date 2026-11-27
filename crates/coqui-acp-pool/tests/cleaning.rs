@@ -322,3 +322,128 @@ fn a_report_that_names_no_message_says_there_is_none_and_the_words_are_not_match
     let by_words = clean(&fixture("limit_error.jsonl"), &cleaning().report(&hit));
     assert_eq!(by_words.removed.limit_text, 3);
 }
+
+fn say(text: &str) -> Line {
+    Line::update(json!({
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}
+    }))
+}
+
+fn tool(id: &str, status: &str) -> Line {
+    Line::update(
+        json!({"sessionUpdate": "tool_call", "toolCallId": id, "status": status, "title": "run"}),
+    )
+}
+
+fn ask(text: &str) -> Line {
+    Line::prompt(vec![json!({"type": "text", "text": text})])
+}
+
+/// A turn a limit ended: some work, a call left open, the limit's words and a failed ending.
+fn limit_turn(question: &str, said: &str) -> Vec<Line> {
+    vec![
+        ask(question),
+        say("Working on it."),
+        tool(&format!("open-{question}"), "in_progress"),
+        say(said),
+        Line::turn_end(Stop::Error),
+    ]
+}
+
+#[test]
+fn every_turn_a_limit_ended_is_cleaned_not_only_the_last() {
+    let mut lines = limit_turn("first", "You have hit your usage limit. Please wait");
+    lines.extend(limit_turn("second", "usage limit reached, try again later"));
+    let mut document = history(lines);
+    let cleaned = clean(&document, &cleaning());
+    assert_eq!(
+        texts(&cleaned.document),
+        ["Working on it.", "Working on it."]
+    );
+    assert!(call_ids(&cleaned.document).is_empty());
+    assert!(
+        !cleaned
+            .document
+            .lines
+            .iter()
+            .any(|line| matches!(line.body, Body::TurnEnd { .. }))
+    );
+    assert_eq!(cleaned.removed.limit_text, 2);
+    assert_eq!(cleaned.removed.open_calls, 2);
+    assert!(cleaned.removed.end);
+    // The earlier turn goes even when the last one ended well.
+    document.lines.truncate(5);
+    document.lines.extend([
+        ask("third"),
+        say("done"),
+        Line::turn_end(Stop::Acp(StopReason::EndTurn)),
+    ]);
+    let later = clean(&document, &cleaning().ended_by_limit(false));
+    assert_eq!(texts(&later.document), ["Working on it.", "done"]);
+}
+
+#[test]
+fn an_earlier_turn_the_harness_reported_is_cleaned_by_the_messages_it_names() {
+    let hit = LimitHit::new(0).text_indexes(vec![1]);
+    let mut lines = limit_turn("first", "Allowance spent");
+    let end = lines.pop().expect("an ending");
+    lines.push(end.meta(json!({ coqui_acp_api::LIMIT_META_KEY: hit })));
+    lines.extend([
+        ask("second"),
+        say("fine"),
+        Line::turn_end(Stop::Acp(StopReason::EndTurn)),
+    ]);
+    let document = history(lines);
+    let cleaned = clean(&document, &Cleaning::new(&[]).ended_by_limit(false));
+    assert_eq!(texts(&cleaned.document), ["Working on it.", "fine"]);
+    assert!(call_ids(&cleaned.document).is_empty());
+}
+
+#[test]
+fn a_turn_whose_agent_said_quota_before_its_last_tool_call_is_kept() {
+    let mut lines = vec![
+        ask("explain"),
+        say("The quota system works like this."),
+        tool("t1", "pending"),
+        Line::update(
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"}),
+        ),
+        say("All done."),
+        Line::turn_end(Stop::Error),
+    ];
+    lines.extend([
+        ask("next"),
+        say("ok"),
+        Line::turn_end(Stop::Acp(StopReason::EndTurn)),
+    ]);
+    let document = history(lines);
+    let cleaned = clean(&document, &cleaning().ended_by_limit(false));
+    assert_eq!(cleaned.document, document);
+}
+
+#[test]
+fn an_earlier_turn_that_failed_for_another_reason_is_kept() {
+    let mut lines = vec![
+        ask("build"),
+        say("Compiling."),
+        tool("t1", "in_progress"),
+        say("The compiler crashed."),
+        Line::turn_end(Stop::Error),
+    ];
+    lines.extend([
+        ask("again"),
+        say("ok"),
+        Line::turn_end(Stop::Acp(StopReason::EndTurn)),
+    ]);
+    let document = history(lines);
+    let cleaned = clean(&document, &cleaning().ended_by_limit(false));
+    assert_eq!(cleaned.document, document);
+    assert_eq!(cleaned.removed, coqui_acp_pool::Removed::default());
+}
+
+/// A history with these lines under the header of a fixture.
+fn history(lines: Vec<Line>) -> Document {
+    let mut document = fixture("limit_first_request.jsonl");
+    document.lines = lines;
+    document
+}
