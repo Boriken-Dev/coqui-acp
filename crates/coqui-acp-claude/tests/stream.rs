@@ -439,6 +439,38 @@ fn a_rejected_rate_limit_event_becomes_a_limit_with_its_reset_time() {
 }
 
 #[test]
+fn a_host_reading_raw_lines_gets_the_limit_with_its_kind_and_continuable_from_limit_of_line() {
+    use coqui_acp_api::LimitKind;
+    let quota = coqui_acp_claude::limit_of_line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_000_000, "rateLimitType": "five_hour"}}))
+        .expect("a rejected event is a limit");
+    assert_eq!(quota.kind, Some(LimitKind::UsageQuota));
+    assert_eq!(quota.continuable, Some(true));
+    assert_eq!(quota.resets_at, Some(1_790_000_000));
+    assert_eq!(quota.bucket.as_deref(), Some("five_hour"));
+    let credit = coqui_acp_claude::limit_of_line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "overage"}}))
+        .expect("a rejected overage event is a limit");
+    assert_eq!(credit.kind, Some(LimitKind::Credit));
+    let result = coqui_acp_claude::limit_of_line(&json!({"type": "result", "is_error": true, "result": "Claude AI usage limit reached|1790000000"}))
+        .expect("an error result that names a limit is one");
+    assert_eq!(result.resets_at, Some(1_790_000_000));
+    let error = coqui_acp_claude::limit_of_line(
+        &json!({"type": "error", "error": {"message": "You have hit your limit"}}),
+    )
+    .expect("an error line that names a limit is one");
+    assert_eq!(error.kind, Some(LimitKind::UsageQuota));
+    let rate = coqui_acp_claude::limit_of_line(&json!({"type": "result", "is_error": true, "api_error_status": 429, "result": "slow down"}))
+        .expect("a 429 is a limit");
+    assert_eq!(rate.kind, Some(LimitKind::RateLimit));
+    for quiet in [
+        json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}}),
+        json!({"type": "result", "is_error": false, "result": "usage limit reached"}),
+        json!({"type": "assistant"}),
+    ] {
+        assert_eq!(coqui_acp_claude::limit_of_line(&quiet), None, "{quiet}");
+    }
+}
+
+#[test]
 fn every_rate_limit_event_reports_its_window_as_a_bucket() {
     let quota = |line: Value| {
         events_of(&[line])

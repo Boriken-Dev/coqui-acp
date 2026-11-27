@@ -186,6 +186,49 @@ fn a_reached_type_of_an_earlier_turn_names_no_later_limit() {
     assert_eq!(hit.kind, Some(LimitKind::UsageQuota));
 }
 
+#[test]
+fn a_host_reading_raw_messages_gets_the_limit_with_its_kind_and_continuable_from_limit_of_message()
+{
+    let error = |info: Value| json!({"method": "error", "params": {"willRetry": false, "error": {"message": "m", "codexErrorInfo": info}}});
+    let usage =
+        coqui_acp_codex::limit_of_message(&error(json!("usageLimitExceeded")), None).unwrap();
+    assert_eq!(
+        (usage.kind, usage.continuable),
+        (Some(LimitKind::UsageQuota), Some(true))
+    );
+    assert_eq!(usage.text.as_deref(), Some("m"));
+    let context =
+        coqui_acp_codex::limit_of_message(&error(json!("contextWindowExceeded")), None).unwrap();
+    assert_eq!(
+        (context.kind, context.continuable),
+        (Some(LimitKind::ContextWindow), Some(false))
+    );
+    let budget =
+        coqui_acp_codex::limit_of_message(&error(json!("sessionBudgetExceeded")), None).unwrap();
+    assert_eq!(
+        (budget.kind, budget.continuable),
+        (Some(LimitKind::Credit), Some(false))
+    );
+    let rate = coqui_acp_codex::limit_of_message(
+        &error(json!({"httpConnectionFailed": {"httpStatusCode": 429}})),
+        None,
+    )
+    .unwrap();
+    assert_eq!(rate.kind, Some(LimitKind::RateLimit));
+    // The error object alone is read too, and the window the account said was used up gives the reset.
+    let mut window = coqui_acp_api::LimitHit::new(0);
+    window.resets_at = Some(1_790_000_000);
+    window.bucket = Some("five_hour".to_string());
+    let alone = json!({"message": "m", "codexErrorInfo": "usageLimitExceeded"});
+    let hit = coqui_acp_codex::limit_of_message(&alone, Some(&window)).unwrap();
+    assert_eq!(
+        (hit.resets_at, hit.bucket.as_deref()),
+        (Some(1_790_000_000), Some("five_hour"))
+    );
+    assert!(coqui_acp_codex::limit_of_message(&error(json!("badRequest")), None).is_none());
+    assert!(coqui_acp_codex::limit_of_message(&json!({"method": "turn/started"}), None).is_none());
+}
+
 fn usage_line(turn: &str, total: [u64; 4], last: [u64; 4]) -> Value {
     let breakdown = |counts: [u64; 4]| {
         json!({"inputTokens": counts[0], "cachedInputTokens": counts[1], "outputTokens": counts[2],

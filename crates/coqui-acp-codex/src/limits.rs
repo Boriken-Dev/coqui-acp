@@ -447,6 +447,23 @@ pub(crate) fn describe(
     (Some(limit), meta)
 }
 
+/// The limit a turn's error states, as the provider reads it: `message` is a `error`, `turn/failed` or failed
+/// `turn/completed` notification of the app server, or the error object itself (one with a `codexErrorInfo`). `kind` and
+/// `continuable` follow the variant: the usage, rate and spend limits and the transient ones are continuable, a context
+/// window and a session budget are not; a variant that is no limit, and an error with none, give `None`. The reset is the
+/// error's `resetsAt`, else `exhausted`, the window (for a usage limit) or spend control (for a credit one) the account
+/// said was used up, which is also where the hit's `bucket` comes from. The words of the error are the hit's `text`.
+#[must_use]
+pub fn limit_of_message(message: &Value, exhausted: Option<&LimitHit>) -> Option<LimitHit> {
+    let error = error_of(message).or_else(|| message.get("codexErrorInfo").map(|_| message))?;
+    let hints = Hints {
+        window: exhausted,
+        spend: exhausted,
+        reached: None,
+    };
+    describe(error, &hints).0
+}
+
 /// The `rateLimitReachedType` a snapshot of an `account/rateLimits/updated` names.
 pub(crate) fn reached_in_update(message: &Value) -> Option<String> {
     reached_in(message.pointer("/params/rateLimits")?)

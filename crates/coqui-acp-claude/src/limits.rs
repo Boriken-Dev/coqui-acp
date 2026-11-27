@@ -249,6 +249,39 @@ pub(crate) fn buckets(value: &Value) -> Vec<Bucket> {
     )]
 }
 
+/// The words of a `type: error` line: its `result`, `error.message`, first text block, `message` or `error`.
+pub(crate) fn line_text(value: &Value) -> String {
+    [
+        "/result",
+        "/error/message",
+        "/message/content/0/text",
+        "/message",
+        "/error",
+    ]
+    .iter()
+    .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+    .unwrap_or("Claude Code reported an error")
+    .to_string()
+}
+
+/// The limit a line of Claude Code's `--output-format stream-json` states, as the provider reads it: a `rate_limit_event`
+/// whose status is `rejected`, a `result` that is an error naming a limit (the words `usage limit`, `limit reached` or
+/// `hit your limit`, or `api_error_status` 429), or a `type: error` line whose words do. `kind` says what it is (a
+/// plan's windows are `UsageQuota`, the `overage` window and money `Credit`, a 429 that names no usage limit
+/// `RateLimit`) and `continuable` is true: another account can take the work. A reset comes from `resetsAt` or the
+/// number after a trailing `|` of the words; a clock time is left unset. `None` for any other line.
+///
+/// The provider also joins a rejected event to the error that follows it; a host that wants that keeps the event's hit and
+/// copies its `resets_at`, `kind` and `bucket` over the later one.
+#[must_use]
+pub fn limit_of_line(line: &Value) -> Option<LimitHit> {
+    if line.get("type").and_then(Value::as_str) == Some("error") {
+        limit_of_text(&line_text(line))
+    } else {
+        limit(line)
+    }
+}
+
 /// The limit an `error` line says, by the same words as a result's; a reset time follows a trailing `|`.
 pub(crate) fn limit_of_text(text: &str) -> Option<LimitHit> {
     limit(&serde_json::json!({"type": "result", "is_error": true, "result": text}))

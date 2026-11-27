@@ -39,6 +39,7 @@ pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned}
 pub use launch::{
     ClientInfo, CodexLaunch, ThreadStart, toml_value, valid_config_key, valid_thread_id,
 };
+pub use limits::limit_of_message;
 pub use parse::{Parser, ParserLimits};
 pub use provider::{CodexProvider, ProviderSettings};
 pub use session::{

@@ -34,6 +34,7 @@ pub use account_provider::{AccountSettings, ClaudeAccounts};
 pub use agent::{ClaudeAgent, DEFAULT, FreshSessions};
 pub use coqui_acp_harness::{self as harness, Launch, PlainSpawn, Spawn, Spawned};
 pub use launch::{ClaudeLaunch, SessionStart, mcp_config, valid_session_id};
+pub use limits::limit_of_line;
 pub use parse::{ModeHook, ModePermit, Parser, ParserLimits};
 pub use provider::{ClaudeProvider, ProviderSettings, SettingSource};
 pub use replay::{config_dir, project_directory, replay, transcript};

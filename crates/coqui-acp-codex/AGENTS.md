@@ -65,6 +65,7 @@ pub fn prompt(&self, content: &[Content]) -> Result<(), Error>
 pub fn interrupt(&self) -> Result<(), Error>
 pub fn steer(&self, turn: &str, content: &[Content]) -> Result<(), Error>   // turn/steer, its answer not awaited
 pub fn request(&self, method: &str, params: Value, limit: Duration) -> Result<Value, Error>
+pub fn limit_of_message(message: &Value, exhausted: Option<&LimitHit>) -> Option<LimitHit>   // an `error` / `turn/failed` / failed `turn/completed` message (or the error object itself) that states a limit: `kind` and `continuable` by the `codexErrorInfo` variant (usage, rate, spend and transient ones continuable; context window and session budget not), `text` the error's words, `resets_at` from `resetsAt` else `exhausted` (the window or spend control the account said was used up, which also gives `bucket`); None for a failure that is no limit. What a host reading the lines itself calls, as the provider does
 pub fn read_usage(&self) -> Result<Vec<Bucket>, Error>      // account/rateLimits/read: needs no turn; the answer is the base later updates merge into
 pub fn CodexSession::read_models(launch: &CodexLaunch, spawn: &dyn Spawn, settings: CodexSettings) -> Result<ModelRead, Error>   // starts app-server, initializes, lists models, asks account/read, ends it: no thread, no turn
 #[non_exhaustive] pub struct ModelRead { pub models: Option<Vec<Model>>, pub signed_out: bool }   // signed_out: account null with requiresOpenaiAuth
