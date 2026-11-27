@@ -14,9 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coqui_acp::{
-    Answer, Authenticate, ChoiceOption, Client, Decider, Decision, DescribeLimits, Elicitation,
-    ElicitationAnswer, Elicitor, Error, Event, Exchange, FieldKind, PermissionRequest, Session,
-    SessionList,
+    AdvertisedCommand, Answer, Authenticate, ChoiceOption, Client, Decider, Decision,
+    DescribeLimits, Elicitation, ElicitationAnswer, Elicitor, Error, Event, Exchange, FieldKind,
+    PermissionRequest, Session, SessionList,
 };
 use futures::SinkExt;
 use futures::channel::mpsc as async_mpsc;
@@ -482,6 +482,58 @@ fn plain(method: &str) -> Option<Value> {
         "session/prompt" => Some(json!({"stopReason": "end_turn"})),
         _ => Some(json!({})),
     }
+}
+
+fn commands_update(session: &str, commands: &Value) -> Value {
+    json!({"sessionId": session, "update": {"sessionUpdate": "available_commands_update", "availableCommands": commands}})
+}
+
+#[test]
+fn advertised_commands_are_kept_and_each_update_replaces_the_last() {
+    let (transport, _) = agent_with(|method, _, agent| {
+        if method == "session/prompt" {
+            agent.notify(
+                "session/update",
+                &commands_update(
+                    "s1",
+                    &json!([
+                        {"name": "compact", "description": "Summarise", "input": {"hint": "what to keep"}},
+                        {"name": "help", "description": "List commands"},
+                    ]),
+                ),
+            );
+            agent.notify(
+                "session/update",
+                &commands_update(
+                    "s1",
+                    &json!([{"name": "help", "description": "List commands"}]),
+                ),
+            );
+        }
+        plain(method)
+    });
+    let session = Client::builder("/w")
+        .prompt("hi")
+        .connect(transport)
+        .unwrap();
+    assert!(session.commands().is_empty());
+    let events = events_until(&session, 3);
+    assert_eq!(
+        events[0],
+        Event::Commands(vec![
+            AdvertisedCommand::new("compact", "Summarise").input_hint("what to keep"),
+            AdvertisedCommand::new("help", "List commands"),
+        ])
+    );
+    assert_eq!(
+        events[1],
+        Event::Commands(vec![AdvertisedCommand::new("help", "List commands")])
+    );
+    assert!(matches!(events[2], Event::Completed { .. }), "{events:?}");
+    assert_eq!(
+        session.commands(),
+        vec![AdvertisedCommand::new("help", "List commands")]
+    );
 }
 
 #[test]

@@ -35,7 +35,7 @@ use crate::describe::{
 };
 use crate::elicit::{self, ElicitationAnswer, Elicitor};
 use crate::error::Error;
-use crate::event::Event;
+use crate::event::{AdvertisedCommand, Event};
 use crate::state::{Step, TEXT_FLUSH, TOOL_KINDS, Turn, kind_name};
 
 const PROTOCOL_VERSION: u64 = 1;
@@ -380,6 +380,7 @@ impl Builder {
             extension: AtomicBool::new(false),
             suppress: AtomicBool::new(false),
             session: Mutex::new(None),
+            commands_known: Mutex::new(Vec::new()),
             turn: Mutex::new(
                 Turn::new(self.refuse_kinds.clone())
                     .text_flush(self.text_flush)
@@ -492,6 +493,7 @@ struct Shared {
     extension: AtomicBool,
     suppress: AtomicBool,
     session: Mutex<Option<String>>,
+    commands_known: Mutex<Vec<AdvertisedCommand>>,
     turn: Mutex<Turn>,
 }
 
@@ -514,6 +516,12 @@ impl Shared {
     }
 
     fn emit(&self, event: Event) {
+        if let Event::Commands(commands) = &event {
+            *self
+                .commands_known
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = commands.clone();
+        }
         let flushed = {
             let mut turn = self.turn();
             turn.note(&event);
@@ -1243,7 +1251,19 @@ async fn open(
         .session
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(session.clone());
-    if !extension {
+    apply_options(cx, options, shared, &session, &config).await;
+    Ok(session)
+}
+
+/// Sets the model and effort the builder asked for, on a session just opened, through the options `config` lists.
+async fn apply_options(
+    cx: &ConnectionTo<Agent>,
+    options: &Builder,
+    shared: &Arc<Shared>,
+    session: &str,
+    config: &[SessionConfigOption],
+) {
+    if !shared.extension.load(Ordering::SeqCst) {
         if let Some(model) = &options.model {
             let request = OptionRequest {
                 what: "model",
@@ -1255,8 +1275,8 @@ async fn open(
             set_option(
                 cx,
                 shared,
-                &session,
-                &config,
+                session,
+                config,
                 request,
                 options.request_timeout,
             )
@@ -1273,15 +1293,14 @@ async fn open(
             set_option(
                 cx,
                 shared,
-                &session,
-                &config,
+                session,
+                config,
                 request,
                 options.request_timeout,
             )
             .await;
         }
     }
-    Ok(session)
 }
 
 fn send_prompt(
@@ -1406,6 +1425,16 @@ impl Session {
     pub fn id(&self) -> Option<String> {
         self.shared
             .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The commands the agent last advertised, empty when it advertised none or the session is new.
+    #[must_use]
+    pub fn commands(&self) -> Vec<AdvertisedCommand> {
+        self.shared
+            .commands_known
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
