@@ -4,7 +4,7 @@
 //! [`Availability`], [`Starter`], [`Ledger`]); the library decides.
 //!
 //! - [`decide`] takes a [`Pool`], a [`Memory`], one [`Standing`] for each member and an [`Ask`], and answers a [`Chosen`] or
-//!   [`NoneLeft`]. [`Strategy`] orders the members that can serve: `priority` (the default), `headroom` and `round_robin`.
+//!   [`NoneLeft`]. [`Strategy`] orders the members that can serve: `priority` (the default), `headroom`, `round_robin` and `least_recent`; members equal on every key of a strategy go in the pool's listed order.
 //! - [`Switchboard`] runs the seams around it: [`Switchboard::assign`] starts a new session, [`Switchboard::at_turn`] moves a running
 //!   one when its turn ends out of usage (the same group first), with the history cleaned by [`clean`] and a continuation by
 //!   [`resume`].

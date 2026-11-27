@@ -335,12 +335,12 @@ fn order_of<T>(
 ) -> Vec<usize> {
     let count = pool.members.len();
     let mut order: Vec<usize> = (0..count).collect();
+    let fallback = Standing::new();
     match pool.strategy {
         Strategy::Priority => {
             order.sort_by_key(|at| (Reverse(pool.members[*at].priority), *at));
         }
         Strategy::Headroom => {
-            let fallback = Standing::new();
             let key = |at: usize| {
                 let standing = standings.get(at).unwrap_or(&fallback);
                 let member = &pool.members[at];
@@ -353,6 +353,19 @@ fn order_of<T>(
                     .chain(memory.last_used(&pool.name, &member.id))
                     .max();
                 (used, standing.active, last, Reverse(member.priority), at)
+            };
+            order.sort_by_key(|at| key(*at));
+        }
+        Strategy::LeastRecent => {
+            let key = |at: usize| {
+                let standing = standings.get(at).unwrap_or(&fallback);
+                let member = &pool.members[at];
+                let last = standing
+                    .last_used
+                    .into_iter()
+                    .chain(memory.last_used(&pool.name, &member.id))
+                    .max();
+                (last, Reverse(member.priority), at)
             };
             order.sort_by_key(|at| key(*at));
         }

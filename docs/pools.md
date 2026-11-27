@@ -26,6 +26,10 @@ that is not reported counts as available and is marked so. Among the members tha
 - `headroom`: the least used, use not reported counting as 500 permille (`unknown_permille`), then fewest runs, least recently used and
   priority.
 - `round_robin`: the member after the last one that took a turn, kept while the session's prompt cache is warm.
+- `least_recent`: the member used longest ago (never used first), then priority; no cursor, so it suits hosts that share standing
+  across stations.
+
+Members equal on every key of the strategy go in the listed order, under every strategy.
 
 A running session stays on its member while it can serve, even if an earlier member has refilled; a later new session takes the
 earlier one. Every bound is a setting with a default and no floor, and a setting that is not its default can be listed.

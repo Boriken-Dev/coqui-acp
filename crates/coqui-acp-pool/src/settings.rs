@@ -8,6 +8,10 @@ use core::fmt;
 use core::str::FromStr;
 
 /// How a pool orders the members that can serve.
+///
+/// Members that compare equal on every key of a strategy are taken in the pool's listed order, under every strategy: a host
+/// that lists its members in an order of its own (sorted by name, say) gets the same pick whatever order its registry holds
+/// them in.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Strategy {
@@ -19,16 +23,22 @@ pub enum Strategy {
     Headroom,
     /// The member after the last one that took a turn, in the listed order.
     RoundRobin,
+    /// The member used longest ago first: one never used, then the oldest `last_used` (the later of
+    /// [`Standing::last_used`](crate::Standing::last_used) and what [`Memory`](crate::Memory) recorded), then priority, then
+    /// the listed order. It keeps no cursor, so a member that was out for a while and is back goes first, and a host that
+    /// reports every station's use through the standing shares it across stations.
+    LeastRecent,
 }
 
 impl Strategy {
-    /// The spelling a configuration uses: `priority`, `headroom`, `round_robin`.
+    /// The spelling a configuration uses: `priority`, `headroom`, `round_robin`, `least_recent`.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Priority => "priority",
             Self::Headroom => "headroom",
             Self::RoundRobin => "round_robin",
+            Self::LeastRecent => "least_recent",
         }
     }
 }
@@ -46,7 +56,7 @@ pub struct UnknownStrategy;
 
 impl fmt::Display for UnknownStrategy {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        out.write_str("a strategy is priority, headroom or round_robin")
+        out.write_str("a strategy is priority, headroom, round_robin or least_recent")
     }
 }
 
@@ -60,6 +70,7 @@ impl FromStr for Strategy {
             "priority" => Ok(Self::Priority),
             "headroom" => Ok(Self::Headroom),
             "round_robin" => Ok(Self::RoundRobin),
+            "least_recent" => Ok(Self::LeastRecent),
             _ => Err(UnknownStrategy),
         }
     }

@@ -246,6 +246,67 @@ fn round_robin_takes_each_member_once_a_round_and_skips_those_that_cannot_serve(
 }
 
 #[test]
+fn least_recent_takes_the_one_never_used_then_the_oldest_and_a_member_back_from_a_stop_goes_first()
+{
+    let pool = pool_of("p", Strategy::LeastRecent, &["a", "b", "c"]);
+    let mut memory = Memory::new();
+    let mut standings = plain(3);
+    let first: Vec<String> = (0..3)
+        .map(|at| take(&pool, &mut memory, &standings, &Ask::new(NOW + at)).member)
+        .collect();
+    assert_eq!(first, ["a", "b", "c"]);
+    // `b` cannot serve for two turns: the others alternate, `a` then `c`.
+    standings[1] = exhausted(NOW + 1000);
+    let during: Vec<String> = (3..5)
+        .map(|at| take(&pool, &mut memory, &standings, &Ask::new(NOW + at)).member)
+        .collect();
+    assert_eq!(during, ["a", "c"]);
+    // Back, it was used longest ago, so it goes before the two that kept serving.
+    standings[1] = Standing::new();
+    assert_eq!(
+        take(&pool, &mut memory, &standings, &Ask::new(NOW + 5)).member,
+        "b"
+    );
+    // The standing's own report counts too, and a member never used goes first.
+    let mut shared = plain(3);
+    shared[0] = Standing::new().last_used(NOW + 100);
+    shared[2] = Standing::new().last_used(NOW + 50);
+    let chosen = take(&pool, &mut Memory::new(), &shared, &start());
+    assert_eq!(chosen.member, "b");
+    // Equal use goes to the higher priority, then the listed order.
+    let pool = Pool::new("p")
+        .strategy(Strategy::LeastRecent)
+        .member(Member::new("x", ()))
+        .member(Member::new("y", ()).priority(3))
+        .member(Member::new("z", ()).priority(3));
+    assert_eq!(
+        take(&pool, &mut Memory::new(), &plain(3), &start()).member,
+        "y"
+    );
+}
+
+#[test]
+fn members_equal_on_every_key_are_taken_in_the_listed_order_under_every_strategy() {
+    for strategy in [
+        Strategy::Priority,
+        Strategy::Headroom,
+        Strategy::RoundRobin,
+        Strategy::LeastRecent,
+    ] {
+        for listed in [["c", "a", "b"], ["b", "c", "a"], ["a", "b", "c"]] {
+            let pool = pool_of("p", strategy, &listed);
+            let chosen = take(&pool, &mut Memory::new(), &plain(3), &start());
+            assert_eq!(chosen.member, listed[0], "{strategy} {listed:?}");
+            // With the first unable to serve, the next listed one.
+            let mut standings = plain(3);
+            standings[0] = exhausted(NOW + 60);
+            let chosen = take(&pool, &mut Memory::new(), &standings, &start());
+            assert_eq!(chosen.member, listed[1], "{strategy} {listed:?}");
+        }
+    }
+}
+
+#[test]
 fn a_member_at_its_cap_of_runs_is_left_and_the_pool_default_applies_to_the_rest() {
     let pool = Pool::new("p")
         .member(Member::new("capped", ()).max_concurrent(1))
@@ -411,7 +472,12 @@ fn a_move_prefers_the_group_of_the_member_it_leaves_whatever_the_order() {
 
 #[test]
 fn the_group_preference_holds_under_each_strategy() {
-    for strategy in [Strategy::Priority, Strategy::Headroom, Strategy::RoundRobin] {
+    for strategy in [
+        Strategy::Priority,
+        Strategy::Headroom,
+        Strategy::RoundRobin,
+        Strategy::LeastRecent,
+    ] {
         let pool = Pool::new("p")
             .strategy(strategy)
             .member(Member::new("x", ()).group("one").priority(1))
@@ -484,6 +550,10 @@ fn a_changed_setting_is_visible() {
         .collect();
     assert_eq!(names, ["unknown_permille", "max_concurrent"]);
     assert_eq!("round_robin".parse::<Strategy>(), Ok(Strategy::RoundRobin));
+    assert_eq!(
+        "least_recent".parse::<Strategy>(),
+        Ok(Strategy::LeastRecent)
+    );
     assert!("fastest".parse::<Strategy>().is_err());
     assert_eq!(Strategy::Headroom.to_string(), "headroom");
 }
