@@ -210,6 +210,13 @@ fn the_extension_names_are_pinned() {
     assert_eq!(USAGE_VERSION, 1);
 }
 
+/// The client names the key itself, since it cannot depend on this crate: the two spellings are one.
+#[cfg(feature = "contract")]
+#[test]
+fn the_client_reads_the_limit_under_the_key_the_agents_write_it() {
+    assert_eq!(coqui_acp::LIMIT_META_KEY, LIMIT_META_KEY);
+}
+
 #[test]
 fn every_variant_validates_against_its_own_schema() {
     // A value the model writes is one its schema accepts, for the tagged enums the codec reads leniently too.

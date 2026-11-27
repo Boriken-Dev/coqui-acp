@@ -663,6 +663,42 @@ fn an_explicit_load_delivers_the_replay() {
 }
 
 #[test]
+fn a_refused_turns_limit_in_its_meta_reaches_the_host_intact_before_the_failure_text() {
+    let hit = json!({"kind": "usage_quota", "continuable": true, "resets_at": 1_790_000_000, "bucket": "five_hour", "text": "limit reached"});
+    let (transport, _) = agent_with({
+        let hit = hit.clone();
+        move |method, _, _| match method {
+            "session/prompt" => Some(json!({
+                "stopReason": "refusal",
+                "_meta": {coqui_acp::LIMIT_META_KEY: hit},
+            })),
+            other => plain(other),
+        }
+    });
+    let session = Client::builder("/w")
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    let events = events_until(&session, 2);
+    assert_eq!(events[0], Event::Limited(hit), "{events:?}");
+    assert!(
+        matches!(&events[1], Event::Failed(text) if text.contains("refused")),
+        "{events:?}"
+    );
+    // A turn that ends with no limit says none, and a `_meta` without one says none.
+    let (transport, _) = agent_with(|method, _, _| match method {
+        "session/prompt" => Some(json!({"stopReason": "refusal", "_meta": {"other": 1}})),
+        other => plain(other),
+    });
+    let session = Client::builder("/w")
+        .prompt("go")
+        .connect(transport)
+        .unwrap();
+    let events = events_until(&session, 1);
+    assert!(matches!(&events[0], Event::Failed(_)), "{events:?}");
+}
+
+#[test]
 fn a_refused_kind_is_refused_without_asking_the_decider() {
     let outcome = Arc::new(Mutex::new(None));
     let (agent, transport) = Agent::pair();
