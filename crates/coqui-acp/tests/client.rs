@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -534,6 +534,100 @@ fn advertised_commands_are_kept_and_each_update_replaces_the_last() {
         session.commands(),
         vec![AdvertisedCommand::new("help", "List commands")]
     );
+}
+
+#[test]
+fn a_new_session_opens_on_the_same_connection_and_the_old_one_no_longer_reaches_it() {
+    let opened = Arc::new(AtomicUsize::new(0));
+    let count = opened.clone();
+    let (transport, messages) = agent_with(move |method, params, agent| match method {
+        "session/new" => {
+            let n = count.fetch_add(1, Ordering::SeqCst) + 1;
+            Some(json!({"sessionId": format!("s{n}"), "configOptions": [
+                {"id": "pick", "name": "Model", "category": "model", "type": "select", "currentValue": "a",
+                 "options": [{"value": "a", "name": "Alpha"}, {"value": "b", "name": "Beta"}]},
+            ]}))
+        }
+        "session/prompt" => {
+            // The agent still speaks for the session it left, and for the new one.
+            let chunk = |session: &str, text: &str| {
+                json!({"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text}}})
+            };
+            agent.notify("session/update", &chunk("s1", "stale"));
+            agent.notify(
+                "session/update",
+                &commands_update("s2", &json!([{"name": "compact", "description": "d"}])),
+            );
+            agent.notify(
+                "session/update",
+                &chunk(params["sessionId"].as_str().unwrap(), "fresh"),
+            );
+            Some(json!({"stopReason": "end_turn"}))
+        }
+        other => plain(other),
+    });
+    let session = Client::builder("/w")
+        .meta("k", json!("v"))
+        .mcp_server(json!({"name": "tools", "command": "x", "args": [], "env": []}))
+        .model("beta")
+        .connect(transport)
+        .unwrap();
+    assert_eq!(session.id().as_deref(), Some("s1"));
+    assert_eq!(session.new_session().unwrap(), "s2");
+    assert_eq!(session.id().as_deref(), Some("s2"));
+    session.send("hello").unwrap();
+    let events = events_until(&session, 3);
+    assert!(
+        matches!(&events[0], Event::Commands(c) if c.len() == 1),
+        "{events:?}"
+    );
+    assert_eq!(events[1], Event::Text("fresh".to_owned()), "{events:?}");
+    assert!(matches!(events[2], Event::Completed { .. }), "{events:?}");
+    let seen: Vec<Value> = messages.try_iter().collect();
+    let news: Vec<&Value> = seen
+        .iter()
+        .filter(|m| m["method"] == "session/new")
+        .collect();
+    assert_eq!(news.len(), 2);
+    assert_eq!(news[0]["params"], news[1]["params"]);
+    assert_eq!(news[1]["params"]["_meta"]["k"], "v");
+    assert!(
+        seen.iter()
+            .any(|m| m["method"] == "session/set_config_option"
+                && m["params"]["sessionId"] == "s2"
+                && m["params"]["value"] == "b"),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|m| m["method"] == "session/prompt" && m["params"]["sessionId"] == "s2")
+    );
+    assert!(!seen.iter().any(|m| m["method"] == "session/close"));
+    session.cancel().unwrap();
+    let cancelled = Instant::now() + WAIT;
+    let mut found = false;
+    while !found && Instant::now() < cancelled {
+        if let Ok(m) = messages.recv_timeout(Duration::from_millis(100)) {
+            found = m["method"] == "session/cancel" && m["params"]["sessionId"] == "s2";
+        }
+    }
+    assert!(found, "cancel names the new session");
+}
+
+#[test]
+fn a_new_session_the_agent_refuses_is_an_error_and_keeps_the_old_one() {
+    let opened = Arc::new(AtomicUsize::new(0));
+    let count = opened.clone();
+    let (transport, _) = agent_with(move |method, _, _| {
+        if method == "session/new" && count.fetch_add(1, Ordering::SeqCst) > 0 {
+            return None;
+        }
+        plain(method)
+    });
+    let session = Client::builder("/w").connect(transport).unwrap();
+    assert!(matches!(session.new_session(), Err(Error::Refused(_))));
+    assert_eq!(session.id().as_deref(), Some("s1"));
 }
 
 #[test]

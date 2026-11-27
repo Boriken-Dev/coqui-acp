@@ -67,6 +67,7 @@ pub fn id(&self) -> Option<String>
 pub fn extension_active(&self) -> bool
 pub fn connection_lost(&self) -> bool
 pub fn commands(&self) -> Vec<AdvertisedCommand>
+pub fn new_session(&self) -> Result<String, Error>
 pub fn send(&self, text: impl Into<String>) -> Result<(), Error>
 pub fn notify(&self, method: impl Into<String>, params: Value) -> Result<(), Error>
 pub fn next_event(&self, timeout: Duration) -> Option<Event>
@@ -74,7 +75,7 @@ pub fn cancel(&self) -> Result<(), Error>
 pub fn close(&self)
 ```
 
-`commands` is the list the agent last advertised with `available_commands_update` (empty before one).
+`commands` is the list the agent last advertised with `available_commands_update` (empty before one, and after `new_session` until the agent advertises again). `new_session` sends `session/new` on the same connection with what the builder opened the first session with (cwd, MCP servers, `_meta`, model and effort); afterwards `id`, `send`, `cancel` and the events are the new session's, what the old one still says is dropped from the moment the agent answers, and the old one is not closed and its agent process not restarted (ACP's clear, and how a warm process serves a new chat). It returns the new id, or the agent's refusal with the session unchanged; a turn still running on the old session is not cancelled.
 
 `next_event` answers `None` when none came in time or the session has ended. `send` is never retried: after a lost connection its outcome is unknown. `close` waits no longer than the close grace, then runs `on_close`. A session ended without `close` (dropped, or after `Event::Failed`) sends `session/cancel` and then one `_coqui/flush` request, waiting up to `abort_wait` (default 5 s, whatever the close grace) for its answer (an error is fine), before `on_close` runs, so the cancel reaches the agent ahead of any kill. When `abort_wait` passes, `on_close` runs anyway: a drop never blocks longer than it.
 
