@@ -461,6 +461,15 @@ fn a_host_reading_raw_lines_gets_the_limit_with_its_kind_and_continuable_from_li
     let rate = coqui_acp_claude::limit_of_line(&json!({"type": "result", "is_error": true, "api_error_status": 429, "result": "slow down"}))
         .expect("a 429 is a limit");
     assert_eq!(rate.kind, Some(LimitKind::RateLimit));
+    assert_eq!(rate.continuable, Some(true));
+    let window = coqui_acp_claude::limit_of_line(&json!({"type": "result", "is_error": true, "api_error_status": 429, "result": "API Error: 429 prompt is too long for the context window"}))
+        .expect("a 429 at a full context window is a limit");
+    assert_eq!(window.kind, Some(LimitKind::ContextWindow));
+    assert_eq!(
+        window.continuable,
+        Some(false),
+        "another account takes the same full window"
+    );
     for quiet in [
         json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}}),
         json!({"type": "result", "is_error": false, "result": "usage limit reached"}),
