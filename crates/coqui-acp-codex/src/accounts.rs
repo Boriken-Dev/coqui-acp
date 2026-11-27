@@ -79,6 +79,10 @@ pub(crate) const VARIABLES: &[&str] = &[
     "OPENAI_BASE_URL",
 ];
 
+/// The part of [`VARIABLES`] whose value is itself a secret: a key or a token. Not an endpoint, an issuer or where
+/// Codex keeps its state, which a person sets on purpose and which a start still clears.
+pub(crate) const SECRETS: &[&str] = &["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"];
+
 /// Where the requests of a ChatGPT login or an access token go.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq, Eq)]
 #[map(crate = ::coqui_acp_api::guatiao, deny_unknown_fields)]
@@ -275,6 +279,7 @@ fn full() -> AccountCatalog {
     );
     catalog.accepts = accepts();
     catalog.credential_variables = VARIABLES.iter().map(|v| (*v).to_string()).collect();
+    catalog.secret_variables = SECRETS.iter().map(|v| (*v).to_string()).collect();
     catalog
 }
 
@@ -641,7 +646,8 @@ pub fn apply(
 /// only by [`Applied::hold`].
 ///
 /// The endpoint variables are cleared and set only from the grant's settings: a host that keeps a person's own choice
-/// (`OPENAI_BASE_URL`) puts it back afterwards. They are among the catalog's `credential_variables`.
+/// (`OPENAI_BASE_URL`) puts it back afterwards. They are among the catalog's `credential_variables` and not among its
+/// `secret_variables`.
 ///
 /// # Errors
 ///

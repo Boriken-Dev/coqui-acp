@@ -394,6 +394,18 @@ fn catalog(contract: &Contract, harness: &dyn AcpHarness) -> Outcome {
         ensure!(!variables.contains(&name), "{name} is listed twice");
         variables.push(name);
     }
+    let mut secrets: Vec<&String> = Vec::new();
+    for name in &catalog.secret_variables {
+        ensure!(
+            catalog.credential_variables.contains(name),
+            "secret_variables names {name}, which credential_variables does not list, so a start would not clear it"
+        );
+        ensure!(
+            !secrets.contains(&name),
+            "{name} is listed twice as a secret"
+        );
+        secrets.push(name);
+    }
     let mut standards = Vec::new();
     for accepted in &catalog.accepts {
         ensure!(

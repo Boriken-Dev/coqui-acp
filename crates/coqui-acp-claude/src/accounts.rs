@@ -98,6 +98,24 @@ pub(crate) const VARIABLES: &[&str] = &[
     "ANTHROPIC_FOUNDRY_RESOURCE",
 ];
 
+/// The part of [`VARIABLES`] whose value is itself a secret: a key, a token, a password or a private key. Not an endpoint,
+/// a switch that picks a cloud provider, a project, a profile or the path of a file, which a person sets on purpose and
+/// which a start still clears.
+pub(crate) const SECRETS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AWS_API_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+    "CLAUDE_CODE_CLIENT_KEY",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
+
 /// What every account of Claude Code's takes beside its credential: where requests go.
 #[derive(ToValue, FromValue, Schema, Debug, Clone, Default, PartialEq, Eq)]
 #[map(crate = ::coqui_acp_api::guatiao, deny_unknown_fields)]
@@ -308,6 +326,7 @@ fn full() -> AccountCatalog {
         .iter()
         .map(|v| (*v).to_string())
         .collect::<Vec<String>>();
+    catalog.secret_variables = SECRETS.iter().map(|v| (*v).to_string()).collect();
     catalog
 }
 
@@ -611,7 +630,7 @@ impl Applied {
 ///
 /// The endpoint variables are cleared and set only from the grant's `base_url`: a host that keeps a person's own
 /// choice of endpoint (`ANTHROPIC_BASE_URL`, a cloud switch) puts it back afterwards. They are among the catalog's
-/// `credential_variables`.
+/// `credential_variables` and not among its `secret_variables`.
 ///
 /// # Errors
 ///

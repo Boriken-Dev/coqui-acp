@@ -252,3 +252,35 @@ fn harness_login_changes_nothing() {
     assert!(!applied.keeps_files());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_secret_variables_are_credentials_cleared_by_a_start_and_leave_out_endpoints() {
+    let catalog = accounts::catalog();
+    for name in &catalog.secret_variables {
+        assert!(catalog.credential_variables.contains(name), "{name}");
+    }
+    for secret in ["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"] {
+        assert!(
+            catalog.secret_variables.iter().any(|name| name == secret),
+            "{secret}"
+        );
+    }
+    for other in [
+        "OPENAI_BASE_URL",
+        "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+        "CODEX_APP_SERVER_LOGIN_ISSUER",
+        "CODEX_SQLITE_HOME",
+    ] {
+        assert!(
+            catalog
+                .credential_variables
+                .iter()
+                .any(|name| name == other),
+            "{other}"
+        );
+        assert!(
+            !catalog.secret_variables.iter().any(|name| name == other),
+            "{other}"
+        );
+    }
+}
