@@ -225,6 +225,8 @@ Config options: `model` (category `model`): `default` and the models Codex lists
 ```rust
 #[derive(Provider)] pub struct CodexProvider;                        // an `acp_harness` provider; Debug
 pub fn CodexProvider::new(settings: ProviderSettings) -> CodexProvider    // also From<ProviderSettings>
+pub fn CodexProvider::warm_ready(&self, environment: &Environment) -> usize  // app servers waiting for a connection started with that environment and nothing else
+// AcpHarness::prewarm(cwd, environment, spawner): CodexAgent::prewarm for the launch such a connection makes (cwd is no part of an app server), started through spawner; nothing while `warm_ahead` keeps none
 pub struct ProviderSettings {                                        // ToValue, FromValue, Schema, Default; every field defaults
     pub executable: String,              // "codex": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>,

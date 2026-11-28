@@ -196,6 +196,8 @@ Config options: `model` (category `model`): the models Claude Code lists, and th
 ```rust
 #[derive(Provider)] pub struct ClaudeProvider;                       // an `acp_harness` provider; Debug
 pub fn ClaudeProvider::new(settings: ProviderSettings) -> ClaudeProvider  // also From<ProviderSettings>
+pub fn ClaudeProvider::warm_ready(&self, cwd: &str, environment: &Environment) -> usize  // processes waiting for a connection started with that environment and nothing else (empty cwd: ".")
+// AcpHarness::prewarm(cwd, environment, spawner): ClaudeAgent::prewarm for the launch such a connection makes, started through spawner; nothing while `warm_ahead` keeps none
 pub struct ProviderSettings {                                        // ToValue, FromValue, Schema, Default; every field defaults
     pub executable: String,              // "claude": a path, or a name looked up where the spawner runs it
     pub model: Option<String>, pub effort: Option<String>, pub permission_mode: Option<String>,

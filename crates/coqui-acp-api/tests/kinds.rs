@@ -806,7 +806,7 @@ fn the_kinds_hashes_are_pinned() {
     assert_eq!(AccountWatchVtable::FLOOR_HASH, ACCOUNT_WATCH_HASH);
 }
 
-const HARNESS_HASH: u32 = 3025339842;
+const HARNESS_HASH: u32 = 2434889077;
 const CHANNEL_HASH: u32 = 3787630980;
 const SINK_HASH: u32 = 4115266557;
 const SPAWNER_HASH: u32 = 4038904472;

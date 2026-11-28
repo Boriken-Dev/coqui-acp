@@ -69,6 +69,10 @@ fn what_a_provider_leaves_out_has_its_default() {
     let (_registry, harness) = loaded();
     assert_eq!(harness.program().expect("answered"), None);
     assert_eq!(harness.non_defaults().expect("answered"), Vec::new());
+    // Warming is a no-op for a harness with nothing to warm, across the ABI like any slot.
+    harness
+        .prewarm("/", Secret::new(Environment::new()), spawner())
+        .expect("a default that does nothing");
     assert_eq!(
         harness
             .session_record(SessionQuery::new(
