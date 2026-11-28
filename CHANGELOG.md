@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - `coqui-acp`: an update an agent sends right behind its `session/new` answer is no longer dropped. The client ignored every `session/update` until it had read the answer and recorded the session id, so the `available_commands_update` Grok sends at once left `Session::commands()` empty, after `connect` and after `Session::new_session` alike. An update that names no known session is now held, up to `max_pending_events`, and the ones that name the id are played when it is recorded; the rest are dropped.
+- `coqui_acp` (Dart): a request whose link ends while it is still being sent no longer raises an unhandled async error; the caller that awaits it later gets the failure.
 - `coqui-acp-claude`: a resumed session no longer ends when `/clear` gives Claude Code's process a new session id. The id that follows a `conversation_reset` line of trigger `clear` becomes the session's and `ClaudeSession::id()` answers it; any other change of id still ends the session.
 - **A full context window is not a limit another account can take.** `coqui-acp-claude` marked every limit it reads `continuable`, so a 429 at a full context window let a pool move the turn to another account, which meets the same window; a `ContextWindow` limit is now `continuable: false`, as coqui-acp-api and coqui-acp-codex say.
 

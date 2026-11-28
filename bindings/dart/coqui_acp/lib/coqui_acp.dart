@@ -1571,6 +1571,8 @@ final class AcpClient {
     final id = ++_counter;
     final pending = Completer<Map<String, dynamic>>();
     _pending[id] = pending;
+    // The link may end while the request is still being sent, before anything awaits this; the caller still gets the error below.
+    unawaited(pending.future.then<void>((_) {}, onError: (Object _) {}));
     try {
       await _send(
         jsonEncode({
