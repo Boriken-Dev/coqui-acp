@@ -104,6 +104,7 @@ const sse = AcpMcpHttp(
 );
 
 void main() {
+  mcpServersParameter();
   test(
     'v1 sends stdio with no type, HTTP and SSE typed, name and value pairs, and the rest',
     () async {
@@ -326,5 +327,71 @@ void main() {
   test('a server never shows its environment or headers', () {
     expect('$stdio', isNot(contains('value')));
     expect('$http', isNot(contains('Bearer')));
+  });
+}
+
+void mcpServersParameter() {
+  group('the mcpServers parameter', () {
+    List<Object?> sentServers(Agent agent, String method) =>
+        (agent.last(method)['params'] as Map)['mcpServers'] as List<Object?>;
+
+    test('every session-opening method sends it, over the setup\'s', () async {
+      final agent = Agent(claudeV2);
+      final client = await agent.connected();
+      const setup = AcpSessionSetup(mcpServers: [http]);
+      await client.openSession(cwd: '/w', mcpServers: [stdio], setup: setup);
+      expect(
+        sentServers(agent, 'session/new').single,
+        containsPair('name', 'marker'),
+      );
+      await client.createSession(cwd: '/w', mcpServers: [stdio], setup: setup);
+      expect(
+        sentServers(agent, 'session/new').single,
+        containsPair('name', 'marker'),
+      );
+      await client.resumeSession(
+        'r',
+        cwd: '/w',
+        mcpServers: [stdio],
+        setup: setup,
+      );
+      expect(
+        sentServers(agent, 'session/resume').single,
+        containsPair('name', 'marker'),
+      );
+      await client.reopenSession(
+        'o',
+        cwd: '/w',
+        mcpServers: [stdio],
+        setup: setup,
+      );
+      expect(
+        sentServers(agent, 'session/resume').single,
+        containsPair('name', 'marker'),
+      );
+    });
+
+    test('an empty list sends none, and no list sends the setup\'s', () async {
+      final agent = Agent(claudeV2);
+      final client = await agent.connected();
+      const setup = AcpSessionSetup(mcpServers: [http]);
+      await client.openSession(cwd: '/w', mcpServers: const [], setup: setup);
+      expect(sentServers(agent, 'session/new'), isEmpty);
+      await client.openSession(cwd: '/w', setup: setup);
+      expect(
+        sentServers(agent, 'session/new').single,
+        containsPair('name', 'web'),
+      );
+    });
+
+    test('it is checked as the setup\'s servers are', () async {
+      final agent = Agent(claudeV2);
+      final client = await agent.connected();
+      await expectLater(
+        client.openSession(cwd: '/w', mcpServers: [stdio, stdio]),
+        throwsArgumentError,
+      );
+      expect(agent.sent('session/new'), isFalse);
+    });
   });
 }

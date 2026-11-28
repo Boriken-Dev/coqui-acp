@@ -1100,14 +1100,17 @@ final class AcpClient {
 
   /// [setup] as the fields of a session request in the version spoken. Throws [ArgumentError] for a relative command or
   /// directory or a repeated name, and [AcpFailure] for what the agent does not say it takes, before anything is sent.
-  Map<String, Object?> _setupParams(AcpSessionSetup setup) {
+  Map<String, Object?> _setupParams(
+    AcpSessionSetup setup,
+    List<AcpMcpServer>? mcpServers,
+  ) {
     final names = <String>{};
     List<Map<String, String>> pairs(Map<String, String> values) => [
       for (final MapEntry(:key, :value) in values.entries)
         {'name': key, 'value': value},
     ];
     final servers = <Map<String, Object?>>[];
-    for (final server in setup.mcpServers) {
+    for (final server in mcpServers ?? setup.mcpServers) {
       if (!names.add(server.name)) {
         throw ArgumentError.value(
           server.name,
@@ -1222,11 +1225,12 @@ final class AcpClient {
   Future<AcpOpenedSession> reopenSession(
     String id, {
     required String cwd,
+    List<AcpMcpServer>? mcpServers,
     AcpSessionSetup setup = AcpSessionSetup.none,
   }) async {
     _ready();
     _checkCwd(cwd);
-    final fields = _setupParams(setup);
+    final fields = _setupParams(setup, mcpServers);
     // Before asking, since the replay arrives before the answer.
     return _using(id, () => _reopen(id, cwd, fields));
   }
@@ -1405,17 +1409,23 @@ final class AcpClient {
 
   Future<String> createSession({
     required String cwd,
+    List<AcpMcpServer>? mcpServers,
     AcpSessionSetup setup = AcpSessionSetup.none,
-  }) => openSession(cwd: cwd, setup: setup).then((session) => session.id);
+  }) => openSession(
+    cwd: cwd,
+    mcpServers: mcpServers,
+    setup: setup,
+  ).then((session) => session.id);
 
   /// As [createSession], with what the agent said about the session. It is the agent's to say: an agent may send neither.
   Future<AcpOpenedSession> openSession({
     required String cwd,
+    List<AcpMcpServer>? mcpServers,
     AcpSessionSetup setup = AcpSessionSetup.none,
   }) async {
     _ready();
     _checkCwd(cwd);
-    final fields = _setupParams(setup);
+    final fields = _setupParams(setup, mcpServers);
     return _request('session/new', {'cwd': cwd, ...fields}).then((reply) {
       final id = reply['sessionId'];
       if (id is! String || id.isEmpty) {
@@ -1457,11 +1467,12 @@ final class AcpClient {
     String id, {
     required String cwd,
     bool replayHistory = false,
+    List<AcpMcpServer>? mcpServers,
     AcpSessionSetup setup = AcpSessionSetup.none,
   }) async {
     _ready();
     _checkCwd(cwd);
-    final fields = _setupParams(setup);
+    final fields = _setupParams(setup, mcpServers);
     return _using(
       id,
       () async => AcpOpenedSession(

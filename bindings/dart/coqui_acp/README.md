@@ -74,7 +74,7 @@ with an absolute `command`, `AcpMcpHttp`, SSE with `sse: true`), `systemPrompt` 
 mode), `additionalDirectories` and `_meta`. Each goes in the shape of the version spoken: v1's stdio entry has no `type`, v2's
 has one, and v2 has no SSE. `takesMcp`, `takesSystemPrompt` and `takesAdditionalDirectories` say what the agent advertises, and
 a setup asking for anything else fails with `AcpFailure` before anything is sent; a relative command or directory, or two
-servers of one name, with `ArgumentError`. A server's `toString` names its variables and headers, never their values.
+servers of one name, with `ArgumentError`. A server's `toString` names its variables and headers, never their values. Each of the four also takes `List<AcpMcpServer>? mcpServers`, which, when given, replaces the setup's servers (an empty list sends none).
 
 ## Permission requests
 
