@@ -1866,3 +1866,63 @@ fn dropping_a_session_whose_agent_is_hung_returns_within_the_abort_wait() {
     );
     assert!(killed.load(Ordering::SeqCst), "on_close runs anyway");
 }
+
+/// An agent that sends its commands right behind the `session/new` answer, once and never again.
+fn agent_announcing_commands_at_once() -> (Transport, Receiver<Value>) {
+    let opened = Arc::new(AtomicUsize::new(0));
+    agent_with(move |method, _, agent| {
+        if method == "session/new" {
+            let n = opened.fetch_add(1, Ordering::SeqCst) + 1;
+            let id = format!("s{n}");
+            // The answer is written after this closure returns, so the update is queued ahead of it for the client's reader, which
+            // is the order that matters here: the client must keep the update whichever of the two it handles first.
+            agent.notify(
+                "session/update",
+                &commands_update(
+                    &id,
+                    &json!([{"name": format!("cmd{n}"), "description": "d"}]),
+                ),
+            );
+            return Some(json!({"sessionId": id}));
+        }
+        plain(method)
+    })
+}
+
+fn wait_for_commands(session: &Session, name: &str) -> Vec<AdvertisedCommand> {
+    let until = Instant::now() + WAIT;
+    loop {
+        let commands = session.commands();
+        if commands.first().is_some_and(|c| c.name == name) || Instant::now() > until {
+            return commands;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn commands_sent_right_after_session_new_are_kept() {
+    for _ in 0..50 {
+        let (transport, _) = agent_announcing_commands_at_once();
+        let session = Client::builder("/w").connect(transport).unwrap();
+        assert_eq!(
+            wait_for_commands(&session, "cmd1"),
+            vec![AdvertisedCommand::new("cmd1", "d")]
+        );
+        session.close();
+    }
+}
+
+#[test]
+fn commands_sent_right_after_a_new_sessions_answer_are_kept() {
+    for _ in 0..50 {
+        let (transport, _) = agent_announcing_commands_at_once();
+        let session = Client::builder("/w").connect(transport).unwrap();
+        assert_eq!(session.new_session().unwrap(), "s2");
+        assert_eq!(
+            wait_for_commands(&session, "cmd2"),
+            vec![AdvertisedCommand::new("cmd2", "d")]
+        );
+        session.close();
+    }
+}
