@@ -1,6 +1,6 @@
 # coqui-acp
 
-A session library for the [Agent Client Protocol](https://agentclientprotocol.com) in Rust and Dart, and a bridge that puts a stdio agent on the network.
+A session library for the [Agent Client Protocol](https://agentclientprotocol.com) in Rust and Dart. The bridge that puts a stdio agent on the network, `coqui-acp-bridge`, lives in [Boriken-Dev/agentic-peer](https://github.com/Boriken-Dev/agentic-peer).
 
 !!! note "Alpha"
     Not published yet: the API may change in any release before 1.0.

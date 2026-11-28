@@ -4,13 +4,11 @@
 [![Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://boriken-dev.github.io/coqui-acp/)
 [![CI](https://img.shields.io/github/actions/workflow/status/Boriken-Dev/coqui-acp/test.yml)](https://github.com/Boriken-Dev/coqui-acp/actions/workflows/test.yml)
 
-**Use any [Agent Client Protocol](https://agentclientprotocol.com) agent, from any program, over any distance.** A session library for Rust and Dart, and a
-command that puts a stdio agent on the network under a proven identity. It builds on the protocol's own SDK and knows nothing of the application above it.
+**Use any [Agent Client Protocol](https://agentclientprotocol.com) agent, from any program, over any distance.** A session library for Rust and Dart. It builds on the protocol's own SDK and knows nothing of the application above it. The command that puts a stdio agent on the network under a proven identity, `coqui-acp-bridge`, lives in [Boriken-Dev/agentic-peer](https://github.com/Boriken-Dev/agentic-peer).
 
 | Path | What it is |
 | --- | --- |
 | `crates/coqui-acp` | the Rust library |
-| `crates/coqui-acp-bridge` | the bridge command |
 | `crates/coqui-acp-api` | the Guatiao kinds: an agent driver (`acp_harness`), its accounts, usage and the spawner its programs start through |
 | `crates/coqui-acp-claude` | [Claude Code as an ACP agent](docs/harnesses.md), over its stream-json protocol, and a command of the same name |
 | `crates/coqui-acp-codex` | [Codex as an ACP agent](docs/harnesses.md), over its app server, and a command of the same name |

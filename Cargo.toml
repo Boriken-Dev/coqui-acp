@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     "crates/coqui-acp",
-    "crates/coqui-acp-bridge",
     "crates/coqui-acp-claude",
     "crates/coqui-acp-codex",
     "crates/coqui-acp-pi",
@@ -85,9 +84,3 @@ missing_debug_implementations = "warn"
 std_instead_of_core = "warn"
 std_instead_of_alloc = "warn"
 alloc_instead_of_core = "warn"
-
-# coqui-peer-tls names the released coqui-peer, and one PeerId type across the graph needs one source.
-[patch.crates-io]
-coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "be72492c89a5a657deb8027aee3c6db27ac14b2f" }
-# The published coqui-peer-tls is older than this revision of coqui-peer, which the commit below names.
-coqui-peer-tls = { git = "https://github.com/Boriken-Dev/coqui-peer-tls", rev = "124f700c3d5ce8c335e838aacd2d1d1b42947214" }

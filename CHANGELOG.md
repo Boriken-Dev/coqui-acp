@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking:** `coqui-acp-bridge` moved to [`Boriken-Dev/agentic-peer`](https://github.com/Boriken-Dev/agentic-peer), beside the crate it depends on, and this workspace no longer has it. The agentic-peer home is `AGENTIC_PEER_HOME`, in an `agentic-peer` folder.
 - `coqui-acp-bridge` depends on the link library under its new name, `cabuya` (`cabuya::` in Rust, repository `Boriken-Dev/cabuya`), renamed from `coqui-link`.
 - `bindings/dart/coqui_acp_chat_ui` builds on `package:material_ui` (^1.11.1) instead of `package:flutter/material.dart`, so `ChatLook` extends `material_ui`'s `ThemeExtension` and an app puts it in `material_ui`'s `ThemeData`. It needs Flutter `main` (Dart `^3.13.0`, Flutter `>=3.47.0`; checked at `c0205700e04`). The package's goldens are redrawn: its Markdown style sheet is built here from that `ThemeData` (flutter_markdown_plus reads the SDK's own theme), and the same eleven images already differed by a few pixels on Flutter `main` before the move.
 

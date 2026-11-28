@@ -1,7 +1,7 @@
 # ACP across a network
 
 ACP's standard transport is stdio, and its remote transports are an [upstream RFD](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport), not final.
-This is what the bridge and these clients speak.
+This is what the bridge (`coqui-acp-bridge`, in Boriken-Dev/agentic-peer) and these clients speak.
 
 ## WebSocket
 
